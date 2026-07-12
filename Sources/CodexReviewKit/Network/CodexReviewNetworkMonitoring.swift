@@ -75,7 +75,6 @@ package struct StaticCodexReviewNetworkMonitor: CodexReviewNetworkMonitoring {
     package func snapshots() -> AsyncStream<CodexReviewNetworkSnapshot> {
         AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
             continuation.yield(snapshot)
-            continuation.finish()
         }
     }
 }

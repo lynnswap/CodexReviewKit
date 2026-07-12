@@ -1,74 +1,108 @@
 import Foundation
 
-package struct ReviewRunCore: Codable, Sendable, Hashable {
-    package struct Run: Codable, Sendable, Hashable {
-        package var attemptID: String?
-        package var reviewThreadID: String?
-        package var threadID: String?
-        package var turnID: String?
-        package var model: String?
+package enum ReviewRunCore: Codable, Sendable, Hashable {
+    case queued
+    case startFailed(
+        endedAt: Date,
+        failure: ReviewBackendFailure
+    )
+    case cancelledBeforeStart(
+        endedAt: Date,
+        cancellation: ReviewCancellation
+    )
+    case running(
+        attempt: ReviewAttempt,
+        startedAt: Date
+    )
+    case succeeded(
+        attempt: ReviewAttempt,
+        startedAt: Date,
+        endedAt: Date
+    )
+    case failed(
+        attempt: ReviewAttempt,
+        startedAt: Date,
+        endedAt: Date,
+        failure: ReviewBackendFailure
+    )
+    case cancelled(
+        attempt: ReviewAttempt,
+        startedAt: Date,
+        endedAt: Date,
+        cancellation: ReviewCancellation
+    )
 
-        package init(
-            attemptID: String? = nil,
-            reviewThreadID: String? = nil,
-            threadID: String? = nil,
-            turnID: String? = nil,
-            model: String? = nil
-        ) {
-            self.attemptID = attemptID
-            self.reviewThreadID = reviewThreadID
-            self.threadID = threadID
-            self.turnID = turnID
-            self.model = model
+    package var status: ReviewRunState {
+        switch self {
+        case .queued:
+            .queued
+        case .startFailed, .failed:
+            .failed
+        case .cancelledBeforeStart, .cancelled:
+            .cancelled
+        case .running:
+            .running
+        case .succeeded:
+            .succeeded
         }
     }
 
-    package struct Lifecycle: Codable, Sendable, Hashable {
-        package var status: ReviewRunState
-        package var exitCode: Int?
-        package var startedAt: Date?
-        package var endedAt: Date?
-        package var cancellation: ReviewCancellation?
-        package var errorMessage: String?
-        package var failure: ReviewBackendFailure?
-
-        package init(
-            status: ReviewRunState,
-            exitCode: Int? = nil,
-            startedAt: Date? = nil,
-            endedAt: Date? = nil,
-            cancellation: ReviewCancellation? = nil,
-            errorMessage: String? = nil,
-            failure: ReviewBackendFailure? = nil
-        ) {
-            self.status = status
-            self.exitCode = exitCode
-            self.startedAt = startedAt
-            self.endedAt = endedAt
-            self.cancellation = cancellation
-            self.errorMessage = errorMessage
-            self.failure = failure
+    package var attempt: ReviewAttempt? {
+        switch self {
+        case .queued, .startFailed, .cancelledBeforeStart:
+            nil
+        case .running(let attempt, _),
+            .succeeded(let attempt, _, _),
+            .failed(let attempt, _, _, _),
+            .cancelled(let attempt, _, _, _):
+            attempt
         }
     }
 
-    package var run: Run
-    package var lifecycle: Lifecycle
-    package var lifecycleMessage: String
-    package var finalReview: String?
+    package var startedAt: Date? {
+        switch self {
+        case .queued, .startFailed, .cancelledBeforeStart:
+            nil
+        case .running(_, let startedAt),
+            .succeeded(_, let startedAt, _),
+            .failed(_, let startedAt, _, _),
+            .cancelled(_, let startedAt, _, _):
+            startedAt
+        }
+    }
 
-    package init(
-        run: Run = .init(),
-        lifecycle: Lifecycle,
-        lifecycleMessage: String,
-        finalReview: String? = nil
-    ) {
-        self.run = run
-        self.lifecycle = lifecycle
-        self.lifecycleMessage = lifecycleMessage
-        self.finalReview = finalReview?.nilIfEmpty
+    package var endedAt: Date? {
+        switch self {
+        case .queued, .running:
+            nil
+        case .startFailed(let endedAt, _),
+            .cancelledBeforeStart(let endedAt, _),
+            .succeeded(_, _, let endedAt),
+            .failed(_, _, let endedAt, _),
+            .cancelled(_, _, let endedAt, _):
+            endedAt
+        }
+    }
+
+    package var failure: ReviewBackendFailure? {
+        switch self {
+        case .startFailed(_, let failure), .failed(_, _, _, let failure):
+            failure
+        case .queued, .cancelledBeforeStart, .running, .succeeded, .cancelled:
+            nil
+        }
+    }
+
+    package var cancellation: ReviewCancellation? {
+        switch self {
+        case .cancelledBeforeStart(_, let cancellation), .cancelled(_, _, _, let cancellation):
+            cancellation
+        case .queued, .startFailed, .running, .succeeded, .failed:
+            nil
+        }
     }
 
     package var isTerminal: Bool {
-        lifecycle.status.isTerminal
+        status.isTerminal
     }
 }

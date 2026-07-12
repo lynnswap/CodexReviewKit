@@ -14,31 +14,31 @@ func toolRequest(
         let cwd = try requiredString("cwd", in: arguments)
         let target = try reviewTarget(from: requiredObject("target", in: arguments))
         return .reviewStart(
-            sessionID: sessionID(in: arguments, defaultSessionID: defaultSessionID) ?? "default",
+            sessionID: try sessionID(in: arguments, defaultSessionID: defaultSessionID) ?? "default",
             request: .init(cwd: cwd, target: target),
             waitTimeout: useBoundedReviewStart ? boundedReviewWaitDuration : nil
         )
     case .reviewAwait:
         return .reviewAwait(
-            sessionID: sessionID(in: arguments, defaultSessionID: defaultSessionID),
+            sessionID: try sessionID(in: arguments, defaultSessionID: defaultSessionID),
             runID: try requiredRunID(in: arguments),
             waitTimeout: boundedReviewWaitDuration
         )
     case .reviewRead:
         return .reviewRead(
-            sessionID: sessionID(in: arguments, defaultSessionID: defaultSessionID),
+            sessionID: try sessionID(in: arguments, defaultSessionID: defaultSessionID),
             runID: try requiredRunID(in: arguments)
         )
     case .reviewList:
         return .reviewList(
-            sessionID: sessionID(in: arguments, defaultSessionID: defaultSessionID),
+            sessionID: try sessionID(in: arguments, defaultSessionID: defaultSessionID),
             cwd: arguments["cwd"]?.stringValue,
             statuses: try statuses(from: arguments["statuses"]),
             limit: arguments["limit"]?.intValue
         )
     case .reviewCancel:
         let runID = try ReviewRunIDArgument.optionalValue(in: arguments)
-        let sessionID = sessionID(
+        let sessionID = try sessionID(
             in: arguments,
             defaultSessionID: defaultSessionID,
             fallback: runID == nil ? "default" : nil
@@ -59,11 +59,27 @@ func sessionID(
     in arguments: [String: Value],
     defaultSessionID: String?,
     fallback: String? = nil
-) -> String? {
-    defaultSessionID ?? arguments["sessionID"]?.stringValue ?? fallback
+) throws -> String? {
+    let suppliedSessionID: String?
+    if let suppliedValue = arguments["sessionID"] {
+        guard let stringValue = suppliedValue.stringValue else {
+            throw MCPProtocolServerError.invalidArgument("sessionID must be a string.")
+        }
+        suppliedSessionID = stringValue
+    } else {
+        suppliedSessionID = nil
+    }
+    if let defaultSessionID, let suppliedSessionID {
+        guard suppliedSessionID == defaultSessionID else {
+            throw MCPProtocolServerError.invalidArgument(
+                "sessionID must match the active MCP transport session."
+            )
+        }
+    }
+    return defaultSessionID ?? suppliedSessionID ?? fallback
 }
 
-func requiredRunID(in arguments: [String: Value]) throws -> String {
+func requiredRunID(in arguments: [String: Value]) throws -> ReviewRunID {
     try ReviewRunIDArgument.requiredValue(in: arguments)
 }
 

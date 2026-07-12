@@ -159,17 +159,17 @@ package extension CodexReviewBackendModel.Auth {
 
 package extension CodexReviewBackendModel.Review {
     struct Start: Equatable, Sendable {
-        package var runID: String
+        package var runID: ReviewRunID
         package var sessionID: String
         package var request: CodexReviewAPI.Start.Request
         package var model: String?
 
-        package init(runID: String, sessionID: String, request: CodexReviewAPI.Start.Request) {
+        package init(runID: ReviewRunID, sessionID: String, request: CodexReviewAPI.Start.Request) {
             self.init(runID: runID, sessionID: sessionID, request: request, model: nil)
         }
 
         package init(
-            runID: String,
+            runID: ReviewRunID,
             sessionID: String,
             request: CodexReviewAPI.Start.Request,
             model: String?
@@ -183,67 +183,16 @@ package extension CodexReviewBackendModel.Review {
 }
 
 package extension CodexReviewBackendModel.Review {
-    struct Run: Codable, Equatable, Sendable {
-        package var attemptID: String
-        package var threadID: String
-        package var turnID: String?
-        package var reviewThreadID: String?
-        package var model: String?
-
-        enum CodingKeys: String, CodingKey {
-            case attemptID
-            case threadID
-            case turnID
-            case reviewThreadID
-            case model
-        }
-
-        package init(
-            attemptID: String = "attempt-1",
-            threadID: String,
-            turnID: String? = nil,
-            reviewThreadID: String? = nil,
-            model: String? = nil
-        ) {
-            self.attemptID = attemptID
-            self.threadID = threadID
-            self.turnID = turnID
-            self.reviewThreadID = reviewThreadID
-            self.model = model
-        }
-
-        package init(from decoder: Decoder) throws {
-            let container = try decoder.container(keyedBy: CodingKeys.self)
-            self.attemptID = try container.decodeIfPresent(String.self, forKey: .attemptID) ?? "attempt-1"
-            self.threadID = try container.decode(String.self, forKey: .threadID)
-            self.turnID = try container.decodeIfPresent(String.self, forKey: .turnID)
-            self.reviewThreadID = try container.decodeIfPresent(String.self, forKey: .reviewThreadID)
-            self.model = try container.decodeIfPresent(String.self, forKey: .model)
-        }
-    }
-}
-
-package extension CodexReviewBackendModel.Review {
     struct RestartToken: Equatable, Sendable {
         package var id: String
-        package var interruptedRun: CodexReviewBackendModel.Review.Run
+        package var interruptedAttempt: ReviewAttempt
 
         package init(
             id: String,
-            interruptedRun: CodexReviewBackendModel.Review.Run
+            interruptedAttempt: ReviewAttempt
         ) {
             self.id = id
-            self.interruptedRun = interruptedRun
-        }
-    }
-}
-
-package extension CodexReviewBackendModel.Review {
-    struct Completion: Equatable, Sendable {
-        package var finalReview: String?
-
-        package init(finalReview: String?) {
-            self.finalReview = finalReview?.nilIfEmpty
+            self.interruptedAttempt = interruptedAttempt
         }
     }
 }
@@ -284,46 +233,113 @@ package struct ReviewTurnFailure: Codable, Hashable, Sendable {
     }
 }
 
+package enum ReviewBackendConnectionTermination: Codable, Hashable, Sendable {
+    case closed
+    case transport(message: String)
+    case processExited(status: Int32?)
+}
+
+package struct ReviewBackendOperationFailure: Codable, Hashable, Sendable {
+    package enum Operation: String, Codable, Hashable, Sendable {
+        case startReview
+        case interruptReview
+        case prepareRestart
+        case restartReview
+    }
+
+    package enum LaunchKind: String, Codable, Hashable, Sendable {
+        case executableNotFound
+        case scaffold
+        case spawn
+    }
+
+    package enum RequestKind: Codable, Hashable, Sendable {
+        case encode
+        case write
+        case transport
+        case server(code: Int, turnFailure: ReviewTurnFailure?)
+        case invalidResponse(expectedType: String)
+        case deadlineExceeded
+        case overloadRetryExhausted(
+            lastCode: Int,
+            lastTurnFailure: ReviewTurnFailure?,
+            attempts: Int
+        )
+    }
+
+    package enum Reason: Codable, Hashable, Sendable {
+        case launch(LaunchKind)
+        case request(requestID: Int, method: String, kind: RequestKind)
+        case connectionTerminated(ReviewBackendConnectionTermination)
+        case turnDeadlineExceeded(turnID: ReviewTurnID, duration: Duration)
+        case malformedNotification(method: String)
+        case reviewRestartUnavailable
+    }
+
+    package let operation: Operation
+    package let reason: Reason
+    package let message: String
+
+    package init(operation: Operation, reason: Reason, message: String) {
+        self.operation = operation
+        self.reason = reason
+        self.message = message
+    }
+}
+
 package enum ReviewBackendFailure: Error, Codable, Hashable, Sendable {
-    case message(String)
-    case missingReviewOutput(turnID: String)
+    case operation(ReviewBackendOperationFailure)
+    case missingReviewOutput(turnID: ReviewTurnID)
+    case outputPublication(ReviewOutputPublicationFailure)
     case invalidTerminalStatus(
         rawStatus: String,
-        turnID: String,
+        turnID: ReviewTurnID,
         turnFailure: ReviewTurnFailure?
     )
     case turnFailed(ReviewTurnFailure)
     case interruptedByBackend(message: String?)
+    case connectionTerminated(ReviewBackendConnectionTermination)
+    case retentionJournal(message: String)
+    case connectivityObservationEnded
+    case prepareRestartCancelledUnexpectedly
+    case restartCancelledUnexpectedly
+    case protocolViolation(message: String)
 
     package var message: String {
         switch self {
-        case .message(let message):
-            message
+        case .operation(let failure):
+            failure.message
         case .missingReviewOutput:
             "Review completed without review output."
+        case .outputPublication(let failure):
+            failure.message
         case .invalidTerminalStatus(let rawStatus, _, _):
             "Review ended with invalid terminal status \(rawStatus)."
         case .turnFailed(let failure):
             failure.message
         case .interruptedByBackend(let message):
             message?.nilIfEmpty ?? "Review was interrupted by the backend."
+        case .connectionTerminated(let termination):
+            switch termination {
+            case .closed:
+                "The review backend connection closed."
+            case .transport(let message):
+                message
+            case .processExited(let status):
+                status.map { "The review backend process exited with status \($0)." }
+                    ?? "The review backend process exited."
+            }
+        case .retentionJournal(let message):
+            message
+        case .connectivityObservationEnded:
+            "Network connectivity observation ended unexpectedly."
+        case .prepareRestartCancelledUnexpectedly:
+            "Review restart preparation was cancelled unexpectedly."
+        case .restartCancelledUnexpectedly:
+            "Review restart was cancelled unexpectedly."
+        case .protocolViolation(let message):
+            message
         }
-    }
-}
-
-package extension CodexReviewBackendModel.Review {
-    enum Event: Equatable, Sendable {
-        case started(turnID: String, reviewThreadID: String?, model: String?)
-        case completed(CodexReviewBackendModel.Review.Completion)
-        case interrupted(message: String?)
-        case failed(ReviewBackendFailure)
-        case cancelled(String)
-    }
-}
-
-package extension CodexReviewBackendModel.Review.Event {
-    static func completed(finalReview: String?) -> Self {
-        .completed(.init(finalReview: finalReview))
     }
 }
 

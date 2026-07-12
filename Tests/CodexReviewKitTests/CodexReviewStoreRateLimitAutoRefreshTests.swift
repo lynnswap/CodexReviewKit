@@ -166,6 +166,10 @@ struct CodexReviewStoreRateLimitAutoRefreshTests {
         let account = makeAccount(lastFetchAt: now)
         let runningRun = ReviewRunRecord.makeForTesting(
             targetSummary: "Review changes",
+            attemptID: "attempt-running",
+            threadID: "thread-running",
+            reviewThreadID: "review-thread-running",
+            turnID: "turn-running",
             status: .running,
             startedAt: now,
             summary: "Running."
@@ -389,11 +393,11 @@ private final class BlockingRateLimitRefreshBackend: PreviewCodexReviewStoreBack
     ) async {
         refreshedAccountKeys.append(accountKey)
         await startedGate.open()
-        await releaseGate.wait()
+        try? await releaseGate.wait()
     }
 
     func waitUntilRefreshStarts() async {
-        await startedGate.wait()
+        try? await startedGate.wait()
     }
 
     func releaseRefresh() async {

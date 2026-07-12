@@ -1,10 +1,17 @@
 import CodexAppServerKit
 import CodexDataKit
 import Foundation
+import OSLog
+
+private let projectionLogger = Logger(
+    subsystem: "CodexReviewKit",
+    category: "chat-log-projection"
+)
 
 @MainActor
 struct ReviewMonitorCodexChatLogProjection {
     private var documentProjection = ReviewMonitorLogDocumentProjection()
+    private var reportedMissingRolloutTargetSourceIDs: Set<String> = []
 
     var currentDocument: ReviewMonitorLog.Document {
         documentProjection.currentDocument
@@ -12,6 +19,7 @@ struct ReviewMonitorCodexChatLogProjection {
 
     mutating func reset() {
         documentProjection.reset()
+        reportedMissingRolloutTargetSourceIDs.removeAll(keepingCapacity: false)
     }
 
     mutating func render(
@@ -79,6 +87,64 @@ struct ReviewMonitorCodexChatLogProjection {
         )
     }
 
+    mutating func render(
+        projectedBlocks: [ReviewMonitorLogProjectedBlock]
+    ) -> ReviewMonitorLog.Document? {
+        guard projectedBlocks.isEmpty == false else {
+            documentProjection.reset()
+            return nil
+        }
+        return documentProjection.render(projectedBlocks: projectedBlocks)
+    }
+
+    func projectedBlocks(
+        from item: CodexThreadItem,
+        turnID: CodexTurnID,
+        turnStatus: CodexTurnStatus,
+        chatCreatedAt: Date?,
+        chatUpdatedAt: Date?,
+        suppressUserMessage: Bool,
+        suppressRolloutCompanion: Bool
+    ) -> [ReviewMonitorLogProjectedBlock] {
+        guard suppressRolloutCompanion == false else {
+            return []
+        }
+        return projectedBlocks(
+            from: CodexThreadSnapshotLogItem(
+                item: item,
+                turnID: turnID,
+                turnStatus: turnStatus
+            ),
+            turnStatus: turnStatus,
+            chatCreatedAt: chatCreatedAt,
+            chatUpdatedAt: chatUpdatedAt,
+            suppressUserMessage: suppressUserMessage
+        )
+    }
+
+    func presentationFacts(
+        for item: CodexThreadItem,
+        turnID: CodexTurnID,
+        turnStatus: CodexTurnStatus
+    ) -> ReviewItemPresentationFacts {
+        Self.presentationFacts(
+            CodexThreadSnapshotLogItem(
+                item: item,
+                turnID: turnID,
+                turnStatus: turnStatus
+            )
+        )
+    }
+
+    func dependsOnTurnStatus(_ item: CodexThreadItem) -> Bool {
+        switch item.content {
+        case .command, .fileChange, .contextCompaction, .diagnostic, .log:
+            true
+        case .message, .plan, .reasoning, .toolCall, .unknown:
+            false
+        }
+    }
+
     private mutating func render<Item: CodexChatLogProjectionItem>(
         items: [Item],
         turnStatus: CodexTurnStatus?,
@@ -89,37 +155,23 @@ struct ReviewMonitorCodexChatLogProjection {
             documentProjection.reset()
             return nil
         }
-        let suppressUserMessages = items.contains { item in
-            item.kind == .enteredReviewMode || item.kind == .exitedReviewMode
-        }
-        let reviewOutputKeys = Set(items.compactMap(Self.reviewOutputKey))
-        var emittedReviewOutputKeys = Set<ReviewOutputKey>()
-        var pendingReasoningMirrors = PendingReasoningMirrors()
+        let presentationFacts = items.map(Self.presentationFacts)
+        let turnPolicy = ReviewTurnPresentationPolicy(items: presentationFacts)
+        let rolloutPolicy = ReviewRolloutPresentationPolicy().evaluate(presentationFacts)
+        reportMissingRolloutTargets(rolloutPolicy.missingTargetSourceIDs)
         let blocks = items.flatMap { item in
-            if let reviewOutputKey = Self.reviewOutputKey(for: item) {
-                guard emittedReviewOutputKeys.insert(reviewOutputKey).inserted else {
-                    return [] as [ReviewMonitorLogProjectedBlock]
-                }
-            }
-            if let reasoningOutputKey = Self.reasoningOutputKey(for: item) {
-                guard pendingReasoningMirrors.shouldRender(reasoningOutputKey) else {
-                    return [] as [ReviewMonitorLogProjectedBlock]
-                }
+            if rolloutPolicy.suppressedCompanionSourceIDs.contains(item.sourceID) {
+                return [] as [ReviewMonitorLogProjectedBlock]
             }
             return projectedBlocks(
                 from: item,
                 turnStatus: turnStatus,
                 chatCreatedAt: chatCreatedAt,
                 chatUpdatedAt: chatUpdatedAt,
-                suppressUserMessages: suppressUserMessages,
-                reviewOutputKeys: reviewOutputKeys
+                suppressUserMessage: turnPolicy.hidesUserMessage(in: item.projectionTurnID)
             )
         }
-        guard blocks.isEmpty == false else {
-            documentProjection.reset()
-            return nil
-        }
-        return documentProjection.render(projectedBlocks: blocks)
+        return render(projectedBlocks: blocks)
     }
 
     private func projectedBlocks<Item: CodexChatLogProjectionItem>(
@@ -127,18 +179,11 @@ struct ReviewMonitorCodexChatLogProjection {
         turnStatus: CodexTurnStatus?,
         chatCreatedAt: Date?,
         chatUpdatedAt: Date?,
-        suppressUserMessages: Bool,
-        reviewOutputKeys: Set<ReviewOutputKey>
+        suppressUserMessage: Bool
     ) -> [ReviewMonitorLogProjectedBlock] {
         switch item.content {
         case .message(let message):
-            guard suppressUserMessages == false || message.role != .user else {
-                return []
-            }
-            if message.role == .assistant,
-                let reviewOutputKey = Self.reviewOutputKey(for: item, text: message.text),
-                reviewOutputKeys.contains(reviewOutputKey)
-            {
+            guard suppressUserMessage == false || message.role != .user else {
                 return []
             }
             return [
@@ -256,71 +301,26 @@ struct ReviewMonitorCodexChatLogProjection {
         }
     }
 
-    private static func reviewOutputKey<Item: CodexChatLogProjectionItem>(for item: Item) -> ReviewOutputKey? {
-        guard item.kind == .exitedReviewMode else {
-            return nil
-        }
-        switch item.content {
-        case .message(let message):
-            return reviewOutputKey(for: item, text: message.text)
-        case .diagnostic(let text), .log(let text):
-            return reviewOutputKey(for: item, text: text)
-        case .unknown(let raw):
-            return raw.text.flatMap { reviewOutputKey(for: item, text: $0) }
-        case .plan, .reasoning, .command, .fileChange, .toolCall, .contextCompaction:
-            return nil
-        }
-    }
-
-    private static func reviewOutputKey<Item: CodexChatLogProjectionItem>(
-        for item: Item,
-        text: String
-    ) -> ReviewOutputKey? {
-        guard let normalizedText = normalizedReviewOutputText(text).nilIfEmpty else {
-            return nil
-        }
-        return ReviewOutputKey(scopeID: reviewOutputScopeID(for: item), text: normalizedText)
-    }
-
-    private static func reviewOutputScopeID<Item: CodexChatLogProjectionItem>(for item: Item) -> String {
-        item.projectionTurnID?.rawValue ?? item.sourceID
-    }
-
-    private static func reasoningOutputKey<Item: CodexChatLogProjectionItem>(for item: Item) -> ReasoningOutputKey? {
-        guard item.kind == .reasoning else {
-            return nil
-        }
-        guard case .reasoning(let reasoning) = item.content,
-            let normalizedText = normalizedReasoningOutputText(reasoning.text).nilIfEmpty
-        else {
-            return nil
-        }
-        return ReasoningOutputKey(
-            scopeID: reasoningOutputScopeID(for: item),
-            text: normalizedText,
-            payloadKind: rawPayloadKind(from: item.rawPayload)
+    private static func presentationFacts<Item: CodexChatLogProjectionItem>(
+        _ item: Item
+    ) -> ReviewItemPresentationFacts {
+        .init(
+            sourceID: item.sourceID,
+            turnID: item.projectionTurnID,
+            kind: item.kind,
+            origin: item.origin,
+            semanticRelation: item.semanticRelation,
+            displayText: item.content.reviewRolloutDisplayText
         )
     }
 
-    private static func reasoningOutputScopeID<Item: CodexChatLogProjectionItem>(for item: Item) -> String {
-        item.projectionTurnID?.rawValue ?? "item:\(item.sourceID)"
-    }
-
-    private static func normalizedReviewOutputText(_ text: String) -> String {
-        text.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private static func normalizedReasoningOutputText(_ text: String) -> String {
-        text.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private static func rawPayloadKind(from data: Data?) -> String? {
-        guard let data,
-            let payload = try? JSONDecoder().decode(RawPayloadKind.self, from: data)
-        else {
-            return nil
+    mutating func reportMissingRolloutTargets(_ sourceIDs: Set<String>) {
+        for sourceID in sourceIDs
+        where reportedMissingRolloutTargetSourceIDs.insert(sourceID).inserted {
+            projectionLogger.error(
+                "Review rollout companion has no exited-review target in its turn: \(sourceID, privacy: .public)"
+            )
         }
-        return payload.kindValue
     }
 
     private func unknownText(title: String, detail: String?) -> String {
@@ -606,74 +606,6 @@ struct ReviewMonitorCodexChatLogProjection {
     }
 }
 
-private struct ReviewOutputKey: Hashable {
-    var scopeID: String
-    var text: String
-}
-
-private struct ReasoningOutputKey: Hashable {
-    var scopeID: String
-    var text: String
-    var payloadKind: String?
-}
-
-// Codex delivers one logical reasoning entry through two payload kinds
-// (`agent_reasoning` event and `reasoning` item), and the mirror may arrive
-// after unrelated items such as commands. Each rendered entry therefore
-// consumes at most one later mirror with the counterpart payload kind, which
-// suppresses late mirrors without dropping legitimately repeated reasoning.
-private struct PendingReasoningMirrors {
-    private struct EntryKey: Hashable {
-        var scopeID: String
-        var text: String
-    }
-
-    private static let mirrorPayloadKinds: Set<String> = ["agent_reasoning", "reasoning"]
-
-    private var pendingPayloadKindsByKey: [EntryKey: [String]] = [:]
-
-    mutating func shouldRender(_ key: ReasoningOutputKey) -> Bool {
-        guard let payloadKind = key.payloadKind,
-            Self.mirrorPayloadKinds.contains(payloadKind)
-        else {
-            return true
-        }
-        let entryKey = EntryKey(scopeID: key.scopeID, text: key.text)
-        var pending = pendingPayloadKindsByKey[entryKey] ?? []
-        if let mirrorIndex = pending.firstIndex(where: { $0 != payloadKind }) {
-            pending.remove(at: mirrorIndex)
-            pendingPayloadKindsByKey[entryKey] = pending.isEmpty ? nil : pending
-            return false
-        }
-        pending.append(payloadKind)
-        pendingPayloadKindsByKey[entryKey] = pending
-        return true
-    }
-}
-
-private struct RawPayloadKind: Decodable {
-    struct NestedItem: Decodable {
-        var type: String?
-        var kind: String?
-
-        var kindValue: String? {
-            type ?? kind
-        }
-    }
-
-    var type: String?
-    var kind: String?
-    var item: NestedItem?
-    var payload: NestedItem?
-
-    // A nested item/payload kind identifies the item itself; a top-level
-    // type on the same wrapper is the event envelope kind, so the nested
-    // kind wins when both are present.
-    var kindValue: String? {
-        item?.kindValue ?? payload?.kindValue ?? type ?? kind
-    }
-}
-
 @MainActor
 private protocol CodexChatLogProjectionItem {
     var itemID: String { get }
@@ -682,8 +614,9 @@ private protocol CodexChatLogProjectionItem {
     var projectionTurnStatus: CodexTurnStatus? { get }
     var kind: CodexThreadItem.Kind { get }
     var content: CodexThreadItem.Content { get }
+    var origin: CodexThreadItem.Origin { get }
+    var semanticRelation: CodexThreadItem.SemanticRelation? { get }
     var itemStatus: CodexTurnStatus? { get }
-    var rawPayload: Data? { get }
 }
 
 extension CodexItem: CodexChatLogProjectionItem {
@@ -733,13 +666,18 @@ private struct CodexChatModelLogItem: CodexChatLogProjectionItem {
         item.content
     }
 
+    var origin: CodexThreadItem.Origin {
+        item.origin
+    }
+
+    var semanticRelation: CodexThreadItem.SemanticRelation? {
+        item.semanticRelation
+    }
+
     var itemStatus: CodexTurnStatus? {
         item.content.reviewMonitorLogItemStatus
     }
 
-    var rawPayload: Data? {
-        item.rawPayload
-    }
 }
 
 @MainActor
@@ -775,27 +713,37 @@ private struct CodexThreadSnapshotLogItem: CodexChatLogProjectionItem {
         item.content
     }
 
+    var origin: CodexThreadItem.Origin {
+        item.origin
+    }
+
+    var semanticRelation: CodexThreadItem.SemanticRelation? {
+        item.semanticRelation
+    }
+
     var itemStatus: CodexTurnStatus? {
         item.content.reviewMonitorLogItemStatus
     }
 
-    var rawPayload: Data? {
-        item.rawPayload
-    }
-
     private var semanticItemID: String {
-        switch item.kind {
-        case .enteredReviewMode:
-            "review-marker:enteredReviewMode"
-        case .exitedReviewMode:
-            "review-marker:exitedReviewMode"
-        default:
-            "\(item.kind.rawValue):\(item.id)"
-        }
+        "\(item.kind.rawValue):\(item.id)"
     }
 }
 
 private extension CodexThreadItem.Content {
+    var reviewRolloutDisplayText: String? {
+        switch self {
+        case .message(let message):
+            message.text
+        case .diagnostic(let text), .log(let text):
+            text
+        case .unknown(let raw):
+            raw.text
+        case .plan, .reasoning, .command, .fileChange, .toolCall, .contextCompaction:
+            nil
+        }
+    }
+
     var reviewMonitorLogItemStatus: CodexTurnStatus? {
         switch self {
         case .command(let command):

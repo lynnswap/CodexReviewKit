@@ -19,7 +19,6 @@ private extension CodexReviewStore {
         externalURLOpener: @escaping ExternalURLOpener = { _ in },
         mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
         mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
-        shutdownCleanupTimeout: Duration = .seconds(2),
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
         networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
         appServerLifecycleHandler: CodexReviewAppServerLifecycleHandler? = nil,
@@ -31,14 +30,15 @@ private extension CodexReviewStore {
             externalURLOpener: externalURLOpener,
             mcpPortOwnerResolver: mcpPortOwnerResolver,
             mcpHTTPServerBindChecker: mcpHTTPServerBindChecker,
-            shutdownCleanupTimeout: shutdownCleanupTimeout,
             networkMonitor: networkMonitor,
             networkRecoveryPolicy: networkRecoveryPolicy,
             appServerLifecycleHandler: appServerLifecycleHandler,
             appServerFactory: { codexHomeURL in
                 try await CodexAppServerTestRuntime.start(
                     transport: transport,
-                    codexHome: codexHomeURL.path
+                    configuration: .init(localProcess: .init(
+                        codexHomeURL: codexHomeURL
+                    ))
                 ).server
             }
         )
@@ -56,7 +56,6 @@ private extension CodexReviewStore {
         ) -> any CodexReviewMCPHTTPServing)? = nil,
         mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
         mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
-        shutdownCleanupTimeout: Duration = .seconds(2),
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
         networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
         appServerLifecycleHandler: CodexReviewAppServerLifecycleHandler? = nil,
@@ -69,7 +68,6 @@ private extension CodexReviewStore {
             mcpHTTPServerFactory: mcpHTTPServerFactory,
             mcpPortOwnerResolver: mcpPortOwnerResolver,
             mcpHTTPServerBindChecker: mcpHTTPServerBindChecker,
-            shutdownCleanupTimeout: shutdownCleanupTimeout,
             networkMonitor: networkMonitor,
             networkRecoveryPolicy: networkRecoveryPolicy,
             appServerLifecycleHandler: appServerLifecycleHandler,
@@ -77,7 +75,9 @@ private extension CodexReviewStore {
                 let transport = try await transportFactory(codexHomeURL)
                 return try await CodexAppServerTestRuntime.start(
                     transport: transport,
-                    codexHome: codexHomeURL.path
+                    configuration: .init(localProcess: .init(
+                        codexHomeURL: codexHomeURL
+                    ))
                 ).server
             }
         )
@@ -185,13 +185,9 @@ struct CodexReviewHostTests {
         let homeURL = try temporaryHome()
         let configuredCodexHomeURL = homeURL.appendingPathComponent("custom-codex-home", isDirectory: true)
         let transport = FakeCodexAppServerTransport()
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
-        try await transport.enqueue(
-            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
-            for: "config/read"
-        )
-        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             runtimePreferences: .init(codexHomePath: configuredCodexHomeURL.path),
@@ -210,13 +206,9 @@ struct CodexReviewHostTests {
     @Test func liveStorePublishesPrimaryAppServerLifecycle() async throws {
         let homeURL = try temporaryHome()
         let transport = FakeCodexAppServerTransport()
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
-        try await transport.enqueue(
-            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
-            for: "config/read"
-        )
-        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
         var observedLifecycleStates: [Bool] = []
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
@@ -243,13 +235,9 @@ struct CodexReviewHostTests {
     @Test func liveStorePassesRuntimePreferenceMCPPortAndPathToHTTPServerFactory() async throws {
         let homeURL = try temporaryHome()
         let transport = FakeCodexAppServerTransport()
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
-        try await transport.enqueue(
-            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
-            for: "config/read"
-        )
-        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
         var capturedConfiguration: CodexReviewMCPHTTPServer.Configuration?
         var capturedLogProjectionProvider: ReviewMCPLogProjectionProvider?
         let store = CodexReviewStore.makeLiveStoreForTesting(
@@ -541,16 +529,12 @@ struct CodexReviewHostTests {
 
     @Test func liveStoreSkipsRateLimitRefreshForUnsupportedActiveAccount() async throws {
         let transport = FakeCodexAppServerTransport()
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await transport.enqueue(
-            TestAccountReadResponse(account: .init(type: "apiKey")),
-            for: "account/read"
+        try await transport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .apiKey),
+            requiresOpenAIAuth: false
         )
-        try await transport.enqueue(
-            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
-            for: "config/read"
-        )
-        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": try temporaryHome().path],
             transport: transport
@@ -561,11 +545,11 @@ struct CodexReviewHostTests {
         await Task.yield()
 
         #expect(store.auth.selectedAccount?.kind == .apiKey)
-        #expect(await transport.recordedRequests().map(\.method) == [
-            "initialize",
-            "account/read",
-            "config/read",
-            "model/list",
+        #expect(await transport.recordedRequests().map(\.request.operation) == [
+            .initialize,
+            .accountRead,
+            .configurationRead,
+            .modelList,
         ])
     }
 
@@ -573,33 +557,22 @@ struct CodexReviewHostTests {
         let homeURL = try temporaryHome()
         let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
         let transport = FakeCodexAppServerTransport()
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
-        try await transport.enqueue(
-            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
-            for: "config/read"
-        )
-        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
-        try await transport.enqueue(
-            AppServerAPI.Account.Login.Response.chatgpt(
-                loginID: "login-1",
-                authURL: "https://example.com/auth"
-            ),
-            for: "account/login/start"
-        )
-        try await transport.enqueue(
-            AppServerAPI.Account.Read.Response(
-                account: .init(email: "new@example.com", planType: "plus")
-            ),
-            for: "account/read"
-        )
-        try await transport.enqueue(
-            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
-                limitID: "codex",
-                primary: .init(usedPercent: 20, windowDurationMins: 300)
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        try await transport.enqueueChatGPTLogin(loginID: "login-1", authenticationURL: testAuthenticationURL)
+        try await transport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "new@example.com",
+                planType: .plus
             )),
-            for: "account/rateLimits/read"
+            requiresOpenAIAuth: false
         )
+        try await transport.enqueueRateLimits(try makeHostRateLimits(
+            planType: nil,
+            windowDurationMinutes: 300,
+            usedPercent: 20
+        ))
         let externalURLOpener = FakeExternalURLOpener()
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
@@ -620,7 +593,7 @@ struct CodexReviewHostTests {
             #expect(failure == .alreadyInProgress)
         }
         #expect(store.auth.isAuthenticating)
-        #expect(await transport.recordedRequests(method: "account/login/start").count == 1)
+        #expect(await transport.recordedRequests(for: .accountLoginStart).count == 1)
         do {
             try await store.removeAccount(accountKey: "missing@example.com")
             Issue.record("Expected account mutation rejection while authentication is active.")
@@ -632,50 +605,37 @@ struct CodexReviewHostTests {
         try Data(#"{"tokens":{"id_token":"new@example.com"}}"#.utf8).write(
             to: mainCodexHomeURL.appendingPathComponent("auth.json")
         )
-        try await transport.emitServerNotificationJSON(
-            method: "account/login/completed",
-            json: #"{"loginId":"login-1","success":true,"error":null}"#
+        try await transport.notificationEmitter.emitLoginCompleted(
+            loginID: "login-1",
+            completion: .succeeded
         )
-        try await transport.emitServerNotificationJSON(
-            method: "account/updated",
-            json: #"{"authMode":"chatgpt","planType":"plus"}"#
-        )
+        try await transport.notificationEmitter.emitAccountChanged(.init(
+            authMode: .chatGPT,
+            planType: .plus
+        ))
         #expect(await waitUntil(timeout: .seconds(1)) {
             store.auth.selectedAccount?.accountKey == "new@example.com"
         })
         await transport.waitForRequestCount(7)
-        #expect(await transport.recordedRequests().map(\.method) == [
-            "initialize",
-            "account/read",
-            "config/read",
-            "model/list",
-            "account/login/start",
-            "account/read",
-            "account/rateLimits/read",
+        #expect(await transport.recordedRequests().map(\.request.operation) == [
+            .initialize,
+            .accountRead,
+            .configurationRead,
+            .modelList,
+            .accountLoginStart,
+            .accountRead,
+            .accountRateLimitsRead,
         ])
         await store.stop()
     }
 
     @Test func liveStoreCancelsLoginWhenOpeningAuthenticationURLFails() async throws {
         let transport = FakeCodexAppServerTransport()
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
-        try await transport.enqueue(
-            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
-            for: "config/read"
-        )
-        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
-        try await transport.enqueue(
-            AppServerAPI.Account.Login.Response.chatgpt(
-                loginID: "login-1",
-                authURL: "https://example.com/auth"
-            ),
-            for: "account/login/start"
-        )
-        try await transport.enqueue(
-            AppServerAPI.Account.Login.Cancel.Response(),
-            for: "account/login/cancel"
-        )
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        try await transport.enqueueChatGPTLogin(loginID: "login-1", authenticationURL: testAuthenticationURL)
+        try await transport.enqueueChatGPTLoginCancellation(.canceled)
         let externalURLOpener = FakeExternalURLOpener(
             failure: CodexReviewAPI.Error.io("Authentication presentation failed.")
         )
@@ -694,14 +654,149 @@ struct CodexReviewHostTests {
                 == "Failed to open the authentication URL: https://example.com/auth"
         )
         #expect(externalURLOpener.openedURLs == [testAuthenticationURL])
-        #expect(await transport.recordedRequests().map(\.method) == [
-            "initialize",
-            "account/read",
-            "config/read",
-            "model/list",
-            "account/login/start",
-            "account/login/cancel",
+        #expect(await transport.recordedRequests().map(\.request.operation) == [
+            .initialize,
+            .accountRead,
+            .configurationRead,
+            .modelList,
+            .accountLoginStart,
+            .accountLoginCancel,
         ])
+        await store.stop()
+    }
+
+    @Test func liveStoreJoinsConcurrentCancellationAndStopInOneLoginTermination() async throws {
+        let transport = FakeCodexAppServerTransport()
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        try await transport.enqueueChatGPTLogin(loginID: "login-1", authenticationURL: testAuthenticationURL)
+        try await transport.enqueueChatGPTLoginCancellation(.canceled)
+        let cancelGate = CodexAppServerTestGate()
+        await transport.holdNextIgnoringCancellation(
+            .accountLoginCancel,
+            gate: cancelGate
+        )
+        var appServerLifecycleStates: [Bool] = []
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            appServerLifecycleHandler: { container in
+                appServerLifecycleStates.append(container != nil)
+            },
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        try await store.addAccount()
+        await transport.waitForRequest(.accountLoginStart)
+
+        async let cancel: Void = store.cancelAuthentication()
+        await transport.waitForRequest(.accountLoginCancel)
+        async let stop: Void = store.stop()
+        await waitUntil { appServerLifecycleStates == [true, false] }
+
+        #expect(await transport.recordedRequests(for: .accountLoginCancel).count == 1)
+        await cancelGate.open()
+        await cancel
+        await stop
+
+        #expect(await transport.recordedRequests(for: .accountLoginCancel).count == 1)
+        #expect(store.auth.isAuthenticating == false)
+        #expect(store.serverURL == nil)
+    }
+
+    @Test func liveStoreKeepsNewLoginGenerationWhenOldNotificationsArrive() async throws {
+        let transport = FakeCodexAppServerTransport()
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        try await transport.enqueueChatGPTLogin(loginID: "login-old", authenticationURL: testAuthenticationURL)
+        try await transport.enqueueChatGPTLoginCancellation(.canceled)
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        await transport.waitForNotificationStreamCount(1)
+        try await store.addAccount()
+        await transport.waitForRequest(.accountLoginStart)
+        await store.cancelAuthentication()
+
+        try await transport.enqueueChatGPTLogin(loginID: "login-new", authenticationURL: testAuthenticationURL)
+        try await transport.enqueueChatGPTLoginCancellation(.canceled)
+
+        try await store.addAccount()
+        await transport.waitForRequest(.accountLoginStart, count: 2)
+        try await transport.notificationEmitter.emitLoginCompleted(
+            loginID: "login-old",
+            completion: .failed(message: "late old-generation completion")
+        )
+        try await transport.notificationEmitter.emitAccountChanged(.init(
+            authMode: .chatGPT,
+            planType: .plus
+        ))
+        await Task.yield()
+
+        #expect(store.auth.isAuthenticating)
+        do {
+            try await store.addAccount()
+            Issue.record("Expected the new login generation to remain active.")
+        } catch let failure as CodexReviewAuthenticationFailure {
+            #expect(failure == .alreadyInProgress)
+        }
+
+        await store.cancelAuthentication()
+        #expect(await transport.recordedRequests(for: .accountLoginCancel).count == 2)
+        await store.stop()
+    }
+
+    @Test func liveStoreInstallsSessionBeforeAnAlreadyCompletedLoginRootRuns() async throws {
+        let transport = FakeCodexAppServerTransport()
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        try await transport.enqueueChatGPTLogin(loginID: "login-early", authenticationURL: testAuthenticationURL)
+        try await transport.enqueueChatGPTLoginCancellation(.canceled)
+        let loginStartGate = CodexAppServerTestGate()
+        await transport.holdNextIgnoringCancellation(
+            .accountLoginStart,
+            gate: loginStartGate
+        )
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        await transport.waitForNotificationStreamCount(1)
+        let firstLogin = Task { @MainActor in
+            try await store.addAccount()
+        }
+        await transport.waitForRequest(.accountLoginStart)
+        await loginStartGate.waitUntilBlocked()
+        try await transport.notificationEmitter.emitLoginCompleted(
+            loginID: "login-early",
+            completion: .failed(message: "login completed before handle publication")
+        )
+        await loginStartGate.open()
+        try await firstLogin.value
+
+        await waitUntil {
+            failedMessage(from: store.auth.phase) == "login completed before handle publication"
+        }
+        #expect(
+            failedMessage(from: store.auth.phase)
+                == "login completed before handle publication"
+        )
+        await store.cancelAuthentication()
+        try await transport.enqueueChatGPTLogin(loginID: "login-next", authenticationURL: testAuthenticationURL)
+        try await store.addAccount()
+        await transport.waitForRequest(.accountLoginStart, count: 2)
+        #expect(store.auth.isAuthenticating)
+
+        await store.cancelAuthentication()
+        #expect(await transport.recordedRequests(for: .accountLoginCancel).count == 1)
         await store.stop()
     }
 
@@ -713,65 +808,50 @@ struct CodexReviewHostTests {
             to: mainCodexHomeURL.appendingPathComponent("auth.json")
         )
         let mainTransport = FakeCodexAppServerTransport()
-        try await mainTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await mainTransport.enqueue(
-            AppServerAPI.Account.Read.Response(
-                account: .init(email: "active@example.com", planType: "pro")
-            ),
-            for: "account/read"
-        )
-        try await mainTransport.enqueue(
-            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
-                limitID: "codex",
-                primary: .init(usedPercent: 10, windowDurationMins: 300)
+        try await mainTransport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "active@example.com",
+                planType: .pro
             )),
-            for: "account/rateLimits/read"
+            requiresOpenAIAuth: false
         )
-        try await mainTransport.enqueue(
-            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
-            for: "config/read"
-        )
-        try await mainTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await mainTransport.enqueueRateLimits(try makeHostRateLimits(
+            planType: nil,
+            windowDurationMinutes: 300,
+            usedPercent: 10
+        ))
+        try await mainTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await mainTransport.enqueueModels(.init(models: []))
 
         let authTransport = FakeCodexAppServerTransport()
-        try await authTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await authTransport.enqueue(
-            AppServerAPI.Account.Login.Response.chatgpt(
-                loginID: "login-2",
-                authURL: "https://example.com/auth"
-            ),
-            for: "account/login/start"
-        )
-        try await authTransport.enqueue(
-            AppServerAPI.Account.Read.Response(
-                account: .init(email: "new@example.com", planType: "plus")
-            ),
-            for: "account/read"
-        )
-        try await authTransport.enqueue(
-            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
-                limitID: "codex",
-                primary: .init(usedPercent: 25, windowDurationMins: 300)
+        try await authTransport.enqueueChatGPTLogin(loginID: "login-2", authenticationURL: testAuthenticationURL)
+        try await authTransport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "new@example.com",
+                planType: .plus
             )),
-            for: "account/rateLimits/read"
+            requiresOpenAIAuth: false
         )
+        try await authTransport.enqueueRateLimits(try makeHostRateLimits(
+            planType: nil,
+            windowDurationMinutes: 300,
+            usedPercent: 25
+        ))
         let refreshTransport = FakeCodexAppServerTransport()
         let refreshGate = AsyncGate()
-        await refreshTransport.hold(method: "account/rateLimits/read", gate: refreshGate)
-        try await refreshTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await refreshTransport.enqueue(
-            AppServerAPI.Account.Read.Response(
-                account: .init(email: "new@example.com", planType: "plus")
-            ),
-            for: "account/read"
-        )
-        try await refreshTransport.enqueue(
-            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
-                limitID: "codex",
-                primary: .init(usedPercent: 44, windowDurationMins: 300)
+        await refreshTransport.holdNext(.accountRateLimitsRead, gate: refreshGate)
+        try await refreshTransport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "new@example.com",
+                planType: .plus
             )),
-            for: "account/rateLimits/read"
+            requiresOpenAIAuth: false
         )
+        try await refreshTransport.enqueueRateLimits(try makeHostRateLimits(
+            planType: nil,
+            windowDurationMinutes: 300,
+            usedPercent: 44
+        ))
         var nonPrimaryTransports = [authTransport, refreshTransport]
         var nonPrimaryRuntimeIndex = 0
         var refreshCodexHomeURL: URL?
@@ -803,19 +883,18 @@ struct CodexReviewHostTests {
         await authTransport.waitForNotificationStreamCount(1)
         await authTransport.waitForRequestCount(2)
         #expect(externalURLOpener.openedURLs == [testAuthenticationURL])
-        let loginRequest = try #require(await authTransport.recordedRequests().first {
-            $0.method == "account/login/start"
-        })
-        let loginParams = try JSONDecoder().decode(AppServerAPI.Account.Login.Params.self, from: loginRequest.params)
-        #expect(loginParams.type == "chatgpt")
-        try await authTransport.emitServerNotification(
-            method: "account/login/completed",
-            params: TestLoginCompletedNotification(loginID: "login-2", success: true)
+        let loginRequest = try #require(
+            await authTransport.recordedRequests(for: .accountLoginStart).first
         )
-        try await authTransport.emitServerNotificationJSON(
-            method: "account/updated",
-            json: #"{"authMode":"chatgpt","planType":"plus"}"#
+        #expect(loginRequest.request == .accountLoginStart)
+        try await authTransport.notificationEmitter.emitLoginCompleted(
+            loginID: "login-2",
+            completion: .succeeded
         )
+        try await authTransport.notificationEmitter.emitAccountChanged(.init(
+            authMode: .chatGPT,
+            planType: .plus
+        ))
         #expect(await waitUntil(timeout: .seconds(1)) {
             store.auth.persistedAccounts.contains { $0.accountKey == "new@example.com" }
                 && store.auth.persistedAccounts.first { $0.accountKey == "new@example.com" }?.rateLimits.first?.usedPercent == 25
@@ -826,12 +905,12 @@ struct CodexReviewHostTests {
         #expect(store.auth.persistedActiveAccountKey == "active@example.com")
         #expect(store.auth.persistedAccounts.map(\.accountKey).contains("new@example.com"))
         #expect(store.auth.persistedAccounts.first { $0.accountKey == "new@example.com" }?.rateLimits.first?.usedPercent == 25)
-        #expect(await mainTransport.recordedRequests().map(\.method).contains("account/login/start") == false)
-        #expect(await authTransport.recordedRequests().map(\.method) == [
-            "initialize",
-            "account/login/start",
-            "account/read",
-            "account/rateLimits/read",
+        #expect(await mainTransport.recordedRequests().map(\.request.operation).contains(.accountLoginStart) == false)
+        #expect(await authTransport.recordedRequests().map(\.request.operation) == [
+            .initialize,
+            .accountLoginStart,
+            .accountRead,
+            .accountRateLimitsRead,
         ])
         try await store.reorderPersistedAccount(accountKey: "new@example.com", toIndex: 1)
         #expect(store.auth.persistedAccounts.map(\.accountKey) == [
@@ -853,10 +932,10 @@ struct CodexReviewHostTests {
         #expect(store.auth.selectedAccount?.accountKey == "active@example.com")
         #expect(store.auth.persistedAccounts.first { $0.accountKey == "new@example.com" }?.rateLimits.first?.usedPercent == 44)
         #expect(try savedAccountAuth(homeURL: homeURL, accountKey: "new@example.com") == Data("{\"tokens\":{\"id_token\":\"refreshed-token\"}}".utf8))
-        #expect(await refreshTransport.recordedRequests().map(\.method) == [
-            "initialize",
-            "account/read",
-            "account/rateLimits/read",
+        #expect(await refreshTransport.recordedRequests().map(\.request.operation) == [
+            .initialize,
+            .accountRead,
+            .accountRateLimitsRead,
         ])
     }
 
@@ -871,37 +950,34 @@ struct CodexReviewHostTests {
         try writeSavedAccountAuth(homeURL: homeURL, accountKey: "new@example.com")
 
         let mainTransport = FakeCodexAppServerTransport()
-        try await mainTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await mainTransport.enqueue(
-            AppServerAPI.Account.Read.Response(account: .init(email: "active@example.com", planType: "pro")),
-            for: "account/read"
-        )
-        try await mainTransport.enqueue(
-            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
-                limitID: "codex",
-                primary: .init(usedPercent: 10, windowDurationMins: 300)
+        try await mainTransport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "active@example.com",
+                planType: .pro
             )),
-            for: "account/rateLimits/read"
+            requiresOpenAIAuth: false
         )
-        try await mainTransport.enqueue(
-            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
-            for: "config/read"
-        )
-        try await mainTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await mainTransport.enqueueRateLimits(try makeHostRateLimits(
+            planType: nil,
+            windowDurationMinutes: 300,
+            usedPercent: 10
+        ))
+        try await mainTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await mainTransport.enqueueModels(.init(models: []))
 
         let refreshTransport = FakeCodexAppServerTransport()
-        try await refreshTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await refreshTransport.enqueue(
-            AppServerAPI.Account.Read.Response(account: .init(email: "active@example.com", planType: "pro")),
-            for: "account/read"
-        )
-        try await refreshTransport.enqueue(
-            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
-                limitID: "codex",
-                primary: .init(usedPercent: 44, windowDurationMins: 300)
+        try await refreshTransport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "active@example.com",
+                planType: .pro
             )),
-            for: "account/rateLimits/read"
+            requiresOpenAIAuth: false
         )
+        try await refreshTransport.enqueueRateLimits(try makeHostRateLimits(
+            planType: nil,
+            windowDurationMinutes: 300,
+            usedPercent: 44
+        ))
 
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
@@ -920,9 +996,9 @@ struct CodexReviewHostTests {
         #expect(newAccount?.rateLimits.isEmpty == true)
         #expect(newAccount?.requiresReauthentication == true)
         #expect(newAccount?.lastRateLimitError?.contains("Saved authentication is for") == true)
-        #expect(await refreshTransport.recordedRequests().map(\.method) == [
-            "initialize",
-            "account/read",
+        #expect(await refreshTransport.recordedRequests().map(\.request.operation) == [
+            .initialize,
+            .accountRead,
         ])
     }
 
@@ -935,31 +1011,22 @@ struct CodexReviewHostTests {
             accounts: ["existing@example.com"]
         )
         let transport = FakeCodexAppServerTransport()
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
-        try await transport.enqueue(
-            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
-            for: "config/read"
-        )
-        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
-        try await transport.enqueue(
-            AppServerAPI.Account.Login.Response.chatgpt(
-                loginID: "login-new",
-                authURL: "https://example.com/auth"
-            ),
-            for: "account/login/start"
-        )
-        try await transport.enqueue(
-            AppServerAPI.Account.Read.Response(account: .init(email: "new@example.com", planType: "plus")),
-            for: "account/read"
-        )
-        try await transport.enqueue(
-            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
-                limitID: "codex",
-                primary: .init(usedPercent: 20, windowDurationMins: 300)
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        try await transport.enqueueChatGPTLogin(loginID: "login-new", authenticationURL: testAuthenticationURL)
+        try await transport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "new@example.com",
+                planType: .plus
             )),
-            for: "account/rateLimits/read"
+            requiresOpenAIAuth: false
         )
+        try await transport.enqueueRateLimits(try makeHostRateLimits(
+            planType: nil,
+            windowDurationMinutes: 300,
+            usedPercent: 20
+        ))
         let externalURLOpener = FakeExternalURLOpener()
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
@@ -984,14 +1051,14 @@ struct CodexReviewHostTests {
         try Data(#"{"tokens":{"id_token":"new@example.com"}}"#.utf8).write(
             to: mainCodexHomeURL.appendingPathComponent("auth.json")
         )
-        try await transport.emitServerNotification(
-            method: "account/login/completed",
-            params: TestLoginCompletedNotification(loginID: "login-new", success: true)
+        try await transport.notificationEmitter.emitLoginCompleted(
+            loginID: "login-new",
+            completion: .succeeded
         )
-        try await transport.emitServerNotificationJSON(
-            method: "account/updated",
-            json: #"{"authMode":"chatgpt","planType":"plus"}"#
-        )
+        try await transport.notificationEmitter.emitAccountChanged(.init(
+            authMode: .chatGPT,
+            planType: .plus
+        ))
         await transport.waitForRequestCount(7)
         await waitUntil {
             store.auth.selectedAccount?.accountKey == "new@example.com"
@@ -1004,14 +1071,14 @@ struct CodexReviewHostTests {
             "new@example.com",
             "existing@example.com",
         ])
-        #expect(await transport.recordedRequests().map(\.method) == [
-            "initialize",
-            "account/read",
-            "config/read",
-            "model/list",
-            "account/login/start",
-            "account/read",
-            "account/rateLimits/read",
+        #expect(await transport.recordedRequests().map(\.request.operation) == [
+            .initialize,
+            .accountRead,
+            .configurationRead,
+            .modelList,
+            .accountLoginStart,
+            .accountRead,
+            .accountRateLimitsRead,
         ])
     }
 
@@ -1024,36 +1091,23 @@ struct CodexReviewHostTests {
             accounts: ["active@example.com"]
         )
         let mainTransport = FakeCodexAppServerTransport()
-        try await mainTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await mainTransport.enqueue(
-            AppServerAPI.Account.Read.Response(account: .init(email: "active@example.com", planType: "pro")),
-            for: "account/read"
-        )
-        try await mainTransport.enqueue(
-            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
-                limitID: "codex",
-                primary: .init(usedPercent: 10, windowDurationMins: 300)
+        try await mainTransport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "active@example.com",
+                planType: .pro
             )),
-            for: "account/rateLimits/read"
+            requiresOpenAIAuth: false
         )
-        try await mainTransport.enqueue(
-            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
-            for: "config/read"
-        )
-        try await mainTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await mainTransport.enqueueRateLimits(try makeHostRateLimits(
+            planType: nil,
+            windowDurationMinutes: 300,
+            usedPercent: 10
+        ))
+        try await mainTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await mainTransport.enqueueModels(.init(models: []))
         let loginTransport = FakeCodexAppServerTransport()
-        try await loginTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await loginTransport.enqueue(
-            AppServerAPI.Account.Login.Response.chatgpt(
-                loginID: "login-2",
-                authURL: "https://example.com/auth"
-            ),
-            for: "account/login/start"
-        )
-        try await loginTransport.enqueue(
-            AppServerAPI.Account.Login.Cancel.Response(),
-            for: "account/login/cancel"
-        )
+        try await loginTransport.enqueueChatGPTLogin(loginID: "login-2", authenticationURL: testAuthenticationURL)
+        try await loginTransport.enqueueChatGPTLoginCancellation(.canceled)
         var isolatedCodexHomeURL: URL?
         let externalURLOpener = FakeExternalURLOpener(
             failure: CodexReviewAPI.Error.io("Authentication presentation failed.")
@@ -1089,10 +1143,10 @@ struct CodexReviewHostTests {
         #expect(externalURLOpener.openedURLs == [testAuthenticationURL])
         await store.stop()
         #expect(FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path) == false)
-        #expect(await loginTransport.recordedRequests().map(\.method) == [
-            "initialize",
-            "account/login/start",
-            "account/login/cancel",
+        #expect(await loginTransport.recordedRequests().map(\.request.operation) == [
+            .initialize,
+            .accountLoginStart,
+            .accountLoginCancel,
         ])
     }
 
@@ -1104,24 +1158,20 @@ struct CodexReviewHostTests {
             to: mainCodexHomeURL.appendingPathComponent("auth.json")
         )
         let transport = FakeCodexAppServerTransport()
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await transport.enqueue(
-            AppServerAPI.Account.Read.Response(account: .init(email: "active@example.com", planType: "pro")),
-            for: "account/read"
-        )
-        try await transport.enqueue(
-            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
-            for: "config/read"
-        )
-        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
-        try await transport.enqueue(
-            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
-                limitID: "codex",
-                primary: .init(usedPercent: 10, windowDurationMins: 300),
-                planType: "pro"
+        try await transport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "active@example.com",
+                planType: .pro
             )),
-            for: "account/rateLimits/read"
+            requiresOpenAIAuth: false
         )
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        try await transport.enqueueRateLimits(try makeHostRateLimits(
+            planType: .pro,
+            windowDurationMinutes: 300,
+            usedPercent: 10
+        ))
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             transport: transport
@@ -1132,21 +1182,34 @@ struct CodexReviewHostTests {
         #expect(await waitUntil(timeout: .seconds(1)) {
             store.auth.selectedAccount?.rateLimits.first?.usedPercent == 10
         })
-        try await transport.emitServerNotification(
-            method: "account/rateLimits/updated",
-            params: TestRateLimitsUpdatedNotification(rateLimits: .init(
+        try await transport.notificationEmitter.emitRateLimitsUpdated(.init(snapshot: try .init(
                 limitID: "openai",
-                primary: .init(usedPercent: 99, windowDurationMins: 300),
-                planType: "pro"
-            ))
-        )
-        try await transport.emitServerNotification(
-            method: "account/rateLimits/updated",
-            params: TestRateLimitsUpdatedNotification(rateLimits: .init(
+                limitName: nil,
+                primary: .init(
+                    usedPercent: 99,
+                    windowDurationMinutes: 300,
+                    resetsAtUnixSeconds: nil
+                ),
+                secondary: nil,
+                credits: nil,
+                individualLimit: nil,
+                planType: .pro,
+                reachedType: nil
+            )))
+        try await transport.notificationEmitter.emitRateLimitsUpdated(.init(snapshot: try .init(
                 limitID: "codex",
-                primary: .init(usedPercent: 11, windowDurationMins: 300)
-            ))
-        )
+                limitName: nil,
+                primary: .init(
+                    usedPercent: 11,
+                    windowDurationMinutes: 300,
+                    resetsAtUnixSeconds: nil
+                ),
+                secondary: nil,
+                credits: nil,
+                individualLimit: nil,
+                planType: nil,
+                reachedType: nil
+            )))
         #expect(await waitUntil(timeout: .seconds(1)) {
             store.auth.selectedAccount?.rateLimits.first?.usedPercent == 11
         })
@@ -1165,45 +1228,39 @@ struct CodexReviewHostTests {
         try writeSavedAccountAuth(homeURL: homeURL, accountKey: "second@example.com")
 
         let firstTransport = FakeCodexAppServerTransport()
-        try await firstTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await firstTransport.enqueue(
-            AppServerAPI.Account.Read.Response(account: .init(email: "first@example.com", planType: "pro")),
-            for: "account/read"
-        )
-        try await firstTransport.enqueue(
-            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
-            for: "config/read"
-        )
-        try await firstTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
-        try await firstTransport.enqueue(
-            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
-                limitID: "codex",
-                primary: .init(usedPercent: 10, windowDurationMins: 300)
+        try await firstTransport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "first@example.com",
+                planType: .pro
             )),
-            for: "account/rateLimits/read"
+            requiresOpenAIAuth: false
         )
-        try await firstTransport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-first", model: "gpt-5"), for: "thread/start")
-        try await firstTransport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-first"), for: "review/start")
-        try await firstTransport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        try await firstTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await firstTransport.enqueueModels(.init(models: []))
+        try await firstTransport.enqueueRateLimits(try makeHostRateLimits(
+            planType: nil,
+            windowDurationMinutes: 300,
+            usedPercent: 10
+        ))
+        try await firstTransport.enqueueThreadStart(threadID: "thread-first", model: "gpt-5")
+        try await firstTransport.enqueueReviewStart(turnID: "turn-first", reviewThreadID: "thread-first")
+        try await firstTransport.enqueueSuccess(for: .turnInterrupt)
 
         let secondTransport = FakeCodexAppServerTransport()
-        try await secondTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await secondTransport.enqueue(
-            AppServerAPI.Account.Read.Response(account: .init(email: "second@example.com", planType: "plus")),
-            for: "account/read"
-        )
-        try await secondTransport.enqueue(
-            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
-            for: "config/read"
-        )
-        try await secondTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
-        try await secondTransport.enqueue(
-            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
-                limitID: "codex",
-                primary: .init(usedPercent: 30, windowDurationMins: 300)
+        try await secondTransport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "second@example.com",
+                planType: .plus
             )),
-            for: "account/rateLimits/read"
+            requiresOpenAIAuth: false
         )
+        try await secondTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await secondTransport.enqueueModels(.init(models: []))
+        try await secondTransport.enqueueRateLimits(try makeHostRateLimits(
+            planType: nil,
+            windowDurationMinutes: 300,
+            usedPercent: 30
+        ))
 
         var mainTransports = [firstTransport, secondTransport]
         let store = CodexReviewStore.makeLiveStoreForTesting(
@@ -1224,18 +1281,18 @@ struct CodexReviewHostTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         )
-        await waitUntil { store.reviewRuns.first?.core.run.turnID == "turn-first" }
+        await waitUntil { store.reviewRuns.first?.core.attempt?.turnID.rawValue == "turn-first" }
 
         try await store.switchAccount(CodexReviewKit.CodexReviewAccount(email: "second@example.com"))
         let result = try await reviewRead
         await secondTransport.waitForRequestCount(2)
         await firstTransport.waitForRequestCount(8)
 
-        #expect(result.core.lifecycle.status == .cancelled)
-        #expect(result.core.lifecycle.cancellation?.message == "Account switched.")
+        #expect(result.presentation.status == .cancelled)
+        #expect(result.core.cancellation?.message == "Account switched.")
         #expect(store.auth.selectedAccount?.accountKey == "second@example.com")
-        #expect(await firstTransport.recordedRequests().map(\.method).contains("turn/interrupt"))
-        #expect(await secondTransport.recordedRequests().map(\.method).contains("account/read"))
+        #expect(await firstTransport.recordedRequests().map(\.request.operation).contains(.turnInterrupt))
+        #expect(await secondTransport.recordedRequests().map(\.request.operation).contains(.accountRead))
     }
 
     @Test func liveStoreSignOutRestartsRuntimeAndCancelsRunningReviews() async throws {
@@ -1248,37 +1305,30 @@ struct CodexReviewHostTests {
         )
 
         let firstTransport = FakeCodexAppServerTransport()
-        try await firstTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await firstTransport.enqueue(
-            AppServerAPI.Account.Read.Response(account: .init(email: "active@example.com", planType: "pro")),
-            for: "account/read"
-        )
-        try await firstTransport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
-        try await firstTransport.enqueue(
-            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
-            for: "config/read"
-        )
-        try await firstTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
-        try await firstTransport.enqueue(
-            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
-                limitID: "codex",
-                primary: .init(usedPercent: 10, windowDurationMins: 300)
+        try await firstTransport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "active@example.com",
+                planType: .pro
             )),
-            for: "account/rateLimits/read"
+            requiresOpenAIAuth: false
         )
-        try await firstTransport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-active", model: "gpt-5"), for: "thread/start")
-        try await firstTransport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-active"), for: "review/start")
-        try await firstTransport.enqueue(EmptyResponse(), for: "turn/interrupt")
-        try await firstTransport.enqueue(EmptyResponse(), for: "account/logout")
+        try await firstTransport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await firstTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await firstTransport.enqueueModels(.init(models: []))
+        try await firstTransport.enqueueRateLimits(try makeHostRateLimits(
+            planType: nil,
+            windowDurationMinutes: 300,
+            usedPercent: 10
+        ))
+        try await firstTransport.enqueueThreadStart(threadID: "thread-active", model: "gpt-5")
+        try await firstTransport.enqueueReviewStart(turnID: "turn-active", reviewThreadID: "thread-active")
+        try await firstTransport.enqueueSuccess(for: .turnInterrupt)
+        try await firstTransport.enqueueSuccess(for: .accountLogout)
 
         let secondTransport = FakeCodexAppServerTransport()
-        try await secondTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await secondTransport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
-        try await secondTransport.enqueue(
-            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
-            for: "config/read"
-        )
-        try await secondTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await secondTransport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await secondTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await secondTransport.enqueueModels(.init(models: []))
 
         var mainTransports = [firstTransport, secondTransport]
         let store = CodexReviewStore.makeLiveStoreForTesting(
@@ -1294,21 +1344,21 @@ struct CodexReviewHostTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         )
-        await waitUntil { store.reviewRuns.first?.core.run.turnID == "turn-active" }
+        await waitUntil { store.reviewRuns.first?.core.attempt?.turnID.rawValue == "turn-active" }
 
         await store.logout()
         let result = try await reviewRead
         await secondTransport.waitForRequestCount(2)
 
-        let firstMethods = await firstTransport.recordedRequests().map(\.method)
-        let interruptIndex = try #require(firstMethods.firstIndex(of: "turn/interrupt"))
-        let logoutIndex = try #require(firstMethods.firstIndex(of: "account/logout"))
+        let firstMethods = await firstTransport.recordedRequests().map(\.request.operation)
+        let interruptIndex = try #require(firstMethods.firstIndex(of: .turnInterrupt))
+        let logoutIndex = try #require(firstMethods.firstIndex(of: .accountLogout))
         #expect(interruptIndex < logoutIndex)
-        #expect(result.core.lifecycle.status == .cancelled)
-        #expect(result.core.lifecycle.cancellation?.message == "Signed out.")
+        #expect(result.presentation.status == .cancelled)
+        #expect(result.core.cancellation?.message == "Signed out.")
         #expect(store.auth.selectedAccount == nil)
         #expect(store.auth.persistedAccounts.isEmpty)
-        #expect(await secondTransport.recordedRequests().map(\.method).contains("account/read"))
+        #expect(await secondTransport.recordedRequests().map(\.request.operation).contains(.accountRead))
     }
 
     @Test func liveStoreSwitchAccountFailsWhenSavedAuthIsMissing() async throws {
@@ -1324,23 +1374,20 @@ struct CodexReviewHostTests {
         try originalAuth.write(to: mainCodexHomeURL.appendingPathComponent("auth.json"))
 
         let transport = FakeCodexAppServerTransport()
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await transport.enqueue(
-            AppServerAPI.Account.Read.Response(account: .init(email: "first@example.com", planType: "pro")),
-            for: "account/read"
-        )
-        try await transport.enqueue(
-            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
-            for: "config/read"
-        )
-        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
-        try await transport.enqueue(
-            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
-                limitID: "codex",
-                primary: .init(usedPercent: 10, windowDurationMins: 300)
+        try await transport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "first@example.com",
+                planType: .pro
             )),
-            for: "account/rateLimits/read"
+            requiresOpenAIAuth: false
         )
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        try await transport.enqueueRateLimits(try makeHostRateLimits(
+            planType: nil,
+            windowDurationMinutes: 300,
+            usedPercent: 10
+        ))
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             transport: transport
@@ -1361,18 +1408,14 @@ struct CodexReviewHostTests {
         let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
         let interruptGate = AsyncGate()
         let transport = FakeCodexAppServerTransport()
-        await transport.holdNext(method: "turn/interrupt", gate: interruptGate)
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
-        try await transport.enqueue(
-            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
-            for: "config/read"
-        )
-        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
-        try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
-        try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-1"), for: "review/start")
-        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
-        try await transport.enqueue(EmptyResponse(), for: "thread/delete")
+        await transport.holdNext(.turnInterrupt, gate: interruptGate)
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        try await transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
+        try await transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "thread-1")
+        try await transport.enqueueSuccess(for: .turnInterrupt)
+        try await transport.enqueueSuccess(for: .threadDelete)
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             mcpHTTPServerFactory: { store, _, _ in
@@ -1389,102 +1432,99 @@ struct CodexReviewHostTests {
         )
 
         await store.start(forceRestartIfNeeded: true)
+        await transport.waitForNotificationStreamCount(1)
         let endpoint = try #require(store.serverURL)
         let sessionID = try await initializeMCPSession(endpoint: endpoint)
         async let reviewRead = store.startReview(
             sessionID: sessionID,
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         )
-        await waitUntil { store.reviewRuns.first?.core.run.turnID == "turn-1" }
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            store.reviewRuns.first?.core.attempt?.turnID.rawValue == "turn-1"
+        })
 
         let stopTask = Task { @MainActor in
             await store.stop()
         }
         let interruptStarted = await waitUntil(timeout: .seconds(2)) {
-            await transport.recordedRequests().map(\.method).contains("turn/interrupt")
+            await transport.recordedRequests().map(\.request.operation).contains(.turnInterrupt)
         }
-        let methodsBeforeInterruptCompletes = await transport.recordedRequests().map(\.method)
+        let methodsBeforeInterruptCompletes = await transport.recordedRequests().map(\.request.operation)
         await interruptGate.open()
         await stopTask.value
         let result = try await reviewRead
 
         #expect(interruptStarted)
-        #expect(methodsBeforeInterruptCompletes.contains("turn/interrupt"))
-        #expect(methodsBeforeInterruptCompletes.contains("thread/delete") == false)
-        #expect(result.core.lifecycle.status == .cancelled)
-        let methods = await transport.recordedRequests().map(\.method)
-        let interruptIndex = try #require(methods.firstIndex(of: "turn/interrupt"))
-        let deleteIndex = try #require(methods.firstIndex(of: "thread/delete"))
+        #expect(methodsBeforeInterruptCompletes.contains(.turnInterrupt))
+        #expect(methodsBeforeInterruptCompletes.contains(.threadDelete) == false)
+        #expect(result.presentation.status == .cancelled)
+        let methods = await transport.recordedRequests().map(\.request.operation)
+        let interruptIndex = try #require(methods.firstIndex(of: .turnInterrupt))
+        let deleteIndex = try #require(methods.firstIndex(of: .threadDelete))
         #expect(interruptIndex < deleteIndex)
     }
 
-    @Test func liveStoreStopBoundsStuckReviewCancellationCleanup() async throws {
+    @Test func liveStoreStopJoinsReviewCancellationCleanup() async throws {
         let homeURL = try temporaryHome()
         let interruptGate = AsyncGate()
         let transport = FakeCodexAppServerTransport()
-        await transport.holdNext(method: "turn/interrupt", gate: interruptGate)
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
-        try await transport.enqueue(
-            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
-            for: "config/read"
-        )
-        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
-        try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
-        try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-1"), for: "review/start")
+        await transport.holdNext(.turnInterrupt, gate: interruptGate)
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        try await transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
+        try await transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "thread-1")
+        try await transport.enqueueSuccess(for: .turnInterrupt)
+        try await transport.enqueueSuccess(for: .threadDelete)
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
-            shutdownCleanupTimeout: .milliseconds(20),
             transport: transport
         )
 
         await store.start(forceRestartIfNeeded: true)
+        await transport.waitForNotificationStreamCount(1)
         let reviewRead = Task { @MainActor in
             try await store.startReview(
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
         }
-        await waitUntil { store.reviewRuns.first?.core.run.turnID == "turn-1" }
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            store.reviewRuns.first?.core.attempt?.turnID.rawValue == "turn-1"
+        })
 
-        let startedAt = Date()
-        await store.stop()
-        let elapsed = Date().timeIntervalSince(startedAt)
-        let resultBeforeRemoteCleanupUnblocked = try await waitForTaskValue(reviewRead, timeout: .seconds(1))
+        let stopFinished = CompletionFlag()
+        let stopTask = Task { @MainActor in
+            await store.stop()
+            await stopFinished.complete()
+        }
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            await transport.recordedRequests().map(\.request.operation).contains(.turnInterrupt)
+        })
+        #expect(await stopFinished.isCompleted() == false)
         await interruptGate.open()
-        let result = try #require(resultBeforeRemoteCleanupUnblocked)
+        await stopTask.value
+        let result = try await reviewRead.value
 
-        #expect(elapsed < 1)
-        #expect(result.core.lifecycle.status == .cancelled)
-        #expect(await transport.recordedRequests().map(\.method).contains("turn/interrupt"))
+        #expect(await stopFinished.isCompleted())
+        #expect(result.presentation.status == .cancelled)
+        #expect(await transport.recordedRequests().map(\.request.operation).contains(.turnInterrupt))
     }
 
     @Test func liveStoreStopCleansRecoveryWaitingReviewWithoutAppServerCleanup() async throws {
         let homeURL = try temporaryHome()
         let networkMonitor = ManualCodexReviewNetworkMonitor()
         let transport = FakeCodexAppServerTransport()
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
-        try await transport.enqueue(
-            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
-            for: "config/read"
-        )
-        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
-        try await transport.enqueue(
-            AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"),
-            for: "thread/start"
-        )
-        try await transport.enqueue(
-            AppServerAPI.Review.Start.Response(turnID: "turn-1", reviewThreadID: "review-thread-1"),
-            for: "review/start"
-        )
-        try await transport.enqueueThreadResume(.init(id: "review-thread-1"))
-        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
-        try await transport.enqueue(EmptyResponse(), for: "thread/delete")
-        try await transport.enqueue(EmptyResponse(), for: "thread/delete")
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        try await transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
+        try await transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "thread-1")
+        try await transport.enqueueThreadResume(makeHostStoredThread(id: "thread-1"))
+        try await transport.enqueueSuccess(for: .turnInterrupt)
+        try await transport.enqueueSuccess(for: .threadDelete)
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
-            shutdownCleanupTimeout: .seconds(1),
             networkMonitor: networkMonitor,
             networkRecoveryPolicy: .init(sleep: { _ in }),
             transport: transport
@@ -1498,11 +1538,15 @@ struct CodexReviewHostTests {
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
         }
-        try #require(await waitUntil(timeout: .seconds(2)) { store.reviewRuns.first?.core.run.turnID == "turn-1" })
+        try #require(
+            await waitUntil(timeout: .seconds(2)) {
+                store.reviewRuns.first?.core.attempt?.turnID.rawValue == "turn-1"
+            }
+        )
 
         networkMonitor.yield(.init(status: .unsatisfied))
         try #require(await waitUntil(timeout: .seconds(2)) {
-            await transport.recordedRequests().map(\.method).contains("turn/interrupt")
+            await transport.recordedRequests().map(\.request.operation).contains(.turnInterrupt)
         })
 
         let stopFinished = CompletionFlag()
@@ -1512,24 +1556,20 @@ struct CodexReviewHostTests {
         }
         await stopTask.value
         let result = try await reviewRead.value
-        let methods = await transport.recordedRequests().map(\.method)
+        let methods = await transport.recordedRequests().map(\.request.operation)
 
         #expect(await stopFinished.isCompleted())
-        #expect(result.core.lifecycle.status == .cancelled)
-        #expect(methods.contains("turn/interrupt"))
-        #expect(methods.filter { $0 == "thread/delete" }.count == 2)
+        #expect(result.presentation.status == .cancelled)
+        #expect(methods.contains(.turnInterrupt))
+        #expect(methods.filter { $0 == .threadDelete }.count == 1)
     }
 
     @Test func liveStoreMarksRuntimeFailedWhenAppServerNotificationStreamCloses() async throws {
         let homeURL = try temporaryHome()
         let transport = FakeCodexAppServerTransport()
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
-        try await transport.enqueue(
-            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
-            for: "config/read"
-        )
-        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             transport: transport
@@ -1537,7 +1577,7 @@ struct CodexReviewHostTests {
 
         await store.start(forceRestartIfNeeded: true)
         await transport.waitForNotificationStreamCount(1)
-        await transport.finishNotificationStreams(throwing: TestTransportClosedError())
+        await transport.failConnection(.closed)
         await waitUntil {
             if case .failed = store.serverState {
                 return true
@@ -1549,8 +1589,54 @@ struct CodexReviewHostTests {
             Issue.record("Expected failed server state.")
             return
         }
-        #expect(message.contains("JSON-RPC transport is closed"))
+        #expect(message.contains("The Codex app-server transport is closed."))
         #expect(store.serverURL == nil)
+    }
+
+    @Test func liveStoreDoesNotResumeActiveReviewAfterConnectionTerminates() async throws {
+        let homeURL = try temporaryHome()
+        let transport = FakeCodexAppServerTransport()
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        try await transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
+        try await transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "thread-1")
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        await transport.waitForNotificationStreamCount(1)
+        let reviewRead = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        try #require(
+            await waitUntil(timeout: .seconds(2)) {
+                store.reviewRuns.first?.core.attempt?.turnID.rawValue == "turn-1"
+            }
+        )
+
+        await transport.failConnection(.closed)
+        try #require(
+            await waitUntil(timeout: .seconds(2)) {
+                if case .failed = store.serverState {
+                    return true
+                }
+                return false
+            }
+        )
+        let result = try await reviewRead.value
+        let methods = await transport.recordedRequests().map(\.request.operation)
+
+        #expect(result.core.isTerminal)
+        #expect(store.serverURL == nil)
+        #expect(methods.contains(.threadResume) == false)
+        #expect(methods.contains(.turnInterrupt) == false)
+        #expect(methods.contains(.threadDelete) == false)
     }
 
     @Test func liveStoreCleansIsolatedLoginRuntimeWhenMainNotificationStreamCloses() async throws {
@@ -1562,29 +1648,18 @@ struct CodexReviewHostTests {
             accounts: ["active@example.com"]
         )
         let mainTransport = FakeCodexAppServerTransport()
-        try await mainTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await mainTransport.enqueue(
-            AppServerAPI.Account.Read.Response(account: .init(email: "active@example.com", planType: "pro")),
-            for: "account/read"
+        try await mainTransport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "active@example.com",
+                planType: .pro
+            )),
+            requiresOpenAIAuth: false
         )
-        try await mainTransport.enqueue(
-            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
-            for: "config/read"
-        )
-        try await mainTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await mainTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await mainTransport.enqueueModels(.init(models: []))
         let loginTransport = FakeCodexAppServerTransport()
-        try await loginTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await loginTransport.enqueue(
-            AppServerAPI.Account.Login.Response.chatgpt(
-                loginID: "login-1",
-                authURL: "https://example.com/auth"
-            ),
-            for: "account/login/start"
-        )
-        try await loginTransport.enqueue(
-            AppServerAPI.Account.Login.Cancel.Response(),
-            for: "account/login/cancel"
-        )
+        try await loginTransport.enqueueChatGPTLogin(loginID: "login-1", authenticationURL: testAuthenticationURL)
+        try await loginTransport.enqueueChatGPTLoginCancellation(.canceled)
         let externalURLOpener = FakeExternalURLOpener()
         var isolatedCodexHomeURL: URL?
         let store = CodexReviewStore.makeLiveStoreForTesting(
@@ -1608,7 +1683,7 @@ struct CodexReviewHostTests {
         #expect(FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path))
         #expect(externalURLOpener.openedURLs == [testAuthenticationURL])
 
-        await mainTransport.finishNotificationStreams(throwing: TestTransportClosedError())
+        await mainTransport.failConnection(.closed)
         await waitUntil {
             if case .failed = store.serverState {
                 return true
@@ -1619,6 +1694,8 @@ struct CodexReviewHostTests {
             FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path) == false
         }
         #expect(FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path) == false)
+        #expect(await loginTransport.recordedRequests(for: .accountLoginCancel).count == 1)
+        #expect(store.auth.isAuthenticating == false)
     }
 
     @Test func liveStoreRemovingActiveAccountClearsSharedAuthAndRestartsSignedOutRuntime() async throws {
@@ -1633,34 +1710,27 @@ struct CodexReviewHostTests {
             .write(to: mainCodexHomeURL.appendingPathComponent("auth.json"))
 
         let firstTransport = FakeCodexAppServerTransport()
-        try await firstTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await firstTransport.enqueue(
-            AppServerAPI.Account.Read.Response(account: .init(email: "active@example.com", planType: "pro")),
-            for: "account/read"
-        )
-        try await firstTransport.enqueue(
-            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
-            for: "config/read"
-        )
-        try await firstTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
-        try await firstTransport.enqueue(
-            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
-                limitID: "codex",
-                primary: .init(usedPercent: 10, windowDurationMins: 300)
+        try await firstTransport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "active@example.com",
+                planType: .pro
             )),
-            for: "account/rateLimits/read"
+            requiresOpenAIAuth: false
         )
-        try await firstTransport.enqueue(EmptyResponse(), for: "account/logout")
-        try await firstTransport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
+        try await firstTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await firstTransport.enqueueModels(.init(models: []))
+        try await firstTransport.enqueueRateLimits(try makeHostRateLimits(
+            planType: nil,
+            windowDurationMinutes: 300,
+            usedPercent: 10
+        ))
+        try await firstTransport.enqueueSuccess(for: .accountLogout)
+        try await firstTransport.enqueueAccount(nil, requiresOpenAIAuth: false)
 
         let secondTransport = FakeCodexAppServerTransport()
-        try await secondTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await secondTransport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
-        try await secondTransport.enqueue(
-            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
-            for: "config/read"
-        )
-        try await secondTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await secondTransport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await secondTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await secondTransport.enqueueModels(.init(models: []))
 
         var mainTransports = [firstTransport, secondTransport]
         let store = CodexReviewStore.makeLiveStoreForTesting(
@@ -1678,8 +1748,8 @@ struct CodexReviewHostTests {
         #expect(FileManager.default.fileExists(atPath: mainCodexHomeURL.appendingPathComponent("auth.json").path) == false)
         #expect(store.auth.selectedAccount == nil)
         #expect(store.auth.persistedAccounts.isEmpty)
-        #expect(await firstTransport.recordedRequests().map(\.method).contains("account/logout"))
-        #expect(await secondTransport.recordedRequests().map(\.method).contains("account/read"))
+        #expect(await firstTransport.recordedRequests().map(\.request.operation).contains(.accountLogout))
+        #expect(await secondTransport.recordedRequests().map(\.request.operation).contains(.accountRead))
     }
 
     @Test func liveStoreFsyncsRemovalJournalBeforeUpstreamLogout() async throws {
@@ -1694,34 +1764,27 @@ struct CodexReviewHostTests {
             .write(to: mainCodexHomeURL.appendingPathComponent("auth.json"))
         let logoutGate = AsyncGate()
         let firstTransport = FakeCodexAppServerTransport()
-        try await firstTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await firstTransport.enqueue(
-            AppServerAPI.Account.Read.Response(account: .init(email: "active@example.com", planType: "pro")),
-            for: "account/read"
-        )
-        try await firstTransport.enqueue(
-            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
-            for: "config/read"
-        )
-        try await firstTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
-        try await firstTransport.enqueue(
-            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
-                limitID: "codex",
-                primary: .init(usedPercent: 10, windowDurationMins: 300)
+        try await firstTransport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "active@example.com",
+                planType: .pro
             )),
-            for: "account/rateLimits/read"
+            requiresOpenAIAuth: false
         )
-        try await firstTransport.enqueue(EmptyResponse(), for: "account/logout")
-        try await firstTransport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
-        await firstTransport.holdNext(method: "account/logout", gate: logoutGate)
+        try await firstTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await firstTransport.enqueueModels(.init(models: []))
+        try await firstTransport.enqueueRateLimits(try makeHostRateLimits(
+            planType: nil,
+            windowDurationMinutes: 300,
+            usedPercent: 10
+        ))
+        try await firstTransport.enqueueSuccess(for: .accountLogout)
+        try await firstTransport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        await firstTransport.holdNext(.accountLogout, gate: logoutGate)
         let secondTransport = FakeCodexAppServerTransport()
-        try await secondTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await secondTransport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
-        try await secondTransport.enqueue(
-            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
-            for: "config/read"
-        )
-        try await secondTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await secondTransport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await secondTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await secondTransport.enqueueModels(.init(models: []))
         var transports = [firstTransport, secondTransport]
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
@@ -1737,13 +1800,20 @@ struct CodexReviewHostTests {
         let journal = try #require(JSONSerialization.jsonObject(with: journalData) as? [String: Any])
         #expect(journal["phase"] as? String == "prepared")
         #expect(journal["mayApplyIrreversibleLogout"] as? Bool == true)
-        try await firstTransport.emitServerNotification(
-            method: "account/rateLimits/updated",
-            params: TestRateLimitsUpdatedNotification(rateLimits: .init(
+        try await firstTransport.notificationEmitter.emitRateLimitsUpdated(.init(snapshot: try .init(
                 limitID: "codex",
-                primary: .init(usedPercent: 12, windowDurationMins: 300)
-            ))
-        )
+                limitName: nil,
+                primary: .init(
+                    usedPercent: 12,
+                    windowDurationMinutes: 300,
+                    resetsAtUnixSeconds: nil
+                ),
+                secondary: nil,
+                credits: nil,
+                individualLimit: nil,
+                planType: nil,
+                reachedType: nil
+            )))
         #expect(await waitUntil(timeout: .seconds(1)) {
             store.auth.selectedAccount?.rateLimits.first?.usedPercent == 12
         })
@@ -1806,29 +1876,23 @@ struct CodexReviewHostTests {
             contentsOf: mainCodexHomeURL.appendingPathComponent("auth.json")
         )
         let transport = FakeCodexAppServerTransport()
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await transport.enqueue(
-            AppServerAPI.Account.Read.Response(
-                account: .init(email: "active@example.com", planType: "pro")
-            ),
-            for: "account/read"
-        )
-        try await transport.enqueue(
-            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
-            for: "config/read"
-        )
-        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
-        try await transport.enqueue(
-            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
-                limitID: "codex",
-                primary: .init(usedPercent: 10, windowDurationMins: 300)
+        try await transport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "active@example.com",
+                planType: .pro
             )),
-            for: "account/rateLimits/read"
+            requiresOpenAIAuth: false
         )
-        await transport.enqueueFailure(
-            code: -32603,
-            message: "logout unavailable",
-            for: "account/logout"
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        try await transport.enqueueRateLimits(try makeHostRateLimits(
+            planType: nil,
+            windowDurationMinutes: 300,
+            usedPercent: 10
+        ))
+        try await transport.enqueueFailure(
+            .response(code: -32603, message: "logout unavailable"),
+            for: .accountLogout
         )
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
@@ -1895,22 +1959,19 @@ struct CodexReviewHostTests {
             accounts: ["active@example.com"]
         )
         let mainTransport = FakeCodexAppServerTransport()
-        try await mainTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await mainTransport.enqueue(
-            AppServerAPI.Account.Read.Response(account: .init(email: "active@example.com", planType: "pro")),
-            for: "account/read"
+        try await mainTransport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "active@example.com",
+                planType: .pro
+            )),
+            requiresOpenAIAuth: false
         )
-        try await mainTransport.enqueue(
-            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
-            for: "config/read"
-        )
-        try await mainTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await mainTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await mainTransport.enqueueModels(.init(models: []))
         let loginTransport = FakeCodexAppServerTransport()
-        try await loginTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        await loginTransport.enqueueFailure(
-            code: -32603,
-            message: "login unavailable",
-            for: "account/login/start"
+        try await loginTransport.enqueueFailure(
+            .response(code: -32603, message: "login unavailable"),
+            for: .accountLoginStart
         )
         var isolatedCodexHomeURL: URL?
         let store = CodexReviewStore.makeLiveStoreForTesting(
@@ -1955,25 +2016,17 @@ struct CodexReviewHostTests {
             accounts: ["active@example.com"]
         )
         let mainTransport = FakeCodexAppServerTransport()
-        try await mainTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await mainTransport.enqueue(
-            AppServerAPI.Account.Read.Response(account: .init(email: "active@example.com", planType: "pro")),
-            for: "account/read"
+        try await mainTransport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "active@example.com",
+                planType: .pro
+            )),
+            requiresOpenAIAuth: false
         )
-        try await mainTransport.enqueue(
-            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
-            for: "config/read"
-        )
-        try await mainTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await mainTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await mainTransport.enqueueModels(.init(models: []))
         let loginTransport = FakeCodexAppServerTransport()
-        try await loginTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await loginTransport.enqueue(
-            AppServerAPI.Account.Login.Response.chatgpt(
-                loginID: "login-2",
-                authURL: "https://example.com/auth"
-            ),
-            for: "account/login/start"
-        )
+        try await loginTransport.enqueueChatGPTLogin(loginID: "login-2", authenticationURL: testAuthenticationURL)
         let externalURLOpener = FakeExternalURLOpener()
         var isolatedCodexHomeURL: URL?
         let store = CodexReviewStore.makeLiveStoreForTesting(
@@ -1993,13 +2046,9 @@ struct CodexReviewHostTests {
         try await store.addAccount()
         await loginTransport.waitForNotificationStreamCount(1)
         #expect(externalURLOpener.openedURLs == [testAuthenticationURL])
-        try await loginTransport.emitServerNotification(
-            method: "account/login/completed",
-            params: TestLoginCompletedNotification(
-                loginID: "login-2",
-                success: false,
-                error: "login completion failed"
-            )
+        try await loginTransport.notificationEmitter.emitLoginCompleted(
+            loginID: "login-2",
+            completion: .failed(message: "login completion failed")
         )
 
         let resolvedIsolatedCodexHomeURL = try #require(isolatedCodexHomeURL)
@@ -2008,9 +2057,9 @@ struct CodexReviewHostTests {
             FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path) == false
         }
         #expect(FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path) == false)
-        #expect(await loginTransport.recordedRequests().map(\.method) == [
-            "initialize",
-            "account/login/start",
+        #expect(await loginTransport.recordedRequests().map(\.request.operation) == [
+            .initialize,
+            .accountLoginStart,
         ])
     }
 
@@ -2065,358 +2114,110 @@ struct CodexReviewHostTests {
     }
 }
 
-private struct TestLoginCompletedNotification: Encodable, Sendable {
-    var loginID: String?
-    var success: Bool
-    var error: String?
-
-    init(loginID: String?, success: Bool, error: String? = nil) {
-        self.loginID = loginID
-        self.success = success
-        self.error = error
+private extension CodexAppServerTestTransport {
+    nonisolated var notificationEmitter: CodexAppServerTestNotificationEmitter {
+        CodexAppServerTestNotificationEmitter(transport: self)
     }
 
-    enum CodingKeys: String, CodingKey {
-        case loginID = "loginId"
-        case success
-        case error
+    func enqueueThreadStart(threadID: CodexThreadID, model: String) throws {
+        try enqueueThreadStart(makeHostStoredThread(id: threadID, model: model))
     }
-}
 
-private struct TestAccountReadResponse: Encodable, Sendable {
-    var account: TestAccount
-    var requiresOpenAIAuth = false
-
-    enum CodingKeys: String, CodingKey {
-        case account
-        case requiresOpenAIAuth = "requiresOpenaiAuth"
+    func enqueueReviewStart(
+        turnID: CodexTurnID,
+        reviewThreadID: CodexThreadID
+    ) throws {
+        let turn = try CodexAppServerTestTurn(
+            snapshot: .init(id: turnID, state: .inProgress),
+            items: []
+        )
+        try enqueueReviewStart(turn, reviewThreadID: reviewThreadID)
     }
 }
 
-private struct TestAccount: Encodable, Sendable {
-    var type: String
+private func makeHostConfigurationReadResult(
+    model: String = "gpt-5"
+) throws -> CodexAppServerTestConfigurationReadResult {
+    let metadata = try CodexAppServerTestConfigurationLayerMetadata(
+        source: .sessionFlags,
+        version: "host-test-config-v1"
+    )
+    return try .init(
+        configuration: .init(model: model),
+        origins: ["model": metadata],
+        layers: [try .init(
+            metadata: metadata,
+            configuration: .object(["model": .string(model)])
+        )]
+    )
 }
 
-private struct TestRateLimitsUpdatedNotification: Encodable, Sendable {
-    var rateLimits: AppServerAPI.Account.RateLimits.Snapshot
+private func makeHostRateLimits(
+    planType: CodexAppServerTestPlanType?,
+    windowDurationMinutes: Int64,
+    usedPercent: Int32
+) throws -> CodexAppServerTestRateLimitsResponse {
+    let snapshot = try CodexAppServerTestRateLimitSnapshot(
+        limitID: "codex",
+        limitName: nil,
+        primary: .init(
+            usedPercent: usedPercent,
+            windowDurationMinutes: windowDurationMinutes,
+            resetsAtUnixSeconds: nil
+        ),
+        secondary: nil,
+        credits: nil,
+        individualLimit: nil,
+        planType: planType,
+        reachedType: nil
+    )
+    return try .init(
+        primarySnapshot: snapshot,
+        snapshotsByLimitID: nil,
+        resetCredits: nil
+    )
 }
 
-private struct TestTransportClosedError: LocalizedError, Equatable, Sendable {
-    var errorDescription: String? {
-        "JSON-RPC transport is closed."
-    }
-}
-
-private struct EmptyResponse: Codable, Equatable, Sendable {
-    init() {}
-}
-
-private enum AppServerAPI {
-    enum Initialize {
-        struct Response: Codable, Equatable, Sendable {
-            var codexHome: String?
-            var userAgent: String?
-
-            init(codexHome: String? = nil, userAgent: String? = nil) {
-                self.codexHome = codexHome
-                self.userAgent = userAgent
-            }
-        }
-    }
-
-    enum Config {
-        enum Read {
-            struct Response: Codable, Equatable, Sendable {
-                var config: Snapshot
-            }
-        }
-
-        struct Snapshot: Codable, Equatable, Sendable {
-            var model: String?
-            var reviewModel: String?
-            var modelReasoningEffort: String?
-            var serviceTier: String?
-
-            enum CodingKeys: String, CodingKey {
-                case model
-                case reviewModel = "review_model"
-                case modelReasoningEffort = "model_reasoning_effort"
-                case serviceTier = "service_tier"
-            }
-
-            init(
-                model: String? = nil,
-                reviewModel: String? = nil,
-                modelReasoningEffort: String? = nil,
-                serviceTier: String? = nil
-            ) {
-                self.model = model
-                self.reviewModel = reviewModel
-                self.modelReasoningEffort = modelReasoningEffort
-                self.serviceTier = serviceTier
-            }
-        }
-    }
-
-    enum Model {
-        enum List {
-            struct Response: Codable, Equatable, Sendable {
-                var data: [CodexModel]
-                var nextCursor: String?
-
-                init(data: [CodexModel], nextCursor: String? = nil) {
-                    self.data = data
-                    self.nextCursor = nextCursor
-                }
-            }
-        }
-    }
-
-    enum Thread {
-        enum Start {
-            struct Response: Codable, Equatable, Sendable {
-                var threadID: String
-                var model: String?
-
-                enum CodingKeys: String, CodingKey {
-                    case thread
-                    case model
-                }
-
-                private struct Thread: Codable, Equatable, Sendable {
-                    var id: String
-                }
-
-                init(threadID: String, model: String? = nil) {
-                    self.threadID = threadID
-                    self.model = model
-                }
-
-                init(from decoder: Decoder) throws {
-                    let container = try decoder.container(keyedBy: CodingKeys.self)
-                    threadID = try container.decode(Thread.self, forKey: .thread).id
-                    model = try container.decodeIfPresent(String.self, forKey: .model)
-                }
-
-                func encode(to encoder: Encoder) throws {
-                    var container = encoder.container(keyedBy: CodingKeys.self)
-                    try container.encode(Thread(id: threadID), forKey: .thread)
-                    try container.encodeIfPresent(model, forKey: .model)
-                }
-            }
-        }
-    }
-
-    enum Review {
-        enum Start {
-            struct Response: Codable, Equatable, Sendable {
-                var turnID: String
-                var reviewThreadID: String?
-
-                enum CodingKeys: String, CodingKey {
-                    case turn
-                    case reviewThreadID = "reviewThreadId"
-                }
-
-                private struct Turn: Codable, Equatable, Sendable {
-                    var id: String
-                    var status: String
-                }
-
-                init(turnID: String, reviewThreadID: String? = nil) {
-                    self.turnID = turnID
-                    self.reviewThreadID = reviewThreadID
-                }
-
-                init(from decoder: Decoder) throws {
-                    let container = try decoder.container(keyedBy: CodingKeys.self)
-                    turnID = try container.decode(Turn.self, forKey: .turn).id
-                    reviewThreadID = try container.decodeIfPresent(String.self, forKey: .reviewThreadID)
-                }
-
-                func encode(to encoder: Encoder) throws {
-                    var container = encoder.container(keyedBy: CodingKeys.self)
-                    try container.encode(
-                        Turn(id: turnID, status: CodexTurnStatus.inProgress.rawValue),
-                        forKey: .turn
-                    )
-                    try container.encodeIfPresent(reviewThreadID, forKey: .reviewThreadID)
-                }
-            }
-        }
-    }
-
-    enum Account {
-        enum Read {
-            struct Response: Codable, Equatable, Sendable {
-                var account: Snapshot?
-                var requiresOpenAIAuth: Bool
-
-                enum CodingKeys: String, CodingKey {
-                    case account
-                    case requiresOpenAIAuth = "requiresOpenaiAuth"
-                }
-
-                init(account: Snapshot? = nil, requiresOpenAIAuth: Bool = false) {
-                    self.account = account
-                    self.requiresOpenAIAuth = requiresOpenAIAuth
-                }
-            }
-        }
-
-        struct Snapshot: Codable, Equatable, Sendable {
-            var type: String
-            var email: String?
-            var planType: String?
-
-            init(type: String = "chatgpt", email: String? = nil, planType: String? = nil) {
-                self.type = type
-                self.email = email
-                self.planType = planType
-            }
-        }
-
-        enum RateLimits {
-            struct Response: Codable, Equatable, Sendable {
-                var rateLimits: Snapshot
-                var rateLimitsByLimitID: [String: Snapshot]?
-
-                enum CodingKeys: String, CodingKey {
-                    case rateLimits
-                    case rateLimitsByLimitID = "rateLimitsByLimitId"
-                }
-
-                init(rateLimits: Snapshot, rateLimitsByLimitID: [String: Snapshot]? = nil) {
-                    self.rateLimits = rateLimits
-                    self.rateLimitsByLimitID = rateLimitsByLimitID
-                }
-            }
-
-            struct Snapshot: Codable, Equatable, Sendable {
-                var limitID: String?
-                var primary: Window?
-                var secondary: Window?
-                var planType: String?
-
-                enum CodingKeys: String, CodingKey {
-                    case limitID = "limitId"
-                    case primary
-                    case secondary
-                    case planType
-                }
-
-                init(
-                    limitID: String? = nil,
-                    primary: Window? = nil,
-                    secondary: Window? = nil,
-                    planType: String? = nil
-                ) {
-                    self.limitID = limitID
-                    self.primary = primary
-                    self.secondary = secondary
-                    self.planType = planType
-                }
-            }
-
-            struct Window: Codable, Equatable, Sendable {
-                var usedPercent: Int
-                var windowDurationMins: Int?
-                var resetsAt: Int64?
-
-                init(usedPercent: Int, windowDurationMins: Int? = nil, resetsAt: Int64? = nil) {
-                    self.usedPercent = usedPercent
-                    self.windowDurationMins = windowDurationMins
-                    self.resetsAt = resetsAt
-                }
-            }
-        }
-
-        enum Login {
-            struct Params: Codable, Equatable, Sendable {
-                var type: String
-                var apiKey: String?
-                var codexStreamlinedLogin: Bool
-
-                init(
-                    type: String = "chatgpt",
-                    apiKey: String? = nil,
-                    codexStreamlinedLogin: Bool = true
-                ) {
-                    self.type = type
-                    self.apiKey = apiKey
-                    self.codexStreamlinedLogin = codexStreamlinedLogin
-                }
-            }
-
-            enum Response: Codable, Equatable, Sendable {
-                case apiKey
-                case chatgpt(loginID: String, authURL: String)
-                case chatgptDeviceCode(loginID: String, verificationURL: String, userCode: String)
-                case chatgptAuthTokens
-
-                private enum CodingKeys: String, CodingKey {
-                    case type
-                    case loginID = "loginId"
-                    case authURL = "authUrl"
-                    case verificationURL = "verificationUrl"
-                    case userCode
-                }
-
-                init(from decoder: Decoder) throws {
-                    let container = try decoder.container(keyedBy: CodingKeys.self)
-                    switch try container.decode(String.self, forKey: .type) {
-                    case "apiKey":
-                        self = .apiKey
-                    case "chatgpt":
-                        self = .chatgpt(
-                            loginID: try container.decode(String.self, forKey: .loginID),
-                            authURL: try container.decode(String.self, forKey: .authURL)
-                        )
-                    case "chatgptDeviceCode":
-                        self = .chatgptDeviceCode(
-                            loginID: try container.decode(String.self, forKey: .loginID),
-                            verificationURL: try container.decode(String.self, forKey: .verificationURL),
-                            userCode: try container.decode(String.self, forKey: .userCode)
-                        )
-                    case "chatgptAuthTokens":
-                        self = .chatgptAuthTokens
-                    case let type:
-                        throw DecodingError.dataCorruptedError(
-                            forKey: .type,
-                            in: container,
-                            debugDescription: "Unsupported login response type: \(type)"
-                        )
-                    }
-                }
-
-                func encode(to encoder: Encoder) throws {
-                    var container = encoder.container(keyedBy: CodingKeys.self)
-                    switch self {
-                    case .apiKey:
-                        try container.encode("apiKey", forKey: .type)
-                    case .chatgpt(let loginID, let authURL):
-                        try container.encode("chatgpt", forKey: .type)
-                        try container.encode(loginID, forKey: .loginID)
-                        try container.encode(authURL, forKey: .authURL)
-                    case .chatgptDeviceCode(let loginID, let verificationURL, let userCode):
-                        try container.encode("chatgptDeviceCode", forKey: .type)
-                        try container.encode(loginID, forKey: .loginID)
-                        try container.encode(verificationURL, forKey: .verificationURL)
-                        try container.encode(userCode, forKey: .userCode)
-                    case .chatgptAuthTokens:
-                        try container.encode("chatgptAuthTokens", forKey: .type)
-                    }
-                }
-            }
-
-            enum Cancel {
-                struct Response: Codable, Equatable, Sendable {
-                    init() {}
-                }
-            }
-
-        }
-    }
+private func makeHostStoredThread(
+    id: CodexThreadID,
+    model: String = "gpt-5"
+) throws -> CodexAppServerTestStoredThread {
+    let workspace = URL(fileURLWithPath: "/tmp/project", isDirectory: true)
+    return try .init(
+        snapshot: .init(
+            id: id,
+            workspace: workspace,
+            preview: id.rawValue,
+            modelProvider: "openai",
+            sourceKind: .appServer,
+            createdAt: Date(timeIntervalSince1970: 1),
+            updatedAt: Date(timeIntervalSince1970: 2),
+            status: .idle,
+            ephemeral: false,
+            turns: []
+        ),
+        turns: [],
+        metadata: .init(
+            sessionID: "session-\(id.rawValue)",
+            cliVersion: "host-test-cli",
+            source: .appServer
+        ),
+        runtimeMetadata: .init(
+            model: model,
+            modelProvider: "openai",
+            serviceTier: nil,
+            cwd: workspace,
+            runtimeWorkspaceRoots: [workspace],
+            instructionSources: [],
+            approvalPolicy: .never,
+            approvalsReviewer: .user,
+            sandbox: .dangerFullAccess,
+            activePermissionProfile: nil,
+            reasoningEffort: nil,
+            multiAgentMode: .explicitRequestOnly
+        ),
+        isArchived: false
+    )
 }
 
 @MainActor

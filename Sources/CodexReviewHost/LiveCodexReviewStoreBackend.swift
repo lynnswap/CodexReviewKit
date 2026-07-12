@@ -28,57 +28,9 @@ private let defaultExternalURLOpener: ExternalURLOpener = { url in
     }
 }
 
-private actor RuntimeShutdownCleanupRace {
-    private var result: Bool?
-    private var continuation: CheckedContinuation<Bool, Never>?
-
-    func finish(_ value: Bool) {
-        guard result == nil else {
-            return
-        }
-        result = value
-        continuation?.resume(returning: value)
-        continuation = nil
-    }
-
-    func wait() async -> Bool {
-        if let result {
-            return result
-        }
-        return await withCheckedContinuation { continuation in
-            if let result {
-                continuation.resume(returning: result)
-            } else {
-                self.continuation = continuation
-            }
-        }
-    }
-}
-
-private func runRuntimeShutdownCleanup(
-    timeout: Duration,
-    operation: @escaping @Sendable () async -> Void
-) async -> Bool {
-    let race = RuntimeShutdownCleanupRace()
-    let operationTask = Task {
-        await operation()
-        await race.finish(true)
-    }
-    let timeoutTask = Task {
-        do {
-            try await Task.sleep(for: timeout)
-        } catch {
-            return
-        }
-        await race.finish(false)
-    }
-    let result = await race.wait()
-    if result {
-        timeoutTask.cancel()
-    } else {
-        operationTask.cancel()
-    }
-    return result
+private enum RuntimeReviewCleanupMode {
+    case connected
+    case connectionTerminated
 }
 
 package struct CodexReviewMCPPortOwner: Equatable, Sendable {
@@ -103,7 +55,17 @@ package protocol CodexReviewMCPHTTPServing: AnyObject, Sendable {
     var url: URL { get async }
 
     func start() async throws
+    func stage() async throws
+    func activate() async
     func stop() async
+}
+
+extension CodexReviewMCPHTTPServing {
+    package func stage() async throws {
+        try await start()
+    }
+
+    package func activate() async {}
 }
 
 extension CodexReviewMCPHTTPServer: CodexReviewMCPHTTPServing {}
@@ -126,7 +88,6 @@ public extension CodexReviewStore {
         externalURLOpener: @escaping ExternalURLOpener = defaultExternalURLOpener,
         mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
         mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
-        shutdownCleanupTimeout: Duration = .seconds(2),
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
         networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
         appServer: CodexAppServer,
@@ -138,7 +99,6 @@ public extension CodexReviewStore {
             externalURLOpener: externalURLOpener,
             mcpPortOwnerResolver: mcpPortOwnerResolver,
             mcpHTTPServerBindChecker: mcpHTTPServerBindChecker,
-            shutdownCleanupTimeout: shutdownCleanupTimeout,
             networkMonitor: networkMonitor,
             networkRecoveryPolicy: networkRecoveryPolicy,
             appServerLifecycleHandler: appServerLifecycleHandler,
@@ -157,7 +117,6 @@ public extension CodexReviewStore {
         ) -> any CodexReviewMCPHTTPServing)? = nil,
         mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
         mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
-        shutdownCleanupTimeout: Duration = .seconds(2),
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
         networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
         appServerLifecycleHandler: CodexReviewAppServerLifecycleHandler? = nil,
@@ -171,7 +130,6 @@ public extension CodexReviewStore {
                 mcpHTTPServerFactory: mcpHTTPServerFactory,
                 mcpPortOwnerResolver: mcpPortOwnerResolver,
                 mcpHTTPServerBindChecker: mcpHTTPServerBindChecker,
-                shutdownCleanupTimeout: shutdownCleanupTimeout,
                 appServerLifecycleHandler: appServerLifecycleHandler,
                 appServerRuntimeFactory: { codexHomeURL in
                     let appServer = try await appServerFactory(codexHomeURL)
@@ -180,7 +138,6 @@ public extension CodexReviewStore {
                         appServer: appServer,
                         modelContainer: modelContainer,
                         backend: AppServerCodexReviewBackend(
-                            appServer: appServer,
                             modelContainer: modelContainer
                         )
                     )
@@ -219,7 +176,6 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     private let accountRegistry: AccountRegistryStore
     private let accountRuntimeTransitionCoordinator: AccountRuntimeTransitionCoordinator
     private let registryLoadFailure: CodexReviewAuthenticationFailure?
-    private let shutdownCleanupTimeout: Duration
     private let appServerLifecycleHandler: CodexReviewAppServerLifecycleHandler?
     private weak var attachedStore: CodexReviewStore?
 
@@ -238,7 +194,6 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         },
         mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
         mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
-        shutdownCleanupTimeout: Duration = .seconds(2),
         appServerLifecycleHandler: CodexReviewAppServerLifecycleHandler? = nil,
         appServerRuntimeFactory: AppServerRuntimeFactory? = nil
     ) {
@@ -258,7 +213,6 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         self.mcpHTTPServerFactory = mcpHTTPServerFactory
         self.mcpPortOwnerResolver = mcpPortOwnerResolver ?? Self.defaultMCPPortOwnerResolver
         self.mcpHTTPServerBindChecker = mcpHTTPServerBindChecker ?? Self.defaultMCPHTTPServerBindChecker
-        self.shutdownCleanupTimeout = shutdownCleanupTimeout
         self.appServerLifecycleHandler = appServerLifecycleHandler
         self.appServerRuntimeFactory = appServerRuntimeFactory ?? Self.makeAppServerRuntimeFactory(
             codexExecutablePath: runtimePreferences.codexExecutablePath
@@ -283,6 +237,14 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     var isActive: Bool {
         appServer != nil
+    }
+
+    var reviewThreadRetentionCodexHomePath: String {
+        codexHomeURL.path
+    }
+
+    var reviewThreadRetentionJournalURL: URL? {
+        codexHomeURL.appendingPathComponent("review-thread-retention.json", isDirectory: false)
     }
 
     var invokesRuntimeStopReviewCleanupDuringStop: Bool {
@@ -420,7 +382,6 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 appServer: appServer,
                 modelContainer: modelContainer,
                 backend: AppServerCodexReviewBackend(
-                    appServer: appServer,
                     modelContainer: modelContainer
                 )
             )
@@ -444,7 +405,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             return
         }
         if forceRestartIfNeeded {
-            await stop(store: store)
+            await stop(store: store, purpose: .runtimeRestartPreservingRuns)
         }
 
         var startedAppServer: CodexAppServer?
@@ -472,13 +433,20 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                     mcpHTTPServerConfiguration,
                     logProjectionProvider
                 )
-                try await mcpHTTPServer.start()
+                try await mcpHTTPServer.stage()
                 startedHTTPServer = mcpHTTPServer
                 self.mcpHTTPServer = mcpHTTPServer
             }
-            store.transitionToRunning(serverURL: await self.mcpHTTPServer?.url)
             let authSnapshot = try await backend.readAuth()
             try await applyAuthSnapshotSerialized(authSnapshot, to: store.auth)
+            switch await store.recoverOrphanedReviewThreads() {
+            case .recovered, .cleanupIncomplete:
+                break
+            case .journalUnavailable(let message):
+                throw ReviewBackendFailure.retentionJournal(message: message)
+            }
+            store.transitionToRunning(serverURL: await self.mcpHTTPServer?.url)
+            await self.mcpHTTPServer?.activate()
             await refreshSelectedAccountRateLimits(auth: store.auth)
             logger.info("Review runtime started")
         } catch {
@@ -525,50 +493,57 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         store: CodexReviewStore,
         appServerBackend: AppServerCodexReviewBackend,
         reason: ReviewCancellation,
-        timeoutWarning: String
+        mode: RuntimeReviewCleanupMode
     ) async {
-        let shutdownCleanupTimeout = shutdownCleanupTimeout
-        let cleanupResult = await store.cleanupActiveReviewsForRuntimeStop(
-            reason: reason,
-            workerDrainTimeout: shutdownCleanupTimeout
-        ) { request in
-            await runRuntimeShutdownCleanup(timeout: shutdownCleanupTimeout) {
+        let cleanupResult = await store.cleanupActiveReviewsForRuntimeStop(reason: reason) { request in
+            switch mode {
+            case .connected:
                 await appServerBackend.cleanupActiveReviewsForShutdown(request)
+                return true
+            case .connectionTerminated:
+                await appServerBackend.cleanupActiveReviewsAfterConnectionTermination(request)
+                return true
             }
         }
-        if cleanupResult.didComplete == false {
-            logger.warning("\(timeoutWarning, privacy: .public)")
-        }
+        precondition(cleanupResult.didComplete, "Runtime teardown must drain backend cleanup and review workers.")
     }
 
-    func stop(store: CodexReviewStore) async {
+    func stop(store: CodexReviewStore, purpose: CodexReviewRuntimeStopPurpose) async {
         let appServer = appServer
         let appServerBackend = appServerBackend
         let mcpHTTPServer = mcpHTTPServer
         let hasRuntimeState = appServer != nil || appServerBackend != nil || mcpHTTPServer != nil
         let loginSession = self.loginSession
-        self.loginSession = nil
         guard hasRuntimeState || loginSession != nil else {
+            if purpose.retiresRuns {
+                _ = await store.retireReviewRunsForFinalStoreStop()
+            }
             return
         }
         logger.info("Stopping review runtime")
+        await mcpHTTPServer?.stop()
+        self.mcpHTTPServer = nil
         if let appServerBackend {
             let reason = ReviewCancellation.system(message: "Review runtime stopped.")
             await cleanupActiveReviewsForRuntimeTeardown(
                 store: store,
                 appServerBackend: appServerBackend,
                 reason: reason,
-                timeoutWarning: "Timed out cleaning active reviews before stopping runtime"
+                mode: .connected
             )
+        }
+        _ = await loginSession?.terminate(reason: .storeStop)
+        if purpose.retiresRuns {
+            guard await store.retireReviewRunsForFinalStoreStop() else {
+                logger.error("Review runtime remains open because an unpersisted cleanup quarantine is unresolved")
+                return
+            }
         }
         self.appServer = nil
         clearAppServerModelContainer()
-        self.mcpHTTPServer = nil
         authNotificationTask?.cancel()
         authNotificationTask = nil
-        await mcpHTTPServer?.stop()
         self.appServerBackend = nil
-        await terminateLoginSession(loginSession)
         await appServer?.close()
         logger.info("Review runtime stopped")
     }
@@ -650,16 +625,18 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     func signIn(auth: CodexReviewAuthModel) async throws {
-        try await beginStockLogin(auth: auth, activation: .activateAuthenticatedAccount)
+        try await attachedStore?.requireReviewThreadRetentionAcceptance()
+        try await beginStockLogin(auth: auth, purpose: .signIn)
     }
 
     func addAccount(auth: CodexReviewAuthModel) async throws {
+        try await attachedStore?.requireReviewThreadRetentionAcceptance()
         let activeAccountKey = auth.persistedActiveAccountKey ?? auth.selectedAccount?.accountKey
         try await beginStockLogin(
             auth: auth,
-            activation: activeAccountKey != nil
-                ? .preserveActiveAccount(activeAccountKey)
-                : .activateAuthenticatedAccount
+            purpose: activeAccountKey != nil
+                ? .addAccountPreservingActive(activeAccountKey)
+                : .signIn
         )
     }
 
@@ -670,48 +647,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             }
             return
         }
-        let resultTask = session.takeResultTask()
-        resultTask?.cancel()
-        do {
-            let outcome = try await session.handle.cancel()
-            await resultTask?.value
-            if case .authenticationCommittedNeedsConnectionReconciliation(let reason) = outcome,
-               case .activateAuthenticatedAccount = session.activation
-            {
-                await reconcilePrimaryAuthentication(
-                    session: session,
-                    reason: reason,
-                    auth: auth
-                )
-                return
-            }
-            loginSession = nil
-            switch outcome {
-            case .cancelled:
-                auth.updatePhase(.signedOut)
-            case .failed(let message):
-                updateAuthenticationFailure(
-                    message ?? "Authentication cancellation failed.",
-                    auth: auth,
-                    activation: session.activation
-                )
-            case .succeeded, .authenticationCommittedNeedsConnectionReconciliation:
-                updateAuthenticationFailure(
-                    "Authentication could not be safely committed after cancellation.",
-                    auth: auth,
-                    activation: session.activation
-                )
-            }
-        } catch {
-            loginSession = nil
-            auth.updatePhase(.failed(.runtime(message: error.localizedDescription)))
-        }
-        await resultTask?.value
-        await closeLoginRuntimeIfNeeded(session)
-        await releaseLoginMutationIfNeeded(session)
+        _ = await session.terminate(reason: .explicitCancellation)
     }
 
     func switchAccount(auth: CodexReviewAuthModel, accountKey: String) async throws {
+        try await attachedStore?.requireReviewThreadRetentionAcceptance()
         try await withAccountMutation {
         guard auth.persistedAccounts.contains(where: { $0.accountKey == accountKey }) else {
             return
@@ -730,15 +670,15 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             return
         }
         await attachedStore.closeActiveReviewSessions(
-            reason: .system(message: "Account switched."),
-            workerDrainTimeout: shutdownCleanupTimeout
+            reason: .system(message: "Account switched.")
         )
-        await stop(store: attachedStore)
+        await stop(store: attachedStore, purpose: .accountTransitionPreservingRuns)
         await start(store: attachedStore, forceRestartIfNeeded: true)
         }
     }
 
     func removeAccount(auth: CodexReviewAuthModel, accountKey: String) async throws {
+        try await attachedStore?.requireReviewThreadRetentionAcceptance()
         try await withAccountMutation {
         let removedActiveAccount = auth.selectedAccount?.accountKey == accountKey
             || auth.persistedActiveAccountKey == accountKey
@@ -777,10 +717,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 return
             }
             await attachedStore.closeActiveReviewSessions(
-                reason: .system(message: "Account removed."),
-                workerDrainTimeout: shutdownCleanupTimeout
+                reason: .system(message: "Account removed.")
             )
-            await stop(store: attachedStore)
+            await stop(store: attachedStore, purpose: .accountTransitionPreservingRuns)
             await start(store: attachedStore, forceRestartIfNeeded: true)
         }
         }
@@ -811,6 +750,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     func signOutActiveAccount(auth: CodexReviewAuthModel) async throws {
+        try await attachedStore?.requireReviewThreadRetentionAcceptance()
         try await withAccountMutation {
         guard let account = auth.selectedAccount else {
             auth.updatePhase(.signedOut)
@@ -820,8 +760,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         let shouldRecycleRuntime = attachedStore != nil && appServerBackend != nil
         if shouldRecycleRuntime {
             await attachedStore?.closeActiveReviewSessions(
-                reason: .system(message: "Signed out."),
-                workerDrainTimeout: shutdownCleanupTimeout
+                reason: .system(message: "Signed out.")
             )
         }
         let remaining = auth.persistedAccounts.filter { $0.accountKey != account.accountKey }
@@ -842,7 +781,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         auth.selectPersistedAccount(nil)
         auth.applyPersistedAccountStates(remaining.map(savedAccountPayload(from:)), activeAccountKey: nil)
         if shouldRecycleRuntime, let attachedStore {
-            await stop(store: attachedStore)
+            await stop(store: attachedStore, purpose: .accountTransitionPreservingRuns)
             await start(store: attachedStore, forceRestartIfNeeded: true)
         }
         }
@@ -893,161 +832,332 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     private func beginStockLogin(
         auth: CodexReviewAuthModel,
-        activation: LoginActivation
+        purpose: LoginPurpose
     ) async throws {
         guard loginSession == nil else {
             throw CodexReviewAuthenticationFailure.alreadyInProgress
         }
         let mutationLease = try await accountRegistry.beginAuthenticationMutation()
         var runtimeRequiringCleanup: LoginRuntime?
+        var mutationLeaseRequiringRelease: AccountRegistryStore.MutationLease? = mutationLease
+        var sessionOwnsFailurePublication = false
         do {
-            let runtime = try await loginRuntime(for: activation)
+            let runtime = try await loginRuntime(for: purpose)
             runtimeRequiringCleanup = runtime
             let handle = try await runtime.appServer.loginChatGPT(
                 accountReadinessTimeout: .seconds(10)
             )
+            let generationID = UUID()
             let session = LoginSession(
+                generationID: generationID,
+                purpose: purpose,
                 handle: handle,
                 runtime: runtime,
-                activation: activation,
-                mutationLease: mutationLease
+                mutationLease: mutationLease,
+                rootOperation: { @MainActor [weak self] in
+                    let observation: LoginRootObservation
+                    do {
+                        observation = .outcome(try await handle.result())
+                    } catch is CancellationError {
+                        observation = .waiterCancelled(message: nil)
+                    } catch {
+                        observation = .failure(
+                            .runtime(message: error.localizedDescription)
+                        )
+                    }
+                    self?.publishLoginRootObservation(
+                        observation,
+                        generationID: generationID,
+                        handleID: handle.id
+                    )
+                    return observation
+                },
+                terminationHandler: { @MainActor [weak self, auth] session, reason, observation in
+                    guard let self else {
+                        return .stopped
+                    }
+                    return await self.finishLoginSession(
+                        session,
+                        reason: reason,
+                        observation: observation,
+                        auth: auth
+                    )
+                }
             )
             loginSession = session
+            runtimeRequiringCleanup = nil
+            mutationLeaseRequiringRelease = nil
+            sessionOwnsFailurePublication = true
             auth.updatePhase(.signingIn(.init(
                 title: "Sign in to Codex",
                 detail: "Continue signing in with your browser.",
                 browserURL: handle.authenticationURL.absoluteString,
                 userCode: nil
             )))
+            session.activate()
             do {
                 try await externalURLOpener(handle.authenticationURL)
             } catch {
-                loginSession = nil
-                _ = try? await handle.cancel()
-                throw CodexReviewAuthenticationFailure.urlOpen(handle.authenticationURL)
-            }
-            let sessionID = session.id
-            session.installResultTask(Task { @MainActor [weak self, weak auth] in
-                guard let self, let auth else {
+                let failure = CodexReviewAuthenticationFailure.urlOpen(handle.authenticationURL)
+                let terminal = await session.terminate(reason: .urlOpenFailure(failure))
+                switch terminal {
+                case .succeeded:
+                    return
+                case .failed(let terminalFailure):
+                    throw terminalFailure
+                case .cancelled, .stopped:
                     return
                 }
-                do {
-                    let outcome = try await handle.result()
-                    await self.finishStockLogin(
-                        sessionID: sessionID,
-                        outcome: outcome,
-                        auth: auth
-                    )
-                } catch is CancellationError {
-                } catch {
-                    await self.finishStockLogin(
-                        sessionID: sessionID,
-                        failure: error,
-                        auth: auth
-                    )
-                }
-            })
-            runtimeRequiringCleanup = nil
+            }
         } catch {
             await closeLoginRuntime(runtimeRequiringCleanup)
-            await accountRegistry.finishMutation(mutationLease)
+            if let mutationLeaseRequiringRelease {
+                await accountRegistry.finishMutation(mutationLeaseRequiringRelease)
+            }
             let failure = (error as? CodexReviewAuthenticationFailure)
                 ?? .runtime(message: error.localizedDescription)
-            updateAuthenticationFailure(
-                failure.localizedDescription,
-                auth: auth,
-                activation: activation
-            )
-            if case .preserveActiveAccount = activation {
+            if sessionOwnsFailurePublication == false {
+                auth.updatePhase(.failed(failure))
+            }
+            if case .addAccountPreservingActive = purpose {
                 throw failure
             }
         }
     }
 
-    private func finishStockLogin(
-        sessionID: UUID,
-        outcome: CodexLoginOutcome,
-        auth: CodexReviewAuthModel
-    ) async {
-        guard let session = loginSession, session.id == sessionID else {
+    private func publishLoginRootObservation(
+        _ observation: LoginRootObservation,
+        generationID: UUID,
+        handleID: CodexLoginHandle.ID
+    ) {
+        guard let session = loginSession,
+              session.generationID == generationID,
+              session.handle.id == handleID else {
             return
         }
-        switch outcome {
-        case .succeeded:
-            do {
-                let snapshot = try await session.runtime.backend.readAuth()
-                let isolatedRateLimits: CodexRateLimits?
-                if session.runtime.usesPrimaryRuntime == false {
-                    isolatedRateLimits = try? await session.runtime.backend.readRateLimits()
-                    await session.runtime.appServer.close()
-                    session.markOwnedRuntimeClosed()
-                } else {
-                    isolatedRateLimits = nil
-                }
-                let account = try await applyAuthSnapshot(
-                    snapshot,
-                    to: auth,
-                    activation: session.activation,
-                    authSourceCodexHomeURL: session.runtime.codexHomeURL
-                )
-                if session.runtime.usesPrimaryRuntime == false {
-                    if let account, let isolatedRateLimits {
-                        applyRateLimits(isolatedRateLimits, to: account)
-                        try await accountRegistry.updateCachedRateLimits(
-                            from: savedAccountPayload(from: account)
-                        )
-                    }
-                    try? FileManager.default.removeItem(at: session.runtime.codexHomeURL)
-                } else {
-                    await refreshSelectedAccountRateLimits(auth: auth)
-                }
-            } catch {
-                updateAuthenticationFailure(
-                    error.localizedDescription,
-                    auth: auth,
-                    activation: session.activation
-                )
-            }
-            session.markResultCompleted()
-            guard session.isReadyForCleanup else {
-                return
-            }
-        case .failed(let message):
-            updateAuthenticationFailure(
-                message ?? "Authentication failed.",
-                auth: auth,
-                activation: session.activation
+        session.publishRootObservation(observation)
+    }
+
+    private func finishLoginSession(
+        _ session: LoginSession,
+        reason: LoginTerminationReason,
+        observation: LoginRootObservation,
+        auth: CodexReviewAuthModel
+    ) async -> LoginSessionTerminal {
+        let terminal: LoginSessionTerminal
+        switch observation {
+        case .outcome(let outcome):
+            terminal = await finishLoginOutcome(
+                outcome,
+                session: session,
+                reason: reason,
+                auth: auth
             )
-        case .cancelled:
-            auth.updatePhase(.signedOut)
-        case .authenticationCommittedNeedsConnectionReconciliation(let reason):
-            if case .activateAuthenticatedAccount = session.activation {
-                await reconcilePrimaryAuthentication(
-                    session: session,
-                    reason: reason,
-                    auth: auth
-                )
-                return
-            }
-            updateAuthenticationFailure(
-                "Authentication requires runtime reconciliation: \(String(describing: reason))",
-                auth: auth,
-                activation: session.activation
+        case .failure(let failure):
+            auth.updatePhase(.failed(failure))
+            terminal = .failed(failure)
+        case .waiterCancelled(let message):
+            terminal = finishCancelledLoginWaiter(
+                session: session,
+                reason: reason,
+                message: message,
+                auth: auth
             )
         }
-        await finishLoginSessionCleanup(session)
+
+        await closeLoginRuntimeIfNeeded(session)
+        await releaseLoginMutationIfNeeded(session)
+        clearLoginSessionIfCurrent(session)
+        return terminal
+    }
+
+    private func finishLoginOutcome(
+        _ outcome: CodexLoginOutcome,
+        session: LoginSession,
+        reason terminationReason: LoginTerminationReason,
+        auth: CodexReviewAuthModel
+    ) async -> LoginSessionTerminal {
+        switch outcome {
+        case .succeeded:
+            return await finishSuccessfulLogin(session: session, auth: auth)
+        case .failed(let message):
+            let failure = CodexReviewAuthenticationFailure.login(
+                message: message ?? "Authentication failed."
+            )
+            auth.updatePhase(.failed(failure))
+            return .failed(failure)
+        case .cancelled:
+            return finishCancelledLoginOutcome(
+                reason: terminationReason,
+                auth: auth
+            )
+        case .authenticationCommittedNeedsConnectionReconciliation(let reconciliationReason):
+            if case .signIn = session.purpose,
+               sessionAllowsPrimaryReconciliation(terminationReason: terminationReason)
+            {
+                return await reconcilePrimaryAuthentication(
+                    session: session,
+                    reason: reconciliationReason,
+                    auth: auth
+                )
+            }
+            let failure = terminationFailure(
+                for: terminationReason,
+                fallback: .login(
+                    message: "Authentication requires runtime reconciliation: \(String(describing: reconciliationReason))"
+                )
+            )
+            if let failure {
+                auth.updatePhase(.failed(failure))
+                return .failed(failure)
+            }
+            if auth.selectedAccount == nil {
+                auth.updatePhase(.signedOut)
+            }
+            return .stopped
+        }
+    }
+
+    private func finishSuccessfulLogin(
+        session: LoginSession,
+        auth: CodexReviewAuthModel
+    ) async -> LoginSessionTerminal {
+        var stagingURLRequiringRemoval: URL?
+        defer {
+            if let stagingURLRequiringRemoval {
+                try? FileManager.default.removeItem(at: stagingURLRequiringRemoval)
+            }
+        }
+        do {
+            let snapshot = try await session.runtime.backend.readAuth()
+            let isolatedRateLimits: CodexRateLimits?
+            if session.runtime.usesPrimaryRuntime == false {
+                isolatedRateLimits = try? await session.runtime.backend.readRateLimits()
+                guard let runtime = session.takeOwnedRuntimeForClose() else {
+                    preconditionFailure("An isolated login runtime can be closed only once.")
+                }
+                await runtime.appServer.close()
+                stagingURLRequiringRemoval = runtime.codexHomeURL
+            } else {
+                isolatedRateLimits = nil
+            }
+            let account = try await applyAuthSnapshot(
+                snapshot,
+                to: auth,
+                activation: session.purpose.activation,
+                authSourceCodexHomeURL: session.runtime.codexHomeURL
+            )
+            if session.runtime.usesPrimaryRuntime == false {
+                if let account, let isolatedRateLimits {
+                    applyRateLimits(isolatedRateLimits, to: account)
+                    try await accountRegistry.updateCachedRateLimits(
+                        from: savedAccountPayload(from: account)
+                    )
+                }
+            } else {
+                await refreshSelectedAccountRateLimits(auth: auth)
+            }
+            return .succeeded
+        } catch let failure as CodexReviewAuthenticationFailure {
+            auth.updatePhase(.failed(failure))
+            return .failed(failure)
+        } catch {
+            let failure = CodexReviewAuthenticationFailure.login(
+                message: error.localizedDescription
+            )
+            auth.updatePhase(.failed(failure))
+            return .failed(failure)
+        }
+    }
+
+    private func finishCancelledLoginOutcome(
+        reason: LoginTerminationReason,
+        auth: CodexReviewAuthModel
+    ) -> LoginSessionTerminal {
+        switch reason {
+        case .urlOpenFailure(let failure), .runtimeFailure(let failure):
+            auth.updatePhase(.failed(failure))
+            return .failed(failure)
+        case .storeStop:
+            auth.updatePhase(.signedOut)
+            return .stopped
+        case .rootOutcome, .explicitCancellation:
+            auth.updatePhase(.signedOut)
+            return .cancelled
+        }
+    }
+
+    private func finishCancelledLoginWaiter(
+        session _: LoginSession,
+        reason: LoginTerminationReason,
+        message: String?,
+        auth: CodexReviewAuthModel
+    ) -> LoginSessionTerminal {
+        finishLoginWaiterFailure(
+            reason: reason,
+            message: message ?? "Authentication cancellation failed.",
+            auth: auth
+        )
+    }
+
+    private func finishLoginWaiterFailure(
+        reason: LoginTerminationReason,
+        message: String,
+        auth: CodexReviewAuthModel
+    ) -> LoginSessionTerminal {
+        switch reason {
+        case .rootOutcome:
+            let failure = CodexReviewAuthenticationFailure.login(message: message)
+            auth.updatePhase(.failed(failure))
+            return .failed(failure)
+        case .explicitCancellation:
+            let failure = CodexReviewAuthenticationFailure.runtime(message: message)
+            auth.updatePhase(.failed(failure))
+            return .failed(failure)
+        case .urlOpenFailure(let failure), .runtimeFailure(let failure):
+            auth.updatePhase(.failed(failure))
+            return .failed(failure)
+        case .storeStop:
+            auth.updatePhase(.signedOut)
+            return .stopped
+        }
+    }
+
+    private func terminationFailure(
+        for reason: LoginTerminationReason,
+        fallback: CodexReviewAuthenticationFailure
+    ) -> CodexReviewAuthenticationFailure? {
+        switch reason {
+        case .rootOutcome:
+            return nil
+        case .explicitCancellation:
+            return fallback
+        case .urlOpenFailure(let failure), .runtimeFailure(let failure):
+            return failure
+        case .storeStop:
+            return nil
+        }
+    }
+
+    private func sessionAllowsPrimaryReconciliation(
+        terminationReason: LoginTerminationReason
+    ) -> Bool {
+        switch terminationReason {
+        case .rootOutcome, .explicitCancellation, .urlOpenFailure:
+            return true
+        case .runtimeFailure, .storeStop:
+            return false
+        }
     }
 
     private func reconcilePrimaryAuthentication(
         session: LoginSession,
         reason: CodexLoginReconciliationReason,
         auth: CodexReviewAuthModel
-    ) async {
-        guard loginSession === session else {
-            return
+    ) async -> LoginSessionTerminal {
+        guard detachLoginSessionIfCurrent(session) else {
+            return .stopped
         }
-        loginSession = nil
-        session.takeResultTask()
         do {
             try await accountRuntimeTransitionCoordinator.perform {
                 guard let store = attachedStore else {
@@ -1055,7 +1165,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                         message: "Authentication committed, but the review store is unavailable for reconciliation."
                     )
                 }
-                await stop(store: store)
+                await stop(store: store, purpose: .loginReconciliationPreservingRuns)
                 await start(store: store, forceRestartIfNeeded: true)
                 guard let backend = appServerBackend else {
                     throw CodexReviewAuthenticationFailure.runtime(
@@ -1073,45 +1183,39 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 }
                 _ = try await applyAuthSnapshotSerialized(snapshot, to: auth)
             }
+            return .succeeded
         } catch let failure as CodexReviewAuthenticationFailure {
             auth.updatePhase(.failed(failure))
             logger.error(
                 "Primary authentication reconciliation failed after \(String(describing: reason), privacy: .public): \(failure.localizedDescription, privacy: .public)"
             )
+            return .failed(failure)
         } catch {
             let failure = CodexReviewAuthenticationFailure.runtime(message: error.localizedDescription)
             auth.updatePhase(.failed(failure))
             logger.error(
                 "Primary authentication reconciliation failed after \(String(describing: reason), privacy: .public): \(error.localizedDescription, privacy: .public)"
             )
+            return .failed(failure)
         }
-        await releaseLoginMutationIfNeeded(session)
     }
 
-    private func finishStockLogin(
-        sessionID: UUID,
-        failure: any Error,
-        auth: CodexReviewAuthModel
-    ) async {
-        guard let session = loginSession, session.id == sessionID else {
-            return
-        }
-        updateAuthenticationFailure(
-            failure.localizedDescription,
-            auth: auth,
-            activation: session.activation
-        )
-        await finishLoginSessionCleanup(session)
-    }
-
-    private func finishLoginSessionCleanup(_ session: LoginSession) async {
-        guard loginSession === session else {
+    private func clearLoginSessionIfCurrent(_ session: LoginSession) {
+        guard loginSession === session,
+              loginSession?.generationID == session.generationID else {
             return
         }
         loginSession = nil
-        session.takeResultTask()
-        await closeLoginRuntimeIfNeeded(session)
-        await releaseLoginMutationIfNeeded(session)
+    }
+
+    @discardableResult
+    private func detachLoginSessionIfCurrent(_ session: LoginSession) -> Bool {
+        guard loginSession === session,
+              loginSession?.generationID == session.generationID else {
+            return false
+        }
+        loginSession = nil
+        return true
     }
 
     private func closeLoginRuntime(_ runtime: LoginRuntime?) async {
@@ -1128,11 +1232,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     private func closeLoginRuntimeIfNeeded(_ session: LoginSession) async {
-        guard session.ownedRuntimeNeedsClose else {
+        guard let runtime = session.takeOwnedRuntimeForClose() else {
             return
         }
-        await closeLoginRuntime(session.runtime)
-        session.markOwnedRuntimeClosed()
+        await closeLoginRuntime(runtime)
     }
 
     private func releaseLoginMutationIfNeeded(_ session: LoginSession) async {
@@ -1142,22 +1245,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         await accountRegistry.finishMutation(lease)
     }
 
-    private func updateAuthenticationFailure(
-        _ message: String,
-        auth: CodexReviewAuthModel,
-        activation: LoginActivation
-    ) {
-        switch activation {
-        case .activateAuthenticatedAccount:
-            auth.updatePhase(.failed(.login(message: message)))
-        case .preserveActiveAccount:
-            auth.updatePhase(.failed(.login(message: message)))
-        }
-    }
-
-    private func loginRuntime(for activation: LoginActivation) async throws -> LoginRuntime {
-        switch activation {
-        case .activateAuthenticatedAccount:
+    private func loginRuntime(for purpose: LoginPurpose) async throws -> LoginRuntime {
+        switch purpose {
+        case .signIn:
             guard let appServer, let appServerBackend else {
                 throw CodexReviewAPI.Error.io("Review runtime is not running.")
             }
@@ -1167,7 +1257,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 codexHomeURL: codexHomeURL,
                 usesPrimaryRuntime: true
             )
-        case .preserveActiveAccount:
+        case .addAccountPreservingActive:
             let temporaryCodexHomeURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent("codex-review-auth-\(UUID().uuidString)", isDirectory: true)
             let runtime = try await appServerRuntimeFactory(temporaryCodexHomeURL)
@@ -1194,18 +1284,18 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         return try await appServerBackend.startReview(request)
     }
 
-    func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws {
+    func interruptReview(_ attempt: ReviewAttempt, reason: CodexReviewBackendModel.CancellationReason) async throws {
         guard let appServerBackend else {
             throw CodexReviewAPI.Error.io("Review runtime is not running.")
         }
-        try await appServerBackend.interruptReview(run, reason: reason)
+        try await appServerBackend.interruptReview(attempt, reason: reason)
     }
 
-    func prepareReviewRestart(_ run: CodexReviewBackendModel.Review.Run) async throws -> CodexReviewBackendModel.Review.RestartToken {
+    func prepareReviewRestart(_ attempt: ReviewAttempt) async throws -> CodexReviewBackendModel.Review.RestartToken {
         guard let appServerBackend else {
             throw CodexReviewAPI.Error.io("Review runtime is not running.")
         }
-        return try await appServerBackend.prepareReviewRestart(run)
+        return try await appServerBackend.prepareReviewRestart(attempt)
     }
 
     func restartPreparedReview(
@@ -1218,11 +1308,58 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         return try await appServerBackend.restartPreparedReview(token, request: request)
     }
 
-    func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async {
+    func discardPreparedReviewRestart(
+        _ token: CodexReviewBackendModel.Review.RestartToken
+    ) async -> [ReviewAttempt] {
+        guard let appServerBackend else {
+            preconditionFailure(
+                "A prepared review restart must retain its matching app-server runtime until discard completes."
+            )
+        }
+        return await appServerBackend.discardPreparedReviewRestart(token)
+    }
+
+    func cleanupReview(_ attempt: ReviewAttempt) async {
         guard let appServerBackend else {
             return
         }
-        await appServerBackend.cleanupReview(run)
+        await appServerBackend.cleanupReview(attempt)
+    }
+
+    func cleanupRetainedReviews(
+        _ attempts: [ReviewAttempt],
+        additionalThreadIDs: [ReviewThreadID]
+    ) async -> ReviewRetainedThreadCleanupResult {
+        guard let appServerBackend else {
+            let attemptFailures = attempts.flatMap { attempt -> [ReviewRetainedThreadCleanupFailure] in
+                if attempt.threadIdentity.activeTurnThreadID == attempt.threadIdentity.sourceThreadID {
+                    return [.init(
+                        threadID: attempt.threadIdentity.sourceThreadID,
+                        message: "The matching review runtime is not running."
+                    )]
+                }
+                return [
+                    .init(
+                        threadID: attempt.threadIdentity.activeTurnThreadID,
+                        message: "The matching review runtime is not running."
+                    ),
+                    .init(
+                        threadID: attempt.threadIdentity.sourceThreadID,
+                        message: "The matching review runtime is not running."
+                    ),
+                ]
+            }
+            return .init(failures: attemptFailures + additionalThreadIDs.map { threadID in
+                .init(
+                    threadID: threadID,
+                    message: "The matching review runtime is not running."
+                )
+            })
+        }
+        return await appServerBackend.cleanupRetainedReviews(
+            attempts,
+            additionalThreadIDs: additionalThreadIDs
+        )
     }
 
     @discardableResult
@@ -1354,30 +1491,31 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         store: CodexReviewStore
     ) async {
         let loginSession = self.loginSession
-        self.loginSession = nil
         guard appServer != nil || appServerBackend != nil || mcpHTTPServer != nil || loginSession != nil else {
             return
         }
         let message = "Review runtime stopped unexpectedly: \(error.localizedDescription)"
+        let failedAppServer = appServer
+        let failedMCPHTTPServer = mcpHTTPServer
+        await failedMCPHTTPServer?.stop()
+        mcpHTTPServer = nil
         if let appServerBackend {
             let reason = ReviewCancellation.system(message: message)
             await cleanupActiveReviewsForRuntimeTeardown(
                 store: store,
                 appServerBackend: appServerBackend,
                 reason: reason,
-                timeoutWarning: "Timed out cleaning active reviews after runtime failure"
+                mode: .connectionTerminated
             )
         }
-        let failedAppServer = appServer
-        let failedMCPHTTPServer = mcpHTTPServer
+        _ = await loginSession?.terminate(
+            reason: .runtimeFailure(.runtime(message: message))
+        )
         appServer = nil
         clearAppServerModelContainer()
         appServerBackend = nil
-        mcpHTTPServer = nil
         authNotificationTask = nil
         store.transitionToFailed(message)
-        await failedMCPHTTPServer?.stop()
-        await terminateLoginSession(loginSession)
         await failedAppServer?.close()
     }
 
@@ -1388,11 +1526,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     ) async {
         switch event {
         case .accountUpdated:
-            if let loginSession {
-                loginSession.markAccountUpdateConsumed()
-                if loginSession.isReadyForCleanup {
-                    await finishLoginSessionCleanup(loginSession)
-                }
+            if loginSession != nil {
                 return
             }
             await refreshAuthAfterAccountNotification(backend: backend, auth: auth)
@@ -1565,22 +1699,6 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         try? FileManager.default.removeItem(at: codexHomeURL)
     }
 
-    private func terminateLoginSession(_ session: LoginSession?) async {
-        guard let session else {
-            return
-        }
-        let resultTask = session.takeResultTask()
-        resultTask?.cancel()
-        do {
-            _ = try await session.handle.cancel()
-        } catch {
-            logger.error("Failed to cancel login during teardown: \(error.localizedDescription, privacy: .public)")
-        }
-        await resultTask?.value
-        await closeLoginRuntimeIfNeeded(session)
-        await releaseLoginMutationIfNeeded(session)
-    }
-
     private func applyRateLimits(
         _ rateLimits: CodexRateLimits,
         to account: CodexReviewAccount
@@ -1689,10 +1807,10 @@ private struct AppServerRuntime: Sendable {
 
 @MainActor
 private struct LoginRuntime: Sendable {
-    var appServer: CodexAppServer
-    var backend: AppServerCodexReviewBackend
-    var codexHomeURL: URL
-    var usesPrimaryRuntime: Bool
+    let appServer: CodexAppServer
+    let backend: AppServerCodexReviewBackend
+    let codexHomeURL: URL
+    let usesPrimaryRuntime: Bool
 }
 
 private actor AccountRegistryStore {
@@ -1895,54 +2013,85 @@ private final class AccountRuntimeTransitionCoordinator {
 
 @MainActor
 private final class LoginSession {
-    let id = UUID()
+    typealias RootOperation = @MainActor @Sendable () async -> LoginRootObservation
+    typealias TerminationHandler = @MainActor @Sendable (
+        LoginSession,
+        LoginTerminationReason,
+        LoginRootObservation
+    ) async -> LoginSessionTerminal
+
+    private enum State {
+        case active
+        case closing(
+            reason: LoginTerminationReason,
+            completion: Task<LoginSessionTerminal, Never>
+        )
+        case closed(LoginSessionTerminal)
+    }
+
+    let generationID: UUID
+    let purpose: LoginPurpose
     let handle: CodexLoginHandle
     let runtime: LoginRuntime
-    let activation: LoginActivation
-    let mutationLease: AccountRegistryStore.MutationLease
-    private var resultTask: Task<Void, Never>?
-    private var didCompleteResult = false
-    private var didConsumeAccountUpdate: Bool
-    private var didCloseOwnedRuntime = false
+    private let mutationLease: AccountRegistryStore.MutationLease
+    private let rootOperation: RootOperation
+    private let terminationHandler: TerminationHandler
+    private var rootTask: Task<LoginRootObservation, Never>?
+    private var state: State = .active
+    private var didTakeOwnedRuntime = false
     private var didReleaseMutationLease = false
 
     init(
+        generationID: UUID,
+        purpose: LoginPurpose,
         handle: CodexLoginHandle,
         runtime: LoginRuntime,
-        activation: LoginActivation,
-        mutationLease: AccountRegistryStore.MutationLease
+        mutationLease: AccountRegistryStore.MutationLease,
+        rootOperation: @escaping RootOperation,
+        terminationHandler: @escaping TerminationHandler
     ) {
+        self.generationID = generationID
+        self.purpose = purpose
         self.handle = handle
         self.runtime = runtime
-        self.activation = activation
         self.mutationLease = mutationLease
-        self.didConsumeAccountUpdate = runtime.usesPrimaryRuntime == false
+        self.rootOperation = rootOperation
+        self.terminationHandler = terminationHandler
     }
 
-    func installResultTask(_ task: Task<Void, Never>) {
-        precondition(resultTask == nil, "A login session owns exactly one result task.")
-        resultTask = task
+    func activate() {
+        precondition(rootTask == nil, "A login session root task can be activated only once.")
+        let rootOperation = rootOperation
+        rootTask = Task { @MainActor in
+            await rootOperation()
+        }
     }
 
-    func markResultCompleted() {
-        didCompleteResult = true
+    func publishRootObservation(_: LoginRootObservation) {
+        guard case .active = state else {
+            return
+        }
+        _ = beginClosing(reason: .rootOutcome)
     }
 
-    func markAccountUpdateConsumed() {
-        didConsumeAccountUpdate = true
+    func terminate(reason: LoginTerminationReason) async -> LoginSessionTerminal {
+        switch state {
+        case .active:
+            return await beginClosing(reason: reason).value
+        case .closing(_, let completion):
+            return await completion.value
+        case .closed(let terminal):
+            return terminal
+        }
     }
 
-    var isReadyForCleanup: Bool {
-        didCompleteResult && didConsumeAccountUpdate
-    }
-
-    var ownedRuntimeNeedsClose: Bool {
-        runtime.usesPrimaryRuntime == false && didCloseOwnedRuntime == false
-    }
-
-    func markOwnedRuntimeClosed() {
-        precondition(runtime.usesPrimaryRuntime == false)
-        didCloseOwnedRuntime = true
+    func takeOwnedRuntimeForClose() -> LoginRuntime? {
+        guard runtime.usesPrimaryRuntime == false,
+              didTakeOwnedRuntime == false else {
+            return nil
+        }
+        didTakeOwnedRuntime = true
+        return runtime
     }
 
     func takeMutationLeaseForRelease() -> AccountRegistryStore.MutationLease? {
@@ -1953,10 +2102,95 @@ private final class LoginSession {
         return mutationLease
     }
 
-    @discardableResult
-    func takeResultTask() -> Task<Void, Never>? {
-        defer { resultTask = nil }
-        return resultTask
+    private func beginClosing(
+        reason: LoginTerminationReason
+    ) -> Task<LoginSessionTerminal, Never> {
+        guard case .active = state else {
+            preconditionFailure("Only an active login session can begin termination.")
+        }
+        precondition(rootTask != nil, "A login session must be activated before termination.")
+        let completion = Task { @MainActor [weak self] in
+            guard let self else {
+                return LoginSessionTerminal.stopped
+            }
+            return await self.performTermination(reason: reason)
+        }
+        state = .closing(reason: reason, completion: completion)
+        return completion
+    }
+
+    private func performTermination(
+        reason: LoginTerminationReason
+    ) async -> LoginSessionTerminal {
+        guard let rootTask else {
+            preconditionFailure("A login session must own its root task through termination.")
+        }
+        var cancellationFailureMessage: String?
+        if reason.requestsSDKCancellation {
+            do {
+                _ = try await handle.cancel()
+            } catch {
+                cancellationFailureMessage = error.localizedDescription
+                rootTask.cancel()
+            }
+        }
+
+        var observation = await rootTask.value
+        if case .waiterCancelled = observation,
+           let cancellationFailureMessage {
+            observation = .waiterCancelled(message: cancellationFailureMessage)
+        }
+        let terminal = await terminationHandler(self, reason, observation)
+        state = .closed(terminal)
+        return terminal
+    }
+
+    isolated deinit {
+        rootTask?.cancel()
+    }
+}
+
+private enum LoginRootObservation: Sendable {
+    case outcome(CodexLoginOutcome)
+    case failure(CodexReviewAuthenticationFailure)
+    case waiterCancelled(message: String?)
+}
+
+private enum LoginTerminationReason: Equatable, Sendable {
+    case rootOutcome
+    case explicitCancellation
+    case urlOpenFailure(CodexReviewAuthenticationFailure)
+    case runtimeFailure(CodexReviewAuthenticationFailure)
+    case storeStop
+
+    var requestsSDKCancellation: Bool {
+        switch self {
+        case .rootOutcome:
+            return false
+        case .explicitCancellation, .urlOpenFailure, .runtimeFailure, .storeStop:
+            return true
+        }
+    }
+}
+
+private enum LoginSessionTerminal: Equatable, Sendable {
+    case succeeded
+    case failed(CodexReviewAuthenticationFailure)
+    case cancelled
+    case stopped
+}
+
+private enum LoginPurpose: Equatable, Sendable {
+    case signIn
+    case addAccountPreservingActive(String?)
+
+    var activation: LoginActivation {
+        switch self {
+        case .signIn:
+            return .activateAuthenticatedAccount
+        case .addAccountPreservingActive(let activeAccountKey):
+            return .preserveActiveAccount(activeAccountKey)
+        }
     }
 }
 

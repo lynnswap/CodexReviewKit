@@ -18,29 +18,19 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
 
     private let appServer: CodexAppServer
     nonisolated package let modelContainer: CodexModelContainer
-    nonisolated package let modelExecutor: any CodexModelExecutor
-    private var reviewEventSessionsByAttemptID: [String: AppServerReviewEventSession] = [:]
-    private var activeReviewAttemptIDByThreadID: [String: String] = [:]
-    private var activeThreadIDsByAttemptID: [String: Set<String>] = [:]
-    private var reviewEventSessionCanonicalThreadIDByThreadID: [String: String] = [:]
-    private var abandonedReviewAttemptIDs: Set<String> = []
-    private var inFlightRestartCountByInterruptedAttemptID: [String: Int] = [:]
-    private var completedReviewEventSessionMetricsByThreadID: [String: ReviewBackendEventSessionMetrics] = [:]
-
-    private struct DeferredReviewThreadCleanup {
-        var run: CodexReviewBackendModel.Review.Run
-        var additionalCleanupThreadIDs: [String]
+    nonisolated package let modelExecutor: CodexDefaultSerialModelExecutor
+    private struct ActiveReviewSession {
+        let attempt: ReviewAttempt
+        let session: CodexReviewSession
+        let chat: CodexChat
     }
 
-    // Terminal reviews keep their chats readable (sidebar, MCP log reads)
-    // until runtime teardown: cleanupReview defers the destructive thread
-    // deletion here and cleanupActiveReviewsForShutdown flushes it.
-    private var deferredThreadCleanupsByAttemptID: [String: DeferredReviewThreadCleanup] = [:]
-    private var completedThreadCleanupAttemptIDs: Set<String> = []
+    private var activeReviewSessionsByAttemptID: [ReviewAttemptID: ActiveReviewSession] = [:]
+    private var abandonedReviewAttemptIDs: Set<ReviewAttemptID> = []
+    private var inFlightRestartCountByInterruptedAttemptID: [ReviewAttemptID: Int] = [:]
 
-    package init(appServer: CodexAppServer, modelContainer: CodexModelContainer? = nil) {
-        let modelContainer = modelContainer ?? CodexModelContainer(appServer: appServer)
-        self.appServer = appServer
+    package init(modelContainer: CodexModelContainer) {
+        self.appServer = modelContainer.appServer
         self.modelContainer = modelContainer
         self.modelExecutor = CodexDefaultSerialModelExecutor(modelContainer: modelContainer)
     }
@@ -93,24 +83,33 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
     }
 
     package func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt {
-        let review = try await startReviewSession(for: request)
-        let attemptID = makeAppServerReviewAttemptID()
-        let run = CodexReviewBackendModel.Review.Run(
-            attemptID: attemptID,
-            threadID: review.threadID.rawValue,
-            turnID: review.turnID.rawValue,
-            reviewThreadID: review.reviewThreadID.rawValue,
-            model: review.model ?? request.model
+        let startedReview = try await performReviewOperation(.startReview) {
+            try await startReviewSession(for: request)
+        }
+        let attempt: ReviewAttempt
+        do {
+            attempt = try Self.reviewAttempt(
+                for: startedReview.session,
+                attemptID: makeAppServerReviewAttemptID(),
+                fallbackModel: request.model
+            )
+        } catch {
+            await discardInvalidlyIdentifiedReview(startedReview.session)
+            throw ReviewBackendFailure.protocolViolation(
+                message: "Review start returned invalid identity: \(error.localizedDescription)"
+            )
+        }
+        let activeReview = ActiveReviewSession(
+            attempt: attempt,
+            session: startedReview.session,
+            chat: startedReview.chat
         )
-        let session = AppServerReviewEventSession(run: run)
-        registerReviewEventSession(session, for: run)
-        await session.startConsuming(review)
-
-        return await session.attempt()
+        activeReviewSessionsByAttemptID[attempt.attemptID] = activeReview
+        return backendAttempt(for: activeReview)
     }
 
     private func startReviewSession(for request: CodexReviewBackendModel.Review.Start) async throws
-        -> CodexReviewSession
+        -> CodexStartedReview
     {
         let workspace = URL(fileURLWithPath: request.request.cwd, isDirectory: true)
         return try await startDataKitBackedReviewSession(request, in: workspace)
@@ -119,7 +118,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
     private func startDataKitBackedReviewSession(
         _ request: CodexReviewBackendModel.Review.Start,
         in workspace: URL
-    ) async throws -> CodexReviewSession {
+    ) async throws -> CodexStartedReview {
         try await modelContext.startReview(
             in: workspace,
             input: CodexReviewInput(
@@ -128,7 +127,6 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
                 delivery: .inline
             )
         )
-        .session
     }
 
     private func reviewThreadOptions(
@@ -151,32 +149,28 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
     }
 
     package func interruptReview(
-        _ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason
+        _ attempt: ReviewAttempt, reason: CodexReviewBackendModel.CancellationReason
     ) async throws {
-        guard abandonedReviewAttemptIDs.contains(run.attemptID) == false else {
+        guard abandonedReviewAttemptIDs.contains(attempt.attemptID) == false else {
             return
         }
-        _ = try await cancelReviewTurn(for: run)
+        _ = try await performReviewOperation(.interruptReview) {
+            try await cancelReviewTurn(for: attempt)
+        }
     }
 
     package func prepareReviewRestart(
-        _ run: CodexReviewBackendModel.Review.Run
+        _ attempt: ReviewAttempt
     ) async throws -> CodexReviewBackendModel.Review.RestartToken {
-        guard let identity = run.appServerReviewIdentity else {
-            throw CodexReviewAPI.Error.io("Review run has no restartable app-server turn.")
+        let identity = attempt.appServerReviewIdentity
+        let appServerToken = try await performReviewOperation(.prepareRestart) {
+            try await appServer.prepareReviewRestart(identity)
         }
-        let appServerToken = try await appServer.prepareReviewRestart(identity)
-        markAttemptAbandoned(run)
-        if let session = unregisterReviewEventSession(for: run) {
-            await session.abandon()
-            let metrics = await session.metricsSnapshot()
-            for threadID in localCleanupThreadIDs(for: run, additional: await session.cleanupThreadIDs()) {
-                completedReviewEventSessionMetricsByThreadID[threadID] = metrics
-            }
-        }
+        markAttemptAbandoned(attempt)
+        activeReviewSessionsByAttemptID.removeValue(forKey: attempt.attemptID)
         return CodexReviewBackendModel.Review.RestartToken(
             id: appServerToken.id,
-            interruptedRun: run
+            interruptedAttempt: attempt
         )
     }
 
@@ -184,329 +178,466 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
         _ token: CodexReviewBackendModel.Review.RestartToken,
         request: CodexReviewBackendModel.Review.Start
     ) async throws -> BackendReviewAttempt {
-        let interruptedRun = token.interruptedRun
-        guard let interruptedIdentity = interruptedRun.appServerReviewIdentity else {
-            throw CodexReviewAPI.Error.io("Prepared review restart has no app-server identity.")
-        }
+        let interruptedAttempt = token.interruptedAttempt
+        let interruptedIdentity = interruptedAttempt.appServerReviewIdentity
         let appServerToken = CodexReviewRestartToken(
             id: token.id,
             interruptedIdentity: interruptedIdentity
         )
-        markRestartInFlight(forInterrupted: interruptedRun)
+        markRestartInFlight(forInterrupted: interruptedAttempt)
         defer {
-            clearRestartInFlight(forInterrupted: interruptedRun)
+            clearRestartInFlight(forInterrupted: interruptedAttempt)
         }
-        let review = try await appServer.restartPreparedReview(
-            appServerToken,
-            target: request.request.target.appServerReviewTarget,
-            delivery: .inline,
-            threadOptions: reviewThreadOptions(model: interruptedRun.model ?? request.model)
+        let review = try await performReviewOperation(.restartReview) {
+            try await appServer.restartPreparedReview(
+                appServerToken,
+                target: request.request.target.appServerReviewTarget,
+                delivery: .inline,
+                threadOptions: reviewThreadOptions(model: interruptedAttempt.model ?? request.model)
+            )
+        }
+        let recoveredAttempt: ReviewAttempt
+        do {
+            recoveredAttempt = try Self.reviewAttempt(
+                for: review,
+                attemptID: makeAppServerReviewAttemptID(),
+                sourceThreadID: interruptedAttempt.threadIdentity.sourceThreadID.rawValue,
+                fallbackModel: interruptedAttempt.model ?? request.model
+            )
+        } catch {
+            await discardInvalidlyIdentifiedReview(review)
+            throw ReviewBackendFailure.protocolViolation(
+                message: "Review restart returned invalid identity: \(error.localizedDescription)"
+            )
+        }
+        let activeReview = ActiveReviewSession(
+            attempt: recoveredAttempt,
+            session: review,
+            chat: modelContext.model(for: review.activeTurnThreadID)
         )
-        let attemptID = makeAppServerReviewAttemptID()
-        let recoveredRun = CodexReviewBackendModel.Review.Run(
-            attemptID: attemptID,
-            threadID: interruptedRun.threadID,
-            turnID: review.turnID.rawValue,
-            reviewThreadID: review.reviewThreadID.rawValue,
-            model: review.model ?? interruptedRun.model ?? request.model
-        )
-        let session = AppServerReviewEventSession(run: recoveredRun)
-        registerReviewEventSession(session, for: recoveredRun)
-        await session.startConsuming(review)
-
-        return await session.attempt()
+        activeReviewSessionsByAttemptID[recoveredAttempt.attemptID] = activeReview
+        return backendAttempt(for: activeReview)
     }
 
-    package func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async {
-        var completedMetrics: ReviewBackendEventSessionMetrics?
-        var additionalCleanupThreadIDs: [String] = []
-        if let session = unregisterReviewEventSession(for: run) {
-            await session.finish()
-            let metrics = await session.metricsSnapshot()
-            additionalCleanupThreadIDs = await session.cleanupThreadIDs()
-            completedMetrics = metrics
-        }
-        let cleanupThreadIDs = localCleanupThreadIDs(for: run, additional: additionalCleanupThreadIDs)
-        if let completedMetrics {
-            for threadID in cleanupThreadIDs {
-                completedReviewEventSessionMetricsByThreadID[threadID] = completedMetrics
+    package func discardPreparedReviewRestart(
+        _ token: CodexReviewBackendModel.Review.RestartToken
+    ) async -> [ReviewAttempt] {
+        let interruptedAttempt = token.interruptedAttempt
+        let interruptedIdentity = interruptedAttempt.appServerReviewIdentity
+        let retainedIdentities = await appServer.discardPreparedReviewRestart(
+            CodexReviewRestartToken(
+                id: token.id,
+                interruptedIdentity: interruptedIdentity
+            )
+        )
+
+        return retainedIdentities.map { identity in
+            precondition(
+                identity.sourceThreadID.rawValue
+                    == interruptedAttempt.threadIdentity.sourceThreadID.rawValue,
+                "A prepared review restart cannot transfer cleanup authority across source threads."
+            )
+            if identity == interruptedIdentity {
+                return interruptedAttempt
+            }
+            do {
+                return try Self.reviewAttempt(
+                    for: identity,
+                    attemptID: makeAppServerReviewAttemptID(),
+                    fallbackModel: interruptedAttempt.model
+                )
+            } catch {
+                preconditionFailure(
+                    "CodexKit returned an invalid retained review identity: \(error.localizedDescription)"
+                )
             }
         }
-        if completedThreadCleanupAttemptIDs.contains(run.attemptID) == false {
-            deferredThreadCleanupsByAttemptID[run.attemptID] = .init(
-                run: run,
-                additionalCleanupThreadIDs: additionalCleanupThreadIDs
-            )
-        }
-        for threadID in cleanupThreadIDs {
-            reviewEventSessionCanonicalThreadIDByThreadID.removeValue(forKey: threadID)
-            activeReviewAttemptIDByThreadID.removeValue(forKey: threadID)
-        }
     }
 
-    private func flushDeferredThreadCleanups() async {
-        let deferredCleanups = deferredThreadCleanupsByAttemptID.values
-        deferredThreadCleanupsByAttemptID = [:]
-        completedThreadCleanupAttemptIDs.formUnion(
-            deferredCleanups.map { $0.run.attemptID }
-        )
-        for cleanup in deferredCleanups {
-            await cleanupAppServerReview(
-                cleanup.run,
-                additionalCleanupThreadIDs: cleanup.additionalCleanupThreadIDs
-            )
+    package func cleanupReview(_ attempt: ReviewAttempt) async {
+        finishReviewLocally(attempt)
+    }
+
+    private func finishReviewLocally(
+        _ attempt: ReviewAttempt
+    ) {
+        activeReviewSessionsByAttemptID.removeValue(forKey: attempt.attemptID)
+        abandonedReviewAttemptIDs.remove(attempt.attemptID)
+    }
+
+    package func cleanupRetainedReviews(
+        _ attempts: [ReviewAttempt],
+        additionalThreadIDs: [ReviewThreadID]
+    ) async -> ReviewRetainedThreadCleanupResult {
+        guard let firstAttempt = attempts.first else {
+            return .init()
         }
+        let sourceThreadID = firstAttempt.threadIdentity.sourceThreadID
+        precondition(
+            attempts.allSatisfy { $0.threadIdentity.sourceThreadID == sourceThreadID },
+            "One retained review cleanup must contain a single source thread lifecycle."
+        )
+        let result = await appServer.cleanupReviewReportingFailures(
+            firstAttempt.appServerReviewIdentity,
+            additionalCleanupThreadIDs: attempts.dropFirst().map { attempt in
+                attempt.appServerReviewIdentity.cleanupThreadIDs
+            } + [additionalThreadIDs.map { CodexThreadID(rawValue: $0.rawValue) }]
+        )
+        return .init(failures: result.failures.map { failure in
+            guard let threadID = try? ReviewThreadID(validating: failure.threadID.rawValue) else {
+                preconditionFailure("CodexKit returned an empty cleanup thread identity.")
+            }
+            return .init(
+                threadID: threadID,
+                message: failure.message
+            )
+        })
     }
 
     package func cleanupActiveReviewsForShutdown(_ request: CodexReviewRuntimeStopReviewCleanupRequest) async {
-        let runs = await activeReviewRunsForShutdown()
-        var cleanedAttemptIDs: Set<String> = []
-        for run in runs {
+        let attempts = await activeReviewAttemptsForShutdown()
+        var cleanedAttemptIDs: Set<ReviewAttemptID> = []
+        for attempt in attempts {
             if Task.isCancelled {
                 return
             }
-            try? await interruptReview(run, reason: request.reason)
+            try? await interruptReview(attempt, reason: request.reason)
             if Task.isCancelled {
                 return
             }
-            await cleanupReview(run)
-            cleanedAttemptIDs.insert(run.attemptID)
+            await cleanupReview(attempt)
+            cleanedAttemptIDs.insert(attempt.attemptID)
         }
-        for run in request.recoveryWaitingRuns where cleanedAttemptIDs.insert(run.attemptID).inserted {
-            if isRestartInFlight(forInterrupted: run) {
+        for attempt in request.recoveryWaitingAttempts
+        where cleanedAttemptIDs.insert(attempt.attemptID).inserted {
+            if isRestartInFlight(forInterrupted: attempt) {
                 continue
             }
             if Task.isCancelled {
                 return
             }
-            await cleanupReview(run)
+            await cleanupReview(attempt)
         }
-        await flushDeferredThreadCleanups()
     }
 
-    package func reviewEventSessionMetricsForTesting(
-        threadID: String
-    ) async -> ReviewBackendEventSessionMetrics? {
-        if let session = reviewEventSession(forThreadID: threadID) {
-            return await session.metricsSnapshot()
+    package func cleanupActiveReviewsAfterConnectionTermination(
+        _ request: CodexReviewRuntimeStopReviewCleanupRequest
+    ) async {
+        let activeAttempts = await activeReviewAttemptsForShutdown()
+        var attemptsByID = Dictionary(uniqueKeysWithValues: activeAttempts.map { ($0.attemptID, $0) })
+        for attempt in request.recoveryWaitingAttempts {
+            attemptsByID[attempt.attemptID] = attempt
         }
-        return completedReviewEventSessionMetricsByThreadID[threadID]
+
+        for attempt in attemptsByID.values {
+            finishReviewLocally(attempt)
+        }
     }
 
-    package func activeReviewEventStreamSubscriptionIDForTesting(threadID: String) async -> Int? {
-        guard let session = reviewEventSession(forThreadID: threadID) else {
+    private func backendAttempt(for activeReview: ActiveReviewSession) -> BackendReviewAttempt {
+        let attempt = activeReview.attempt
+        return BackendReviewAttempt(
+            attempt: activeReview.attempt,
+            observeTerminal: { [self] in
+                try await observeTerminal(for: attempt)
+            },
+            observedTerminalIfKnown: { [self] in
+                await observedTerminalIfKnown(for: attempt)
+            },
+            finalizeTerminal: { [self] observed in
+                await finalizeTerminal(observed, attempt: attempt)
+            }
+        )
+    }
+
+    private func observeTerminal(
+        for attempt: ReviewAttempt
+    ) async throws -> ReviewBackendObservedTerminal {
+        guard let activeReview = activeReviewSessionsByAttemptID[attempt.attemptID],
+              activeReview.attempt == attempt else {
+            return .failed(.protocolViolation(
+                message: "Terminal observation requires the active SDK review session."
+            ))
+        }
+        do {
+            return AppServerReviewTerminalMapper.observed(
+                try await activeReview.session.collect(),
+                expectedAttempt: attempt
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return .failed(AppServerReviewTerminalMapper.failure(error))
+        }
+    }
+
+    private func observedTerminalIfKnown(
+        for attempt: ReviewAttempt
+    ) async -> ReviewBackendObservedTerminal? {
+        guard let activeReview = activeReviewSessionsByAttemptID[attempt.attemptID],
+              activeReview.attempt == attempt else {
+            return .failed(.protocolViolation(
+                message: "Terminal probing requires the active SDK review session."
+            ))
+        }
+        do {
+            guard let outcome = try await activeReview.session.terminalOutcomeIfKnown() else {
+                return nil
+            }
+            return AppServerReviewTerminalMapper.observed(
+                outcome,
+                expectedAttempt: attempt
+            )
+        } catch is CancellationError {
             return nil
+        } catch {
+            return .failed(AppServerReviewTerminalMapper.failure(error))
         }
-        return await session.activeStreamSubscriptionIDForTesting()
     }
 
-    package func detachReviewEventStreamForTesting(threadID: String, subscriptionID: Int) async {
-        guard let session = reviewEventSession(forThreadID: threadID) else {
-            return
+    private func finalizeTerminal(
+        _ observed: ReviewBackendObservedTerminal,
+        attempt: ReviewAttempt
+    ) async -> ReviewBackendTerminal {
+        switch observed {
+        case .completed(let candidate):
+            // Do not directly await the refresh in the caller's task. Product
+            // cancellation removes its waiter, but an accepted completion must
+            // finish the authoritative DataKit publication barrier.
+            return await Task { [self] in
+                await publishCompletedReview(candidate, attempt: attempt)
+            }.value
+        case .interrupted(let message):
+            return .interrupted(message: message)
+        case .failed(let failure):
+            return .failed(failure)
         }
-        await session.detach(subscriptionID: subscriptionID)
     }
 
-    package func reviewAttemptForTesting(_ run: CodexReviewBackendModel.Review.Run) async -> BackendReviewAttempt {
-        let session = await reviewEventSession(for: run)
-        return await session.attempt()
-    }
-
-    private func reviewEventSession(for run: CodexReviewBackendModel.Review.Run) async -> AppServerReviewEventSession {
-        if let session = reviewEventSessionsByAttemptID[run.attemptID] {
-            await session.updateRun(run)
-            registerReviewEventSession(session, for: run)
-            return session
+    private func publishCompletedReview(
+        _ candidate: ReviewCompletionCandidate,
+        attempt: ReviewAttempt
+    ) async -> ReviewBackendTerminal {
+        guard candidate.turnID == attempt.turnID else {
+            return .failed(.protocolViolation(
+                message: "Review completion candidate does not match its attempt turn."
+            ))
         }
-        let session = AppServerReviewEventSession(run: run)
-        registerReviewEventSession(session, for: run)
-        return session
+        guard let activeReview = activeReviewSessionsByAttemptID[attempt.attemptID],
+              activeReview.attempt == attempt else {
+            return .failed(.protocolViolation(
+                message: "Output publication requires the active SDK review session."
+            ))
+        }
+        let chat = activeReview.chat
+        do {
+            try await modelContext.refresh(chat, includeTurns: true)
+        } catch {
+            return .failed(.outputPublication(.refreshFailed(
+                turnID: candidate.turnID,
+                message: error.localizedDescription
+            )))
+        }
+
+        let turnID = CodexTurnID(rawValue: candidate.turnID.rawValue)
+        guard chat.turn(id: turnID) != nil else {
+            return .failed(.outputPublication(.unavailable(turnID: candidate.turnID)))
+        }
+        guard let rawOutput = chat.transcript(in: turnID).reviewOutputText else {
+            return .failed(.outputPublication(.empty(turnID: candidate.turnID)))
+        }
+        guard let projectedOutput = try? NonEmptyReviewOutput(validating: rawOutput) else {
+            return .failed(.outputPublication(.empty(turnID: candidate.turnID)))
+        }
+        guard projectedOutput == candidate.expectedOutput else {
+            return .failed(.outputPublication(.mismatched(turnID: candidate.turnID)))
+        }
+        return .completed(.init(finalReview: projectedOutput))
     }
 
-    private func registerReviewEventSession(
-        _ session: AppServerReviewEventSession,
-        for run: CodexReviewBackendModel.Review.Run
-    ) {
-        reviewEventSessionsByAttemptID[run.attemptID] = session
-        let activeThreadIDs = Set(run.appServerAssociatedThreadIDs)
-        for threadID in activeThreadIDsByAttemptID[run.attemptID] ?? []
-        where activeThreadIDs.contains(threadID) == false {
-            if activeReviewAttemptIDByThreadID[threadID] == run.attemptID {
-                activeReviewAttemptIDByThreadID.removeValue(forKey: threadID)
+    private func discardInvalidlyIdentifiedReview(
+        _ session: CodexReviewSession
+    ) async {
+        await Task { [appServer] in
+            do {
+                _ = try await session.cancel()
+            } catch {
+                appServerBackendLogger.error(
+                    "Failed to cancel a review with invalid identity before cleanup: \(error.localizedDescription, privacy: .public)"
+                )
             }
-        }
-        activeThreadIDsByAttemptID[run.attemptID] = activeThreadIDs
-        for threadID in activeThreadIDs {
-            activeReviewAttemptIDByThreadID[threadID] = run.attemptID
-        }
-        reviewEventSessionCanonicalThreadIDByThreadID[run.threadID] = run.threadID
-        if let reviewThreadID = run.reviewThreadID,
-            reviewThreadID != run.threadID
-        {
-            reviewEventSessionCanonicalThreadIDByThreadID[reviewThreadID] = run.threadID
+            await appServer.cleanupReview(session.identity)
+        }.value
+    }
+
+    private func performReviewOperation<T>(
+        _ operation: ReviewBackendOperationFailure.Operation,
+        _ body: () async throws -> T
+    ) async throws -> T {
+        do {
+            return try await body()
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let failure as ReviewBackendFailure {
+            throw failure
+        } catch let error as CodexAppServerError {
+            throw AppServerReviewOperationFailureMapper.failure(error, operation: operation)
+        } catch {
+            appServerBackendLogger.error(
+                "Unexpected review operation failure type \(String(reflecting: type(of: error)), privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+            throw ReviewBackendFailure.protocolViolation(
+                message: "Unexpected review operation failure: \(error.localizedDescription)"
+            )
         }
     }
 
-    private func reviewEventSession(forThreadID threadID: String) -> AppServerReviewEventSession? {
-        let canonicalThreadID = reviewEventSessionCanonicalThreadIDByThreadID[threadID] ?? threadID
-        let attemptID: String?
-        if let directAttemptID = activeReviewAttemptIDByThreadID[threadID] {
-            attemptID = directAttemptID
-        } else if canonicalThreadID == threadID {
-            attemptID = activeReviewAttemptIDByThreadID[canonicalThreadID]
-        } else {
-            attemptID = nil
-        }
-        guard let attemptID else { return nil }
-        return reviewEventSessionsByAttemptID[attemptID]
+    private nonisolated static func reviewAttempt(
+        for session: CodexReviewSession,
+        attemptID: String,
+        sourceThreadID: String? = nil,
+        fallbackModel: String?
+    ) throws -> ReviewAttempt {
+        try ReviewAttempt(
+            validatingAttemptID: attemptID,
+            sourceThreadID: sourceThreadID ?? session.sourceThreadID.rawValue,
+            activeTurnThreadID: session.activeTurnThreadID.rawValue,
+            turnID: session.turnID.rawValue,
+            model: session.model ?? fallbackModel
+        )
     }
 
-    private func unregisterReviewEventSession(for run: CodexReviewBackendModel.Review.Run)
-        -> AppServerReviewEventSession?
-    {
-        let threadIDs =
-            activeThreadIDsByAttemptID.removeValue(forKey: run.attemptID)
-            ?? Set(run.appServerAssociatedThreadIDs)
-        for threadID in threadIDs {
-            if activeReviewAttemptIDByThreadID[threadID] == run.attemptID {
-                activeReviewAttemptIDByThreadID.removeValue(forKey: threadID)
-            }
-        }
-        return reviewEventSessionsByAttemptID.removeValue(forKey: run.attemptID)
+    private nonisolated static func reviewAttempt(
+        for identity: CodexReviewIdentity,
+        attemptID: String,
+        fallbackModel: String?
+    ) throws -> ReviewAttempt {
+        try ReviewAttempt(
+            validatingAttemptID: attemptID,
+            sourceThreadID: identity.sourceThreadID.rawValue,
+            activeTurnThreadID: identity.activeTurnThreadID.rawValue,
+            turnID: identity.turnID.rawValue,
+            model: identity.model ?? fallbackModel
+        )
     }
 
-    private func markAttemptAbandoned(_ run: CodexReviewBackendModel.Review.Run) {
-        abandonedReviewAttemptIDs.insert(run.attemptID)
+    private func markAttemptAbandoned(_ attempt: ReviewAttempt) {
+        abandonedReviewAttemptIDs.insert(attempt.attemptID)
     }
 
-    private func markRestartInFlight(forInterrupted run: CodexReviewBackendModel.Review.Run) {
-        inFlightRestartCountByInterruptedAttemptID[run.attemptID, default: 0] += 1
+    private func markRestartInFlight(forInterrupted attempt: ReviewAttempt) {
+        inFlightRestartCountByInterruptedAttemptID[attempt.attemptID, default: 0] += 1
     }
 
-    private func clearRestartInFlight(forInterrupted run: CodexReviewBackendModel.Review.Run) {
-        let count = inFlightRestartCountByInterruptedAttemptID[run.attemptID, default: 0]
+    private func clearRestartInFlight(forInterrupted attempt: ReviewAttempt) {
+        let count = inFlightRestartCountByInterruptedAttemptID[attempt.attemptID, default: 0]
         if count <= 1 {
-            inFlightRestartCountByInterruptedAttemptID.removeValue(forKey: run.attemptID)
+            inFlightRestartCountByInterruptedAttemptID.removeValue(forKey: attempt.attemptID)
         } else {
-            inFlightRestartCountByInterruptedAttemptID[run.attemptID] = count - 1
+            inFlightRestartCountByInterruptedAttemptID[attempt.attemptID] = count - 1
         }
     }
 
-    private func isRestartInFlight(forInterrupted run: CodexReviewBackendModel.Review.Run) -> Bool {
-        inFlightRestartCountByInterruptedAttemptID[run.attemptID] != nil
+    private func isRestartInFlight(forInterrupted attempt: ReviewAttempt) -> Bool {
+        inFlightRestartCountByInterruptedAttemptID[attempt.attemptID] != nil
     }
 
-    private func activeReviewRunsForShutdown() async -> [CodexReviewBackendModel.Review.Run] {
-        let sessions = Array(reviewEventSessionsByAttemptID.values)
-        var runsByAttemptID: [String: CodexReviewBackendModel.Review.Run] = [:]
-        for session in sessions {
-            let run = await session.currentRun()
-            runsByAttemptID[run.attemptID] = run
-        }
-        return Array(runsByAttemptID.values)
+    private func activeReviewAttemptsForShutdown() async -> [ReviewAttempt] {
+        activeReviewSessionsByAttemptID.values.map(\.attempt)
     }
 
     private func cancelReviewTurn(
-        for run: CodexReviewBackendModel.Review.Run
+        for attempt: ReviewAttempt
     ) async throws -> CodexTurnCancellation {
-        guard let identity = run.appServerReviewIdentity else {
-            throw CodexReviewAPI.Error.io("Review run has no cancellable app-server turn.")
-        }
-        if let session = reviewEventSessionsByAttemptID[run.attemptID],
-            let cancellation = try await session.cancelReview(
-                expectedTurnID: identity.turnID.rawValue
+        guard let activeReview = activeReviewSessionsByAttemptID[attempt.attemptID],
+              activeReview.attempt == attempt else {
+            throw ReviewBackendFailure.protocolViolation(
+                message: "Interrupt requires the active SDK review session for its attempt."
             )
-        {
-            return cancellation
         }
-        let review = try await appServer.resumeReview(
-            identity,
-            threadOptions: reviewThreadOptions(model: run.model)
-        )
-        return try await review.cancel()
-    }
-
-    private func localCleanupThreadIDs(
-        for run: CodexReviewBackendModel.Review.Run,
-        additional: [String]
-    ) -> [String] {
-        let sourceThreadID = run.threadID
-        var seen: Set<String> = []
-        var threadIDs: [String] = []
-        for sequence in [run.appServerCleanupThreadIDs, additional] {
-            for threadID in sequence where threadID != sourceThreadID && seen.insert(threadID).inserted {
-                threadIDs.append(threadID)
-            }
-        }
-        if seen.insert(sourceThreadID).inserted {
-            threadIDs.append(sourceThreadID)
-        }
-        return threadIDs
+        return try await activeReview.session.cancel()
     }
 
     private func cleanupAppServerReview(
-        _ run: CodexReviewBackendModel.Review.Run,
-        additionalCleanupThreadIDs: [String]
+        _ attempt: ReviewAttempt
     ) async {
-        guard let identity = run.appServerReviewIdentity else {
-            for threadID in localCleanupThreadIDs(for: run, additional: additionalCleanupThreadIDs) {
-                try? await appServer.deleteThread(.init(rawValue: threadID))
-            }
-            return
-        }
-        await appServer.cleanupReview(
-            identity,
-            additionalCleanupThreadIDs: [additionalCleanupThreadIDs.map(CodexThreadID.init(rawValue:))]
-        )
+        await appServer.cleanupReview(attempt.appServerReviewIdentity)
     }
 
 }
 
-private enum AppServerTypedReviewEventAdapter {
-    static func started(
-        review: CodexReviewSession,
-        run: CodexReviewBackendModel.Review.Run
-    ) -> CodexReviewBackendModel.Review.Event {
-        .started(
-            turnID: review.turnID.rawValue,
-            reviewThreadID: review.reviewThreadID.rawValue,
-            model: run.model
-        )
-    }
-
-    static func convert(
-        _ outcome: CodexTurnOutcome
-    ) -> CodexReviewBackendModel.Review.Event {
+enum AppServerReviewTerminalMapper {
+    static func observed(
+        _ outcome: CodexTurnOutcome,
+        expectedAttempt: ReviewAttempt
+    ) -> ReviewBackendObservedTerminal {
+        guard let turnID = try? ReviewTurnID(validating: outcome.response.turnID.rawValue) else {
+            return .failed(.protocolViolation(message: "Review terminal has an empty turn ID."))
+        }
+        guard turnID == expectedAttempt.turnID else {
+            return .failed(.protocolViolation(
+                message: "Review terminal turn does not match its attempt."
+            ))
+        }
         switch outcome {
         case .completed(let response):
-            guard let finalReview = response.transcript.reviewOutputText?.nilIfEmpty else {
-                return .failed(.missingReviewOutput(turnID: response.turnID.rawValue))
+            guard let rawOutput = response.transcript.reviewOutputText,
+                  let output = try? NonEmptyReviewOutput(validating: rawOutput) else {
+                return .failed(.missingReviewOutput(turnID: turnID))
             }
-            return .completed(finalReview: finalReview)
+            return .completed(.init(turnID: turnID, expectedOutput: output))
         case .interrupted:
             return .interrupted(message: nil)
         case .failed(let failedTurn):
-            return .failed(.turnFailed(map(failedTurn.error)))
-        case .invalidTerminalStatus(let rawStatus, let error, let response):
+            return .failed(.turnFailed(turnFailure(failedTurn.error)))
+        case .invalidTerminalStatus(let rawStatus, let error, _):
             return .failed(
                 .invalidTerminalStatus(
                     rawStatus: rawStatus,
-                    turnID: response.turnID.rawValue,
-                    turnFailure: error.map(map)
+                    turnID: turnID,
+                    turnFailure: error.map(turnFailure)
                 )
             )
         }
     }
 
-    private static func map(_ error: CodexTurnError) -> ReviewTurnFailure {
+    static func failure(_ error: any Error) -> ReviewBackendFailure {
+        if let failure = error as? ReviewBackendFailure {
+            return failure
+        }
+        guard let appServerError = error as? CodexAppServerError else {
+            appServerBackendLogger.error(
+                "Unexpected review terminal failure type \(String(reflecting: type(of: error)), privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+            return .protocolViolation(
+                message: "Unexpected review terminal failure: \(error.localizedDescription)"
+            )
+        }
+        switch appServerError {
+        case .connectionTerminated(let termination):
+            return .connectionTerminated(AppServerReviewOperationFailureMapper.connectionTermination(termination))
+        case .malformedNotification(let malformed):
+            return .protocolViolation(message: malformed.localizedDescription)
+        case .turnDeadlineExceeded(let turnID, let duration):
+            return .protocolViolation(
+                message: "Unexpected terminal collection deadline for turn \(turnID.rawValue): \(duration)"
+            )
+        case .launch, .request, .reviewRestartUnavailable, .loginAlreadyInProgress:
+            return .protocolViolation(
+                message: "Unexpected terminal collection failure: \(appServerError.localizedDescription)"
+            )
+        }
+    }
+
+    static func turnFailure(_ error: CodexTurnError) -> ReviewTurnFailure {
         .init(
             message: error.message,
-            code: error.info.map(map),
+            code: error.info.map(turnFailureCode),
             additionalDetails: error.additionalDetails
         )
     }
 
-    private static func map(_ info: CodexErrorInfo) -> ReviewTurnFailure.Code {
+    private static func turnFailureCode(_ info: CodexErrorInfo) -> ReviewTurnFailure.Code {
         switch info {
         case .contextWindowExceeded:
             .contextWindowExceeded
@@ -546,155 +677,111 @@ private enum AppServerTypedReviewEventAdapter {
     }
 }
 
-private actor AppServerReviewEventSession {
-    private let pipeline: ReviewBackendEventSession
-    private var terminalCollectionTask: Task<Void, Never>?
-    private var reviewSession: CodexReviewSession?
-
-    init(
-        run: CodexReviewBackendModel.Review.Run,
-        mailbox: BackendReviewEventMailbox = .init()
-    ) {
-        self.pipeline = ReviewBackendEventSession(
-            run: run,
-            mailbox: mailbox,
-            callbacks: .init(
-                recordFinished: { run, metrics in
-                    appServerBackendLogger.debug(
-                        "Review event session finished for \(run.threadID, privacy: .public): emitted=\(metrics.emitted, privacy: .public) buffered=\(metrics.buffered, privacy: .public) ignored=\(metrics.ignored, privacy: .public) timeoutWarnings=\(metrics.commandTimeoutWarnings, privacy: .public)"
-                    )
-                }
+private enum AppServerReviewOperationFailureMapper {
+    static func failure(
+        _ error: CodexAppServerError,
+        operation: ReviewBackendOperationFailure.Operation
+    ) -> ReviewBackendFailure {
+        let reason: ReviewBackendOperationFailure.Reason
+        switch error {
+        case .launch(let failure):
+            reason = .launch(launchKind(failure))
+        case .request(let failure):
+            reason = .request(
+                requestID: failure.requestID,
+                method: failure.method,
+                kind: requestKind(failure.kind)
             )
-        )
-    }
-
-    func updateRun(_ run: CodexReviewBackendModel.Review.Run) async {
-        await pipeline.updateRun(run)
-    }
-
-    func currentRun() async -> CodexReviewBackendModel.Review.Run {
-        await pipeline.currentRun()
-    }
-
-    func attempt() async -> BackendReviewAttempt {
-        await pipeline.attempt()
-    }
-
-    func cleanupThreadIDs() async -> [String] {
-        await pipeline.cleanupThreadIDs()
-    }
-
-    func finish() async {
-        cancelTerminalCollection()
-        await pipeline.finish(throwing: nil)
-    }
-
-    func finish(throwing error: (any Error)?) async {
-        cancelTerminalCollection()
-        await pipeline.finish(throwing: error)
-    }
-
-    func abandon() async {
-        cancelTerminalCollection()
-        await pipeline.abandon()
-    }
-
-    func metricsSnapshot() async -> ReviewBackendEventSessionMetrics {
-        await pipeline.metricsSnapshot()
-    }
-
-    func activeStreamSubscriptionIDForTesting() -> Int? {
-        nil
-    }
-
-    func detach(subscriptionID _: Int) {}
-
-    func startConsuming(_ review: CodexReviewSession) {
-        guard terminalCollectionTask == nil else {
-            return
-        }
-        reviewSession = review
-        terminalCollectionTask = Task { [weak self] in
-            await self?.consume(review)
-        }
-    }
-
-    func cancelReview(
-        expectedTurnID _: String
-    ) async throws -> CodexTurnCancellation? {
-        guard let reviewSession else {
-            return nil
-        }
-        return try await reviewSession.cancel()
-    }
-
-    private func consume(_ review: CodexReviewSession) async {
-        defer {
-            terminalCollectionTask = nil
-            if reviewSession?.id == review.id {
-                reviewSession = nil
+        case .connectionTerminated(let termination):
+            reason = .connectionTerminated(connectionTermination(termination))
+        case .turnDeadlineExceeded(let turnID, let duration):
+            guard let reviewTurnID = try? ReviewTurnID(validating: turnID.rawValue) else {
+                return .protocolViolation(message: "Review operation deadline has an empty turn ID.")
             }
-        }
-        let run = await pipeline.currentRun()
-        await receive(
-            AppServerTypedReviewEventAdapter.started(review: review, run: run),
-            controlThreadID: review.reviewThreadID.rawValue
-        )
-        do {
-            let outcome = try await review.collect()
-            await receive(
-                AppServerTypedReviewEventAdapter.convert(outcome),
-                controlThreadID: review.reviewThreadID.rawValue
+            reason = .turnDeadlineExceeded(turnID: reviewTurnID, duration: duration)
+        case .malformedNotification(let malformed):
+            reason = .malformedNotification(method: malformed.method)
+        case .reviewRestartUnavailable:
+            reason = .reviewRestartUnavailable
+        case .loginAlreadyInProgress:
+            return .protocolViolation(
+                message: "A review operation unexpectedly reported an authentication conflict."
             )
-        } catch is CancellationError {
-            await finish(throwing: CancellationError())
-        } catch {
-            await finish(throwing: error)
+        }
+        return .operation(.init(
+            operation: operation,
+            reason: reason,
+            message: error.localizedDescription
+        ))
+    }
+
+    static func connectionTermination(
+        _ termination: CodexConnectionTermination
+    ) -> ReviewBackendConnectionTermination {
+        switch termination {
+        case .closedByCaller:
+            .closed
+        case .transportFailure(let failure):
+            .transport(message: failure.localizedDescription)
+        case .processExited(let status):
+            .processExited(status: status)
         }
     }
 
-    private func receive(
-        _ event: CodexReviewBackendModel.Review.Event,
-        controlThreadID: String
-    ) async {
-        await pipeline.receive([event], controlThreadID: controlThreadID)
+    private static func launchKind(
+        _ failure: CodexLaunchFailure
+    ) -> ReviewBackendOperationFailure.LaunchKind {
+        switch failure {
+        case .executableNotFound:
+            .executableNotFound
+        case .scaffold:
+            .scaffold
+        case .spawn:
+            .spawn
+        }
     }
 
-    private func cancelTerminalCollection() {
-        terminalCollectionTask?.cancel()
-        terminalCollectionTask = nil
-        reviewSession = nil
+    private static func requestKind(
+        _ kind: CodexRequestFailure.Kind
+    ) -> ReviewBackendOperationFailure.RequestKind {
+        switch kind {
+        case .encode:
+            .encode
+        case .write:
+            .write
+        case .transport:
+            .transport
+        case .server(let error):
+            .server(
+                code: error.code,
+                turnFailure: error.turnError.map(AppServerReviewTerminalMapper.turnFailure)
+            )
+        case .invalidResponse(let expectedType, _, _):
+            .invalidResponse(expectedType: expectedType)
+        case .deadlineExceeded:
+            .deadlineExceeded
+        case .overloadRetryExhausted(let last, let attempts):
+            .overloadRetryExhausted(
+                lastCode: last.code,
+                lastTurnFailure: last.turnError.map(AppServerReviewTerminalMapper.turnFailure),
+                attempts: attempts
+            )
+        }
     }
 }
 
-private extension CodexReviewBackendModel.Review.Run {
-    var appServerReviewIdentity: CodexReviewIdentity? {
-        guard let turnID = turnID?.nilIfEmpty else {
-            return nil
-        }
-        let sourceThreadID = CodexThreadID(rawValue: threadID)
-        let reviewThreadID = reviewThreadID?.nilIfEmpty.map(CodexThreadID.init(rawValue:))
+private extension ReviewAttempt {
+    var appServerReviewIdentity: CodexReviewIdentity {
+        let sourceThreadID = CodexThreadID(rawValue: threadIdentity.sourceThreadID.rawValue)
+        let activeTurnThreadID = CodexThreadID(rawValue: threadIdentity.activeTurnThreadID.rawValue)
         return CodexReviewIdentity(
             threadID: sourceThreadID,
-            turnID: .init(rawValue: turnID),
-            reviewThreadID: reviewThreadID == sourceThreadID ? nil : reviewThreadID,
+            turnID: .init(rawValue: turnID.rawValue),
+            reviewThreadID: activeTurnThreadID == sourceThreadID ? nil : activeTurnThreadID,
             model: model
         )
     }
 
-    var appServerAssociatedThreadIDs: [String] {
-        if let identity = appServerReviewIdentity {
-            return identity.associatedThreadIDs.map(\.rawValue)
-        }
-        return [threadID]
-    }
-
-    var appServerCleanupThreadIDs: [String] {
-        if let identity = appServerReviewIdentity {
-            return identity.cleanupThreadIDs.map(\.rawValue)
-        }
-        return [threadID]
-    }
 }
 
 private extension CodexAppServerKit.CodexAccount {

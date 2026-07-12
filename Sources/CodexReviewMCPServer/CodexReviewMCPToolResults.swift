@@ -11,11 +11,11 @@ func toolResult(response: CodexReviewMCP.Tool.Response) throws -> CallTool.Resul
         .reviewAwait(let snapshot):
         value = snapshot.result.structuredContentForStartOrAwait(log: snapshot.log)
         text = snapshot.result.textContentForStartOrAwait(log: snapshot.log)
-        isError = snapshot.result.core.lifecycle.status == .failed
+        isError = snapshot.result.presentation.status == .failed
     case .reviewRead(let snapshot):
         value = snapshot.result.structuredContentForRead(log: snapshot.log)
         text = snapshot.result.textContentForRead(log: snapshot.log)
-        isError = snapshot.result.core.lifecycle.status == .failed
+        isError = snapshot.result.presentation.status == .failed
     case .reviewList(let result):
         value = result.structuredContent()
         text = "Listed \(result.items.count) review run(s)."
@@ -34,27 +34,27 @@ func toolResult(response: CodexReviewMCP.Tool.Response) throws -> CallTool.Resul
 
 private extension CodexReviewAPI.Read.Result {
     func textContent(log: ReviewMCPLogProjection) -> String {
-        log.finalResult?.nilIfEmpty ?? core.finalReview ?? core.displayLifecycleMessage
+        log.finalResult?.nilIfEmpty ?? presentation.lifecycle.message
     }
 
     func textContentForStartOrAwait(log: ReviewMCPLogProjection) -> String {
-        if core.lifecycle.status.isTerminal {
+        if presentation.status.isTerminal {
             return textContent(log: log)
         }
 
-        var status = "Review \(core.lifecycle.status.rawValue)"
+        var status = "Review \(presentation.status.rawValue)"
         if let elapsedSeconds {
             status += " for \(elapsedSeconds)s"
         }
-        return "\(status). runId: \(runID). Call `review_await` with this runId to continue waiting."
+        return "\(status). runId: \(runID.rawValue). Call `review_await` with this runId to continue waiting."
     }
 
     func textContentForRead(log: ReviewMCPLogProjection) -> String {
-        if core.lifecycle.status.isTerminal {
+        if presentation.status.isTerminal {
             return textContent(log: log)
         }
 
-        var status = "Review \(core.lifecycle.status.rawValue)"
+        var status = "Review \(presentation.status.rawValue)"
         if let elapsedSeconds {
             status += " for \(elapsedSeconds)s"
         }
@@ -65,7 +65,7 @@ private extension CodexReviewAPI.Read.Result {
         structuredContent(
             includeLog: true,
             includeDetails: false,
-            includeNextAction: core.lifecycle.status.isTerminal == false,
+            includeNextAction: presentation.status.isTerminal == false,
             log: log
         )
     }
@@ -86,14 +86,15 @@ private extension CodexReviewAPI.Read.Result {
         log: ReviewMCPLogProjection
     ) -> Value {
         var object: [String: Value] = [
-            "runId": .string(runID),
-            "run": core.run.structuredContent(),
-            "lifecycle": core.structuredLifecycleContent(
+            "runId": .string(runID.rawValue),
+            "run": core.structuredRunContent(),
+            "lifecycle": presentation.structuredLifecycleContent(
+                core: core,
                 elapsedSeconds: elapsedSeconds,
-                cancellable: cancellable
+                cancellable: presentation.isCancellable
             ),
             "review": core.structuredReviewContent(
-                resolvedFinalReview: log.finalResult?.nilIfEmpty ?? core.finalReview
+                resolvedFinalReview: log.finalResult
             ),
         ]
         if includeLog {
@@ -105,7 +106,7 @@ private extension CodexReviewAPI.Read.Result {
         if includeNextAction {
             object["nextAction"] = .object([
                 "tool": .string(CodexReviewMCP.Tool.Name.reviewAwait.rawValue),
-                "runId": .string(runID),
+                "runId": .string(runID.rawValue),
             ])
         }
         return .object(object)
@@ -203,7 +204,7 @@ private extension ReviewMCPLogProjection {
 
 private extension ReviewMCPLogProjection.Item {
     func structuredContent() -> Value {
-        .object([
+        return .object([
             "id": .string(id),
             "kind": .string(kind),
             "content": content.structuredContent(),
@@ -349,13 +350,14 @@ private extension String {
 private extension CodexReviewAPI.Run.ListItem {
     func structuredContent() -> Value {
         .object([
-            "runId": .string(runID),
+            "runId": .string(runID.rawValue),
             "cwd": .string(cwd),
             "targetSummary": .string(targetSummary),
-            "run": core.run.structuredContent(),
-            "lifecycle": core.structuredLifecycleContent(
+            "run": core.structuredRunContent(),
+            "lifecycle": presentation.structuredLifecycleContent(
+                core: core,
                 elapsedSeconds: elapsedSeconds,
-                cancellable: cancellable
+                cancellable: presentation.isCancellable
             ),
             "review": core.structuredReviewContent(),
         ])
@@ -373,55 +375,72 @@ private extension CodexReviewAPI.List.Result {
 private extension CodexReviewAPI.Cancel.Outcome {
     func textContent() -> String {
         if cancelled {
-            core.lifecycle.cancellation?.message ?? "Review cancelled."
+            presentation.cancellation?.message ?? "Review cancelled."
         } else {
             "Review was already finished."
         }
     }
 
     func structuredContent() -> Value {
-        .object([
-            "runId": .string(runID),
+        return .object([
+            "runId": .string(runID.rawValue),
             "cancelled": .bool(cancelled),
-            "run": core.run.structuredContent(),
-            "lifecycle": core.structuredLifecycleContent(
+            "run": core.structuredRunContent(),
+            "lifecycle": presentation.structuredLifecycleContent(
+                core: core,
                 elapsedSeconds: nil,
-                cancellable: false
+                cancellable: presentation.isCancellable
             ),
             "review": core.structuredReviewContent(),
         ])
     }
 }
 
-private extension ReviewRunCore.Run {
+private extension ReviewAttempt {
     func structuredContent() -> Value {
         .object([
-            "reviewThreadId": reviewThreadID.map(Value.string) ?? .null,
-            "threadId": threadID.map(Value.string) ?? .null,
-            "turnId": turnID.map(Value.string) ?? .null,
+            "attemptId": .string(attemptID.rawValue),
+            "reviewThreadId": .string(threadIdentity.activeTurnThreadID.rawValue),
+            "threadId": .string(threadIdentity.sourceThreadID.rawValue),
+            "turnId": .string(turnID.rawValue),
             "model": model.map(Value.string) ?? .null,
         ])
     }
 }
 
-private extension ReviewRunCore.Lifecycle {
+private extension ReviewRunPresentation {
     func structuredContent(
+        core: ReviewRunCore,
         elapsedSeconds: Int?,
-        cancellable: Bool,
-        message: String
+        cancellable: Bool
     ) -> Value {
-        .object([
+        let failure: ReviewBackendFailure?
+        let cancellation: ReviewCancellation?
+        switch lifecycle {
+        case .failed(let value):
+            failure = value
+            cancellation = nil
+        case .cancelling(let value), .cancelled(let value):
+            failure = nil
+            cancellation = value
+        case .queued, .starting, .running, .waitingForNetwork, .preparingRestart,
+            .restarting, .succeeded:
+            failure = nil
+            cancellation = nil
+        }
+        var object: [String: Value] = [
             "status": .string(status.rawValue),
-            "message": .string(message),
-            "exitCode": exitCode.map(Value.int) ?? .null,
-            "startedAt": startedAt.map { .string($0.ISO8601Format()) } ?? .null,
-            "endedAt": endedAt.map { .string($0.ISO8601Format()) } ?? .null,
+            "message": .string(lifecycle.message),
+            "exitCode": .null,
+            "startedAt": core.startedAt.map { .string($0.ISO8601Format()) } ?? .null,
+            "endedAt": core.endedAt.map { .string($0.ISO8601Format()) } ?? .null,
             "elapsedSeconds": elapsedSeconds.map(Value.int) ?? .null,
             "cancellable": .bool(cancellable),
-            "cancellation": cancellation.map { $0.structuredContent() } ?? .null,
-            "errorMessage": errorMessage.map(Value.string) ?? .null,
-            "failure": failure.map { $0.structuredContent() } ?? .null,
-        ])
+        ]
+        object["cancellation"] = cancellation.map { $0.structuredContent() } ?? .null
+        object["errorMessage"] = failure.map { .string($0.message) } ?? .null
+        object["failure"] = failure.map { $0.structuredContent() } ?? .null
+        return .object(object)
     }
 }
 
@@ -431,15 +450,19 @@ private extension ReviewBackendFailure {
             "message": .string(message),
         ]
         switch self {
-        case .message:
-            object["kind"] = .string("message")
+        case .operation(let failure):
+            object["kind"] = .string("operation")
+            object["operation"] = failure.structuredContent()
         case .missingReviewOutput(let turnID):
             object["kind"] = .string("missingReviewOutput")
-            object["turnId"] = .string(turnID)
+            object["turnId"] = .string(turnID.rawValue)
+        case .outputPublication(let failure):
+            object["kind"] = .string("outputPublication")
+            object["outputPublication"] = failure.structuredContent()
         case .invalidTerminalStatus(let rawStatus, let turnID, let turnFailure):
             object["kind"] = .string("invalidTerminalStatus")
             object["rawStatus"] = .string(rawStatus)
-            object["turnId"] = .string(turnID)
+            object["turnId"] = .string(turnID.rawValue)
             object["turnFailure"] = turnFailure.map { $0.structuredContent() } ?? .null
         case .turnFailed(let turnFailure):
             object["kind"] = .string("turnFailed")
@@ -447,8 +470,129 @@ private extension ReviewBackendFailure {
         case .interruptedByBackend(let backendMessage):
             object["kind"] = .string("interruptedByBackend")
             object["backendMessage"] = backendMessage.map(Value.string) ?? .null
+        case .connectionTerminated(let termination):
+            object["kind"] = .string("connectionTerminated")
+            object["connectionTermination"] = termination.structuredContent()
+        case .retentionJournal:
+            object["kind"] = .string("retentionJournal")
+        case .connectivityObservationEnded:
+            object["kind"] = .string("connectivityObservationEnded")
+        case .prepareRestartCancelledUnexpectedly:
+            object["kind"] = .string("prepareRestartCancelledUnexpectedly")
+        case .restartCancelledUnexpectedly:
+            object["kind"] = .string("restartCancelledUnexpectedly")
+        case .protocolViolation:
+            object["kind"] = .string("protocolViolation")
         }
         return .object(object)
+    }
+}
+
+private extension ReviewBackendOperationFailure {
+    func structuredContent() -> Value {
+        .object([
+            "operation": .string(operation.rawValue),
+            "message": .string(message),
+            "reason": reason.structuredContent(),
+        ])
+    }
+}
+
+private extension ReviewBackendOperationFailure.Reason {
+    func structuredContent() -> Value {
+        var object: [String: Value] = [:]
+        switch self {
+        case .launch(let kind):
+            object["kind"] = .string("launch")
+            object["launchKind"] = .string(kind.rawValue)
+        case .request(let requestID, let method, let kind):
+            object["kind"] = .string("request")
+            object["requestId"] = .int(requestID)
+            object["method"] = .string(method)
+            object["requestFailure"] = kind.structuredContent()
+        case .connectionTerminated(let termination):
+            object["kind"] = .string("connectionTerminated")
+            object["connectionTermination"] = termination.structuredContent()
+        case .turnDeadlineExceeded(let turnID, let duration):
+            object["kind"] = .string("turnDeadlineExceeded")
+            object["turnId"] = .string(turnID.rawValue)
+            object["duration"] = .string(String(describing: duration))
+        case .malformedNotification(let method):
+            object["kind"] = .string("malformedNotification")
+            object["method"] = .string(method)
+        case .reviewRestartUnavailable:
+            object["kind"] = .string("reviewRestartUnavailable")
+        }
+        return .object(object)
+    }
+}
+
+private extension ReviewBackendOperationFailure.RequestKind {
+    func structuredContent() -> Value {
+        var object: [String: Value] = [:]
+        switch self {
+        case .encode:
+            object["kind"] = .string("encode")
+        case .write:
+            object["kind"] = .string("write")
+        case .transport:
+            object["kind"] = .string("transport")
+        case .server(let code, let turnFailure):
+            object["kind"] = .string("server")
+            object["code"] = .int(code)
+            object["turnFailure"] = turnFailure.map { $0.structuredContent() } ?? .null
+        case .invalidResponse(let expectedType):
+            object["kind"] = .string("invalidResponse")
+            object["expectedType"] = .string(expectedType)
+        case .deadlineExceeded:
+            object["kind"] = .string("deadlineExceeded")
+        case .overloadRetryExhausted(let lastCode, let lastTurnFailure, let attempts):
+            object["kind"] = .string("overloadRetryExhausted")
+            object["lastCode"] = .int(lastCode)
+            object["lastTurnFailure"] = lastTurnFailure.map { $0.structuredContent() } ?? .null
+            object["attempts"] = .int(attempts)
+        }
+        return .object(object)
+    }
+}
+
+private extension ReviewOutputPublicationFailure {
+    func structuredContent() -> Value {
+        var object: [String: Value] = ["message": .string(message)]
+        switch self {
+        case .refreshFailed(let turnID, _):
+            object["kind"] = .string("refreshFailed")
+            object["turnId"] = .string(turnID.rawValue)
+        case .unavailable(let turnID):
+            object["kind"] = .string("unavailable")
+            object["turnId"] = .string(turnID.rawValue)
+        case .empty(let turnID):
+            object["kind"] = .string("empty")
+            object["turnId"] = .string(turnID.rawValue)
+        case .mismatched(let turnID):
+            object["kind"] = .string("mismatched")
+            object["turnId"] = .string(turnID.rawValue)
+        }
+        return .object(object)
+    }
+}
+
+private extension ReviewBackendConnectionTermination {
+    func structuredContent() -> Value {
+        switch self {
+        case .closed:
+            .object(["kind": .string("closed")])
+        case .transport(let message):
+            .object([
+                "kind": .string("transport"),
+                "message": .string(message),
+            ])
+        case .processExited(let status):
+            .object([
+                "kind": .string("processExited"),
+                "status": status.map { .int(Int($0)) } ?? .null,
+            ])
+        }
     }
 }
 
@@ -512,26 +656,51 @@ private extension ReviewTurnFailure.Code {
 }
 
 private extension ReviewRunCore {
-    var displayLifecycleMessage: String {
-        lifecycle.errorMessage?.nilIfEmpty ?? lifecycleMessage.nilIfEmpty ?? lifecycle.status.rawValue
+    func structuredRunContent() -> Value {
+        attempt?.structuredContent()
+            ?? .object([
+                "attemptId": .null,
+                "reviewThreadId": .null,
+                "threadId": .null,
+                "turnId": .null,
+                "model": .null,
+            ])
+    }
+
+}
+
+private extension ReviewRunPresentation {
+    var cancellation: ReviewCancellation? {
+        switch lifecycle {
+        case .cancelling(let cancellation), .cancelled(let cancellation):
+            cancellation
+        case .queued, .starting, .running, .waitingForNetwork, .preparingRestart,
+            .restarting, .succeeded, .failed:
+            nil
+        }
     }
 
     func structuredLifecycleContent(
+        core: ReviewRunCore,
         elapsedSeconds: Int?,
         cancellable: Bool
     ) -> Value {
-        lifecycle.structuredContent(
+        structuredContent(
+            core: core,
             elapsedSeconds: elapsedSeconds,
-            cancellable: cancellable,
-            message: displayLifecycleMessage
+            cancellable: cancellable
         )
     }
+}
 
+private extension ReviewRunCore {
     // The run record is not the transcript's source of truth; read paths that
     // hold a log projection pass the resolved final review so structured
     // fields match the text content.
     func structuredReviewContent(resolvedFinalReview: String? = nil) -> Value {
-        let finalReview = (resolvedFinalReview ?? self.finalReview)?.nilIfEmpty
+        let finalReview = resolvedFinalReview.flatMap { value -> String? in
+            value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : value
+        }
         return .object([
             "hasFinalReview": .bool(finalReview != nil),
             "finalReview": finalReview.map(Value.string) ?? .null,

@@ -27,8 +27,8 @@ func makeReviewMonitorPreviewContentViewControllerForPreview(
     return rootViewController
 }
 
-struct ReviewChatLogEntryForTesting: Sendable, Hashable {
-    enum Kind: String, Sendable, Hashable {
+struct ReviewChatLogEntryForTesting: Sendable {
+    enum Kind: String, Sendable {
         case command
         case commandOutput
         case fileChange
@@ -46,10 +46,10 @@ struct ReviewChatLogEntryForTesting: Sendable, Hashable {
         case event
     }
 
-    struct Metadata: Sendable, Hashable {
+    struct Metadata: Sendable {
         var sourceType: String?
         var title: String?
-        var status: String?
+        var status: CodexTurnStatus?
         var itemID: String?
         var command: String?
         var cwd: String?
@@ -57,12 +57,12 @@ struct ReviewChatLogEntryForTesting: Sendable, Hashable {
         var startedAt: Date?
         var completedAt: Date?
         var durationMs: Int?
-        var commandStatus: String?
+        var commandStatus: CodexTurnStatus?
 
         init(
             sourceType: String? = nil,
             title: String? = nil,
-            status: String? = nil,
+            status: CodexTurnStatus? = nil,
             itemID: String? = nil,
             command: String? = nil,
             cwd: String? = nil,
@@ -70,7 +70,7 @@ struct ReviewChatLogEntryForTesting: Sendable, Hashable {
             startedAt: Date? = nil,
             completedAt: Date? = nil,
             durationMs: Int? = nil,
-            commandStatus: String? = nil
+            commandStatus: CodexTurnStatus? = nil
         ) {
             self.sourceType = sourceType
             self.title = title
@@ -117,11 +117,12 @@ struct ReviewChatFixtureForTesting {
         var id: CodexThreadID
         var title: String
         var preview: String?
-        var model: String?
+        var model: String
         var workspaceCWD: String?
-        var updatedAt: Date?
-        var recencyAt: Date?
-        var status: CodexThreadStatus?
+        var createdAt: Date
+        var updatedAt: Date
+        var recencyAt: Date
+        var status: CodexThreadStatus
     }
 
     var id: String
@@ -175,7 +176,7 @@ func makeReviewChatFixtureForTesting(
     cwd: String = "/tmp/repo",
     title: String,
     preview: String? = nil,
-    model: String? = "gpt-5",
+    model: String = "gpt-5",
     chatID: CodexThreadID? = nil,
     turnID: CodexTurnID? = nil,
     status: ReviewChatFixtureStatus = .succeeded,
@@ -186,7 +187,10 @@ func makeReviewChatFixtureForTesting(
 ) -> ReviewChatFixtureForTesting {
     let resolvedChatID = chatID ?? CodexThreadID(rawValue: id)
     let resolvedTurnID = turnID ?? CodexTurnID(rawValue: "\(id):preview-turn")
-    let resolvedUpdatedAt = updatedAt ?? startedAt
+    guard let resolvedCreatedAt = startedAt ?? updatedAt else {
+        preconditionFailure("A Preview test chat requires an explicit creation time.")
+    }
+    let resolvedUpdatedAt = updatedAt ?? resolvedCreatedAt
     let chat = ReviewChatFixtureForTesting.Chat(
         rowID: .chat(resolvedChatID),
         id: resolvedChatID,
@@ -194,6 +198,7 @@ func makeReviewChatFixtureForTesting(
         preview: preview,
         model: model,
         workspaceCWD: cwd,
+        createdAt: resolvedCreatedAt,
         updatedAt: resolvedUpdatedAt,
         recencyAt: resolvedUpdatedAt,
         status: CodexThreadStatus(chatFixtureStatusForTesting: status)
@@ -247,9 +252,9 @@ func replaceChatLogTextForTesting(
 func installPreviewChatLogSourceForTesting(
     on store: CodexReviewStore,
     fixtures: [ReviewChatFixtureForTesting]
-) -> ReviewMonitorPreviewAppServerRuntime {
+) -> PreviewRuntimeLifetime {
     let fixtures = fixtures.map(makePreviewChatLogFixtureForTesting)
-    let runtime = ReviewMonitorPreviewAppServerRuntime(fixtures: fixtures)
+    let runtime = PreviewRuntimeLifetime(fixtures: fixtures)
     let retainer = ReviewChatLogFixtureRetainer(
         store: store,
         runtime: runtime,
@@ -261,7 +266,7 @@ func installPreviewChatLogSourceForTesting(
 }
 
 @MainActor
-func previewRuntimeForTesting(on store: CodexReviewStore) -> ReviewMonitorPreviewAppServerRuntime? {
+func previewRuntimeForTesting(on store: CodexReviewStore) -> PreviewRuntimeLifetime? {
     prunePreviewSupportRetainersByStore()
     guard let retainer = previewSupportRetainersByStore[ObjectIdentifier(store)],
           retainer.store === store
@@ -274,6 +279,7 @@ func previewRuntimeForTesting(on store: CodexReviewStore) -> ReviewMonitorPrevie
 
 @MainActor
 private func prunePreviewSupportRetainersByStore() {
+    runStorePreviewSupportRetainers.removeAll { $0.store == nil }
     previewSupportRetainersByStore = previewSupportRetainersByStore.filter { _, retainer in
         retainer.store != nil
     }
@@ -426,8 +432,8 @@ func makePreviewAppServerRuntimeForTesting(
     streamID: String,
     isRunning: Bool,
     initialSnapshot: CodexThreadSnapshot
-) -> ReviewMonitorPreviewAppServerRuntime {
-    ReviewMonitorPreviewAppServerRuntime(
+) -> PreviewRuntimeLifetime {
+    PreviewRuntimeLifetime(
         fixtures: [
             makePreviewChatLogFixtureForTesting(
                 chat: chat,
@@ -552,12 +558,17 @@ func makePreviewChatLogFixtureForTesting(
     isRunning: Bool,
     initialSnapshot: CodexThreadSnapshot
 ) -> ReviewMonitorPreviewChatLogFixture {
-    ReviewMonitorPreviewChatLogFixture(
+    guard let workspaceCWD = chat.workspaceCWD else {
+        preconditionFailure("A Preview test chat requires an explicit workspace.")
+    }
+    return ReviewMonitorPreviewChatLogFixture(
         chatID: chat.id,
         title: chat.title,
-        preview: chat.preview,
+        preview: chat.preview ?? chat.title,
         model: chat.model,
-        workspaceCWD: chat.workspaceCWD,
+        modelProvider: "openai",
+        workspaceCWD: workspaceCWD,
+        createdAt: chat.createdAt,
         updatedAt: chat.updatedAt,
         recencyAt: chat.recencyAt,
         status: chat.status,
@@ -619,12 +630,12 @@ private enum ReviewChatLogFixtureStore {
 @MainActor
 private final class ReviewChatLogFixtureRetainer {
     weak var store: CodexReviewStore?
-    let runtime: ReviewMonitorPreviewAppServerRuntime
+    let runtime: PreviewRuntimeLifetime
     private var cwdByChatID: [CodexThreadID: String]
 
     init(
         store: CodexReviewStore,
-        runtime: ReviewMonitorPreviewAppServerRuntime,
+        runtime: PreviewRuntimeLifetime,
         cwdByChatID: [CodexThreadID: String]
     ) {
         self.store = store
@@ -1010,13 +1021,9 @@ private func chatLogCommandText(for entry: ReviewChatLogEntryForTesting) -> Stri
 }
 
 private func codexTurnStatus(for entry: ReviewChatLogEntryForTesting) -> CodexTurnStatus? {
-    guard let rawValue = entry.metadata?.commandStatus ?? entry.metadata?.status else {
-        return entry.kind == .command ? .inProgress : nil
-    }
-    if rawValue == "running" {
-        return .inProgress
-    }
-    return CodexTurnStatus(rawValue: rawValue)
+    entry.metadata?.commandStatus
+        ?? entry.metadata?.status
+        ?? (entry.kind == .command ? .inProgress : nil)
 }
 
 extension CodexThreadSnapshot {

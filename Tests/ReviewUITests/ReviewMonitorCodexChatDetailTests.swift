@@ -109,30 +109,17 @@ struct ReviewMonitorCodexChatDetailTests {
     @Test func selectedReviewChatRendersInitialSnapshot() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let modelContext = CodexModelContainer(appServer: runtime.server).mainContext
-        try await runtime.transport.enqueueThreadResume(.init(id: "review-thread"))
+        try await runtime.transport.enqueueThreadResume(try makeChatDetailStoredThread(id: "review-thread"))
         try await runtime.transport.enqueueThreadRead(
-            .init(
+            try makeChatDetailStoredThread(
                 id: "review-thread",
-                turns: [
-                    .init(
-                        id: "turn-1",
-                        state: .inProgress,
-                        items: [
-                            .init(
-                                id: "message-1",
-                                kind: .agentMessage,
-                                content: .message(
-                                    .init(
-                                        id: "message-1",
-                                        role: .assistant,
-                                        phase: .finalAnswer,
-                                        text: "Review snapshot"
-                                    ))
-                            )
-                        ]
-                    )
-                ]
-            ))
+                turnID: "turn-1",
+                state: .inProgress,
+                messageID: "message-1",
+                message: "Review snapshot",
+                phase: .finalAnswer
+            )
+        )
 
         let store = CodexReviewStore.makePreviewStore()
         let uiState = ReviewMonitorUIState(auth: store.auth)
@@ -150,32 +137,19 @@ struct ReviewMonitorCodexChatDetailTests {
         ) { snapshot in
             snapshot.log == "Review snapshot"
         }
-        #expect(await runtime.transport.recordedRequests(method: "thread/resume").count == 1)
+        #expect(await runtime.transport.recordedRequests(for: .threadResume).count == 1)
     }
 
     @Test func switchingSelectedChatKeepsPreviousLogUntilNextBaselineRenders() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let modelContext = CodexModelContainer(appServer: runtime.server).mainContext
-        try await runtime.transport.enqueueThreadResume(.init(id: "first-thread"))
-        try await runtime.transport.enqueueThreadRead(.init(
+        try await runtime.transport.enqueueThreadResume(try makeChatDetailStoredThread(id: "first-thread"))
+        try await runtime.transport.enqueueThreadRead(try makeChatDetailStoredThread(
             id: "first-thread",
-            turns: [
-                .init(
-                    id: "turn-first",
-                    state: .completed,
-                    items: [
-                        .init(
-                            id: "message-first",
-                            kind: .agentMessage,
-                            content: .message(.init(
-                                id: "message-first",
-                                role: .assistant,
-                                text: "First chat log"
-                            ))
-                        ),
-                    ]
-                ),
-            ]
+            turnID: "turn-first",
+            state: .completed,
+            messageID: "message-first",
+            message: "First chat log"
         ))
 
         let store = CodexReviewStore.makePreviewStore()
@@ -195,31 +169,18 @@ struct ReviewMonitorCodexChatDetailTests {
         }
 
         let secondReadGate = CodexAppServerTestGate()
-        await runtime.transport.holdNext(method: "thread/read", gate: secondReadGate)
-        try await runtime.transport.enqueueThreadResume(.init(id: "second-thread"))
-        try await runtime.transport.enqueueThreadRead(.init(
+        await runtime.transport.holdNext(.threadRead, gate: secondReadGate)
+        try await runtime.transport.enqueueThreadResume(try makeChatDetailStoredThread(id: "second-thread"))
+        try await runtime.transport.enqueueThreadRead(try makeChatDetailStoredThread(
             id: "second-thread",
-            turns: [
-                .init(
-                    id: "turn-second",
-                    state: .completed,
-                    items: [
-                        .init(
-                            id: "message-second",
-                            kind: .agentMessage,
-                            content: .message(.init(
-                                id: "message-second",
-                                role: .assistant,
-                                text: "Second chat log"
-                            ))
-                        ),
-                    ]
-                ),
-            ]
+            turnID: "turn-second",
+            state: .completed,
+            messageID: "message-second",
+            message: "Second chat log"
         ))
 
         selectChat(id: "second-thread", in: uiState)
-        await runtime.transport.waitForRequest(method: "thread/read", count: 2)
+        await runtime.transport.waitForRequest(.threadRead, count: 2)
         try await waitForCondition {
             transport.renderedStateForTesting.selection == .chat("second-thread")
         }
@@ -237,29 +198,16 @@ struct ReviewMonitorCodexChatDetailTests {
     @Test func switchingSelectedChatToEmptyCurrentValueClearsAfterBaseline() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let modelContext = CodexModelContainer(appServer: runtime.server).mainContext
-        try await runtime.transport.enqueueThreadResume(.init(id: "first-thread"))
-        try await runtime.transport.enqueueThreadRead(.init(
+        try await runtime.transport.enqueueThreadResume(try makeChatDetailStoredThread(id: "first-thread"))
+        try await runtime.transport.enqueueThreadRead(try makeChatDetailStoredThread(
             id: "first-thread",
-            turns: [
-                .init(
-                    id: "turn-first",
-                    state: .completed,
-                    items: [
-                        .init(
-                            id: "message-first",
-                            kind: .agentMessage,
-                            content: .message(.init(
-                                id: "message-first",
-                                role: .assistant,
-                                text: "First chat log"
-                            ))
-                        ),
-                    ]
-                ),
-            ]
+            turnID: "turn-first",
+            state: .completed,
+            messageID: "message-first",
+            message: "First chat log"
         ))
-        try await runtime.transport.enqueueThreadResume(.init(id: "empty-thread"))
-        try await runtime.transport.enqueueThreadRead(.init(id: "empty-thread", turns: []))
+        try await runtime.transport.enqueueThreadResume(try makeChatDetailStoredThread(id: "empty-thread"))
+        try await runtime.transport.enqueueThreadRead(try makeChatDetailStoredThread(id: "empty-thread", turns: []))
 
         let store = CodexReviewStore.makePreviewStore()
         let uiState = ReviewMonitorUIState(auth: store.auth)
@@ -289,8 +237,8 @@ struct ReviewMonitorCodexChatDetailTests {
     @Test func clearingSelectionClearsDisplayedChatLog() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let modelContext = CodexModelContainer(appServer: runtime.server).mainContext
-        try await runtime.transport.enqueueThreadResume(.init(id: "review-thread"))
-        try await runtime.transport.enqueueThreadRead(.init(id: "review-thread"))
+        try await runtime.transport.enqueueThreadResume(try makeChatDetailStoredThread(id: "review-thread"))
+        try await runtime.transport.enqueueThreadRead(try makeChatDetailStoredThread(id: "review-thread"))
 
         let store = CodexReviewStore.makePreviewStore()
         let uiState = ReviewMonitorUIState(auth: store.auth)
@@ -318,30 +266,17 @@ struct ReviewMonitorCodexChatDetailTests {
     @Test func selectedReviewChatConnectsWhenModelSourceInstallsLater() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let modelSource = ReviewMonitorCodexModelSource()
-        try await runtime.transport.enqueueThreadResume(.init(id: "review-thread"))
+        try await runtime.transport.enqueueThreadResume(try makeChatDetailStoredThread(id: "review-thread"))
         try await runtime.transport.enqueueThreadRead(
-            .init(
+            try makeChatDetailStoredThread(
                 id: "review-thread",
-                turns: [
-                    .init(
-                        id: "turn-1",
-                        state: .inProgress,
-                        items: [
-                            .init(
-                                id: "message-1",
-                                kind: .agentMessage,
-                                content: .message(
-                                    .init(
-                                        id: "message-1",
-                                        role: .assistant,
-                                        phase: .finalAnswer,
-                                        text: "Late source"
-                                    ))
-                            )
-                        ]
-                    )
-                ]
-            ))
+                turnID: "turn-1",
+                state: .inProgress,
+                messageID: "message-1",
+                message: "Late source",
+                phase: .finalAnswer
+            )
+        )
 
         let store = CodexReviewStore.makePreviewStore()
         let uiState = ReviewMonitorUIState(auth: store.auth)
@@ -370,30 +305,17 @@ struct ReviewMonitorCodexChatDetailTests {
     @Test func selectedReviewChatRendersCodexChatTurnAndLiveUpdates() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let modelContext = CodexModelContainer(appServer: runtime.server).mainContext
-        try await runtime.transport.enqueueThreadResume(.init(id: "review-thread"))
+        try await runtime.transport.enqueueThreadResume(try makeChatDetailStoredThread(id: "review-thread"))
         try await runtime.transport.enqueueThreadRead(
-            .init(
+            try makeChatDetailStoredThread(
                 id: "review-thread",
-                turns: [
-                    .init(
-                        id: "turn-1",
-                        state: .inProgress,
-                        items: [
-                            .init(
-                                id: "message-1",
-                                kind: .agentMessage,
-                                content: .message(
-                                    .init(
-                                        id: "message-1",
-                                        role: .assistant,
-                                        phase: .finalAnswer,
-                                        text: "Chat snapshot"
-                                    ))
-                            )
-                        ]
-                    )
-                ]
-            ))
+                turnID: "turn-1",
+                state: .inProgress,
+                messageID: "message-1",
+                message: "Chat snapshot",
+                phase: .finalAnswer
+            )
+        )
 
         let store = CodexReviewStore.makePreviewStore()
         let uiState = ReviewMonitorUIState(auth: store.auth)
@@ -413,17 +335,13 @@ struct ReviewMonitorCodexChatDetailTests {
         }
         #expect(initialSnapshot.log.contains("Legacy fallback") == false)
 
-        try await runtime.transport.emitServerNotification(
-            method: "item/completed",
-            params: ThreadItemParams(
-                threadID: "review-thread",
-                turnID: "turn-1",
-                item: .init(
-                    id: "message-1",
-                    type: "agentMessage",
-                    text: "Chat stream update",
-                    phase: "final_answer"
-                )
+        try await runtime.notificationEmitter.emitItemCompleted(
+            threadID: "review-thread",
+            turnID: "turn-1",
+            item: .agentMessage(
+                id: "message-1",
+                text: "Chat stream update",
+                phase: .finalAnswer
             )
         )
 
@@ -440,30 +358,17 @@ struct ReviewMonitorCodexChatDetailTests {
     @Test func codexChatTextAppendUsesAppendPath() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let modelContext = CodexModelContainer(appServer: runtime.server).mainContext
-        try await runtime.transport.enqueueThreadResume(.init(id: "review-thread"))
+        try await runtime.transport.enqueueThreadResume(try makeChatDetailStoredThread(id: "review-thread"))
         try await runtime.transport.enqueueThreadRead(
-            .init(
+            try makeChatDetailStoredThread(
                 id: "review-thread",
-                turns: [
-                    .init(
-                        id: "turn-1",
-                        state: .inProgress,
-                        items: [
-                            .init(
-                                id: "message-1",
-                                kind: .agentMessage,
-                                content: .message(
-                                    .init(
-                                        id: "message-1",
-                                        role: .assistant,
-                                        phase: .finalAnswer,
-                                        text: "Initial"
-                                    ))
-                            )
-                        ]
-                    )
-                ]
-            ))
+                turnID: "turn-1",
+                state: .inProgress,
+                messageID: "message-1",
+                message: "Initial",
+                phase: .finalAnswer
+            )
+        )
 
         let store = CodexReviewStore.makePreviewStore()
         let uiState = ReviewMonitorUIState(auth: store.auth)
@@ -485,17 +390,13 @@ struct ReviewMonitorCodexChatDetailTests {
         let appendCount = transport.logAppendCountForTesting
         let reloadCount = transport.logReloadCountForTesting
 
-        try await runtime.transport.emitServerNotification(
-            method: "item/completed",
-            params: ThreadItemParams(
-                threadID: "review-thread",
-                turnID: "turn-1",
-                item: .init(
-                    id: "message-1",
-                    type: "agentMessage",
-                    text: "Initial log",
-                    phase: "final_answer"
-                )
+        try await runtime.notificationEmitter.emitItemCompleted(
+            threadID: "review-thread",
+            turnID: "turn-1",
+            item: .agentMessage(
+                id: "message-1",
+                text: "Initial log",
+                phase: .finalAnswer
             )
         )
 
@@ -542,7 +443,61 @@ struct ReviewMonitorCodexChatDetailTests {
         #expect(document?.text == "Review the current code changes.")
     }
 
-    @Test func codexChatLogProjectionDeduplicatesReviewOutputAgentMessage() async throws {
+    @Test func codexChatLogProjectionOnlyHidesUserPromptInMarkedTurn() async throws {
+        var projection = ReviewMonitorCodexChatLogProjection()
+        let snapshot = makeCodexThreadSnapshotForTesting(
+            chatID: CodexThreadID(rawValue: "review-thread"),
+            turns: [
+                .init(
+                    id: CodexTurnID(rawValue: "review-turn"),
+                    state: .completed,
+                    items: [
+                        .init(
+                            id: "review-user",
+                            kind: .userMessage,
+                            content: .message(.init(
+                                id: "review-user",
+                                role: .user,
+                                text: "Review this change."
+                            ))
+                        ),
+                        .init(
+                            id: "entered-review",
+                            kind: .enteredReviewMode,
+                            content: .log("Review started")
+                        ),
+                    ]
+                ),
+                .init(
+                    id: CodexTurnID(rawValue: "ordinary-turn"),
+                    state: .completed,
+                    items: [
+                        .init(
+                            id: "ordinary-user",
+                            kind: .userMessage,
+                            content: .message(.init(
+                                id: "ordinary-user",
+                                role: .user,
+                                text: "Keep this prompt visible."
+                            ))
+                        ),
+                    ]
+                ),
+            ]
+        )
+
+        let document = projection.render(
+            from: snapshot,
+            chatCreatedAt: nil,
+            chatUpdatedAt: nil
+        )
+
+        #expect(document?.text.contains("Review this change.") == false)
+        #expect(document?.text.contains("Review started") == true)
+        #expect(document?.text.contains("Keep this prompt visible.") == true)
+    }
+
+    @Test func codexChatLogProjectionSuppressesEquivalentTypedReviewRolloutCompanion() async throws {
         var projection = ReviewMonitorCodexChatLogProjection()
         let finalReview = """
         Review comment:
@@ -559,10 +514,10 @@ struct ReviewMonitorCodexChatDetailTests {
                     content: .log(finalReview)
                 ),
                 .init(
-                    id: "review-output-agent",
+                    id: "review_rollout_assistant",
                     kind: .agentMessage,
                     content: .message(.init(
-                        id: "review-output-agent",
+                        id: "review_rollout_assistant",
                         role: .assistant,
                         text: finalReview
                     ))
@@ -577,6 +532,117 @@ struct ReviewMonitorCodexChatDetailTests {
 
         #expect(document?.text == finalReview)
         #expect(document?.blocks.count == 1)
+    }
+
+    @Test func codexChatLogProjectionKeepsGeneralAssistantWithMatchingReviewText() async throws {
+        var projection = ReviewMonitorCodexChatLogProjection()
+        let finalReview = "No issues found."
+        let turn = CodexTurnSnapshot(
+            id: CodexTurnID(rawValue: "turn-review"),
+            state: .completed,
+            items: [
+                .init(
+                    id: "review-output",
+                    kind: .exitedReviewMode,
+                    content: .log(finalReview)
+                ),
+                .init(
+                    id: "ordinary-assistant",
+                    kind: .agentMessage,
+                    content: .message(.init(
+                        id: "ordinary-assistant",
+                        role: .assistant,
+                        text: finalReview
+                    ))
+                ),
+            ]
+        )
+
+        let document = projection.render(
+            from: turn,
+            chatCreatedAt: nil,
+            chatUpdatedAt: nil
+        )
+
+        #expect(document?.blocks.count == 2)
+        #expect(document?.text == "\(finalReview)\n\n\(finalReview)")
+    }
+
+    @Test func codexChatLogProjectionKeepsReviewRolloutCompanionWithDifferentText() async throws {
+        var projection = ReviewMonitorCodexChatLogProjection()
+        let turn = CodexTurnSnapshot(
+            id: CodexTurnID(rawValue: "turn-review"),
+            state: .completed,
+            items: [
+                .init(
+                    id: "review-output",
+                    kind: .exitedReviewMode,
+                    content: .log("Review failed before producing findings.")
+                ),
+                .init(
+                    id: "review_rollout_assistant",
+                    kind: .agentMessage,
+                    content: .message(.init(
+                        id: "review_rollout_assistant",
+                        role: .assistant,
+                        text: "The review child was interrupted."
+                    ))
+                ),
+            ]
+        )
+
+        let document = projection.render(
+            from: turn,
+            chatCreatedAt: nil,
+            chatUpdatedAt: nil
+        )
+
+        #expect(document?.blocks.count == 2)
+        #expect(document?.text.contains("Review failed before producing findings.") == true)
+        #expect(document?.text.contains("The review child was interrupted.") == true)
+    }
+
+    @Test func codexChatLogProjectionKeepsReviewRolloutCompanionWhenTargetIsMissing() async throws {
+        var projection = ReviewMonitorCodexChatLogProjection()
+        let turn = CodexTurnSnapshot(
+            id: CodexTurnID(rawValue: "turn-review"),
+            state: .completed,
+            items: [
+                .init(
+                    id: "review_rollout_assistant",
+                    kind: .agentMessage,
+                    content: .message(.init(
+                        id: "review_rollout_assistant",
+                        role: .assistant,
+                        text: "The review child was interrupted."
+                    ))
+                ),
+            ]
+        )
+
+        let document = projection.render(
+            from: turn,
+            chatCreatedAt: nil,
+            chatUpdatedAt: nil
+        )
+
+        #expect(document?.blocks.count == 1)
+        #expect(document?.text == "The review child was interrupted.")
+
+        let policyResult = ReviewRolloutPresentationPolicy().evaluate([
+            .init(
+                sourceID: "turn-review:agentMessage:review_rollout_assistant",
+                turnID: CodexTurnID(rawValue: "turn-review"),
+                kind: .agentMessage,
+                origin: .reviewRolloutAssistant,
+                semanticRelation: .companionOf(.exitedReviewMode),
+                displayText: "The review child was interrupted."
+            )
+        ])
+        #expect(
+            policyResult.missingTargetSourceIDs
+                == ["turn-review:agentMessage:review_rollout_assistant"]
+        )
     }
 
     @Test func codexChatLogProjectionKeepsMatchingReviewOutputsFromDifferentTurns() async throws {
@@ -595,10 +661,10 @@ struct ReviewMonitorCodexChatDetailTests {
                             content: .log(finalReview)
                         ),
                         .init(
-                            id: "review-output-agent-first",
+                            id: "review_rollout_assistant",
                             kind: .agentMessage,
                             content: .message(.init(
-                                id: "review-output-agent-first",
+                                id: "review_rollout_assistant",
                                 role: .assistant,
                                 text: finalReview
                             ))
@@ -615,10 +681,10 @@ struct ReviewMonitorCodexChatDetailTests {
                             content: .log(finalReview)
                         ),
                         .init(
-                            id: "review-output-agent-second",
+                            id: "review_rollout_assistant",
                             kind: .agentMessage,
                             content: .message(.init(
-                                id: "review-output-agent-second",
+                                id: "review_rollout_assistant",
                                 role: .assistant,
                                 text: finalReview
                             ))
@@ -643,7 +709,7 @@ struct ReviewMonitorCodexChatDetailTests {
         #expect(renderedText == [finalReview, finalReview])
     }
 
-    @Test func codexChatLogProjectionDeduplicatesSameTurnReasoningMirrorItems() async throws {
+    @Test func codexChatLogProjectionKeepsDistinctReasoningItemsRegardlessOfRawPayload() async throws {
         var projection = ReviewMonitorCodexChatLogProjection()
         let reasoningText = """
         **Summarizing files with git**
@@ -676,8 +742,9 @@ struct ReviewMonitorCodexChatDetailTests {
         )
         let document = try #require(projectedDocument)
 
-        #expect(document.blocks.count == 1)
-        #expect(document.text == "Summarizing files with git\n\nI need to summarize the files.")
+        #expect(document.blocks.count == 2)
+        let renderedReasoning = "Summarizing files with git\n\nI need to summarize the files."
+        #expect(document.text == "\(renderedReasoning)\n\n\(renderedReasoning)")
     }
 
     @Test func codexChatLogProjectionKeepsAdjacentMatchingReasoningWithoutMirrorPayloads() async throws {
@@ -793,7 +860,7 @@ struct ReviewMonitorCodexChatDetailTests {
         #expect(document.text == "\(reasoningText)\n\n\(reasoningText)")
     }
 
-    @Test func codexChatLogProjectionIgnoresLateReasoningMirrorBeforeCommand() async throws {
+    @Test func codexChatLogProjectionKeepsLateDistinctReasoningBeforeCommand() async throws {
         var projection = ReviewMonitorCodexChatLogProjection()
         let turnID = CodexTurnID(rawValue: "turn-review")
         let reasoningText = """
@@ -856,12 +923,12 @@ struct ReviewMonitorCodexChatDetailTests {
         )
         let mirroredDocument = try #require(projectedMirroredDocument)
 
-        #expect(mirroredDocument.text == initialDocument.text)
-        #expect(mirroredDocument.blocks == initialDocument.blocks)
-        #expect(mirroredDocument.revision == initialDocument.revision)
+        #expect(mirroredDocument.blocks.count == initialDocument.blocks.count + 1)
+        #expect(mirroredDocument.text != initialDocument.text)
+        #expect(mirroredDocument.revision > initialDocument.revision)
     }
 
-    @Test func codexChatLogProjectionDeduplicatesReasoningMirrorSeparatedByCommand() async throws {
+    @Test func codexChatLogProjectionKeepsDistinctReasoningSeparatedByCommand() async throws {
         var projection = ReviewMonitorCodexChatLogProjection()
         let reasoningText = "Inspecting differences"
         let turn = CodexTurnSnapshot(
@@ -895,11 +962,11 @@ struct ReviewMonitorCodexChatDetailTests {
         )
         let document = try #require(projectedDocument)
 
-        #expect(document.blocks.count == 2)
-        #expect(document.text == "\(reasoningText)\n\n$ /bin/zsh -lc")
+        #expect(document.blocks.count == 3)
+        #expect(document.text == "\(reasoningText)\n\n$ /bin/zsh -lc\n\n\(reasoningText)")
     }
 
-    @Test func codexChatLogProjectionDeduplicatesReasoningMirrorWithWrappedItemPayload() async throws {
+    @Test func codexChatLogProjectionDoesNotDecodeWrappedRawPayloadForReasoningIdentity() async throws {
         var projection = ReviewMonitorCodexChatLogProjection()
         let reasoningText = "Inspecting differences"
         let turn = CodexTurnSnapshot(
@@ -928,11 +995,11 @@ struct ReviewMonitorCodexChatDetailTests {
         )
         let document = try #require(projectedDocument)
 
-        #expect(document.blocks.count == 1)
-        #expect(document.text == reasoningText)
+        #expect(document.blocks.count == 2)
+        #expect(document.text == "\(reasoningText)\n\n\(reasoningText)")
     }
 
-    @Test func codexChatLogProjectionKeepsRepeatedReasoningAfterMirrorPairConsumed() async throws {
+    @Test func codexChatLogProjectionKeepsAllRepeatedReasoningItems() async throws {
         var projection = ReviewMonitorCodexChatLogProjection()
         let reasoningText = "Inspecting differences"
         func reasoningItem(id: String, payloadType: String) -> CodexThreadItem {
@@ -961,8 +1028,8 @@ struct ReviewMonitorCodexChatDetailTests {
         )
         let document = try #require(projectedDocument)
 
-        #expect(document.blocks.count == 2)
-        #expect(document.text == "\(reasoningText)\n\n\(reasoningText)")
+        #expect(document.blocks.count == 4)
+        #expect(document.text == Array(repeating: reasoningText, count: 4).joined(separator: "\n\n"))
     }
 
     @Test func codexChatLogProjectionRendersUserMessageWithoutReviewModeLog() async throws {
@@ -1423,33 +1490,207 @@ struct ReviewMonitorCodexChatDetailTests {
         #expect(thirdRange.lowerBound < movedSecondRange.lowerBound)
     }
 
+    @Test func codexChatSourceProjectionTargetsMarkerAndRolloutPolicyChanges() throws {
+        var projection = ReviewMonitorCodexChatLogSourceProjection()
+        let turnID = CodexTurnID(rawValue: "turn-review-policy")
+        let user = CodexThreadItem(
+            id: "user-review-policy",
+            kind: .userMessage,
+            content: .message(.init(
+                id: "user-review-policy",
+                role: .user,
+                text: "Review this change."
+            ))
+        )
+        let companion = CodexThreadItem(
+            id: "review_rollout_assistant",
+            kind: .agentMessage,
+            content: .message(.init(
+                id: "review_rollout_assistant",
+                role: .assistant,
+                text: "No issues found."
+            ))
+        )
+        let initialTurn = CodexTurnSnapshot(
+            id: turnID,
+            state: .inProgress,
+            items: [user, companion]
+        )
+        let initial = projection.apply(.init(
+            generation: 1,
+            sequence: 0,
+            payload: .snapshot(.init(
+                thread: .init(id: "thread-review-policy", turns: [initialTurn]),
+                phase: .running(turnID: turnID)
+            ), reason: .initial)
+        ))
+        #expect(initial?.sourceDocument?.text == "Review this change.\n\nNo issues found.")
+
+        let matchingTarget = CodexThreadItem(
+            id: "review-output",
+            kind: .exitedReviewMode,
+            content: .log("No issues found.")
+        )
+        let matching = projection.apply(.init(
+            generation: 1,
+            sequence: 1,
+            payload: .update(.itemInserted(
+                item: matchingTarget,
+                turnID: turnID,
+                index: 1
+            ))
+        ))
+        #expect(matching?.sourceDocument?.text == "No issues found.")
+        #expect(matching?.sourceDocument?.blocks.count == 1)
+
+        var differentTarget = matchingTarget
+        differentTarget.content = .log("Review stopped before producing findings.")
+        let different = projection.apply(.init(
+            generation: 1,
+            sequence: 2,
+            payload: .update(.itemUpdated(
+                item: differentTarget,
+                turnID: turnID,
+                index: 1
+            ))
+        ))
+        #expect(
+            different?.sourceDocument?.text
+                == "Review stopped before producing findings.\n\nNo issues found."
+        )
+
+        let removed = projection.apply(.init(
+            generation: 1,
+            sequence: 3,
+            payload: .update(.itemRemoved(.init(item: differentTarget, turnID: turnID)))
+        ))
+        #expect(removed?.sourceDocument?.text == "Review this change.\n\nNo issues found.")
+    }
+
+    @Test func codexChatSourceProjectionAppliesPhaseOnlyToStatusDependentBlocks() throws {
+        var projection = ReviewMonitorCodexChatLogSourceProjection()
+        let turnID = CodexTurnID(rawValue: "turn-phase")
+        let command = CodexThreadItem(
+            id: "command-phase",
+            kind: .commandExecution,
+            content: .command(.init(command: "/usr/bin/true"))
+        )
+        let message = CodexThreadItem(
+            id: "message-phase",
+            kind: .agentMessage,
+            content: .message(.init(
+                id: "message-phase",
+                role: .assistant,
+                text: "Still visible"
+            ))
+        )
+        let thread = CodexThreadSnapshot(
+            id: "thread-phase",
+            status: .active(activeFlags: []),
+            turns: [.init(id: turnID, state: .inProgress, items: [command, message])]
+        )
+        _ = projection.apply(.init(
+            generation: 1,
+            sequence: 0,
+            payload: .snapshot(.init(
+                thread: thread,
+                phase: .running(turnID: turnID)
+            ), reason: .initial)
+        ))
+
+        let threadStatus = projection.apply(.init(
+            generation: 1,
+            sequence: 1,
+            payload: .update(.statusChanged(.idle))
+        ))
+        let unchangedCommand = try #require(
+            threadStatus?.sourceDocument?.blocks.first { $0.kind == .command }
+        )
+        #expect(unchangedCommand.metadata?.status == CodexTurnStatus.inProgress.rawValue)
+
+        let terminalPhase = projection.apply(.init(
+            generation: 1,
+            sequence: 2,
+            payload: .update(.phaseChanged(.terminal(
+                turnID: turnID,
+                disposition: .failed
+            )))
+        ))
+        let failedCommand = try #require(
+            terminalPhase?.sourceDocument?.blocks.first { $0.kind == .command }
+        )
+        #expect(failedCommand.metadata?.status == CodexTurnStatus.failed.rawValue)
+        #expect(terminalPhase?.sourceDocument?.text.contains("Still visible") == true)
+    }
+
+    @Test func codexChatSourceProjectionTargetsInsertedAndRemovedTurns() throws {
+        var projection = ReviewMonitorCodexChatLogSourceProjection()
+        let firstTurnID = CodexTurnID(rawValue: "turn-first-targeted")
+        let secondTurnID = CodexTurnID(rawValue: "turn-second-targeted")
+        let first = CodexTurnSnapshot(
+            id: firstTurnID,
+            state: .completed,
+            items: [.init(
+                id: "first-targeted",
+                kind: .agentMessage,
+                content: .message(.init(
+                    id: "first-targeted",
+                    role: .assistant,
+                    text: "First"
+                ))
+            )]
+        )
+        _ = projection.apply(.init(
+            generation: 1,
+            sequence: 0,
+            payload: .snapshot(.init(
+                thread: .init(id: "thread-targeted-turns", turns: [first]),
+                phase: .terminal(turnID: firstTurnID, disposition: .completed)
+            ), reason: .initial)
+        ))
+
+        let second = CodexTurnSnapshot(
+            id: secondTurnID,
+            state: .completed,
+            items: [.init(
+                id: "second-targeted",
+                kind: .agentMessage,
+                content: .message(.init(
+                    id: "second-targeted",
+                    role: .assistant,
+                    text: "Second"
+                ))
+            )]
+        )
+        let inserted = projection.apply(.init(
+            generation: 1,
+            sequence: 1,
+            payload: .update(.turnInserted(second, index: 1))
+        ))
+        #expect(inserted?.sourceDocument?.text == "First\n\nSecond")
+
+        let removed = projection.apply(.init(
+            generation: 1,
+            sequence: 2,
+            payload: .update(.turnRemoved(id: firstTurnID))
+        ))
+        #expect(removed?.sourceDocument?.text == "Second")
+    }
+
     @Test func codexChatRendersThreadAndLiveUpdates() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let modelContext = CodexModelContainer(appServer: runtime.server).mainContext
-        try await runtime.transport.enqueueThreadResume(.init(id: "chat-thread"))
+        try await runtime.transport.enqueueThreadResume(try makeChatDetailStoredThread(id: "chat-thread"))
         try await runtime.transport.enqueueThreadRead(
-            .init(
+            try makeChatDetailStoredThread(
                 id: "chat-thread",
-                turns: [
-                    .init(
-                        id: "turn-1",
-                        state: .inProgress,
-                        items: [
-                            .init(
-                                id: "message-1",
-                                kind: .agentMessage,
-                                content: .message(
-                                    .init(
-                                        id: "message-1",
-                                        role: .assistant,
-                                        phase: .finalAnswer,
-                                        text: "Generic chat snapshot"
-                                    ))
-                            )
-                        ]
-                    )
-                ]
-            ))
+                turnID: "turn-1",
+                state: .inProgress,
+                messageID: "message-1",
+                message: "Generic chat snapshot",
+                phase: .finalAnswer
+            )
+        )
 
         let store = CodexReviewStore.makePreviewStore()
         let uiState = ReviewMonitorUIState(auth: store.auth)
@@ -1469,17 +1710,13 @@ struct ReviewMonitorCodexChatDetailTests {
         }
         #expect(transport.renderedStateForTesting.selection == .chat("chat-thread"))
 
-        try await runtime.transport.emitServerNotification(
-            method: "item/completed",
-            params: ThreadItemParams(
-                threadID: "chat-thread",
-                turnID: "turn-1",
-                item: .init(
-                    id: "message-1",
-                    type: "agentMessage",
-                    text: "Generic chat stream update",
-                    phase: "final_answer"
-                )
+        try await runtime.notificationEmitter.emitItemCompleted(
+            threadID: "chat-thread",
+            turnID: "turn-1",
+            item: .agentMessage(
+                id: "message-1",
+                text: "Generic chat stream update",
+                phase: .finalAnswer
             )
         )
 
@@ -1490,7 +1727,7 @@ struct ReviewMonitorCodexChatDetailTests {
             snapshot.log.contains("Generic chat stream update")
         }
         #expect(updatedSnapshot.log.contains("Generic chat snapshot") == false)
-        #expect(await runtime.transport.recordedRequests(method: "thread/resume").count == 1)
+        #expect(await runtime.transport.recordedRequests(for: .threadResume).count == 1)
     }
 
     private func selectChat(
@@ -1501,45 +1738,88 @@ struct ReviewMonitorCodexChatDetailTests {
         uiState.selection = .chat(chatID)
     }
 
-    private func makeProjectionChat(
-        threadID: CodexThreadID = CodexThreadID(rawValue: "review-thread"),
-        turns: [CodexTurnSnapshot]
-    ) async throws -> CodexChat {
-        let runtime = try await CodexAppServerTestRuntime.start()
-        let modelContext = CodexModelContainer(appServer: runtime.server).mainContext
-        try await runtime.transport.enqueueThreadResume(.init(id: threadID))
-        try await runtime.transport.enqueueThreadRead(
-            .init(
-                id: threadID,
-                turns: turns
-            ))
-        let chat = modelContext.model(for: threadID)
-        try await modelContext.refresh(chat)
-        return chat
-    }
-
     private func rawPayload(type: String) -> Data {
         Data("{\"type\":\"\(type)\"}".utf8)
     }
 }
 
-private struct ThreadItemParams: Encodable, Sendable {
-    var threadID: String
-    var turnID: String
-    var item: Item
-    var completedAtMs: Int64 = 0
+private func makeChatDetailStoredThread(
+    id: CodexThreadID,
+    turns: [CodexAppServerTestTurn] = []
+) throws -> CodexAppServerTestStoredThread {
+    let workspace = URL(
+        fileURLWithPath: "/tmp/\(id.rawValue)",
+        isDirectory: true
+    )
+    return try .init(
+        snapshot: .init(
+            id: id,
+            workspace: workspace,
+            preview: id.rawValue,
+            modelProvider: "openai",
+            sourceKind: .appServer,
+            createdAt: Date(timeIntervalSince1970: 1),
+            updatedAt: Date(timeIntervalSince1970: 2),
+            status: .idle,
+            ephemeral: false,
+            turns: turns.map(\.snapshot)
+        ),
+        turns: turns,
+        metadata: .init(
+            sessionID: "chat-detail-\(id.rawValue)",
+            cliVersion: "review-ui-tests",
+            source: .appServer
+        ),
+        runtimeMetadata: .init(
+            model: "gpt-5",
+            modelProvider: "openai",
+            serviceTier: nil,
+            cwd: workspace,
+            runtimeWorkspaceRoots: [workspace],
+            instructionSources: [],
+            approvalPolicy: .never,
+            approvalsReviewer: .user,
+            sandbox: .dangerFullAccess,
+            activePermissionProfile: nil,
+            reasoningEffort: nil,
+            multiAgentMode: .explicitRequestOnly
+        ),
+        isArchived: false
+    )
+}
 
-    enum CodingKeys: String, CodingKey {
-        case threadID = "threadId"
-        case turnID = "turnId"
-        case item
-        case completedAtMs
-    }
+private func makeChatDetailTurn(
+    id: CodexTurnID,
+    state: CodexTurnSnapshot.State,
+    items: [CodexAppServerTestItem]
+) throws -> CodexAppServerTestTurn {
+    try .init(
+        snapshot: .init(
+            id: id,
+            state: state,
+            items: items.map(\.domainProjection)
+        ),
+        items: items
+    )
+}
 
-    struct Item: Encodable, Sendable {
-        var id: String
-        var type: String
-        var text: String?
-        var phase: String?
-    }
+private func makeChatDetailStoredThread(
+    id: CodexThreadID,
+    turnID: CodexTurnID,
+    state: CodexTurnSnapshot.State,
+    messageID: String,
+    message: String,
+    phase: CodexMessagePhase? = nil
+) throws -> CodexAppServerTestStoredThread {
+    let item = try CodexAppServerTestItem.agentMessage(
+        id: messageID,
+        text: message,
+        phase: phase
+    )
+    let turn = try makeChatDetailTurn(
+        id: turnID,
+        state: state,
+        items: [item]
+    )
+    return try makeChatDetailStoredThread(id: id, turns: [turn])
 }

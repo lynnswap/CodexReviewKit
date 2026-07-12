@@ -28,10 +28,12 @@ package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend {
     var seed: CodexReviewStoreSeed { get }
     var isActive: Bool { get }
     var invokesRuntimeStopReviewCleanupDuringStop: Bool { get }
+    var reviewThreadRetentionCodexHomePath: String { get }
+    var reviewThreadRetentionJournalURL: URL? { get }
 
     func attachStore(_ store: CodexReviewStore)
     func start(store: CodexReviewStore, forceRestartIfNeeded: Bool) async
-    func stop(store: CodexReviewStore) async
+    func stop(store: CodexReviewStore, purpose: CodexReviewRuntimeStopPurpose) async
     func waitUntilStopped() async
     func refreshAuth(auth: CodexReviewAuthModel) async
     func signIn(auth: CodexReviewAuthModel) async throws
@@ -45,25 +47,46 @@ package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend {
     func requiresCurrentSessionRecovery(auth: CodexReviewAuthModel, accountKey: String) -> Bool
 
     func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt
-    func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws
-    func prepareReviewRestart(_ run: CodexReviewBackendModel.Review.Run) async throws -> CodexReviewBackendModel.Review.RestartToken
+    func interruptReview(_ attempt: ReviewAttempt, reason: CodexReviewBackendModel.CancellationReason) async throws
+    func prepareReviewRestart(_ attempt: ReviewAttempt) async throws -> CodexReviewBackendModel.Review.RestartToken
     func restartPreparedReview(
         _ token: CodexReviewBackendModel.Review.RestartToken,
         request: CodexReviewBackendModel.Review.Start
     ) async throws -> BackendReviewAttempt
-    func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async
+    func discardPreparedReviewRestart(
+        _ token: CodexReviewBackendModel.Review.RestartToken
+    ) async -> [ReviewAttempt]
+    func cleanupReview(_ attempt: ReviewAttempt) async
+    func cleanupRetainedReviews(
+        _ attempts: [ReviewAttempt],
+        additionalThreadIDs: [ReviewThreadID]
+    ) async -> ReviewRetainedThreadCleanupResult
+}
+
+package enum CodexReviewRuntimeStopPurpose: Sendable {
+    case runtimeRestartPreservingRuns
+    case accountTransitionPreservingRuns
+    case loginReconciliationPreservingRuns
+    case finalStoreShutdownRetiringRuns
+
+    package var retiresRuns: Bool {
+        if case .finalStoreShutdownRetiringRuns = self {
+            return true
+        }
+        return false
+    }
 }
 
 package struct CodexReviewRuntimeStopReviewCleanupRequest: Sendable {
     package var reason: CodexReviewBackendModel.CancellationReason
-    package var recoveryWaitingRuns: [CodexReviewBackendModel.Review.Run]
+    package var recoveryWaitingAttempts: [ReviewAttempt]
 
     package init(
         reason: CodexReviewBackendModel.CancellationReason,
-        recoveryWaitingRuns: [CodexReviewBackendModel.Review.Run]
+        recoveryWaitingAttempts: [ReviewAttempt]
     ) {
         self.reason = reason
-        self.recoveryWaitingRuns = recoveryWaitingRuns
+        self.recoveryWaitingAttempts = recoveryWaitingAttempts
     }
 }
 
@@ -87,5 +110,15 @@ package struct CodexReviewRuntimeStopReviewCleanupResult: Sendable {
 extension CodexReviewStoreBackend {
     package var invokesRuntimeStopReviewCleanupDuringStop: Bool {
         false
+    }
+
+    package var reviewThreadRetentionCodexHomePath: String {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexReviewKit-volatile", isDirectory: true)
+            .path
+    }
+
+    package var reviewThreadRetentionJournalURL: URL? {
+        nil
     }
 }

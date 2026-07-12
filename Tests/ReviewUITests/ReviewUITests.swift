@@ -24,6 +24,60 @@ private extension CodexReviewAuthModel {
     }
 }
 
+private extension CodexAppServerTestStoredThread {
+    init(
+        id: CodexThreadID,
+        workspace: URL? = nil,
+        name: String? = nil,
+        preview: String? = nil,
+        updatedAt: Date = Date(timeIntervalSince1970: 0),
+        recencyAt: Date? = nil,
+        status: CodexThreadStatus = .idle
+    ) throws {
+        let cwd = workspace ?? URL(
+            fileURLWithPath: "/tmp/codex-review-ui",
+            isDirectory: true
+        )
+        try self.init(
+            snapshot: .init(
+                id: id,
+                workspace: cwd,
+                name: name,
+                preview: preview ?? name ?? id.rawValue,
+                modelProvider: "openai",
+                sourceKind: .appServer,
+                createdAt: updatedAt,
+                updatedAt: updatedAt,
+                recencyAt: recencyAt ?? updatedAt,
+                status: status,
+                ephemeral: false,
+                turns: []
+            ),
+            turns: [],
+            metadata: .init(
+                sessionID: "session-\(id.rawValue)",
+                cliVersion: "codex-cli-test",
+                source: .appServer
+            ),
+            runtimeMetadata: .init(
+                model: "gpt-5",
+                modelProvider: "openai",
+                serviceTier: nil,
+                cwd: cwd,
+                runtimeWorkspaceRoots: [cwd],
+                instructionSources: [],
+                approvalPolicy: .never,
+                approvalsReviewer: .user,
+                sandbox: .dangerFullAccess,
+                activePermissionProfile: nil,
+                reasoningEffort: nil,
+                multiAgentMode: .explicitRequestOnly
+            ),
+            isArchived: false
+        )
+    }
+}
+
 @Suite(.serialized)
 @MainActor
 struct ReviewUITests {
@@ -836,10 +890,10 @@ struct ReviewUITests {
                     text: "$ git diff --stat",
                     metadata: .init(
                         sourceType: "commandExecution",
-                        status: "completed",
+                        status: .completed,
                         itemID: "cmd_1",
                         command: "git diff --stat",
-                        commandStatus: "completed"
+                        commandStatus: .completed
                     )
                 ),
                 .init(
@@ -848,10 +902,10 @@ struct ReviewUITests {
                     text: "README.md | 1 +",
                     metadata: .init(
                         sourceType: "commandExecution",
-                        status: "completed",
+                        status: .completed,
                         itemID: "cmd_1",
                         command: "git diff --stat",
-                        commandStatus: "completed"
+                        commandStatus: .completed
                     )
                 ),
                 .init(kind: .agentMessage, text: "No correctness issues found."),
@@ -932,7 +986,7 @@ struct ReviewUITests {
                 kind: .command,
                 groupID: "cmd-direct",
                 text: "$ swift test",
-                metadata: .init(command: "swift test", commandStatus: "completed")
+                metadata: .init(command: "swift test", commandStatus: .completed)
             ),
             to: chat.chatID,
             turnID: chat.turnID
@@ -942,7 +996,7 @@ struct ReviewUITests {
                 kind: .commandOutput,
                 groupID: "cmd-direct",
                 text: "Tests passed",
-                metadata: .init(command: "swift test", exitCode: 0, commandStatus: "completed")
+                metadata: .init(command: "swift test", exitCode: 0, commandStatus: .completed)
             ),
             to: chat.chatID,
             turnID: chat.turnID
@@ -1007,7 +1061,7 @@ struct ReviewUITests {
                 kind: .commandOutput,
                 groupID: "cmd-failed-direct",
                 text: "Tests failed",
-                metadata: .init(command: "swift test", commandStatus: "failed")
+                metadata: .init(command: "swift test", commandStatus: .failed)
             ),
             to: chat.chatID,
             turnID: chat.turnID
@@ -1063,7 +1117,7 @@ struct ReviewUITests {
                 kind: .commandOutput,
                 groupID: "cmd-running-direct",
                 text: "Building...",
-                metadata: .init(command: "swift test", commandStatus: "running")
+                metadata: .init(command: "swift test", commandStatus: .inProgress)
             ),
             to: chat.chatID,
             turnID: chat.turnID
@@ -1123,7 +1177,7 @@ struct ReviewUITests {
                 text: "Sources/App.swift | 12 ++++++------",
                 metadata: .init(
                     title: "Updated Sources/App.swift",
-                    commandStatus: "completed"
+                    commandStatus: .completed
                 )
             ),
             to: chat.chatID,
@@ -1164,7 +1218,7 @@ struct ReviewUITests {
                     text: "Automatically compacting context",
                     metadata: .init(
                         sourceType: "contextCompaction",
-                        status: "inProgress",
+                        status: .inProgress,
                         itemID: "compact_1"
                     )
                 )
@@ -1202,10 +1256,10 @@ struct ReviewUITests {
         let commandMetadata = ReviewChatLogEntryForTesting.Metadata(
             sourceType: "command",
             title: "Ran command for 17s",
-            status: "succeeded",
+            status: .completed,
             command: "swift test",
             exitCode: 0,
-            commandStatus: "completed"
+            commandStatus: .completed
         )
         let chat = makeReviewChatFixtureForTesting(
             id: "chat-command-output-panel",
@@ -1380,14 +1434,14 @@ struct ReviewUITests {
                     kind: .commandOutput,
                     groupID: "cmd_1",
                     text: firstOutput,
-                    metadata: .init(sourceType: "command", title: "Ran swift test for 1s", status: "succeeded")
+                    metadata: .init(sourceType: "command", title: "Ran swift test for 1s", status: .completed)
                 ),
                 .init(kind: .command, groupID: "cmd_2", text: "$ git diff"),
                 .init(
                     kind: .commandOutput,
                     groupID: "cmd_2",
                     text: secondOutput,
-                    metadata: .init(sourceType: "command", title: "Ran git diff for 1s", status: "succeeded")
+                    metadata: .init(sourceType: "command", title: "Ran git diff for 1s", status: .completed)
                 ),
             ]
         )
@@ -1476,10 +1530,10 @@ struct ReviewUITests {
                 metadata: .init(
                     sourceType: "commandExecution",
                     title: "Command output",
-                    status: "succeeded",
+                    status: .completed,
                     command: "swift test",
                     exitCode: 0,
-                    commandStatus: "completed"
+                    commandStatus: .completed
                 )
             ),
             to: chat.chatID,
@@ -2161,7 +2215,7 @@ struct ReviewUITests {
         }
 
         let activeChat = context.model(for: activeThreadID)
-        try await runtime.transport.enqueueEmpty(for: "thread/delete")
+        try await runtime.transport.enqueueSuccess(for: .threadDelete)
         try await activeChat.delete()
 
         try await waitForCondition {
@@ -2646,11 +2700,11 @@ struct ReviewUITests {
                 text: "$ git diff",
                 metadata: .init(
                     sourceType: "commandExecution",
-                    status: "inProgress",
+                    status: .inProgress,
                     itemID: "cmd_1",
                     command: "git diff",
                     startedAt: startedAt,
-                    commandStatus: "inProgress"
+                    commandStatus: .inProgress
                 )
             ),
             to: chat.chatID,
@@ -3195,7 +3249,7 @@ struct ReviewUITests {
                 kind: .command,
                 groupID: "cmd_1",
                 text: "$ git diff",
-                metadata: .init(command: "git diff", commandStatus: "running")
+                metadata: .init(command: "git diff", commandStatus: .inProgress)
             ),
             to: chat.chatID,
             turnID: chat.turnID
@@ -5945,7 +5999,7 @@ final class CountingStartBackend: PreviewCodexReviewStoreBackend {
         startCalls += 1
     }
 
-    override func stop(store _: CodexReviewStore) async {
+    override func stop(store _: CodexReviewStore, purpose _: CodexReviewRuntimeStopPurpose) async {
         isActive = false
     }
 
@@ -5981,7 +6035,7 @@ final class AuthActionBackend: PreviewCodexReviewStoreBackend {
         isActive = true
     }
 
-    override func stop(store _: CodexReviewStore) async {
+    override func stop(store _: CodexReviewStore, purpose _: CodexReviewRuntimeStopPurpose) async {
         isActive = false
     }
 
@@ -6023,13 +6077,13 @@ final class FailingCancellationBackend: PreviewCodexReviewStoreBackend {
     ) async {
     }
 
-    override func stop(store _: CodexReviewStore) async {
+    override func stop(store _: CodexReviewStore, purpose _: CodexReviewRuntimeStopPurpose) async {
     }
 
     override func waitUntilStopped() async {}
 
     override func interruptReview(
-        _: CodexReviewBackendModel.Review.Run, reason _: CodexReviewBackendModel.CancellationReason
+        _: ReviewAttempt, reason _: CodexReviewBackendModel.CancellationReason
     ) async throws {
         throw CodexReviewAPI.Error.io("Cancellation failed.")
     }
@@ -6074,7 +6128,7 @@ final class BlockingSettingsBackend: PreviewCodexReviewStoreBackend {
     ) async {
     }
 
-    override func stop(store _: CodexReviewStore) async {
+    override func stop(store _: CodexReviewStore, purpose _: CodexReviewRuntimeStopPurpose) async {
     }
 
     override func waitUntilStopped() async {}
@@ -6084,7 +6138,7 @@ final class BlockingSettingsBackend: PreviewCodexReviewStoreBackend {
         if shouldBlockNextRefresh {
             shouldBlockNextRefresh = false
             await blockedRefreshStartedGate.open()
-            await blockedRefreshResumeGate.wait()
+            try? await blockedRefreshResumeGate.wait()
         }
         return currentSettingsSnapshot
     }
@@ -6114,7 +6168,7 @@ final class BlockingSettingsBackend: PreviewCodexReviewStoreBackend {
         if shouldBlockNextModelUpdate {
             shouldBlockNextModelUpdate = false
             await blockedModelUpdateStartedGate.open()
-            await blockedModelUpdateResumeGate.wait()
+            try? await blockedModelUpdateResumeGate.wait()
         }
     }
 
@@ -6127,7 +6181,7 @@ final class BlockingSettingsBackend: PreviewCodexReviewStoreBackend {
         if shouldBlockNextReasoningUpdate {
             shouldBlockNextReasoningUpdate = false
             await blockedReasoningUpdateStartedGate.open()
-            await blockedReasoningUpdateResumeGate.wait()
+            try? await blockedReasoningUpdateResumeGate.wait()
         }
     }
 
@@ -6143,7 +6197,7 @@ final class BlockingSettingsBackend: PreviewCodexReviewStoreBackend {
     }
 
     func waitForBlockedRefreshToStart() async {
-        await blockedRefreshStartedGate.wait()
+        try? await blockedRefreshStartedGate.wait()
     }
 
     func resumeBlockedRefresh() async {
@@ -6155,7 +6209,7 @@ final class BlockingSettingsBackend: PreviewCodexReviewStoreBackend {
     }
 
     func waitForBlockedModelUpdateToStart() async {
-        await blockedModelUpdateStartedGate.wait()
+        try? await blockedModelUpdateStartedGate.wait()
     }
 
     func resumeBlockedModelUpdate() async {
@@ -6167,7 +6221,7 @@ final class BlockingSettingsBackend: PreviewCodexReviewStoreBackend {
     }
 
     func waitForBlockedReasoningUpdateToStart() async {
-        await blockedReasoningUpdateStartedGate.wait()
+        try? await blockedReasoningUpdateStartedGate.wait()
     }
 
     func resumeBlockedReasoningUpdate() async {

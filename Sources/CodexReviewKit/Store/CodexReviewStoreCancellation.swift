@@ -1,100 +1,107 @@
 import Foundation
 
-private actor RuntimeStopDetachedReviewWorkerDrainRace {
-    private var result: Bool?
-    private var continuation: CheckedContinuation<Bool, Never>?
-
-    func finish(_ value: Bool) {
-        guard result == nil else {
-            return
-        }
-        result = value
-        continuation?.resume(returning: value)
-        continuation = nil
-    }
-
-    func wait() async -> Bool {
-        if let result {
-            return result
-        }
-        return await withCheckedContinuation { continuation in
-            if let result {
-                continuation.resume(returning: result)
-            } else {
-                self.continuation = continuation
-            }
-        }
-    }
-}
-
 extension CodexReviewStore {
     package func completeCancellationLocally(
-        runID: String,
+        runID: ReviewRunID,
         sessionID: String,
         cancellation: ReviewCancellation = .system()
     ) throws {
         guard let runRecord = reviewRun(id: runID)
         else {
-            throw CodexReviewAPI.Error.runNotFound("Run \(runID) was not found.")
+            throw CodexReviewAPI.Error.runNotFound("Run \(runID.rawValue) was not found.")
         }
         guard runRecord.sessionID == sessionID
         else {
-            throw CodexReviewAPI.Error.runNotFound("Run \(runID) was not found.")
+            throw CodexReviewAPI.Error.runNotFound("Run \(runID.rawValue) was not found.")
         }
+
+        commitCancellationLocally(runRecord, cancellation: cancellation)
+    }
+
+    package func commitCancellationLocally(
+        _ runRecord: ReviewRunRecord,
+        cancellation: ReviewCancellation = .system()
+    ) {
+        guard let ownedRunRecord = reviewRun(id: runRecord.id) else {
+            preconditionFailure("A review cancellation can only be committed for a store-owned run.")
+        }
+        precondition(
+            ownedRunRecord === runRecord,
+            "A review cancellation can only be committed to the store-owned run instance."
+        )
         guard runRecord.isTerminal == false else {
             return
         }
 
         let endedAt = clock.now()
         runRecord.cancellationRequested = false
-        runRecord.core.lifecycle.cancellation = cancellation
-        runRecord.core.lifecycle.status = .cancelled
-        runRecord.core.lifecycle.failure = nil
-        runRecord.core.lifecycleMessage = cancellation.message
-        runRecord.core.lifecycle.errorMessage =
-            cancellation.message.nilIfEmpty
-            ?? runRecord.core.lifecycle.errorMessage
-        runRecord.core.lifecycle.endedAt = endedAt
-        runRecord.core.finalReview = nil
+        runRecord.pendingCancellation = nil
+        switch runRecord.core {
+        case .queued:
+            runRecord.core = .cancelledBeforeStart(
+                endedAt: endedAt,
+                cancellation: cancellation
+            )
+        case .running(let attempt, let startedAt):
+            runRecord.core = .cancelled(
+                attempt: attempt,
+                startedAt: startedAt,
+                endedAt: endedAt,
+                cancellation: cancellation
+            )
+        case .startFailed, .cancelledBeforeStart, .succeeded, .failed, .cancelled:
+            return
+        }
+        runRecord.executionPhase = nil
         noteReviewRunMutation()
     }
 
     package func recordCancellationFailure(
-        runID: String,
+        runID: ReviewRunID,
         sessionID: String,
-        message: String
+        message _: String
     ) throws {
         guard let runRecord = reviewRun(id: runID)
         else {
-            throw CodexReviewAPI.Error.runNotFound("Run \(runID) was not found.")
+            throw CodexReviewAPI.Error.runNotFound("Run \(runID.rawValue) was not found.")
         }
         guard runRecord.sessionID == sessionID
         else {
-            throw CodexReviewAPI.Error.runNotFound("Run \(runID) was not found.")
+            throw CodexReviewAPI.Error.runNotFound("Run \(runID.rawValue) was not found.")
         }
 
+        commitCancellationFailure(runRecord)
+    }
+
+    package func commitCancellationFailure(_ runRecord: ReviewRunRecord) {
+        guard let ownedRunRecord = reviewRun(id: runRecord.id) else {
+            preconditionFailure("A cancellation failure can only be committed for a store-owned run.")
+        }
+        precondition(
+            ownedRunRecord === runRecord,
+            "A cancellation failure can only be committed to the store-owned run instance."
+        )
+
         runRecord.cancellationRequested = false
-        runRecord.core.lifecycle.cancellation = nil
-        if let message = message.nilIfEmpty {
-            if message == "Failed to cancel review." {
-                runRecord.core.lifecycleMessage = message
-            } else {
-                runRecord.core.lifecycleMessage = "Failed to cancel review: \(message)"
-            }
-            runRecord.core.lifecycle.errorMessage = message
-        } else {
-            runRecord.core.lifecycleMessage = "Failed to cancel review."
+        runRecord.pendingCancellation = nil
+        switch runRecord.core {
+        case .queued:
+            runRecord.executionPhase = .starting
+        case .running:
+            runRecord.executionPhase = .running(attemptGeneration: 0)
+        case .startFailed, .cancelledBeforeStart, .succeeded, .failed, .cancelled:
+            runRecord.executionPhase = nil
         }
         writeDiagnosticsIfNeeded()
     }
 
     package func recordCancellationFailure(
-        runID: String,
+        runID: ReviewRunID,
         message: String
     ) throws {
         guard let runRecord = reviewRun(id: runID)
         else {
-            throw CodexReviewAPI.Error.runNotFound("Run \(runID) was not found.")
+            throw CodexReviewAPI.Error.runNotFound("Run \(runID.rawValue) was not found.")
         }
         try recordCancellationFailure(
             runID: runID,
@@ -119,12 +126,7 @@ extension CodexReviewStore {
                     cancellation: cancellation
                 )
             } catch {
-                let message = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
-                try? recordCancellationFailure(
-                    runID: runRecord.id,
-                    sessionID: runRecord.sessionID,
-                    message: message.isEmpty ? "Failed to cancel review." : message
-                )
+                commitCancellationFailure(runRecord)
                 if firstError == nil {
                     firstError = error
                 }
@@ -135,51 +137,33 @@ extension CodexReviewStore {
         }
     }
 
-    package func requestActiveReviewCancellationsForRuntimeStop(
-        reason: ReviewCancellation = .system(message: "Review runtime stopped.")
-    ) async -> [String] {
-        let activeReviewRunIDs =
-            orderedReviewRuns
-            .filter { $0.isTerminal == false }
-            .map(\.id)
-        for runID in activeReviewRunIDs {
-            _ = try? await cancelReview(runID: runID, cancellation: reason)
-        }
-        return activeReviewRunIDs
-    }
-
     package func cleanupActiveReviewsForRuntimeStop(
         reason: ReviewCancellation = .system(message: "Review runtime stopped."),
-        workerDrainTimeout: Duration,
         cleanupBackendReviews:
             @escaping @Sendable (
                 CodexReviewRuntimeStopReviewCleanupRequest
             ) async -> Bool
     ) async -> CodexReviewRuntimeStopReviewCleanupResult {
-        let startingRunIDs: [String] = orderedReviewRuns.compactMap { runRecord in
-            guard runRecord.isTerminal == false,
-                runtimeState.isStarting(runRecord.id)
-            else {
-                return nil
-            }
-            return runRecord.id
-        }
+        let activeRunIDs = Set(
+            orderedReviewRuns
+                .filter { $0.isTerminal == false }
+                .map(\.id)
+        )
         markActiveReviewCancellationsPendingForRuntimeStop(reason: reason)
         let request = runtimeStopReviewCleanupRequest(reason: reason)
         let didCompleteInitialBackendCleanup = await cleanupBackendReviews(request)
-        _ = await drainReviewWorkersForRuntimeStop(
-            runIDs: startingRunIDs,
-            timeout: workerDrainTimeout
-        )
-        let locallyCancelledReviewRunIDs = cancelActiveReviewsLocallyForRuntimeStop(
+        _ = cancelActiveReviewsLocallyForRuntimeStop(
             reason: reason,
             cancelWorkers: false
         )
-        cancelAndDetachReviewWorkersForRuntimeStop(runIDs: locallyCancelledReviewRunIDs)
-        let didDrainReviewWorkers = await drainReviewWorkersForRuntimeStop(
-            timeout: workerDrainTimeout
-        )
+        for runID in activeRunIDs {
+            runtimeState.cancelActiveWorker(for: runID)
+        }
+        for task in runtimeState.ownedTasks(for: activeRunIDs) {
+            await task.value
+        }
         let didCompleteFinalBackendCleanup = await cleanupBackendReviews(request)
+        let didDrainReviewWorkers = activeRunIDs.allSatisfy { runtimeState.isDrained($0) }
         return .init(
             didCompleteBackendCleanup:
                 didCompleteInitialBackendCleanup && didCompleteFinalBackendCleanup,
@@ -192,9 +176,8 @@ extension CodexReviewStore {
     ) {
         for runRecord in orderedReviewRuns where runRecord.isTerminal == false {
             runRecord.cancellationRequested = true
-            runRecord.core.lifecycle.cancellation = reason
-            runRecord.core.lifecycleMessage = reason.message
-            runRecord.core.lifecycle.errorMessage = reason.message
+            runRecord.pendingCancellation = reason
+            runRecord.executionPhase = .cancelling(reason)
         }
     }
 
@@ -203,7 +186,7 @@ extension CodexReviewStore {
     ) -> CodexReviewRuntimeStopReviewCleanupRequest {
         return .init(
             reason: .init(message: reason.message),
-            recoveryWaitingRuns: runtimeState.recoveryWaitingRuns()
+            recoveryWaitingAttempts: runtimeState.recoveryWaitingAttempts()
         )
     }
 
@@ -211,7 +194,7 @@ extension CodexReviewStore {
     package func cancelActiveReviewsLocallyForRuntimeStop(
         reason: ReviewCancellation = .system(message: "Review runtime stopped."),
         cancelWorkers: Bool = true
-    ) -> [String] {
+    ) -> [ReviewRunID] {
         let activeReviewRunIDs =
             orderedReviewRuns
             .filter { $0.isTerminal == false }
@@ -222,75 +205,13 @@ extension CodexReviewStore {
 
         for runID in activeReviewRunIDs {
             if let runRecord = reviewRun(id: runID), runRecord.isTerminal == false {
-                try? completeCancellationLocally(
-                    runID: runRecord.id,
-                    sessionID: runRecord.sessionID,
-                    cancellation: reason
-                )
+                commitCancellationLocally(runRecord, cancellation: reason)
             }
             if cancelWorkers {
                 runtimeState.cancelActiveWorker(for: runID)
             }
         }
         return activeReviewRunIDs
-    }
-
-    package func cancelAndDetachReviewWorkersForRuntimeStop(runIDs: [String]) {
-        for runID in runIDs {
-            runtimeState.cancelAndDetachActiveWorkerForRuntimeStop(runID: runID)
-            runtimeState.clearRuntimeStopState(for: runID)
-        }
-    }
-
-    package func drainRuntimeStopDetachedReviewWorkers(timeout: Duration) async -> Bool {
-        let tasks = runtimeState.detachedWorkerTasks()
-        return await drainReviewWorkerTasksForRuntimeStop(tasks, timeout: timeout)
-    }
-
-    package func drainReviewWorkersForRuntimeStop(timeout: Duration) async -> Bool {
-        let tasks = runtimeState.allWorkerTasks()
-        return await drainReviewWorkerTasksForRuntimeStop(tasks, timeout: timeout)
-    }
-
-    private func drainReviewWorkersForRuntimeStop(
-        runIDs: [String],
-        timeout: Duration
-    ) async -> Bool {
-        let tasks = runtimeState.activeWorkerTasks(for: runIDs)
-        return await drainReviewWorkerTasksForRuntimeStop(tasks, timeout: timeout)
-    }
-
-    private func drainReviewWorkerTasksForRuntimeStop(
-        _ tasks: [Task<Void, Never>],
-        timeout: Duration
-    ) async -> Bool {
-        guard tasks.isEmpty == false else {
-            return true
-        }
-
-        let race = RuntimeStopDetachedReviewWorkerDrainRace()
-        let drainTask = Task {
-            for task in tasks {
-                await task.value
-            }
-            await race.finish(true)
-        }
-        let timeoutTask = Task {
-            do {
-                try await Task.sleep(for: timeout)
-            } catch {
-                return
-            }
-            await race.finish(false)
-        }
-
-        let didDrain = await race.wait()
-        if didDrain {
-            timeoutTask.cancel()
-        } else {
-            drainTask.cancel()
-        }
-        return didDrain
     }
 
     package func terminateAllRunningReviewRunsLocally(
@@ -300,21 +221,27 @@ extension CodexReviewStore {
         let resolvedError = failureMessage.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
         for runRecord in orderedReviewRuns where runRecord.isTerminal == false {
             runRecord.cancellationRequested = false
-            runRecord.core.lifecycle.cancellation = nil
-            runRecord.core.lifecycle.status = .failed
-            if let resolvedError {
-                runRecord.core.lifecycleMessage = "Failed to cancel review: \(resolvedError)"
-            } else {
-                runRecord.core.lifecycleMessage = "Failed to cancel review."
-            }
-            runRecord.core.lifecycle.errorMessage =
-                resolvedError
-                ?? reason.nilIfEmpty
-                ?? runRecord.core.lifecycle.errorMessage
-            runRecord.core.lifecycle.failure = .message(
-                runRecord.core.lifecycle.errorMessage ?? runRecord.core.lifecycleMessage
+            runRecord.pendingCancellation = nil
+            let failure = ReviewBackendFailure.connectionTerminated(
+                .transport(
+                    message: resolvedError ?? reason.nilIfEmpty ?? "Failed to cancel review."
+                )
             )
-            runRecord.core.lifecycle.endedAt = clock.now()
+            let endedAt = clock.now()
+            switch runRecord.core {
+            case .queued:
+                runRecord.core = .startFailed(endedAt: endedAt, failure: failure)
+            case .running(let attempt, let startedAt):
+                runRecord.core = .failed(
+                    attempt: attempt,
+                    startedAt: startedAt,
+                    endedAt: endedAt,
+                    failure: failure
+                )
+            case .startFailed, .cancelledBeforeStart, .succeeded, .failed, .cancelled:
+                break
+            }
+            runRecord.executionPhase = nil
         }
         noteReviewRunMutation()
     }

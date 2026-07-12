@@ -32,7 +32,8 @@ package actor MCPClientSessionState {
 @MainActor
 package func makeMCPProtocolServer(
     adapter: CodexReviewMCPServer,
-    defaultSessionID: String? = nil,
+    sessionID: String,
+    sessionRegistry: MCPReviewSessionRegistry,
     clientSession: MCPClientSessionState = .init(),
     boundedReviewWaitDuration: Duration = .seconds(540)
 ) async -> Server {
@@ -46,57 +47,150 @@ package func makeMCPProtocolServer(
     )
 
     await server.withMethodHandler(ListTools.self) { _ in
-        let tools = await adapter.tools.map { descriptor in
-            Tool(
-                name: descriptor.name.rawValue,
-                description: descriptor.description,
-                inputSchema: schema(for: descriptor.name)
-            )
+        try await withMCPSessionOperation(registry: sessionRegistry, sessionID: sessionID) { _ in
+            let tools = await adapter.tools.map { descriptor in
+                Tool(
+                    name: descriptor.name.rawValue,
+                    description: descriptor.description,
+                    inputSchema: schema(for: descriptor.name)
+                )
+            }
+            return .init(tools: tools)
         }
-        return .init(tools: tools)
     }
 
     await server.withMethodHandler(CallTool.self) { params in
-        guard let tool = CodexReviewMCP.Tool.Name(rawValue: params.name) else {
-            return .init(
-                content: [.text(text: "Unknown tool: \(params.name)", annotations: nil, _meta: nil)],
-                isError: true
-            )
-        }
+        await withMCPSessionOperationResult(
+            registry: sessionRegistry,
+            sessionID: sessionID
+        ) { operation in
+            guard let tool = CodexReviewMCP.Tool.Name(rawValue: params.name) else {
+                return .init(
+                    content: [.text(text: "Unknown tool: \(params.name)", annotations: nil, _meta: nil)],
+                    isError: true
+                )
+            }
 
-        do {
             let httpContext = Server.currentHandlerContext?.httpContext
             let useBoundedReviewStart = await clientSession.usesBoundedReviewStart(httpContext: httpContext)
             let request = try toolRequest(
                 tool: tool,
                 arguments: params.arguments ?? [:],
-                defaultSessionID: defaultSessionID,
+                defaultSessionID: sessionID,
                 boundedReviewWaitDuration: boundedReviewWaitDuration,
                 useBoundedReviewStart: useBoundedReviewStart
             )
-            let response = try await adapter.handle(request)
+            let response: CodexReviewMCP.Tool.Response
+            if case .reviewStart = request {
+                response = try await handleReviewStart(
+                    request,
+                    sessionID: sessionID,
+                    registry: sessionRegistry,
+                    adapter: adapter
+                )
+            } else {
+                let allowedRunIDs = try await sessionRegistry.members(for: operation)
+                response = try await adapter.handle(
+                    request,
+                    allowedRunIDs: allowedRunIDs
+                )
+            }
             return try toolResult(response: response)
-        } catch {
-            return .init(
-                content: [.text(text: error.localizedDescription, annotations: nil, _meta: nil)],
-                isError: true
-            )
         }
     }
 
     await server.withMethodHandler(ListResources.self) { _ in
-        .init(resources: helpResources.map(\.resource))
+        try await withMCPSessionOperation(registry: sessionRegistry, sessionID: sessionID) { _ in
+            .init(resources: helpResources.map(\.resource))
+        }
     }
 
     await server.withMethodHandler(ReadResource.self) { params in
-        let content = helpResources.first { $0.uri == params.uri }?.content
-            ?? "Resource not found: \(params.uri)"
-        return .init(contents: [.text(content, uri: params.uri, mimeType: "text/markdown")])
+        try await withMCPSessionOperation(registry: sessionRegistry, sessionID: sessionID) { _ in
+            let content = helpResources.first { $0.uri == params.uri }?.content
+                ?? "Resource not found: \(params.uri)"
+            return .init(contents: [.text(content, uri: params.uri, mimeType: "text/markdown")])
+        }
     }
 
     await server.withMethodHandler(ListResourceTemplates.self) { _ in
-        .init(templates: helpResourceTemplates)
+        try await withMCPSessionOperation(registry: sessionRegistry, sessionID: sessionID) { _ in
+            .init(templates: helpResourceTemplates)
+        }
     }
 
     return server
+}
+
+private func withMCPSessionOperation<Result: Sendable>(
+    registry: MCPReviewSessionRegistry,
+    sessionID: String,
+    operation: @Sendable (MCPSessionOperationToken) async throws -> Result
+) async throws -> Result {
+    let token = try await registry.beginOperation(in: sessionID)
+    let result: Result
+    do {
+        result = try await operation(token)
+    } catch {
+        try await registry.finishOperation(token)
+        throw error
+    }
+    try await registry.finishOperation(token)
+    return result
+}
+
+private func withMCPSessionOperationResult(
+    registry: MCPReviewSessionRegistry,
+    sessionID: String,
+    operation: @Sendable (MCPSessionOperationToken) async throws -> CallTool.Result
+) async -> CallTool.Result {
+    do {
+        return try await withMCPSessionOperation(
+            registry: registry,
+            sessionID: sessionID,
+            operation: operation
+        )
+    } catch {
+        return .init(
+            content: [.text(text: error.localizedDescription, annotations: nil, _meta: nil)],
+            isError: true
+        )
+    }
+}
+
+private func handleReviewStart(
+    _ request: CodexReviewMCP.Tool.Request,
+    sessionID: String,
+    registry: MCPReviewSessionRegistry,
+    adapter: CodexReviewMCPServer
+) async throws -> CodexReviewMCP.Tool.Response {
+    guard case .reviewStart(_, let reviewRequest, let waitTimeout) = request else {
+        preconditionFailure("Only review_start can enter the start reservation path.")
+    }
+    let reservation = try await registry.reserveStart(in: sessionID)
+    var reservationIsPending = true
+    do {
+        let runID = try await adapter.beginReview(
+            sessionID: sessionID,
+            request: reviewRequest
+        )
+        let disposition = try await registry.bind(
+            runID: runID,
+            reservation: reservation
+        )
+        reservationIsPending = false
+        guard case .bound = disposition else {
+            throw MCPReviewSessionRegistryError.sessionNotOpen(sessionID)
+        }
+        return try await adapter.finishReviewStart(
+            sessionID: sessionID,
+            runID: runID,
+            waitTimeout: waitTimeout
+        )
+    } catch {
+        if reservationIsPending {
+            try await registry.finishStart(reservation)
+        }
+        throw error
+    }
 }

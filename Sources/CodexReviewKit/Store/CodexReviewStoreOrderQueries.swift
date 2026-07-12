@@ -24,18 +24,18 @@ extension CodexReviewStore {
     package var orderedReviewRuns: [ReviewRunRecord] {
         reviewRuns.sorted {
             if $0.sortOrder == $1.sortOrder {
-                return $0.id < $1.id
+                return $0.id.rawValue < $1.id.rawValue
             }
             return $0.sortOrder > $1.sortOrder
         }
     }
 
-    package func reviewRun(id: String) -> ReviewRunRecord? {
+    package func reviewRun(id: ReviewRunID) -> ReviewRunRecord? {
         reviewRuns.first(where: { $0.id == id })
     }
 
     package func isCancellableReviewRun(_ runRecord: ReviewRunRecord) -> Bool {
-        runRecord.isTerminal == false && runRecord.cancellationRequested == false
+        runRecord.presentation.isCancellable && runRecord.cancellationRequested == false
     }
 
     package func hasCancellableReview(forChatID chatID: String) -> Bool {
@@ -93,16 +93,14 @@ extension CodexReviewStore {
 
 private extension ReviewRunRecord {
     func matchesChatID(_ chatID: String) -> Bool {
-        matchesChatID(chatID, candidate: core.run.reviewThreadID)
-            || matchesChatID(chatID, candidate: core.run.threadID)
-    }
-
-    private func matchesChatID(_ chatID: String, candidate: String?) -> Bool {
-        guard let candidate = candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
-            candidate.isEmpty == false
-        else {
+        guard let identity = core.attempt?.threadIdentity else {
             return false
         }
+        return matchesChatID(chatID, candidate: identity.activeTurnThreadID.rawValue)
+            || matchesChatID(chatID, candidate: identity.sourceThreadID.rawValue)
+    }
+
+    private func matchesChatID(_ chatID: String, candidate: String) -> Bool {
         return candidate == chatID
     }
 }

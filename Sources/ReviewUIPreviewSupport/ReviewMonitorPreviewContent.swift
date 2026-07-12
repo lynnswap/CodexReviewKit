@@ -8,42 +8,46 @@ import ReviewUI
 @MainActor
 public final class ReviewMonitorPreviewContentSource {
     public let store: CodexReviewStore
-    let runtime: ReviewMonitorPreviewAppServerRuntime
+    private weak var lifetime: PreviewRuntimeLifetime?
 
     public var codexModelSource: ReviewMonitorCodexModelSource {
-        runtime.modelSource
+        requireLifetime().modelSource
     }
 
     init(
         store: CodexReviewStore,
-        runtime: ReviewMonitorPreviewAppServerRuntime
+        lifetime: PreviewRuntimeLifetime
     ) {
         self.store = store
-        self.runtime = runtime
+        self.lifetime = lifetime
+    }
+
+    isolated deinit {
+        lifetime?.signalCancellation()
     }
 
     var initialChatID: CodexThreadID? {
-        runtime.initialChatID
+        requireLifetime().initialChatID
     }
 
     func start() {
-        runtime.start()
+        requireLifetime().start()
     }
 
     func startStreaming(interval: Duration) {
-        runtime.startStreaming(interval: interval)
+        requireLifetime().startStreaming(interval: interval)
     }
 
     package func startStreamingForTesting(interval: Duration) {
-        runtime.startStreaming(interval: interval)
+        requireLifetime().startStreaming(interval: interval)
     }
 
     package func cancelStreamingForTesting() {
-        runtime.cancelStreaming()
+        requireLifetime().cancelStreaming()
     }
 
     package func stopStreamingForTesting() async {
-        await runtime.stopStreaming()
+        await requireLifetime().stopStreaming()
     }
 
     @discardableResult
@@ -51,32 +55,63 @@ public final class ReviewMonitorPreviewContentSource {
         after tick: Int = 0,
         emitsNotifications: Bool = false
     ) async -> Int {
-        await runtime.appendPreviewStreamTick(
+        await requireLifetime().appendPreviewStreamTick(
             after: tick,
             emitsNotifications: emitsNotifications
         )
     }
 
     public func snapshotForTesting(chatID: CodexThreadID) async -> CodexThreadSnapshot? {
-        await runtime.snapshotForTesting(chatID: chatID)
+        await requireLifetime().snapshotForTesting(chatID: chatID)
     }
 
     public func observedTurnStateForTesting(
         chatID: CodexThreadID
     ) -> CodexTurnSnapshot.State? {
-        runtime.observedTurnStateForTesting(chatID: chatID)
+        requireLifetime().observedTurnStateForTesting(chatID: chatID)
     }
 
     public func interruptRequestCountForTesting() async -> Int {
-        await runtime.interruptRequestCountForTesting()
+        await requireLifetime().interruptRequestCountForTesting()
     }
 
     public func turnCompletionNotificationCountForTesting() -> Int {
-        runtime.turnCompletionNotificationCountForTesting()
+        requireLifetime().turnCompletionNotificationCountForTesting()
     }
 
     public func archiveRequestCountForTesting() async -> Int {
-        await runtime.archiveRequestCountForTesting()
+        await requireLifetime().archiveRequestCountForTesting()
+    }
+
+    package func startAndWaitForTesting() async {
+        await requireLifetime().startAndWaitForTesting()
+    }
+
+    var runtimeLifetimeForTesting: PreviewRuntimeLifetime? {
+        lifetime
+    }
+
+    package var runtimeTransportForTesting: CodexAppServerTestTransport? {
+        lifetime?.runtimeTransportForTesting
+    }
+
+    package var modelContainerForTesting: CodexModelContainer? {
+        lifetime?.modelContainerForTesting
+    }
+
+    package var activeRuntimeTaskCountForTesting: Int {
+        lifetime?.activeTaskCountForTesting ?? 0
+    }
+
+    package var stopOperationCountForTesting: Int {
+        lifetime?.stopOperationCountForTesting ?? 0
+    }
+
+    private func requireLifetime() -> PreviewRuntimeLifetime {
+        guard let lifetime else {
+            preconditionFailure("A preview content source requires its store-owned runtime lifetime.")
+        }
+        return lifetime
     }
 }
 
@@ -151,7 +186,7 @@ public enum ReviewMonitorPreviewContent {
         }
     }
 
-    package enum PreviewStreamMode {
+    package enum PreviewStreamMode: Sendable {
         case update
         case complete
         case textDelta
@@ -181,7 +216,7 @@ public enum ReviewMonitorPreviewContent {
         }
     }
 
-    package struct PreviewChatLogStreamStep {
+    package struct PreviewChatLogStreamStep: Sendable {
         let itemName: String
         let kind: CodexThreadItem.Kind
         let content: CodexThreadItem.Content
@@ -197,14 +232,21 @@ public enum ReviewMonitorPreviewContent {
         }
     }
 
-    package struct PreviewStreamFrame {
+    package struct PreviewStreamFrame: Sendable {
         let step: PreviewChatLogStreamStep
         let cycle: Int
     }
 
     public static func makeStore() -> CodexReviewStore {
+        makeStore(runtimeLifetime: nil)
+    }
+
+    private static func makeStore(
+        runtimeLifetime: PreviewRuntimeLifetime?
+    ) -> CodexReviewStore {
         let store = CodexReviewStore.makePreviewStore(
-            seed: .init(initialSettingsSnapshot: makePreviewSettingsSnapshot())
+            seed: .init(initialSettingsSnapshot: makePreviewSettingsSnapshot()),
+            runtimeLifetime: runtimeLifetime
         )
         let accounts = makePreviewAccounts()
         store.loadForTesting(
@@ -218,13 +260,12 @@ public enum ReviewMonitorPreviewContent {
 
     public static func makeContentSource() -> ReviewMonitorPreviewContentSource {
         let chatLogFixtures = makeChatLogFixtures()
-        let store = makeStore()
-        let previewRuntime = ReviewMonitorPreviewAppServerRuntime(
+        let lifetime = PreviewRuntimeLifetime(
             fixtures: chatLogFixtures
         )
         return ReviewMonitorPreviewContentSource(
-            store: store,
-            runtime: previewRuntime
+            store: makeStore(runtimeLifetime: lifetime),
+            lifetime: lifetime
         )
     }
 
@@ -233,10 +274,6 @@ public enum ReviewMonitorPreviewContent {
     }
 
     public static func makeCommandOutputContentSource() -> ReviewMonitorPreviewContentSource {
-        let store = CodexReviewStore.makePreviewStore(
-            seed: .init(initialSettingsSnapshot: makePreviewSettingsSnapshot())
-        )
-        let accounts = makePreviewAccounts()
         let cwd = "/path/to/workspace-alpha"
         let now = Date()
         let chatItems = makeCommandOutputPreviewChatLogItems(cwd: cwd)
@@ -256,18 +293,14 @@ public enum ReviewMonitorPreviewContent {
             endedAt: nil,
             chatItems: chatItems
         )
-        store.loadForTesting(
-            serverState: .running,
-            account: accounts.first,
-            persistedAccounts: accounts,
-            serverURL: URL(string: "http://localhost:9417/mcp")
-        )
         let fixture = makeChatLogFixture(
-            for: chatFixture
+            for: chatFixture,
+            referenceDate: now
         )
+        let lifetime = PreviewRuntimeLifetime(fixtures: [fixture])
         return ReviewMonitorPreviewContentSource(
-            store: store,
-            runtime: ReviewMonitorPreviewAppServerRuntime(fixtures: [fixture])
+            store: makeStore(runtimeLifetime: lifetime),
+            lifetime: lifetime
         )
     }
 
@@ -724,7 +757,8 @@ public enum ReviewMonitorPreviewContent {
                 )
                 chatLogFixtures.append(
                     makeChatLogFixture(
-                        for: chatFixture
+                        for: chatFixture,
+                        referenceDate: now
                     ))
             }
         }
@@ -732,7 +766,8 @@ public enum ReviewMonitorPreviewContent {
     }
 
     private static func makeChatLogFixture(
-        for chatFixture: PreviewChatFixture
+        for chatFixture: PreviewChatFixture,
+        referenceDate: Date
     ) -> ReviewMonitorPreviewChatLogFixture {
         let turn = CodexTurnSnapshot(
             id: chatFixture.turnID,
@@ -752,11 +787,15 @@ public enum ReviewMonitorPreviewContent {
         return ReviewMonitorPreviewChatLogFixture(
             chatID: chatFixture.chatID,
             title: chatFixture.targetSummary,
-            preview: chatFixture.initialMessage.nilIfEmpty ?? chatFixture.summary.nilIfEmpty,
+            preview: chatFixture.initialMessage.nilIfEmpty
+                ?? chatFixture.summary.nilIfEmpty
+                ?? chatFixture.targetSummary,
             model: chatFixture.model,
+            modelProvider: "openai",
             workspaceCWD: chatFixture.cwd,
-            updatedAt: chatFixture.endedAt ?? chatFixture.startedAt,
-            recencyAt: chatFixture.endedAt ?? chatFixture.startedAt,
+            createdAt: chatFixture.startedAt ?? referenceDate,
+            updatedAt: chatFixture.endedAt ?? chatFixture.startedAt ?? referenceDate,
+            recencyAt: chatFixture.endedAt ?? chatFixture.startedAt ?? referenceDate,
             status: CodexThreadStatus(previewLifecycle: chatFixture.lifecycle),
             cwd: chatFixture.cwd,
             streamID: chatFixture.id,

@@ -2,24 +2,9 @@ import Foundation
 import Testing
 import CodexAppServerKit
 import CodexAppServerKitTesting
+import CodexDataKit
 @testable import CodexReviewAppServer
 import CodexReviewKit
-
-private struct BackendReviewEventSequence: AsyncSequence {
-    struct AsyncIterator: AsyncIteratorProtocol {
-        var mailbox: BackendReviewEventMailbox
-
-        mutating func next() async throws -> CodexReviewBackendModel.Review.Event? {
-            try await mailbox.next()
-        }
-    }
-
-    var mailbox: BackendReviewEventMailbox
-
-    func makeAsyncIterator() -> AsyncIterator {
-        AsyncIterator(mailbox: mailbox)
-    }
-}
 
 @Suite("AppServerClientTests")
 struct AppServerClientTests {
@@ -27,232 +12,325 @@ struct AppServerClientTests {
         let runtime = try await CodexAppServerTestRuntime.start()
         try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
         try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "thread-1")
-        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
+        let backend = await makeBackend(appServer: runtime.server)
 
         let attempt = try await backend.startReview(makeReviewStart(target: .uncommittedChanges))
 
-        #expect(attempt.run.threadID == "thread-1")
-        #expect(attempt.run.turnID == "turn-1")
-        #expect(attempt.run.reviewThreadID == "thread-1")
+        #expect(attempt.attempt.threadIdentity.sourceThreadID.rawValue == "thread-1")
+        #expect(attempt.attempt.turnID.rawValue == "turn-1")
+        #expect(attempt.attempt.threadIdentity.activeTurnThreadID.rawValue == "thread-1")
 
         let requests = await runtime.transport.recordedRequests()
-        #expect(requests.map(\.method) == ["initialize", "thread/start", "review/start"])
+        #expect(requests.map(\.request.operation) == [
+            .initialize,
+            .threadStart,
+            .reviewStart,
+        ])
 
-        let threadStart = try #require(requests.first { $0.method == "thread/start" })
-        let threadParams = try jsonObject(from: threadStart.params)
-        #expect(threadParams["cwd"] as? String == "/tmp/project")
-        #expect(threadParams["model"] as? String == "gpt-5")
-        #expect(threadParams["ephemeral"] as? Bool == false)
-        #expect(threadParams["approvalPolicy"] as? String == "never")
-        #expect(threadParams["permissions"] as? String == ":danger-full-access")
-        #expect(threadParams["sessionStartSource"] as? String == "startup")
-        #expect(threadParams["threadSource"] as? String == "user")
-        #expect(threadParams["sandbox"] == nil)
+        let threadStart = try #require(requests.compactMap { request
+            -> (URL, CodexInstructions?, CodexThread.Options)? in
+            guard case .threadStart(let workspace, let instructions, let options) = request.request
+            else { return nil }
+            return (workspace, instructions, options)
+        }.first)
+        #expect(threadStart.0.path == "/tmp/project")
+        #expect(threadStart.1 == nil)
+        #expect(threadStart.2.model == "gpt-5")
+        #expect(threadStart.2.ephemeral == false)
+        #expect(threadStart.2.approvalMode == .denyAll)
+        #expect(threadStart.2.permissions == .profile(id: ":danger-full-access"))
+        #expect(threadStart.2.sessionStartSource == .startup)
+        #expect(threadStart.2.threadSource == .user)
+        #expect(threadStart.2.sandbox == nil)
 
-        let reviewStart = try #require(requests.first { $0.method == "review/start" })
-        let reviewParams = try jsonObject(from: reviewStart.params)
-        #expect(reviewParams["threadId"] as? String == "thread-1")
-        #expect(reviewParams["delivery"] as? String == "inline")
-        let target = try #require(reviewParams["target"] as? [String: Any])
-        #expect(target["type"] as? String == "uncommittedChanges")
+        let reviewStart = try #require(requests.compactMap { request
+            -> (CodexThreadID, CodexReviewTarget, CodexReviewDelivery)? in
+            guard case .reviewStart(let threadID, let target, let delivery) = request.request
+            else { return nil }
+            return (threadID, target, delivery)
+        }.first)
+        #expect(reviewStart.0 == "thread-1")
+        #expect(reviewStart.1 == .uncommittedChanges)
+        #expect(reviewStart.2 == .inline)
     }
 
     @Test func backendConsumesTypedReviewSessionStream() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
-        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "review-thread")
+        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "thread-1")
         await runtime.transport.waitForNotificationStreamCount(1)
-        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
+        let backend = await makeBackend(appServer: runtime.server)
 
         let attempt = try await backend.startReview(makeReviewStart(target: .baseBranch("main")))
-        var iterator = eventSequence(attempt).makeAsyncIterator()
 
-        try await runtime.transport.emitServerNotification(
-            method: "item/completed",
-            params: TestItemNotification(
-                threadID: "review-thread",
-                turnID: "turn-1",
-                item: .init(
-                    type: "commandExecution",
-                    id: "cmd-1",
-                    command: "swift test",
-                    aggregatedOutput: "passed",
-                    status: "completed"
-                )
+        try await runtime.notificationEmitter.emitItemCompleted(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            item: .commandExecution(
+                id: "cmd-1",
+                command: "swift test",
+                cwd: URL(fileURLWithPath: "/tmp/project", isDirectory: true),
+                status: .completed,
+                aggregatedOutput: "passed"
             )
         )
-        try await runtime.transport.emitServerNotification(
-            method: "turn/completed",
-            params: TestTurnNotification(
-                threadID: "review-thread",
-                turn: .init(
-                    id: "turn-1",
-                    status: "completed",
-                    items: [
-                        .exitedReviewMode(id: "review-output", review: "Looks good.")
-                    ]
-                )
-            )
+        try await emitTurn(
+            on: runtime,
+            threadID: "thread-1",
+            turnID: "turn-1",
+            state: .completed,
+            items: [
+                .exitedReviewMode(id: "review-output", review: "Looks good."),
+            ]
         )
+
+        let observed = try await withTimeout {
+            try await attempt.observeTerminal()
+        }
+        let turnID = try makeTurnID("turn-1")
+        #expect(
+            observed == .completed(.init(
+                turnID: turnID,
+                expectedOutput: try NonEmptyReviewOutput(validating: "Looks good.")
+            ))
+        )
+        #expect(await runtime.transport.recordedRequests(for: .threadRead).isEmpty)
+
+        try await enqueueReviewProjection(
+            transport: runtime.transport,
+            threadID: "thread-1",
+            turnID: "turn-1",
+            output: "Looks good."
+        )
+        #expect(
+            await attempt.finalizeTerminal(observed)
+                == .completed(.init(
+                    finalReview: try NonEmptyReviewOutput(validating: "Looks good.")
+                ))
+        )
+        #expect(await runtime.transport.recordedRequests(for: .threadRead).count == 1)
+    }
+
+    @Test func completionPublicationFinishesAfterFinalizerCallerCancellation() async throws {
+        let fixture = try await makeCompletedReviewFixture(output: "Looks good.")
+        try await enqueueReviewProjection(
+            transport: fixture.runtime.transport,
+            threadID: "thread-1",
+            turnID: "turn-1",
+            output: "Looks good."
+        )
+        let refreshGate = CodexAppServerTestGate()
+        await fixture.runtime.transport.holdNextIgnoringCancellation(
+            .threadRead,
+            gate: refreshGate
+        )
+
+        let finalization = Task {
+            await fixture.attempt.finalizeTerminal(fixture.observed)
+        }
+        await fixture.runtime.transport.waitForRequest(.threadRead)
+        await refreshGate.waitUntilBlocked()
+        finalization.cancel()
+        await refreshGate.open()
 
         #expect(
-            try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "review-thread", model: "gpt-5"))
-        #expect(try await iterator.next() == .completed(finalReview: "Looks good."))
+            await finalization.value
+                == .completed(.init(
+                    finalReview: try NonEmptyReviewOutput(validating: "Looks good.")
+                ))
+        )
+        #expect(
+            await fixture.runtime.transport.recordedRequests(for: .threadRead).count == 1
+        )
+    }
+
+    @Test(arguments: ReviewPublicationFailureScenario.allCases)
+    func completionPublicationMapsTypedFailure(
+        _ scenario: ReviewPublicationFailureScenario
+    ) async throws {
+        let fixture = try await makeCompletedReviewFixture(output: "Expected output")
+        switch scenario {
+        case .turnUnavailable:
+            try await enqueueReviewProjection(
+                transport: fixture.runtime.transport,
+                threadID: "thread-1",
+                turnID: nil,
+                output: nil
+            )
+        case .outputMissing:
+            try await enqueueReviewProjection(
+                transport: fixture.runtime.transport,
+                threadID: "thread-1",
+                turnID: "turn-1",
+                output: nil
+            )
+        case .outputEmpty:
+            try await enqueueReviewProjection(
+                transport: fixture.runtime.transport,
+                threadID: "thread-1",
+                turnID: "turn-1",
+                output: "   "
+            )
+        case .outputMismatch:
+            try await enqueueReviewProjection(
+                transport: fixture.runtime.transport,
+                threadID: "thread-1",
+                turnID: "turn-1",
+                output: "Different output"
+            )
+        case .refreshFailure:
+            try await fixture.runtime.transport.enqueueFailure(
+                .response(code: -32_000, message: "projection unavailable"),
+                for: .threadRead
+            )
+        }
+
+        let terminal = await fixture.attempt.finalizeTerminal(fixture.observed)
+        guard case .failed(.outputPublication(let failure)) = terminal else {
+            Issue.record("Expected a typed output-publication failure, got \(terminal).")
+            return
+        }
+        let turnID = try makeTurnID("turn-1")
+        switch (scenario, failure) {
+        case (.turnUnavailable, .unavailable(let actualTurnID)):
+            #expect(actualTurnID == turnID)
+        case (.outputMissing, .empty(let actualTurnID)),
+            (.outputEmpty, .empty(let actualTurnID)):
+            #expect(actualTurnID == turnID)
+        case (.outputMismatch, .mismatched(let actualTurnID)):
+            #expect(actualTurnID == turnID)
+        case (.refreshFailure, .refreshFailed(let actualTurnID, let message)):
+            #expect(actualTurnID == turnID)
+            #expect(message.contains("projection unavailable"))
+        default:
+            Issue.record("Unexpected publication mapping \(failure) for \(scenario).")
+        }
+        #expect(
+            await fixture.runtime.transport.recordedRequests(for: .threadRead).count == 1
+        )
     }
 
     @Test func backendCompletesReviewFromExitedReviewModeWhenTerminalPayloadIsSparse() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
-        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "review-thread")
+        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "thread-1")
         await runtime.transport.waitForNotificationStreamCount(1)
-        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
+        let backend = await makeBackend(appServer: runtime.server)
 
         let attempt = try await backend.startReview(makeReviewStart(target: .baseBranch("main")))
-        var iterator = eventSequence(attempt).makeAsyncIterator()
 
-        try await runtime.transport.emitServerNotification(
-            method: "item/completed",
-            params: TestItemNotification(
-                threadID: "review-thread",
-                turnID: "turn-1",
-                item: .init(
-                    type: "exitedReviewMode",
-                    id: "review-output",
-                    review: "No issues found."
-                )
-            )
+        try await runtime.notificationEmitter.emitItemCompleted(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            item: .exitedReviewMode(id: "review-output", review: "No issues found.")
         )
-        try await runtime.transport.emitServerNotification(
-            method: "turn/completed",
-            params: TestTurnNotification(
-                threadID: "review-thread",
-                turn: .init(id: "turn-1", status: "completed")
-            )
+        try await emitTurn(
+            on: runtime,
+            threadID: "thread-1",
+            turnID: "turn-1",
+            state: .completed
         )
 
         #expect(
-            try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "review-thread", model: "gpt-5"))
-        #expect(try await iterator.next() == .completed(finalReview: "No issues found."))
-    }
-
-    @Test func backendRejectsItemDeltaWithoutRequiredTurnID() async throws {
-        let runtime = try await CodexAppServerTestRuntime.start()
-        try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
-        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "review-thread")
-        await runtime.transport.waitForNotificationStreamCount(1)
-        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
-
-        let attempt = try await backend.startReview(makeReviewStart(target: .baseBranch("main")))
-        var iterator = eventSequence(attempt).makeAsyncIterator()
-
-        try await runtime.transport.emitServerNotification(
-            method: "item/agentMessage/delta",
-            params: TestDeltaWithoutTurnIDNotification(
-                threadID: "review-thread",
-                itemID: "msg-1",
-                delta: "Looks good.",
-                phase: "final_answer"
-            )
+            try await attempt.observeTerminal()
+                == .completed(.init(
+                    turnID: makeTurnID("turn-1"),
+                    expectedOutput: try NonEmptyReviewOutput(validating: "No issues found.")
+                ))
         )
-        #expect(
-            try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "review-thread", model: "gpt-5"))
-        do {
-            _ = try await iterator.next()
-            Issue.record("Expected the malformed current-v2 notification to terminate the event stream.")
-        } catch {
-            #expect(
-                error.localizedDescription.contains(
-                    "Current-v2 notification is missing required field turnId."
-                )
-            )
-        }
     }
 
-    @Test func backendDoesNotPromoteThreadlessAgentMessageToInlineReview() async throws {
+    @Test func backendSurfacesTransportContractViolationAsConnectionTermination() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
         try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "thread-1")
         await runtime.transport.waitForNotificationStreamCount(1)
-        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
+        let backend = await makeBackend(appServer: runtime.server)
 
         let attempt = try await backend.startReview(makeReviewStart(target: .baseBranch("main")))
-        var iterator = eventSequence(attempt).makeAsyncIterator()
 
-        try await runtime.transport.emitServerNotification(
-            method: "agent/message",
-            params: TestAgentMessageNotification(message: "Looks good.")
-        )
-        try await runtime.transport.emitServerNotification(
-            method: "turn/completed",
-            params: TestTurnNotification(
-                threadID: "thread-1",
-                turn: .init(id: "turn-1", status: "completed")
+        await runtime.transport.failConnection(.contractViolation(
+            message: "Current-v2 notification is missing required field turnId."
+        ))
+        let observed = try await attempt.observeTerminal()
+        guard case .failed(.connectionTerminated(.transport(let message))) = observed else {
+            Issue.record(
+                "Expected a typed connection termination for the malformed stream, got \(observed)."
             )
+            return
+        }
+        #expect(message.contains("Current-v2 notification is missing required field turnId."))
+    }
+
+    @Test func backendDoesNotPromoteAgentMessageToInlineReview() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
+        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "thread-1")
+        await runtime.transport.waitForNotificationStreamCount(1)
+        let backend = await makeBackend(appServer: runtime.server)
+
+        let attempt = try await backend.startReview(makeReviewStart(target: .baseBranch("main")))
+
+        try await runtime.notificationEmitter.emitItemCompleted(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            item: .agentMessage(id: "message-1", text: "Looks good.")
+        )
+        try await emitTurn(
+            on: runtime,
+            threadID: "thread-1",
+            turnID: "turn-1",
+            state: .completed
         )
 
         #expect(
-            try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: "gpt-5"))
-        #expect(
-            try await iterator.next()
-                == .failed(.missingReviewOutput(turnID: "turn-1")))
+            try await attempt.observeTerminal()
+                == .failed(.missingReviewOutput(turnID: makeTurnID("turn-1"))))
     }
 
     @Test func backendFailsCompletedReviewWithoutReviewOutput() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
-        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "review-thread")
+        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "thread-1")
         await runtime.transport.waitForNotificationStreamCount(1)
-        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
+        let backend = await makeBackend(appServer: runtime.server)
 
         let attempt = try await backend.startReview(makeReviewStart(target: .baseBranch("main")))
-        var iterator = eventSequence(attempt).makeAsyncIterator()
 
-        try await runtime.transport.emitServerNotification(
-            method: "turn/completed",
-            params: TestTurnNotification(
-                threadID: "review-thread",
-                turn: .init(id: "turn-1", status: "completed")
-            )
+        try await emitTurn(
+            on: runtime,
+            threadID: "thread-1",
+            turnID: "turn-1",
+            state: .completed
         )
 
         #expect(
-            try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "review-thread", model: "gpt-5"))
-        #expect(
-            try await iterator.next()
-                == .failed(.missingReviewOutput(turnID: "turn-1")))
+            try await attempt.observeTerminal()
+                == .failed(.missingReviewOutput(turnID: makeTurnID("turn-1"))))
     }
 
     @Test func backendPreservesTypedTurnFailure() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
-        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "review-thread")
+        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "thread-1")
         await runtime.transport.waitForNotificationStreamCount(1)
-        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
+        let backend = await makeBackend(appServer: runtime.server)
 
         let attempt = try await backend.startReview(makeReviewStart())
-        var iterator = eventSequence(attempt).makeAsyncIterator()
 
-        try await runtime.transport.emitServerNotification(
-            method: "turn/completed",
-            params: TestTurnNotification(
-                threadID: "review-thread",
-                turn: .init(
-                    id: "turn-1",
-                    status: "failed",
-                    error: .init(
-                        message: "Capacity exhausted.",
-                        codexErrorInfo: "serverOverloaded",
-                        additionalDetails: "retry after the maintenance window"
-                    )
-                )
-            )
+        try await emitTurn(
+            on: runtime,
+            threadID: "thread-1",
+            turnID: "turn-1",
+            state: .failed(.init(
+                message: "Capacity exhausted.",
+                info: .serverOverloaded,
+                additionalDetails: "retry after the maintenance window"
+            ))
         )
 
         #expect(
-            try await iterator.next()
-                == .started(turnID: "turn-1", reviewThreadID: "review-thread", model: "gpt-5"))
-        #expect(
-            try await iterator.next()
+            try await attempt.observeTerminal()
                 == .failed(
                     .turnFailed(
                         .init(
@@ -268,62 +346,49 @@ struct AppServerClientTests {
     @Test func backendKeepsServerInterruptionDistinctFromCallerCancellation() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
-        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "review-thread")
+        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "thread-1")
         await runtime.transport.waitForNotificationStreamCount(1)
-        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
+        let backend = await makeBackend(appServer: runtime.server)
 
         let attempt = try await backend.startReview(makeReviewStart())
-        var iterator = eventSequence(attempt).makeAsyncIterator()
 
-        try await runtime.transport.emitServerNotification(
-            method: "turn/completed",
-            params: TestTurnNotification(
-                threadID: "review-thread",
-                turn: .init(id: "turn-1", status: "interrupted")
-            )
+        try await emitTurn(
+            on: runtime,
+            threadID: "thread-1",
+            turnID: "turn-1",
+            state: .interrupted
         )
 
-        #expect(
-            try await iterator.next()
-                == .started(turnID: "turn-1", reviewThreadID: "review-thread", model: "gpt-5"))
-        #expect(try await iterator.next() == .interrupted(message: nil))
+        #expect(try await attempt.observeTerminal() == .interrupted(message: nil))
     }
 
-    @Test func backendPreservesUnknownTerminalStatusError() async throws {
-        let runtime = try await CodexAppServerTestRuntime.start()
-        try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
-        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "review-thread")
-        await runtime.transport.waitForNotificationStreamCount(1)
-        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
-
-        let attempt = try await backend.startReview(makeReviewStart())
-        var iterator = eventSequence(attempt).makeAsyncIterator()
-
-        try await runtime.transport.emitServerNotification(
-            method: "turn/completed",
-            params: TestTurnNotification(
-                threadID: "review-thread",
-                turn: .init(
-                    id: "turn-1",
-                    status: "pausedByFutureServer",
-                    error: .init(
-                        message: "Future terminal detail.",
-                        codexErrorInfo: "futureErrorCode",
-                        additionalDetails: "future additional detail"
-                    )
-                )
-            )
+    @Test func terminalMapperPreservesUnknownTerminalStatusError() throws {
+        let attempt = try makeReviewAttempt(
+            attemptID: "attempt-1",
+            sourceThreadID: "thread-1",
+            turnID: "turn-1",
+            activeTurnThreadID: "thread-1"
         )
+        let outcome = CodexTurnOutcome.invalidTerminalStatus(
+            rawStatus: "pausedByFutureServer",
+            error: .init(
+                message: "Future terminal detail.",
+                info: .unknown(rawValue: "futureErrorCode"),
+                additionalDetails: "future additional detail"
+            ),
+            response: .init(turnID: "turn-1")
+        )
+        let expectedTurnID = try makeTurnID("turn-1")
 
         #expect(
-            try await iterator.next()
-                == .started(turnID: "turn-1", reviewThreadID: "review-thread", model: "gpt-5"))
-        #expect(
-            try await iterator.next()
+            AppServerReviewTerminalMapper.observed(
+                outcome,
+                expectedAttempt: attempt
+            )
                 == .failed(
                     .invalidTerminalStatus(
                         rawStatus: "pausedByFutureServer",
-                        turnID: "turn-1",
+                        turnID: expectedTurnID,
                         turnFailure: .init(
                             message: "Future terminal detail.",
                             code: .unknown(rawValue: "futureErrorCode"),
@@ -334,366 +399,542 @@ struct AppServerClientTests {
         )
     }
 
+    @Test func terminalMapperRejectsTurnMismatchForEveryOutcome() throws {
+        let expectedAttempt = try makeReviewAttempt(
+            attemptID: "attempt-1",
+            sourceThreadID: "thread-1",
+            turnID: "turn-expected",
+            activeTurnThreadID: "thread-1"
+        )
+        let response = CodexResponse(turnID: "turn-actual")
+        let outcomes: [CodexTurnOutcome] = [
+            .completed(response),
+            .interrupted(response),
+            CodexAppServerTestTurnOutcome.failed(
+                response: response,
+                error: .init(message: "failed")
+            ),
+            .invalidTerminalStatus(
+                rawStatus: "future",
+                error: .init(message: "future"),
+                response: response
+            ),
+        ]
+
+        for outcome in outcomes {
+            #expect(
+                AppServerReviewTerminalMapper.observed(
+                    outcome,
+                    expectedAttempt: expectedAttempt
+                ) == .failed(.protocolViolation(
+                    message: "Review terminal turn does not match its attempt."
+                ))
+            )
+        }
+    }
+
     @Test func backendIgnoresAgentMessageDeltasInLifecycleStream() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
-        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "review-thread-1")
+        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "thread-1")
         await runtime.transport.waitForNotificationStreamCount(1)
-        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
+        let backend = await makeBackend(appServer: runtime.server)
 
         let firstAttempt = try await backend.startReview(makeReviewStart(runID: "run-1", sessionID: "session-1"))
         try await runtime.transport.enqueueThreadStart(threadID: "thread-2", model: "gpt-5")
-        try await runtime.transport.enqueueReviewStart(turnID: "turn-2", reviewThreadID: "review-thread-2")
+        try await runtime.transport.enqueueReviewStart(turnID: "turn-2", reviewThreadID: "thread-2")
         let secondAttempt = try await backend.startReview(makeReviewStart(runID: "run-2", sessionID: "session-2"))
 
-        try await runtime.transport.emitServerNotification(
-            method: "item/started",
-            params: TestItemNotification(
-                threadID: "review-thread-1",
-                turnID: "turn-1",
-                item: .init(type: "agentMessage", id: "msg-1", text: "")
-            )
+        try await runtime.notificationEmitter.emitItemStarted(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            item: .agentMessage(id: "msg-1", text: "")
         )
-        try await runtime.transport.emitServerNotification(
-            method: "item/agentMessage/delta",
-            params: TestDeltaNotification(
-                threadID: "review-thread-1",
-                turnID: "turn-1",
-                itemID: "msg-1",
-                delta: "first"
-            )
+        try await runtime.notificationEmitter.emitAgentMessageDelta(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            itemID: "msg-1",
+            delta: "first"
         )
-        try await runtime.transport.emitServerNotification(
-            method: "item/started",
-            params: TestItemNotification(
-                threadID: "review-thread-2",
-                turnID: "turn-2",
-                item: .init(type: "agentMessage", id: "msg-1", text: "")
-            )
+        try await runtime.notificationEmitter.emitItemStarted(
+            threadID: "thread-2",
+            turnID: "turn-2",
+            item: .agentMessage(id: "msg-1", text: "")
         )
-        try await runtime.transport.emitServerNotification(
-            method: "item/agentMessage/delta",
-            params: TestDeltaNotification(
-                threadID: "review-thread-2",
-                turnID: "turn-2",
-                itemID: "msg-1",
-                delta: "second"
-            )
+        try await runtime.notificationEmitter.emitAgentMessageDelta(
+            threadID: "thread-2",
+            turnID: "turn-2",
+            itemID: "msg-1",
+            delta: "second"
         )
-        try await runtime.transport.emitServerNotification(
-            method: "turn/completed",
-            params: TestTurnNotification(
-                threadID: "review-thread-1",
-                turn: .init(
-                    id: "turn-1",
-                    status: "completed",
-                    items: [
-                        .exitedReviewMode(id: "review-output-1", review: "first")
-                    ]
-                )
-            )
+        try await emitTurn(
+            on: runtime,
+            threadID: "thread-1",
+            turnID: "turn-1",
+            state: .completed,
+            items: [.exitedReviewMode(id: "review-output-1", review: "first")]
         )
-        try await runtime.transport.emitServerNotification(
-            method: "turn/completed",
-            params: TestTurnNotification(
-                threadID: "review-thread-2",
-                turn: .init(
-                    id: "turn-2",
-                    status: "completed",
-                    items: [
-                        .exitedReviewMode(id: "review-output-2", review: "second")
-                    ]
-                )
-            )
+        try await emitTurn(
+            on: runtime,
+            threadID: "thread-2",
+            turnID: "turn-2",
+            state: .completed,
+            items: [.exitedReviewMode(id: "review-output-2", review: "second")]
         )
 
-        var firstIterator = eventSequence(firstAttempt).makeAsyncIterator()
         #expect(
-            try await firstIterator.next()
-                == .started(turnID: "turn-1", reviewThreadID: "review-thread-1", model: "gpt-5"))
-        #expect(try await firstIterator.next() == .completed(finalReview: "first"))
+            try await firstAttempt.observeTerminal()
+                == .completed(.init(
+                    turnID: makeTurnID("turn-1"),
+                    expectedOutput: try NonEmptyReviewOutput(validating: "first")
+                ))
+        )
 
-        var secondIterator = eventSequence(secondAttempt).makeAsyncIterator()
         #expect(
-            try await secondIterator.next()
-                == .started(turnID: "turn-2", reviewThreadID: "review-thread-2", model: "gpt-5"))
-        #expect(try await secondIterator.next() == .completed(finalReview: "second"))
+            try await secondAttempt.observeTerminal()
+                == .completed(.init(
+                    turnID: makeTurnID("turn-2"),
+                    expectedOutput: try NonEmptyReviewOutput(validating: "second")
+                ))
+        )
     }
 
     @Test func backendKeepsCommandOutputDeltasInCodexChat() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
-        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "review-thread")
+        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "thread-1")
         await runtime.transport.waitForNotificationStreamCount(1)
-        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
+        let backend = await makeBackend(appServer: runtime.server)
 
         let attempt = try await backend.startReview(makeReviewStart())
-        #expect(
-            try await nextEvent(from: attempt.events)
-                == .started(
-                    turnID: "turn-1",
-                    reviewThreadID: "review-thread",
-                    model: "gpt-5"
-                ))
 
-        try await runtime.transport.emitServerNotification(
-            method: "item/started",
-            params: TestItemNotification(
-                threadID: "review-thread",
-                turnID: "turn-1",
-                item: .init(
-                    type: "commandExecution",
-                    id: "cmd-1",
-                    command: "swift test",
-                    aggregatedOutput: "",
-                    status: "inProgress"
-                )
-            )
-        )
-        try await runtime.transport.emitServerNotification(
-            method: "item/commandExecution/outputDelta",
-            params: TestDeltaNotification(
-                threadID: "review-thread",
-                turnID: "turn-1",
-                itemID: "cmd-1",
-                delta: "first"
-            )
-        )
-        try await runtime.transport.emitServerNotification(
-            method: "item/commandExecution/outputDelta",
-            params: TestDeltaNotification(
-                threadID: "review-thread",
-                turnID: "turn-1",
-                itemID: "cmd-1",
-                delta: "second"
-            )
-        )
-        try await runtime.transport.emitServerNotification(
-            method: "turn/completed",
-            params: TestTurnNotification(
-                threadID: "review-thread",
-                turn: .init(
-                    id: "turn-1",
-                    status: "completed",
-                    items: [
-                        .exitedReviewMode(id: "review-output", review: "No issues found.")
-                    ]
-                )
-            )
-        )
-
-        #expect(try await nextEvent(from: attempt.events) == .completed(finalReview: "No issues found."))
-    }
-
-    @Test func cleanupDefersReviewThreadDeletionUntilShutdown() async throws {
-        let runtime = try await CodexAppServerTestRuntime.start()
-        try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
-        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "review-thread")
-        try await runtime.transport.enqueueEmpty(for: "thread/delete")
-        try await runtime.transport.enqueueEmpty(for: "thread/delete")
-        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
-
-        let attempt = try await backend.startReview(makeReviewStart())
-        await backend.cleanupReview(attempt.run)
-
-        // Completed review chats stay readable until runtime teardown.
-        #expect(await runtime.transport.recordedRequests(method: "thread/delete").isEmpty)
-
-        await backend.cleanupActiveReviewsForShutdown(
-            .init(reason: .init(message: "Review runtime stopped."), recoveryWaitingRuns: [])
-        )
-
-        // The review worker can reach its own finalizer after shutdown cleanup.
-        // Repeated finalization must not reacquire destructive cleanup authority.
-        await backend.cleanupReview(attempt.run)
-        await backend.cleanupActiveReviewsForShutdown(
-            .init(reason: .init(message: "Review runtime stopped."), recoveryWaitingRuns: [])
-        )
-
-        let deleteRequests = await runtime.transport.recordedRequests(method: "thread/delete")
-        #expect(deleteRequests.count == 2)
-        let deletedIDs = try deleteRequests.map { try jsonObject(from: $0.params)["threadId"] as? String }
-        #expect(Set(deletedIDs.compactMap { $0 }) == ["review-thread", "thread-1"])
-    }
-
-    @Test func shutdownCleanupDeletesRecoveryWaitingRunsWithoutInterrupt() async throws {
-        let runtime = try await CodexAppServerTestRuntime.start()
-        try await runtime.transport.enqueueEmpty(for: "thread/delete")
-        try await runtime.transport.enqueueEmpty(for: "thread/delete")
-        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
-        let run = CodexReviewBackendModel.Review.Run(
-            attemptID: "attempt-recovery",
+        try await runtime.notificationEmitter.emitItemStarted(
             threadID: "thread-1",
             turnID: "turn-1",
-            reviewThreadID: "review-thread",
+            item: .commandExecution(
+                id: "cmd-1",
+                command: "swift test",
+                cwd: URL(fileURLWithPath: "/tmp/project", isDirectory: true),
+                status: .inProgress,
+                aggregatedOutput: ""
+            )
+        )
+        try await runtime.notificationEmitter.emitCommandExecutionOutputDelta(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            itemID: "cmd-1",
+            delta: "first"
+        )
+        try await runtime.notificationEmitter.emitCommandExecutionOutputDelta(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            itemID: "cmd-1",
+            delta: "second"
+        )
+        try await emitTurn(
+            on: runtime,
+            threadID: "thread-1",
+            turnID: "turn-1",
+            state: .completed,
+            items: [.exitedReviewMode(id: "review-output", review: "No issues found.")]
+        )
+
+        #expect(
+            try await attempt.observeTerminal()
+                == .completed(.init(
+                    turnID: makeTurnID("turn-1"),
+                    expectedOutput: try NonEmptyReviewOutput(validating: "No issues found.")
+                ))
+        )
+    }
+
+    @Test func cleanupReleasesLiveSessionAndRetentionOwnerDeletesThread() async throws {
+        let threadStore = try CodexAppServerTestThreadStore(
+            plannedStarts: [makeStoredThread(id: "thread-1")]
+        )
+        let runtime = try await CodexAppServerTestRuntime.start(threadStore: threadStore)
+        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "thread-1")
+        let backend = await makeBackend(appServer: runtime.server)
+
+        let attempt = try await backend.startReview(makeReviewStart())
+        await backend.cleanupReview(attempt.attempt)
+
+        // Attempt finalization releases only the live SDK session. The CRK
+        // retention owner decides when the persisted chat is retired.
+        #expect(await runtime.transport.recordedRequests(for: .threadDelete).isEmpty)
+
+        await backend.cleanupActiveReviewsForShutdown(
+            .init(reason: .init(message: "Review runtime stopped."), recoveryWaitingAttempts: [])
+        )
+        #expect(await runtime.transport.recordedRequests(for: .threadDelete).isEmpty)
+
+        let cleanup = await backend.cleanupRetainedReviews(
+            [attempt.attempt],
+            additionalThreadIDs: []
+        )
+
+        let deleteRequests = await runtime.transport.recordedRequests(for: .threadDelete)
+        #expect(cleanup.succeeded)
+        #expect(deleteRequests.count == 1)
+        let deletedIDs = deleteRequests.compactMap { request -> CodexThreadID? in
+            guard case .threadDelete(let id) = request.request else { return nil }
+            return id
+        }
+        #expect(deletedIDs == ["thread-1"])
+    }
+
+    @Test func connectionTerminationCleanupDoesNotStartRemoteWork() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
+        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "thread-1")
+        let backend = await makeBackend(appServer: runtime.server)
+        let attempt = try await backend.startReview(makeReviewStart())
+        let request = CodexReviewRuntimeStopReviewCleanupRequest(
+            reason: .init(message: "Connection terminated."),
+            recoveryWaitingAttempts: []
+        )
+        let methodsBeforeCleanup = await runtime.transport.recordedRequests().map(\.request.operation)
+
+        await backend.cleanupActiveReviewsAfterConnectionTermination(request)
+        await backend.cleanupReview(attempt.attempt)
+        await backend.cleanupActiveReviewsAfterConnectionTermination(request)
+        await backend.cleanupActiveReviewsForShutdown(request)
+
+        #expect(await runtime.transport.recordedRequests().map(\.request.operation) == methodsBeforeCleanup)
+    }
+
+    @Test func shutdownCleanupReleasesRecoveryWaitingRunsWithoutDeletingThreads() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start(
+            threads: [
+                makeStoredThread(id: "thread-1"),
+                makeStoredThread(id: "review-thread"),
+            ]
+        )
+        let backend = await makeBackend(appServer: runtime.server)
+        let attempt = try makeReviewAttempt(
+            attemptID: "attempt-recovery",
+            sourceThreadID: "thread-1",
+            turnID: "turn-1",
+            activeTurnThreadID: "review-thread",
             model: "gpt-5"
         )
         let request = CodexReviewRuntimeStopReviewCleanupRequest(
             reason: .init(message: "Review runtime stopped."),
-            recoveryWaitingRuns: [run]
+            recoveryWaitingAttempts: [attempt]
         )
 
         await backend.cleanupActiveReviewsForShutdown(request)
 
         let requests = await runtime.transport.recordedRequests()
-        #expect(requests.map(\.method).contains("turn/interrupt") == false)
-        let deleteRequests = requests.filter { $0.method == "thread/delete" }
+        #expect(requests.map(\.request.operation).contains(.turnInterrupt) == false)
+        #expect(requests.contains { $0.request.operation == .threadDelete } == false)
+
+        let cleanup = await backend.cleanupRetainedReviews(
+            [attempt],
+            additionalThreadIDs: []
+        )
+        let deleteRequests = await runtime.transport.recordedRequests(for: .threadDelete)
+        #expect(cleanup.succeeded)
         #expect(deleteRequests.count == 2)
-        let deletedIDs = try deleteRequests.map { try jsonObject(from: $0.params)["threadId"] as? String }
-        #expect(Set(deletedIDs.compactMap { $0 }) == ["review-thread", "thread-1"])
+        let deletedIDs = deleteRequests.compactMap { request -> CodexThreadID? in
+            guard case .threadDelete(let id) = request.request else { return nil }
+            return id
+        }
+        #expect(Set(deletedIDs) == ["review-thread", "thread-1"])
     }
 
-    @Test func interruptReviewCancelsReconstructedRunThroughResumedThread() async throws {
+    @Test func interruptReviewRejectsAttemptWithoutRegisteredSDKSession() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
-        try await runtime.transport.enqueueJSON(
-            #"{"thread":{"id":"thread-1"},"model":"gpt-5"}"#,
-            for: "thread/resume"
-        )
-        try await runtime.transport.enqueueEmpty(for: "turn/interrupt")
-        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
-        let run = CodexReviewBackendModel.Review.Run(
+        let backend = await makeBackend(appServer: runtime.server)
+        let attempt = try makeReviewAttempt(
             attemptID: "attempt-1",
-            threadID: "thread-1",
+            sourceThreadID: "thread-1",
             turnID: "turn-1",
-            reviewThreadID: "thread-1",
+            activeTurnThreadID: "thread-1",
             model: "gpt-5"
         )
 
-        try await backend.interruptReview(run, reason: .init(message: "Stop"))
+        do {
+            try await backend.interruptReview(attempt, reason: .init(message: "Stop"))
+            Issue.record("Expected an unregistered attempt to fail without remote work.")
+        } catch let failure as ReviewBackendFailure {
+            #expect(
+                failure == .protocolViolation(
+                    message: "Interrupt requires the active SDK review session for its attempt."
+                )
+            )
+        }
 
         let requests = await runtime.transport.recordedRequests()
-        #expect(requests.map(\.method) == ["initialize", "thread/resume", "turn/interrupt"])
-        let resume = try #require(requests.first { $0.method == "thread/resume" })
-        let resumeParams = try jsonObject(from: resume.params)
-        #expect(resumeParams["threadId"] as? String == "thread-1")
-        #expect(resumeParams["model"] as? String == "gpt-5")
-        let interrupt = try #require(requests.first { $0.method == "turn/interrupt" })
-        let interruptParams = try jsonObject(from: interrupt.params)
-        #expect(interruptParams["threadId"] as? String == "thread-1")
-        #expect(interruptParams["turnId"] as? String == "turn-1")
+        #expect(requests.map(\.request.operation) == [.initialize])
     }
 
-    @Test func interruptReviewCancelsDetachedReconstructedRunThroughReviewThread() async throws {
+    @Test func interruptReviewUsesRegisteredSDKSessionWithoutResume() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
-        try await runtime.transport.enqueueJSON(
-            #"{"thread":{"id":"review-thread"},"model":"gpt-5"}"#,
-            for: "thread/resume"
-        )
-        try await runtime.transport.enqueueEmpty(for: "turn/interrupt")
-        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
-        let run = CodexReviewBackendModel.Review.Run(
-            attemptID: "attempt-1",
-            threadID: "thread-1",
+        try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
+        try await runtime.transport.enqueueReviewStart(
             turnID: "turn-1",
-            reviewThreadID: "review-thread",
-            model: "gpt-5"
+            reviewThreadID: "thread-1"
         )
+        try await runtime.transport.handleTurnInterrupt { _ in }
+        let backend = await makeBackend(appServer: runtime.server)
+        let attempt = try await backend.startReview(makeReviewStart())
 
-        try await backend.interruptReview(run, reason: .init(message: "Stop"))
+        try await backend.interruptReview(attempt.attempt, reason: .init(message: "Stop"))
 
         let requests = await runtime.transport.recordedRequests()
-        #expect(requests.map(\.method) == ["initialize", "thread/resume", "turn/interrupt"])
-        let resume = try #require(requests.first { $0.method == "thread/resume" })
-        let resumeParams = try jsonObject(from: resume.params)
-        #expect(resumeParams["threadId"] as? String == "review-thread")
-        #expect(resumeParams["model"] as? String == "gpt-5")
-        let interrupt = try #require(requests.first { $0.method == "turn/interrupt" })
-        let interruptParams = try jsonObject(from: interrupt.params)
-        #expect(interruptParams["threadId"] as? String == "review-thread")
-        #expect(interruptParams["turnId"] as? String == "turn-1")
+        #expect(requests.map(\.request.operation) == [
+            .initialize,
+            .threadStart,
+            .reviewStart,
+            .turnInterrupt,
+        ])
+        #expect(requests.contains { $0.request.operation == .threadResume } == false)
+        let interrupt = try #require(requests.compactMap { request
+            -> (CodexThreadID, CodexTurnID)? in
+            guard case .turnInterrupt(let threadID, let turnID) = request.request else {
+                return nil
+            }
+            return (threadID, turnID)
+        }.first)
+        #expect(interrupt.0 == "thread-1")
+        #expect(interrupt.1 == "turn-1")
+    }
+
+    @Test func startReviewMapsRequestFailureToTypedOperation() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        try await runtime.transport.enqueueFailure(
+            .response(code: -32_000, message: "start unavailable"),
+            for: .threadStart
+        )
+        let backend = await makeBackend(appServer: runtime.server)
+
+        do {
+            _ = try await backend.startReview(makeReviewStart())
+            Issue.record("Expected startReview to preserve its typed operation failure.")
+        } catch {
+            try expectServerRequestFailure(
+                error,
+                operation: .startReview,
+                method: "thread/start",
+                code: -32_000
+            )
+        }
+    }
+
+    @Test func interruptReviewMapsRequestFailureToTypedOperation() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
+        try await runtime.transport.enqueueReviewStart(
+            turnID: "turn-1",
+            reviewThreadID: "thread-1"
+        )
+        let backend = await makeBackend(appServer: runtime.server)
+        let attempt = try await backend.startReview(makeReviewStart())
+        try await runtime.transport.enqueueFailure(
+            .response(code: -32_011, message: "interrupt unavailable"),
+            for: .turnInterrupt
+        )
+
+        do {
+            try await backend.interruptReview(
+                attempt.attempt,
+                reason: .init(message: "Stop")
+            )
+            Issue.record("Expected interruptReview to preserve its typed operation failure.")
+        } catch {
+            try expectServerRequestFailure(
+                error,
+                operation: .interruptReview,
+                method: "turn/interrupt",
+                code: -32_011
+            )
+        }
+        #expect(await runtime.transport.recordedRequests(for: .threadResume).isEmpty)
+    }
+
+    @Test func prepareRestartMapsRequestFailureToTypedOperation() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
+        try await runtime.transport.enqueueReviewStart(
+            turnID: "turn-1",
+            reviewThreadID: "thread-1"
+        )
+        let backend = await makeBackend(appServer: runtime.server)
+        let attempt = try await backend.startReview(makeReviewStart())
+        try await runtime.transport.enqueueFailure(
+            .response(code: -32_002, message: "resume unavailable"),
+            for: .threadResume
+        )
+
+        do {
+            _ = try await backend.prepareReviewRestart(attempt.attempt)
+            Issue.record("Expected prepareRestart to preserve its typed operation failure.")
+        } catch {
+            try expectServerRequestFailure(
+                error,
+                operation: .prepareRestart,
+                method: "thread/resume",
+                code: -32_002
+            )
+        }
+    }
+
+    @Test func restartReviewMapsUnavailableTokenToTypedOperation() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        let backend = await makeBackend(appServer: runtime.server)
+        let interruptedAttempt = try makeReviewAttempt(
+            attemptID: "attempt-1",
+            sourceThreadID: "thread-1",
+            turnID: "turn-1",
+            activeTurnThreadID: "thread-1",
+            model: "gpt-5"
+        )
+        let token = CodexReviewBackendModel.Review.RestartToken(
+            id: "missing-token",
+            interruptedAttempt: interruptedAttempt
+        )
+
+        do {
+            _ = try await backend.restartPreparedReview(token, request: makeReviewStart())
+            Issue.record("Expected restartReview to preserve its typed operation failure.")
+        } catch let failure as ReviewBackendFailure {
+            let operationFailure = try #require(failure.operationFailure)
+            #expect(operationFailure.operation == .restartReview)
+            #expect(operationFailure.reason == .reviewRestartUnavailable)
+        }
     }
 
     @Test func preparedReviewRestartCancelsRollsBackAndRestartsOnSameThread() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
-        try await runtime.transport.enqueueReviewStart(turnID: "turn-old", reviewThreadID: "review-thread")
+        try await runtime.transport.enqueueReviewStart(turnID: "turn-old", reviewThreadID: "thread-1")
         await runtime.transport.waitForNotificationStreamCount(1)
-        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
+        let backend = await makeBackend(appServer: runtime.server)
         let attempt = try await backend.startReview(makeReviewStart())
-        try await runtime.transport.enqueueJSON(
-            #"{"thread":{"id":"review-thread"},"model":"gpt-5"}"#,
-            for: "thread/resume"
+        try await runtime.transport.enqueueThreadResume(
+            makeStoredThread(id: "thread-1")
         )
-        await runtime.transport.enqueueFailure(
-            code: -32602,
-            message: "expected active turn id turn-old but found turn-new",
-            for: "turn/interrupt"
+        try await runtime.transport.enqueueFailure(
+            .response(
+                code: -32602,
+                message: "expected active turn id turn-old but found turn-new"
+            ),
+            for: .turnInterrupt
         )
-        try await runtime.transport.enqueueEmpty(for: "turn/interrupt")
-        try await runtime.transport.enqueueJSON(
-            #"{"thread":{"id":"review-thread"},"model":"gpt-5"}"#,
-            for: "thread/resume"
+        try await runtime.transport.handleTurnInterrupt { _ in }
+        try await runtime.transport.enqueueThreadResume(
+            makeStoredThread(id: "thread-1")
         )
-        try await runtime.transport.enqueueEmpty(for: "thread/rollback")
-        try await runtime.transport.enqueueJSON(
-            #"{"thread":{"id":"thread-1"},"model":"gpt-5"}"#,
-            for: "thread/resume"
+        try await runtime.transport.enqueueThreadRollback(
+            makeStoredThread(id: "thread-1")
         )
-        try await runtime.transport.enqueueReviewStart(turnID: "turn-restarted", reviewThreadID: "review-thread")
+        try await runtime.transport.enqueueThreadResume(
+            makeStoredThread(id: "thread-1")
+        )
+        try await runtime.transport.enqueueReviewStart(turnID: "turn-restarted", reviewThreadID: "thread-1")
 
         let prepareTask = Task {
-            try await backend.prepareReviewRestart(attempt.run)
+            try await backend.prepareReviewRestart(attempt.attempt)
         }
         defer {
             prepareTask.cancel()
         }
-        await runtime.transport.waitForRequest(method: "turn/interrupt", count: 2)
-        try await runtime.transport.emitServerNotification(
-            method: "turn/completed",
-            params: TestTurnNotification(
-                threadID: "review-thread",
-                turn: .init(id: "turn-new", status: "interrupted")
-            )
+        await runtime.transport.waitForRequest(.turnInterrupt, count: 2)
+        try await emitTurn(
+            on: runtime,
+            threadID: "thread-1",
+            turnID: "turn-new",
+            state: .interrupted
         )
         let token = try await withTimeout {
             try await prepareTask.value
         }
         let restartedAttempt = try await backend.restartPreparedReview(token, request: makeReviewStart())
 
-        #expect(token.interruptedRun == attempt.run)
-        #expect(restartedAttempt.run.threadID == "thread-1")
-        #expect(restartedAttempt.run.turnID == "turn-restarted")
-        #expect(restartedAttempt.run.reviewThreadID == "review-thread")
+        #expect(token.interruptedAttempt == attempt.attempt)
+        #expect(restartedAttempt.attempt.threadIdentity.sourceThreadID.rawValue == "thread-1")
+        #expect(restartedAttempt.attempt.turnID.rawValue == "turn-restarted")
+        #expect(restartedAttempt.attempt.threadIdentity.activeTurnThreadID.rawValue == "thread-1")
         let requests = await runtime.transport.recordedRequests()
         #expect(
-            requests.map(\.method) == [
-                "initialize",
-                "thread/start",
-                "review/start",
-                "thread/resume",
-                "turn/interrupt",
-                "turn/interrupt",
-                "thread/resume",
-                "thread/rollback",
-                "thread/resume",
-                "review/start",
+            requests.map(\.request.operation) == [
+                .initialize,
+                .threadStart,
+                .reviewStart,
+                .threadResume,
+                .turnInterrupt,
+                .turnInterrupt,
+                .threadResume,
+                .threadRollback,
+                .threadResume,
+                .reviewStart,
             ])
-        let resumeThreadIDs = try requests.filter { $0.method == "thread/resume" }.map {
-            try jsonObject(from: $0.params)["threadId"] as? String
+        let resumeRequests = requests.compactMap { request -> (CodexThreadID, CodexThread.Options)? in
+            guard case .threadResume(let id, let options) = request.request else { return nil }
+            return (id, options)
         }
-        #expect(resumeThreadIDs == ["review-thread", "review-thread", "thread-1"])
-        let resumeModels = try requests.filter { $0.method == "thread/resume" }.map {
-            try jsonObject(from: $0.params)["model"] as? String
-        }
+        let resumeThreadIDs = resumeRequests.map(\.0.rawValue)
+        #expect(resumeThreadIDs == ["thread-1", "thread-1", "thread-1"])
+        let resumeModels = resumeRequests.map(\.1.model)
         #expect(resumeModels == ["gpt-5", "gpt-5", "gpt-5"])
         // Restarted reviews keep the review thread profile instead of default
         // Codex settings.
-        let resumeApprovalPolicies = try requests.filter { $0.method == "thread/resume" }.map {
-            try jsonObject(from: $0.params)["approvalPolicy"] as? String
-        }
-        #expect(resumeApprovalPolicies.last == "never")
-        let interruptTurnIDs = try requests.filter { $0.method == "turn/interrupt" }.map {
-            try jsonObject(from: $0.params)["turnId"] as? String
+        let resumeApprovalModes = resumeRequests.map(\.1.approvalMode)
+        #expect(resumeApprovalModes.last == .denyAll)
+        let interruptTurnIDs = requests.compactMap { request -> CodexTurnID? in
+            guard case .turnInterrupt(_, let turnID) = request.request else { return nil }
+            return turnID
         }
         #expect(interruptTurnIDs == ["turn-old", "turn-new"])
-        let rollback = try #require(requests.first { $0.method == "thread/rollback" })
-        let rollbackParams = try jsonObject(from: rollback.params)
-        #expect(rollbackParams["threadId"] as? String == "review-thread")
-        #expect(rollbackParams["numTurns"] as? Int == 1)
-        let reviewStarts = requests.filter { $0.method == "review/start" }
-        let restart = try #require(reviewStarts.last)
-        let restartParams = try jsonObject(from: restart.params)
-        #expect(restartParams["threadId"] as? String == "thread-1")
+        let rollback = try #require(requests.compactMap { request
+            -> (CodexThreadID, Int)? in
+            guard case .threadRollback(let id, let numberOfTurns) = request.request else {
+                return nil
+            }
+            return (id, numberOfTurns)
+        }.first)
+        #expect(rollback.0 == "thread-1")
+        #expect(rollback.1 == 1)
+        let reviewStarts = requests.compactMap { request -> CodexThreadID? in
+            guard case .reviewStart(let threadID, _, _) = request.request else { return nil }
+            return threadID
+        }
+        #expect(reviewStarts.last == "thread-1")
+    }
+
+    @Test func discardPreparedRestartTransfersRetentionWithoutDeletingThreads() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
+        try await runtime.transport.enqueueReviewStart(
+            turnID: "turn-old",
+            reviewThreadID: "thread-1"
+        )
+        await runtime.transport.waitForNotificationStreamCount(1)
+        let backend = await makeBackend(appServer: runtime.server)
+        let attempt = try await backend.startReview(makeReviewStart())
+        try await runtime.transport.enqueueThreadResume(makeStoredThread(id: "thread-1"))
+        try await runtime.transport.handleTurnInterrupt { _ in }
+
+        let prepare = Task {
+            try await backend.prepareReviewRestart(attempt.attempt)
+        }
+        defer {
+            prepare.cancel()
+        }
+        await runtime.transport.waitForRequest(.turnInterrupt)
+        try await emitTurn(
+            on: runtime,
+            threadID: "thread-1",
+            turnID: "turn-old",
+            state: .interrupted
+        )
+        let token = try await prepare.value
+
+        let retained = await backend.discardPreparedReviewRestart(token)
+
+        #expect(retained == [attempt.attempt])
+        #expect(await runtime.transport.recordedRequests(for: .threadDelete).isEmpty)
     }
 
     @Test func shutdownCleanupDoesNotDeleteProvisionalRestartSourceThread() async throws {
@@ -701,45 +942,42 @@ struct AppServerClientTests {
         try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
         try await runtime.transport.enqueueReviewStart(turnID: "turn-old", reviewThreadID: "thread-1")
         await runtime.transport.waitForNotificationStreamCount(1)
-        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
+        let backend = await makeBackend(appServer: runtime.server)
         let attempt = try await backend.startReview(makeReviewStart())
-        try await runtime.transport.enqueueJSON(
-            #"{"thread":{"id":"thread-1"},"model":"gpt-5"}"#,
-            for: "thread/resume"
+        try await runtime.transport.enqueueThreadResume(
+            makeStoredThread(id: "thread-1")
         )
-        try await runtime.transport.enqueueEmpty(for: "turn/interrupt")
+        try await runtime.transport.handleTurnInterrupt { _ in }
         let prepareTask = Task {
-            try await backend.prepareReviewRestart(attempt.run)
+            try await backend.prepareReviewRestart(attempt.attempt)
         }
         defer {
             prepareTask.cancel()
         }
-        await runtime.transport.waitForRequest(method: "turn/interrupt")
-        try await runtime.transport.emitServerNotification(
-            method: "turn/completed",
-            params: TestTurnNotification(
-                threadID: "thread-1",
-                turn: .init(id: "turn-old", status: "interrupted")
-            )
+        await runtime.transport.waitForRequest(.turnInterrupt)
+        try await emitTurn(
+            on: runtime,
+            threadID: "thread-1",
+            turnID: "turn-old",
+            state: .interrupted
         )
         let token = try await withTimeout {
             try await prepareTask.value
         }
 
         let reviewStartGate = CodexAppServerTestGate()
-        try await runtime.transport.enqueueJSON(
-            #"{"thread":{"id":"thread-1"},"model":"gpt-5"}"#,
-            for: "thread/resume"
+        try await runtime.transport.enqueueThreadResume(
+            makeStoredThread(id: "thread-1")
         )
-        try await runtime.transport.enqueueEmpty(for: "thread/rollback")
-        try await runtime.transport.enqueueJSON(
-            #"{"thread":{"id":"thread-1"},"model":"gpt-5"}"#,
-            for: "thread/resume"
+        try await runtime.transport.enqueueThreadRollback(
+            makeStoredThread(id: "thread-1")
+        )
+        try await runtime.transport.enqueueThreadResume(
+            makeStoredThread(id: "thread-1")
         )
         try await runtime.transport.enqueueReviewStart(turnID: "turn-restarted", reviewThreadID: "thread-1")
-        try await runtime.transport.enqueueEmpty(for: "thread/delete")
         await runtime.transport.holdNextIgnoringCancellation(
-            method: "review/start",
+            .reviewStart,
             gate: reviewStartGate
         )
         let restartTask = Task {
@@ -748,26 +986,124 @@ struct AppServerClientTests {
         defer {
             restartTask.cancel()
         }
-        await runtime.transport.waitForRequest(method: "review/start", count: 2)
+        await runtime.transport.waitForRequest(.reviewStart, count: 2)
 
         await backend.cleanupActiveReviewsForShutdown(
             .init(
                 reason: .init(message: "Review runtime stopped."),
-                recoveryWaitingRuns: [attempt.run]
+                recoveryWaitingAttempts: [attempt.attempt]
             ))
 
-        #expect(await runtime.transport.recordedRequests(method: "thread/delete").isEmpty)
+        #expect(await runtime.transport.recordedRequests(for: .threadDelete).isEmpty)
         await reviewStartGate.open()
         let restartedAttempt = try await withTimeout {
             try await restartTask.value
         }
-        #expect(restartedAttempt.run.threadID == "thread-1")
-        #expect(restartedAttempt.run.turnID == "turn-restarted")
+        #expect(restartedAttempt.attempt.threadIdentity.sourceThreadID.rawValue == "thread-1")
+        #expect(restartedAttempt.attempt.turnID.rawValue == "turn-restarted")
     }
+}
+
+@MainActor
+private func makeBackend(appServer: CodexAppServer) -> AppServerCodexReviewBackend {
+    let modelContainer = CodexModelContainer(appServer: appServer)
+    return AppServerCodexReviewBackend(modelContainer: modelContainer)
+}
+
+private struct CompletedReviewFixture: Sendable {
+    let runtime: CodexAppServerTestRuntime
+    let attempt: BackendReviewAttempt
+    let observed: ReviewBackendObservedTerminal
+}
+
+private func makeCompletedReviewFixture(
+    output: String
+) async throws -> CompletedReviewFixture {
+    let runtime = try await CodexAppServerTestRuntime.start()
+    try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
+    try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "thread-1")
+    await runtime.transport.waitForNotificationStreamCount(1)
+    let backend = await makeBackend(appServer: runtime.server)
+    let attempt = try await backend.startReview(makeReviewStart())
+    try await emitTurn(
+        on: runtime,
+        threadID: "thread-1",
+        turnID: "turn-1",
+        state: .completed,
+        items: [.exitedReviewMode(id: "review-output", review: output)]
+    )
+    return CompletedReviewFixture(
+        runtime: runtime,
+        attempt: attempt,
+        observed: try await attempt.observeTerminal()
+    )
+}
+
+enum ReviewPublicationFailureScenario: CaseIterable, Sendable {
+    case turnUnavailable
+    case outputMissing
+    case outputEmpty
+    case outputMismatch
+    case refreshFailure
+}
+
+private func makeReviewAttempt(
+    attemptID: String,
+    sourceThreadID: String,
+    turnID: String,
+    activeTurnThreadID: String,
+    model: String? = nil
+) throws -> ReviewAttempt {
+    try ReviewAttempt(
+        validatingAttemptID: attemptID,
+        sourceThreadID: sourceThreadID,
+        activeTurnThreadID: activeTurnThreadID,
+        turnID: turnID,
+        model: model
+    )
+}
+
+private func makeTurnID(_ rawValue: String) throws -> ReviewTurnID {
+    try ReviewTurnID(validating: rawValue)
+}
+
+private func makeThreadID(_ rawValue: String) throws -> ReviewThreadID {
+    try ReviewThreadID(validating: rawValue)
 }
 
 private enum AppServerClientTestTimeout: Error {
     case timedOut
+}
+
+private extension ReviewBackendFailure {
+    var operationFailure: ReviewBackendOperationFailure? {
+        guard case .operation(let failure) = self else {
+            return nil
+        }
+        return failure
+    }
+}
+
+private func expectServerRequestFailure(
+    _ error: any Error,
+    operation: ReviewBackendOperationFailure.Operation,
+    method: String,
+    code: Int
+) throws {
+    let backendFailure = try #require(error as? ReviewBackendFailure)
+    let operationFailure = try #require(backendFailure.operationFailure)
+    #expect(operationFailure.operation == operation)
+    guard case .request(
+        requestID: _,
+        method: let actualMethod,
+        kind: .server(code: let actualCode, turnFailure: let turnFailure)
+    ) = operationFailure.reason else {
+        Issue.record("Expected a typed server request failure, got \(operationFailure.reason).")
+        return
+    }
+    #expect(actualMethod == method)
+    #expect(actualCode == code)
+    #expect(turnFailure == nil)
 }
 
 private func withTimeout<T: Sendable>(
@@ -788,28 +1124,127 @@ private func withTimeout<T: Sendable>(
     }
 }
 
-private func nextEvent(
-    from mailbox: BackendReviewEventMailbox,
-    timeout: Duration = .seconds(1)
-) async throws -> CodexReviewBackendModel.Review.Event? {
-    try await withThrowingTaskGroup(of: CodexReviewBackendModel.Review.Event?.self) { group in
-        group.addTask {
-            try await mailbox.next()
-        }
-        group.addTask {
-            try await Task.sleep(for: timeout)
-            throw AppServerClientTestTimeout.timedOut
-        }
-        let event = try await group.next()
-        group.cancelAll()
-        return event ?? nil
+private func enqueueReviewProjection(
+    transport: CodexAppServerTestTransport,
+    threadID: String,
+    turnID: String?,
+    output: String?
+) async throws {
+    let items = try output.map {
+        [try CodexAppServerTestItem.exitedReviewMode(id: "review-output", review: $0)]
+    } ?? []
+    let turns = try turnID.map {
+        [try CodexAppServerTestTurn(
+            snapshot: .init(
+                id: .init(rawValue: $0),
+                state: .completed,
+                items: items.map(\.domainProjection)
+            ),
+            items: items
+        )]
+    } ?? []
+    try await transport.enqueueThreadRead(
+        makeStoredThread(
+            id: .init(rawValue: threadID),
+            turns: turns
+        )
+    )
+}
+
+private extension CodexAppServerTestTransport {
+    func enqueueThreadStart(
+        threadID: String,
+        model: String? = nil
+    ) throws {
+        try enqueueThreadStart(
+            makeStoredThread(
+                id: .init(rawValue: threadID),
+                model: model ?? "gpt-5"
+            )
+        )
+    }
+
+    func enqueueReviewStart(
+        turnID: String,
+        reviewThreadID: String
+    ) throws {
+        try enqueueReviewStart(
+            makeTestTurn(id: .init(rawValue: turnID), state: .inProgress),
+            reviewThreadID: .init(rawValue: reviewThreadID)
+        )
     }
 }
 
-private func eventSequence(
-    _ attempt: BackendReviewAttempt
-) -> BackendReviewEventSequence {
-    BackendReviewEventSequence(mailbox: attempt.events)
+private func makeTestTurn(
+    id: CodexTurnID,
+    state: CodexTurnSnapshot.State = .completed,
+    items: [CodexAppServerTestItem] = []
+) throws -> CodexAppServerTestTurn {
+    try .init(
+        snapshot: .init(
+            id: id,
+            state: state,
+            items: items.map(\.domainProjection)
+        ),
+        items: items
+    )
+}
+
+private func emitTurn(
+    on runtime: CodexAppServerTestRuntime,
+    threadID: CodexThreadID,
+    turnID: CodexTurnID,
+    state: CodexTurnSnapshot.State,
+    items: [CodexAppServerTestItem] = []
+) async throws {
+    try await runtime.notificationEmitter.emitTurnCompleted(
+        threadID: threadID,
+        turn: makeTestTurn(id: turnID, state: state, items: items)
+    )
+}
+
+private func makeStoredThread(
+    id: CodexThreadID,
+    model: String = "gpt-5",
+    turns: [CodexAppServerTestTurn] = [],
+    isArchived: Bool = false
+) throws -> CodexAppServerTestStoredThread {
+    let workspace = URL(fileURLWithPath: "/tmp/project", isDirectory: true)
+    return try .init(
+        snapshot: .init(
+            id: id,
+            workspace: workspace,
+            preview: id.rawValue,
+            modelProvider: "openai",
+            sourceKind: .appServer,
+            createdAt: Date(timeIntervalSince1970: 10),
+            updatedAt: Date(timeIntervalSince1970: 20),
+            status: .idle,
+            ephemeral: false,
+            turns: turns.map(\.snapshot)
+        ),
+        turns: turns,
+        metadata: .init(
+            sessionID: "session-\(id.rawValue)",
+            cliVersion: "codex-cli-test",
+            source: .appServer
+        ),
+        runtimeMetadata: .init(
+            model: model,
+            modelProvider: "openai",
+            serviceTier: nil,
+            cwd: workspace,
+            runtimeWorkspaceRoots: [workspace],
+            instructionSources: [],
+            approvalPolicy: .never,
+            approvalsReviewer: .user,
+            sandbox: .dangerFullAccess,
+            activePermissionProfile: nil,
+            reasoningEffort: nil,
+            multiAgentMode: .explicitRequestOnly
+        ),
+        isArchived: isArchived
+    )
 }
 
 private func makeReviewStart(
@@ -817,148 +1252,14 @@ private func makeReviewStart(
     sessionID: String = "session-1",
     target: CodexReviewAPI.Target = .uncommittedChanges
 ) -> CodexReviewBackendModel.Review.Start {
-    .init(
-        runID: runID,
-        sessionID: sessionID,
-        request: .init(cwd: "/tmp/project", target: target),
-        model: "gpt-5"
-    )
-}
-
-private func jsonObject(from data: Data) throws -> [String: Any] {
-    try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
-}
-
-private struct TestTurnNotification: Encodable, Sendable {
-    var threadID: String
-    var turn: TestTurn
-
-    enum CodingKeys: String, CodingKey {
-        case threadID = "threadId"
-        case turn
-    }
-}
-
-private struct TestTurn: Encodable, Sendable {
-    var id: String
-    var status: String
-    var items: [TestItem]
-    var error: TestTurnError?
-
-    init(
-        id: String,
-        status: String,
-        items: [TestItem] = [],
-        error: TestTurnError? = nil
-    ) {
-        self.id = id
-        self.status = status
-        self.items = items
-        self.error = error
-    }
-}
-
-private struct TestTurnError: Encodable, Sendable {
-    var message: String
-    var codexErrorInfo: String?
-    var additionalDetails: String?
-}
-
-private struct TestDeltaNotification: Encodable, Sendable {
-    var threadID: String
-    var turnID: String
-    var itemID: String
-    var delta: String
-    var phase: String?
-
-    enum CodingKeys: String, CodingKey {
-        case threadID = "threadId"
-        case turnID = "turnId"
-        case itemID = "itemId"
-        case delta
-        case phase
-    }
-}
-
-private struct TestDeltaWithoutTurnIDNotification: Encodable, Sendable {
-    var threadID: String
-    var itemID: String
-    var delta: String
-    var phase: String?
-
-    enum CodingKeys: String, CodingKey {
-        case threadID = "threadId"
-        case itemID = "itemId"
-        case delta
-        case phase
-    }
-}
-
-private struct TestAgentMessageNotification: Encodable, Sendable {
-    var message: String
-    var phase: String? = nil
-}
-
-private struct TestItemNotification: Encodable, Sendable {
-    var threadID: String
-    var turnID: String
-    var item: TestItem
-    var startedAtMs: Int64 = 0
-    var completedAtMs: Int64 = 0
-
-    enum CodingKeys: String, CodingKey {
-        case threadID = "threadId"
-        case turnID = "turnId"
-        case item
-        case startedAtMs
-        case completedAtMs
-    }
-}
-
-private struct TestItem: Encodable, Sendable {
-    var type: String
-    var id: String
-    var review: String?
-    var text: String?
-    var phase: String?
-    var command: String?
-    var commandActions: [String]
-    var cwd: String?
-    var aggregatedOutput: String?
-    var exitCode: Int?
-    var status: String?
-
-    init(
-        type: String,
-        id: String,
-        review: String? = nil,
-        text: String? = nil,
-        phase: String? = nil,
-        command: String? = nil,
-        cwd: String? = nil,
-        aggregatedOutput: String? = nil,
-        exitCode: Int? = nil,
-        status: String? = nil
-    ) {
-        self.type = type
-        self.id = id
-        self.review = review
-        self.text = text
-        self.phase = phase
-        self.command = command
-        self.commandActions = []
-        self.cwd = type == "commandExecution" ? (cwd ?? "/tmp/project") : cwd
-        self.aggregatedOutput = aggregatedOutput
-        self.exitCode = exitCode
-        self.status = status
-    }
-
-    static func exitedReviewMode(id: String, review: String) -> TestItem {
-        .init(
-            type: "exitedReviewMode",
-            id: id,
-            review: review,
-            status: "completed"
+    do {
+        return .init(
+            runID: try ReviewRunID(validating: runID),
+            sessionID: sessionID,
+            request: .init(cwd: "/tmp/project", target: target),
+            model: "gpt-5"
         )
+    } catch {
+        preconditionFailure("Invalid explicit review run fixture: \(error)")
     }
 }

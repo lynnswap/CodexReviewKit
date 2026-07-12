@@ -17,12 +17,19 @@ enum ReviewRunIDArgument {
         })
     }
 
-    static func optionalValue(in arguments: [String: Value]) throws -> String? {
-        let provided = acceptedNames.compactMap { name -> (name: String, value: String)? in
-            guard let value = arguments[name]?.stringValue?.nilIfEmpty else {
+    static func optionalValue(in arguments: [String: Value]) throws -> ReviewRunID? {
+        let provided = try acceptedNames.compactMap { name -> (name: String, value: ReviewRunID)? in
+            guard let argument = arguments[name] else {
                 return nil
             }
-            return (name, value)
+            guard let rawValue = argument.stringValue else {
+                throw MCPProtocolServerError.invalidArgument("\(name) must be a string.")
+            }
+            do {
+                return (name, try ReviewRunID(validating: rawValue))
+            } catch {
+                throw MCPProtocolServerError.invalidArgument("\(name) must not be empty.")
+            }
         }
         guard let first = provided.first else {
             return nil
@@ -35,7 +42,7 @@ enum ReviewRunIDArgument {
         return first.value
     }
 
-    static func requiredValue(in arguments: [String: Value]) throws -> String {
+    static func requiredValue(in arguments: [String: Value]) throws -> ReviewRunID {
         guard let runID = try optionalValue(in: arguments) else {
             throw MCPProtocolServerError.missingArgument(requiredDescription)
         }

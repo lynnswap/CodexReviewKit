@@ -20,7 +20,8 @@ public final class CodexReviewStore {
     @ObservationIgnored package let networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy
     @ObservationIgnored package let clock: CodexReviewClock
     @ObservationIgnored package let idGenerator: CodexReviewIDGenerator
-    @ObservationIgnored let runtimeState = CodexReviewStoreRuntimeState()
+    @ObservationIgnored package let reviewThreadRetentionRegistry: ReviewThreadRetentionRegistry
+    @ObservationIgnored let runtimeState = ReviewStoreRuntime()
     @ObservationIgnored package var closedSessions: Set<String> = []
     @ObservationIgnored package var accountRateLimitAutoRefreshDriver: CodexReviewStoreRateLimitAutoRefreshDriver?
 
@@ -31,7 +32,8 @@ public final class CodexReviewStore {
         clock: CodexReviewClock = .init(),
         idGenerator: CodexReviewIDGenerator = .init(),
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
-        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default
+        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
+        reviewThreadRetentionJournal: (any ReviewThreadRetentionJournaling)? = nil
     ) {
         self.backend = backend
         self.networkMonitor = networkMonitor
@@ -39,6 +41,15 @@ public final class CodexReviewStore {
         self.diagnosticsURL = diagnosticsURL
         self.clock = clock
         self.idGenerator = idGenerator
+        let retentionJournal: any ReviewThreadRetentionJournaling
+        if let reviewThreadRetentionJournal {
+            retentionJournal = reviewThreadRetentionJournal
+        } else if let journalURL = backend.reviewThreadRetentionJournalURL {
+            retentionJournal = FileReviewThreadRetentionJournal(fileURL: journalURL)
+        } else {
+            retentionJournal = InMemoryReviewThreadRetentionJournal()
+        }
+        self.reviewThreadRetentionRegistry = ReviewThreadRetentionRegistry(journal: retentionJournal)
         self.auth = CodexReviewAuthModel()
         self.settings = SettingsStore(snapshot: backend.seed.initialSettingsSnapshot)
         self.settingsService = settingsService ?? CodexReviewSettingsService(
@@ -64,7 +75,7 @@ public final class CodexReviewStore {
 
     isolated deinit {
         accountRateLimitAutoRefreshDriver?.cancel()
-        runtimeState.cancelAllWorkers()
+        runtimeState.signalCancellation()
     }
 
     public static func makePreviewStore(diagnosticsURL: URL? = nil) -> CodexReviewStore {
@@ -73,10 +84,14 @@ public final class CodexReviewStore {
 
     package static func makePreviewStore(
         seed: CodexReviewStoreSeed,
+        runtimeLifetime: (any CodexReviewPreviewRuntimeLifetime)? = nil,
         diagnosticsURL: URL? = nil
     ) -> CodexReviewStore {
         CodexReviewStore(
-            backend: PreviewCodexReviewStoreBackend(seed: seed),
+            backend: PreviewCodexReviewStoreBackend(
+                seed: seed,
+                runtimeLifetime: runtimeLifetime
+            ),
             diagnosticsURL: diagnosticsURL,
             networkMonitor: StaticCodexReviewNetworkMonitor()
         )
@@ -88,7 +103,8 @@ public final class CodexReviewStore {
         clock: CodexReviewClock = .init(),
         idGenerator: CodexReviewIDGenerator = .init(),
         networkMonitor: any CodexReviewNetworkMonitoring = StaticCodexReviewNetworkMonitor(),
-        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default
+        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
+        reviewThreadRetentionJournal: (any ReviewThreadRetentionJournaling)? = nil
     ) -> CodexReviewStore {
         CodexReviewStore(
             backend: backend,
@@ -96,7 +112,8 @@ public final class CodexReviewStore {
             clock: clock,
             idGenerator: idGenerator,
             networkMonitor: networkMonitor,
-            networkRecoveryPolicy: networkRecoveryPolicy
+            networkRecoveryPolicy: networkRecoveryPolicy,
+            reviewThreadRetentionJournal: reviewThreadRetentionJournal
         )
     }
 
@@ -120,22 +137,38 @@ public final class CodexReviewStore {
     }
 
     public func stop() async {
-        let locallyCancelledReviewRunIDs: [String]
-        if backend.invokesRuntimeStopReviewCleanupDuringStop {
-            locallyCancelledReviewRunIDs = []
-        } else {
-            locallyCancelledReviewRunIDs = await requestActiveReviewCancellationsForRuntimeStop()
+        await stop(purpose: .finalStoreShutdownRetiringRuns)
+    }
+
+    private func stop(purpose: CodexReviewRuntimeStopPurpose) async {
+        if backend.invokesRuntimeStopReviewCleanupDuringStop == false {
+            _ = await closeActiveReviewSessions(
+                reason: .system(message: "Review runtime stopped.")
+            )
         }
-        await backend.stop(store: self)
-        let remainingLocallyCancelledReviewRunIDs = cancelActiveReviewsLocallyForRuntimeStop(cancelWorkers: false)
-        cancelAndDetachReviewWorkersForRuntimeStop(
-            runIDs: Array(Set(locallyCancelledReviewRunIDs + remainingLocallyCancelledReviewRunIDs))
-        )
+        if backend.invokesRuntimeStopReviewCleanupDuringStop == false,
+           purpose.retiresRuns,
+           await retireReviewRunsForFinalStoreStop() == false
+        {
+            transitionToFailed("Review thread retention recovery is quarantined; the runtime remains open.")
+            return
+        }
+        await backend.stop(store: self, purpose: purpose)
+        runtimeState.signalCancellation()
+        for task in runtimeState.allWorkerTasks() + runtimeState.cancellationOperationTasks() {
+            await task.value
+        }
+        if purpose.retiresRuns,
+           await reviewThreadRetentionRegistry.acceptance().isAccepting == false
+        {
+            transitionToFailed("Review thread retention recovery is quarantined; the runtime remains open.")
+            return
+        }
         transitionToStopped()
     }
 
     public func restart() async {
-        await stop()
+        await stop(purpose: .runtimeRestartPreservingRuns)
         await start(forceRestartIfNeeded: true)
     }
 
@@ -357,8 +390,8 @@ public final class CodexReviewStore {
         }
         let reviewRuns: [CodexReviewStoreDiagnosticsSnapshot.Run] = orderedReviewRuns.map { runRecord in
             return CodexReviewStoreDiagnosticsSnapshot.Run(
-                status: runRecord.core.lifecycle.status.rawValue,
-                lifecycleMessage: runRecord.core.lifecycleMessage
+                status: runRecord.core.status.rawValue,
+                lifecycleMessage: runRecord.presentation.lifecycle.message
             )
         }
         let snapshot = CodexReviewStoreDiagnosticsSnapshot(

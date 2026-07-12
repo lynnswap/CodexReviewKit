@@ -31,6 +31,7 @@ package struct ReviewMCPLogProjection: Sendable, Equatable {
     var activeEntryIDs: [String]
     var activeEntryCount: Int
     var latestEntryID: String?
+    var turnID: CodexTurnID?
     var finalLifecycleMessage: String?
     var finalResult: String?
     var items: [Item]
@@ -40,12 +41,13 @@ package struct ReviewMCPLogProjection: Sendable, Equatable {
     }
 
     private init(result: CodexReviewAPI.Read.Result) {
-        self.revision = "\(result.runID):unavailable"
+        self.revision = "\(result.runID.rawValue):unavailable"
         self.items = []
         self.orderedEntryIDs = []
         self.activeEntryIDs = []
         self.activeEntryCount = activeEntryIDs.count
         self.latestEntryID = orderedEntryIDs.last
+        self.turnID = nil
         self.finalLifecycleMessage = nil
         self.finalResult = nil
     }
@@ -53,11 +55,10 @@ package struct ReviewMCPLogProjection: Sendable, Equatable {
     init(
         result: CodexReviewAPI.Read.Result,
         turnID: CodexTurnID,
-        threadItems: [CodexThreadItem]
+        threadItems: [CodexThreadItem],
+        reviewOutputText: String?
     ) {
-        let lifecycle = result.core.lifecycle
-        let lifecycleMessage = result.core.lifecycleMessage
-        let status = lifecycle.status
+        let status = result.presentation.status
         let projectedItems = threadItems.compactMap { item -> Item? in
             guard let content = Content(threadItem: item) else {
                 return nil
@@ -76,9 +77,9 @@ package struct ReviewMCPLogProjection: Sendable, Equatable {
             }
             .joined(separator: "|")
         self.revision = [
-            result.runID,
+            result.runID.rawValue,
             status.rawValue,
-            lifecycle.endedAt?.timeIntervalSince1970.description ?? "running",
+            result.core.endedAt?.timeIntervalSince1970.description ?? "running",
             turnID.rawValue,
             itemRevision,
         ].joined(separator: ":")
@@ -87,22 +88,19 @@ package struct ReviewMCPLogProjection: Sendable, Equatable {
         self.activeEntryIDs = status.isTerminal ? [] : projectedItems.map(\.id)
         self.activeEntryCount = activeEntryIDs.count
         self.latestEntryID = orderedEntryIDs.last
-        self.finalLifecycleMessage = status.isTerminal ? lifecycleMessage : nil
+        self.turnID = turnID
+        self.finalLifecycleMessage = status.isTerminal ? result.presentation.lifecycle.message : nil
         self.finalResult =
             status == .succeeded
-            ? result.core.finalReview ?? projectedItems.lastAssistantMessageText
+            ? reviewOutputText.flatMap(Self.nonEmptyReviewOutput)
             : nil
     }
-}
 
-private extension [ReviewMCPLogProjection.Item] {
-    // Only agent messages qualify as the final result; a trailing user
-    // prompt in the transcript must never replace the review findings.
-    var lastAssistantMessageText: String? {
-        reversed()
-            .filter { $0.kind == CodexThreadItem.Kind.agentMessage.rawValue }
-            .compactMap { $0.content.messageText }
-            .first
+    private static func nonEmptyReviewOutput(_ value: String) -> String? {
+        guard value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+            return nil
+        }
+        return value
     }
 }
 
@@ -120,13 +118,6 @@ private extension String {
 }
 
 private extension ReviewMCPLogProjection.Content {
-    var messageText: String? {
-        guard case .message(let text) = self else {
-            return nil
-        }
-        return text.nilIfEmpty
-    }
-
     init?(threadItem item: CodexThreadItem) {
         switch item.content {
         case .message(let message):

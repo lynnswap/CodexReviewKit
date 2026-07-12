@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import MCP
+import Synchronization
 @preconcurrency import NIOCore
 import Testing
 @_spi(Testing) @testable import CodexReviewKit
@@ -69,8 +70,10 @@ struct CodexReviewMCPHTTPServerTests {
         )
         let server = CodexReviewMCPHTTPServer(
             adapter: CodexReviewMCPServer(store: store),
-            configuration: .init(host: "review.local", port: 9417)
+            configuration: .init(host: "127.0.0.1", port: 0)
         )
+        try await server.start()
+        let port = try #require(await server.url.port)
         let initializeBody = try makeJSONBody([
             "jsonrpc": "2.0",
             "id": 1,
@@ -84,22 +87,22 @@ struct CodexReviewMCPHTTPServerTests {
                 ],
             ],
         ])
-        let response = await server.handleHTTPRequest(
+        let response = await server.handleHTTPRequestForTesting(
             HTTPRequest(
                 method: "POST",
                 headers: [
-                    HTTPHeaderName.host: "review.local:9417",
+                    HTTPHeaderName.host: "127.0.0.1:\(port)",
                     HTTPHeaderName.accept: "text/event-stream, application/json",
                     HTTPHeaderName.contentType: "application/json",
                 ],
                 body: initializeBody,
                 path: "/mcp"
             ))
-        let denied = await server.handleHTTPRequest(
+        let denied = await server.handleHTTPRequestForTesting(
             HTTPRequest(
                 method: "POST",
                 headers: [
-                    HTTPHeaderName.host: "other.local:9417",
+                    HTTPHeaderName.host: "other.local:\(port)",
                     HTTPHeaderName.accept: "text/event-stream, application/json",
                     HTTPHeaderName.contentType: "application/json",
                 ],
@@ -111,6 +114,194 @@ struct CodexReviewMCPHTTPServerTests {
         #expect(response.headers[HTTPHeaderName.sessionID]?.isEmpty == false)
         #expect(denied.statusCode == 421)
         await server.stop()
+        assertNoHTTPServerResources(await server.resourceSnapshotForTesting())
+    }
+
+    @Test func streamableHTTPRejectsRequestsUntilStagedServerIsActivated() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+        let server = CodexReviewMCPHTTPServer(
+            adapter: CodexReviewMCPServer(store: store),
+            configuration: .init(host: "127.0.0.1", port: 0)
+        )
+        let request = HTTPRequest(method: "GET", path: "/mcp")
+
+        try await server.stage()
+        let stagedResponse = await server.handleHTTPRequestForTesting(request)
+        await server.activate()
+        let acceptingResponse = await server.handleHTTPRequestForTesting(request)
+        await server.stop()
+
+        #expect(stagedResponse.statusCode == 503)
+        #expect(acceptingResponse.statusCode == 400)
+        assertNoHTTPServerResources(await server.resourceSnapshotForTesting())
+    }
+
+    @Test func streamableHTTPCloseDrainsInitializationBeforeLateProtocolServerBind() async throws {
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        )
+        let protocolServerGate = AsyncGate()
+        let (initializingSessionIDs, initializingSessionContinuation) =
+            AsyncStream<String>.makeStream()
+        let server = CodexReviewMCPHTTPServer(
+            adapter: CodexReviewMCPServer(store: store),
+            configuration: .init(host: "127.0.0.1", port: 0),
+            protocolServerFactory: {
+                adapter,
+                sessionID,
+                registry,
+                clientSession,
+                boundedReviewWaitDuration in
+                let protocolServer = await makeMCPProtocolServer(
+                    adapter: adapter,
+                    sessionID: sessionID,
+                    sessionRegistry: registry,
+                    clientSession: clientSession,
+                    boundedReviewWaitDuration: boundedReviewWaitDuration
+                )
+                initializingSessionContinuation.yield(sessionID)
+                do {
+                    try await protocolServerGate.wait()
+                } catch {
+                    preconditionFailure("The protocol-server test gate was cancelled: \(error)")
+                }
+                return protocolServer
+            }
+        )
+        try await server.start()
+        let port = try #require(await server.url.port)
+        let initializeRequest = HTTPRequest(
+            method: "POST",
+            headers: [
+                HTTPHeaderName.host: "127.0.0.1:\(port)",
+                HTTPHeaderName.accept: "text/event-stream, application/json",
+                HTTPHeaderName.contentType: "application/json",
+            ],
+            body: try makeJSONBody([
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": [
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": [:],
+                    "clientInfo": [
+                        "name": "CodexReviewKitTests",
+                        "version": "0.0.0",
+                    ],
+                ],
+            ]),
+            path: "/mcp"
+        )
+
+        let initialization = Task {
+            await server.handleHTTPRequestForTesting(initializeRequest)
+        }
+        var sessionIDIterator = initializingSessionIDs.makeAsyncIterator()
+        let sessionID = try #require(await sessionIDIterator.next())
+        let stop = Task {
+            await server.stop()
+        }
+        let enteredClosing = await waitUntil(timeout: .seconds(2)) {
+            await server.sessionIsClosingForTesting(sessionID: sessionID)
+        }
+        #expect(enteredClosing)
+
+        await protocolServerGate.open()
+        let response = await initialization.value
+        await stop.value
+        initializingSessionContinuation.finish()
+
+        #expect(response.statusCode == 503)
+        #expect(response.headers[HTTPHeaderName.sessionID] == nil)
+        assertNoHTTPServerResources(await server.resourceSnapshotForTesting())
+    }
+
+    @Test func streamableHTTPConcurrentStopJoinsOneResourceDrain() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "run-server-stop" })
+        )
+        let server = CodexReviewMCPHTTPServer(
+            adapter: CodexReviewMCPServer(store: store),
+            configuration: .init(host: "127.0.0.1", port: 0)
+        )
+        try await server.start()
+        let sessionID = try await initializeSession(endpoint: await server.url)
+        let running = try await beginRunningReview(store: store, sessionID: sessionID)
+        try await server.registerSessionMemberForTesting(
+            makeHTTPTestRunID("run-server-stop"),
+            sessionID: sessionID
+        )
+
+        async let firstStop: Void = server.stop()
+        async let secondStop: Void = server.stop()
+        _ = await (firstStop, secondStop)
+
+        #expect(running.presentation.status == .cancelled)
+        assertNoHTTPServerResources(await server.resourceSnapshotForTesting())
+    }
+
+    @Test func streamableHTTPGlobalStopDrainsActivePostAndEventStreamWriter() async throws {
+        let backend = FakeCodexReviewBackend()
+        let startGate = AsyncGate()
+        await backend.holdStartReview(with: startGate)
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "run-active-stop" })
+        )
+        let server = CodexReviewMCPHTTPServer(
+            adapter: CodexReviewMCPServer(store: store),
+            configuration: .init(
+                host: "127.0.0.1",
+                port: 0,
+                streamHeartbeatInterval: .milliseconds(50)
+            )
+        )
+        try await server.start()
+        let endpoint = await server.url
+        let sessionID = try await initializeSession(endpoint: endpoint)
+        let requestBody = try makeJSONBody([
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": [
+                "name": "review_start",
+                "arguments": [
+                    "cwd": "/tmp/project",
+                    "target": ["type": "uncommittedChanges"],
+                ],
+            ],
+        ])
+        let post = Task {
+            try await postJSONRPCData(
+                endpoint: endpoint,
+                sessionID: sessionID,
+                bodyData: requestBody
+            )
+        }
+        await backend.waitForStartReview()
+        let eventStreamOpened = AsyncGate()
+        let eventStream = Task {
+            try await openAndCloseRawEventStream(
+                endpoint: endpoint,
+                sessionID: sessionID,
+                holdUntilServerCloses: true,
+                opened: eventStreamOpened
+            )
+        }
+        try await eventStreamOpened.wait()
+        #expect(await server.sessionActiveRequestCountForTesting(sessionID: sessionID) == 2)
+        #expect(await server.resourceSnapshotForTesting().activeRequestWorkCount == 2)
+
+        await server.stop()
+        _ = await post.result
+        _ = await eventStream.result
+
+        assertNoHTTPServerResources(await server.resourceSnapshotForTesting())
     }
 
     @Test func streamableHTTPClassifiesAddressInUseBindError() {
@@ -133,6 +324,40 @@ struct CodexReviewMCPHTTPServerTests {
                 ))
     }
 
+    @Test func streamableHTTPStageFailureDrainsOwnedResources() async throws {
+        let occupiedStore = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        )
+        let occupiedServer = CodexReviewMCPHTTPServer(
+            adapter: CodexReviewMCPServer(store: occupiedStore),
+            configuration: .init(host: "127.0.0.1", port: 0)
+        )
+        try await occupiedServer.start()
+        let occupiedPort = try #require(await occupiedServer.url.port)
+        let blockedStore = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        )
+        let blockedServer = CodexReviewMCPHTTPServer(
+            adapter: CodexReviewMCPServer(store: blockedStore),
+            configuration: .init(host: "127.0.0.1", port: occupiedPort)
+        )
+
+        do {
+            try await blockedServer.stage()
+            Issue.record("Expected the second MCP listener bind to fail.")
+        } catch {
+            #expect(
+                (error as? CodexReviewMCPHTTPServer.Error)
+                    == .addressInUse(host: "127.0.0.1", port: occupiedPort)
+            )
+        }
+
+        await blockedServer.stop()
+        assertNoHTTPServerResources(await blockedServer.resourceSnapshotForTesting())
+        await occupiedServer.stop()
+        assertNoHTTPServerResources(await occupiedServer.resourceSnapshotForTesting())
+    }
+
     @Test func streamableHTTPCallsReviewStartWithCustomTarget() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
@@ -143,7 +368,7 @@ struct CodexReviewMCPHTTPServerTests {
         try await withHTTPServer(
             store: store,
             logProjectionProvider: { result in
-                ReviewMCPLogProjection(
+                .available(ReviewMCPLogProjection(
                     result: result,
                     turnID: "turn-1",
                     threadItems: [
@@ -161,8 +386,9 @@ struct CodexReviewMCPHTTPServerTests {
                                 text: "No issues found."
                             ))
                         ),
-                    ]
-                )
+                    ],
+                    reviewOutputText: "No issues found."
+                ))
             }
         ) { server in
             let endpoint = await server.url
@@ -174,7 +400,6 @@ struct CodexReviewMCPHTTPServerTests {
                 "params": [
                     "name": "review_start",
                     "arguments": [
-                        "sessionID": "session-1",
                         "cwd": "/tmp/project",
                         "target": [
                             "type": "custom",
@@ -214,7 +439,7 @@ struct CodexReviewMCPHTTPServerTests {
                 commands.contains(
                     .startReview(
                         .init(
-                            runID: "run-1",
+                            runID: makeHTTPTestRunID("run-1"),
                             sessionID: sessionID,
                             request: .init(
                                 cwd: "/tmp/project", target: .custom(instructions: "Focus on test coverage."))
@@ -229,7 +454,23 @@ struct CodexReviewMCPHTTPServerTests {
             idGenerator: .init(next: { "run-1" })
         )
 
-        try await withHTTPServer(store: store) { server in
+        let reviewOutput = """
+            Review comment:
+
+            - [P1] Pin CodexKit fallback — Package.swift:14-14
+              Fresh clones can resolve a moving dependency and drift from the reviewed API.
+            """
+        try await withHTTPServer(
+            store: store,
+            logProjectionProvider: { result in
+                .available(ReviewMCPLogProjection(
+                    result: result,
+                    turnID: "turn-1",
+                    threadItems: [],
+                    reviewOutputText: reviewOutput
+                ))
+            }
+        ) { server in
             let endpoint = await server.url
             let sessionID = try await initializeSession(endpoint: endpoint)
             let requestBody = try makeJSONBody([
@@ -249,12 +490,7 @@ struct CodexReviewMCPHTTPServerTests {
                 sessionID: sessionID,
                 bodyData: requestBody
             )
-            await backend.yield(.completed(finalReview: """
-            Review comment:
-
-            - [P1] Pin CodexKit fallback — Package.swift:14-14
-              Fresh clones can resolve a moving dependency and drift from the reviewed API.
-            """))
+            await backend.yield(.completed(finalReview: reviewOutput))
             let resolved = try decodeSSEJSON(from: try await responseData)
 
             #expect(
@@ -287,7 +523,7 @@ struct CodexReviewMCPHTTPServerTests {
             store: store,
             configuration: configuration,
             logProjectionProvider: { result in
-                ReviewMCPLogProjection(
+                .available(ReviewMCPLogProjection(
                     result: result,
                     turnID: "turn-1",
                     threadItems: [
@@ -296,8 +532,11 @@ struct CodexReviewMCPHTTPServerTests {
                             kind: .commandExecution,
                             content: .command(.init(command: "git diff", output: "diff"))
                         ),
-                    ]
-                )
+                    ],
+                    reviewOutputText: result.presentation.status == .succeeded
+                        ? "No issues found."
+                        : nil
+                ))
             }
         ) { server in
             let endpoint = await server.url
@@ -373,7 +612,22 @@ struct CodexReviewMCPHTTPServerTests {
             idGenerator: .init(next: { "run-1" })
         )
 
-        try await withHTTPServer(store: store) { server in
+        try await withHTTPServer(
+            store: store,
+            logProjectionProvider: { result in
+                guard let attempt = result.core.attempt else {
+                    return .unavailable
+                }
+                return .available(ReviewMCPLogProjection(
+                    result: result,
+                    turnID: .init(rawValue: attempt.turnID.rawValue),
+                    threadItems: [],
+                    reviewOutputText: result.presentation.status == .succeeded
+                        ? "Done"
+                        : nil
+                ))
+            }
+        ) { server in
             let endpoint = await server.url
             let sessionID = try await initializeSession(endpoint: endpoint)
             let requestBody = try makeJSONBody([
@@ -405,11 +659,38 @@ struct CodexReviewMCPHTTPServerTests {
                 commands.contains(
                     .startReview(
                         .init(
-                            runID: "run-1",
+                            runID: makeHTTPTestRunID("run-1"),
                             sessionID: sessionID,
                             request: .init(
                                 cwd: "/tmp/project", target: .custom(instructions: "Focus on test coverage."))
                         ))))
+        }
+    }
+
+    @Test func streamableHTTPRejectsCallerSuppliedSessionSelector() async throws {
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        )
+
+        try await withHTTPServer(store: store) { server in
+            let sessionID = try await initializeSession(endpoint: await server.url)
+            let response = try await postJSONRPC(
+                endpoint: await server.url,
+                sessionID: sessionID,
+                body: [
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": [
+                        "name": "review_list",
+                        "arguments": ["sessionID": "other-session"],
+                    ],
+                ]
+            )
+
+            #expect(response.value(for: ["result", "isError"]) as? Bool == true)
+            let content = response.value(for: ["result", "content"]) as? [[String: Any]]
+            #expect((content?.first?["text"] as? String)?.contains("active MCP transport session") == true)
         }
     }
 
@@ -494,7 +775,12 @@ struct CodexReviewMCPHTTPServerTests {
                 sessionID: sessionID,
                 cwd: "/tmp/project",
                 targetSummary: "Uncommitted changes",
+                attemptID: "attempt-included",
+                threadID: "thread-included",
+                turnID: "turn-included",
                 status: .succeeded,
+                startedAt: Date(timeIntervalSince1970: 1_000),
+                endedAt: Date(timeIntervalSince1970: 1_001),
                 summary: "Done"
             )
             let otherSession = ReviewRunRecord.makeForTesting(
@@ -502,7 +788,12 @@ struct CodexReviewMCPHTTPServerTests {
                 sessionID: "other-session",
                 cwd: "/tmp/project",
                 targetSummary: "Uncommitted changes",
+                attemptID: "attempt-other-session",
+                threadID: "thread-other-session",
+                turnID: "turn-other-session",
                 status: .succeeded,
+                startedAt: Date(timeIntervalSince1970: 1_000),
+                endedAt: Date(timeIntervalSince1970: 1_001),
                 summary: "Done"
             )
             let otherWorkspace = ReviewRunRecord.makeForTesting(
@@ -510,12 +801,25 @@ struct CodexReviewMCPHTTPServerTests {
                 sessionID: sessionID,
                 cwd: "/tmp/other",
                 targetSummary: "Uncommitted changes",
+                attemptID: "attempt-other-workspace",
+                threadID: "thread-other-workspace",
+                turnID: "turn-other-workspace",
                 status: .succeeded,
+                startedAt: Date(timeIntervalSince1970: 1_000),
+                endedAt: Date(timeIntervalSince1970: 1_001),
                 summary: "Done"
             )
             store.loadForTesting(
                 serverState: .running,
                 reviewRuns: [included, otherSession, otherWorkspace]
+            )
+            try await server.registerSessionMemberForTesting(
+                makeHTTPTestRunID("run-included"),
+                sessionID: sessionID
+            )
+            try await server.registerSessionMemberForTesting(
+                makeHTTPTestRunID("run-other-workspace"),
+                sessionID: sessionID
             )
             let response = try await postJSONRPC(
                 endpoint: await server.url,
@@ -527,7 +831,6 @@ struct CodexReviewMCPHTTPServerTests {
                     "params": [
                         "name": "review_list",
                         "arguments": [
-                            "sessionID": "other-session",
                             "cwd": "/tmp/project",
                             "statuses": ["succeeded"],
                         ],
@@ -546,14 +849,34 @@ struct CodexReviewMCPHTTPServerTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
         )
 
-        try await withHTTPServer(store: store) { server in
+        try await withHTTPServer(
+            store: store,
+            logProjectionProvider: { result in
+                guard let attempt = result.core.attempt else {
+                    return .unavailable
+                }
+                return .available(ReviewMCPLogProjection(
+                    result: result,
+                    turnID: .init(rawValue: attempt.turnID.rawValue),
+                    threadItems: [],
+                    reviewOutputText: result.presentation.status == .succeeded
+                        ? "Done"
+                        : nil
+                ))
+            }
+        ) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
             let includedRun = ReviewRunRecord.makeForTesting(
                 id: "run-in-session",
                 sessionID: sessionID,
                 cwd: "/tmp/project",
                 targetSummary: "Included",
+                attemptID: "attempt-in-session",
+                threadID: "thread-in-session",
+                turnID: "turn-in-session",
                 status: .succeeded,
+                startedAt: Date(timeIntervalSince1970: 1_000),
+                endedAt: Date(timeIntervalSince1970: 1_001),
                 summary: "Done"
             )
             store.loadForTesting(
@@ -565,10 +888,19 @@ struct CodexReviewMCPHTTPServerTests {
                         sessionID: "other-session",
                         cwd: "/tmp/project",
                         targetSummary: "Other",
+                        attemptID: "attempt-other-session",
+                        threadID: "thread-other-session",
+                        turnID: "turn-other-session",
                         status: .succeeded,
+                        startedAt: Date(timeIntervalSince1970: 1_000),
+                        endedAt: Date(timeIntervalSince1970: 1_001),
                         summary: "Done"
                     ),
                 ]
+            )
+            try await server.registerSessionMemberForTesting(
+                makeHTTPTestRunID("run-in-session"),
+                sessionID: sessionID
             )
 
             let allowed = try await postJSONRPC(
@@ -644,7 +976,7 @@ struct CodexReviewMCPHTTPServerTests {
         }
     }
 
-    @Test func streamableHTTPReviewReadLeavesLogEmptyWithoutChatProvider() async throws {
+    @Test func streamableHTTPRejectsSucceededReviewWithoutChatProjection() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
@@ -657,12 +989,21 @@ struct CodexReviewMCPHTTPServerTests {
                 sessionID: sessionID,
                 cwd: "/tmp/project",
                 targetSummary: "Included",
+                attemptID: "attempt-semantic",
+                threadID: "thread-semantic",
+                turnID: "turn-semantic",
                 status: .succeeded,
+                startedAt: Date(timeIntervalSince1970: 1_000),
+                endedAt: Date(timeIntervalSince1970: 1_001),
                 summary: "Done"
             )
             store.loadForTesting(
                 serverState: .running,
                 reviewRuns: [runRecord]
+            )
+            try await server.registerSessionMemberForTesting(
+                makeHTTPTestRunID("run-semantic"),
+                sessionID: sessionID
             )
 
             let defaultResponse = try await postJSONRPC(
@@ -681,56 +1022,27 @@ struct CodexReviewMCPHTTPServerTests {
                 ]
             )
 
-            #expect(defaultResponse.value(for: ["result", "structuredContent", "runId"]) as? String == "run-semantic")
-            #expect(defaultResponse.value(for: ["result", "structuredContent", "run"]) != nil)
-            #expect(
-                defaultResponse.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String
-                    == "succeeded")
-            #expect(
-                defaultResponse.value(for: ["result", "structuredContent", "lifecycle", "message"]) as? String
-                    == "Done")
-            #expect(
-                defaultResponse.value(for: ["result", "structuredContent", "review", "hasFinalReview"]) as? Bool
-                    == false)
-            #expect(defaultResponse.value(for: ["result", "structuredContent", "review", "finalReview"]) is NSNull)
-            #expect(defaultResponse.value(for: ["result", "structuredContent", "logs"]) == nil)
-            #expect(defaultResponse.value(for: ["result", "structuredContent", "logsPage"]) == nil)
-            #expect(defaultResponse.value(for: ["result", "structuredContent", "rawLogText"]) == nil)
-
-            let log = try #require(
-                defaultResponse.value(for: ["result", "structuredContent", "log"]) as? [String: Any])
-            #expect(log["orderedEntryIds"] as? [String] == [])
-            #expect(log["activeEntryIds"] as? [String] == [])
-            #expect(log["activeEntryCount"] as? Int == 0)
-            #expect(log["latestEntryId"] is NSNull)
-            let itemsPage = try #require(log["itemsPage"] as? [String: Any])
-            #expect(itemsPage["total"] as? Int == 0)
-            #expect(itemsPage["limit"] as? Int == 100)
-            #expect(itemsPage["returned"] as? Int == 0)
-            let items = try #require(log["items"] as? [[String: Any]])
-            #expect(items.isEmpty)
+            #expect(defaultResponse.value(for: ["result", "isError"]) as? Bool == true)
+            #expect(defaultResponse.value(for: ["result", "structuredContent"]) == nil)
+            let errorText = (defaultResponse.value(for: ["result", "content"]) as? [[String: Any]])?
+                .first?["text"] as? String
+            #expect(errorText == "Review output projection invariant failed for run run-semantic.")
         }
     }
 
     @Test func streamableHTTPReviewReadDoesNotProjectRunningSummaryAsLogContent() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "run-tool-progress" })
         )
 
         try await withHTTPServer(store: store) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
-            let runRecord = ReviewRunRecord.makeForTesting(
-                id: "run-tool-progress",
-                sessionID: sessionID,
-                cwd: "/tmp/project",
-                targetSummary: "Included",
-                status: .running,
-                summary: "Running"
-            )
-            store.loadForTesting(
-                serverState: .running,
-                reviewRuns: [runRecord]
+            _ = try await beginRunningReview(store: store, sessionID: sessionID)
+            try await server.registerSessionMemberForTesting(
+                makeHTTPTestRunID("run-tool-progress"),
+                sessionID: sessionID
             )
 
             let response = try await postJSONRPC(
@@ -759,36 +1071,39 @@ struct CodexReviewMCPHTTPServerTests {
     }
 
     @Test func streamableHTTPCancelsReviewByTransportScopedSelector() async throws {
-        let backend = FakeCodexReviewBackend()
+        let backend = FakeCodexReviewBackend(
+            nextAttempt: makeReviewAttemptForTesting(
+                attemptID: "attempt-1",
+                sourceThreadID: "thread-1",
+                activeTurnThreadID: "thread-1",
+                turnID: "turn-1",
+                model: "gpt-5"
+            )
+        )
+        let runIDs = Mutex(["run-running", "run-other-session"])
         let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: {
+                runIDs.withLock { runIDs in
+                    precondition(runIDs.isEmpty == false)
+                    return runIDs.removeFirst()
+                }
+            })
         )
 
         try await withHTTPServer(store: store) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
-            let running = ReviewRunRecord.makeForTesting(
-                id: "run-running",
-                sessionID: sessionID,
-                cwd: "/tmp/project",
-                targetSummary: "Uncommitted changes",
-                threadID: "thread-1",
-                turnID: "turn-1",
-                status: .running,
-                summary: "Running"
-            )
-            let otherSession = ReviewRunRecord.makeForTesting(
-                id: "run-other-session",
+            let running = try await beginRunningReview(store: store, sessionID: sessionID)
+            let startGate = AsyncGate()
+            await backend.holdStartReview(with: startGate)
+            let otherRunID = try await store.beginReview(
                 sessionID: "other-session",
-                cwd: "/tmp/project",
-                targetSummary: "Uncommitted changes",
-                threadID: "thread-2",
-                turnID: "turn-2",
-                status: .running,
-                summary: "Running"
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
-            store.loadForTesting(
-                serverState: .running,
-                reviewRuns: [running, otherSession]
+            let otherSession = try #require(store.reviewRun(id: otherRunID))
+            try await server.registerSessionMemberForTesting(
+                makeHTTPTestRunID("run-running"),
+                sessionID: sessionID
             )
             let response = try await postJSONRPC(
                 endpoint: await server.url,
@@ -800,9 +1115,8 @@ struct CodexReviewMCPHTTPServerTests {
                     "params": [
                         "name": "review_cancel",
                         "arguments": [
-                            "sessionID": "other-session",
                             "cwd": "/tmp/project",
-                            "statuses": ["running"],
+                            "statuses": ["queued", "running"],
                             "reason": "Stop from MCP",
                         ],
                     ],
@@ -811,23 +1125,33 @@ struct CodexReviewMCPHTTPServerTests {
 
             #expect(response.value(for: ["result", "structuredContent", "runId"]) as? String == "run-running")
             #expect(response.value(for: ["result", "structuredContent", "cancelled"]) as? Bool == true)
-            #expect(running.core.lifecycle.status == .cancelled)
-            #expect(running.core.lifecycle.cancellation?.message == "Stop from MCP")
+            #expect(running.presentation.status == .cancelled)
+            #expect(running.core.cancellation?.message == "Stop from MCP")
             #expect(otherSession.cancellationRequested == false)
             let commands = await backend.recordedCommands()
             #expect(
                 commands.contains(
                     .interruptReview(
-                        .init(threadID: "thread-1", turnID: "turn-1", reviewThreadID: "thread-1", model: "gpt-5"),
+                        makeReviewAttemptForTesting(
+                            attemptID: "attempt-1",
+                            sourceThreadID: "thread-1",
+                            activeTurnThreadID: "thread-1",
+                            turnID: "turn-1",
+                            model: "gpt-5"
+                        ),
                         .init(message: "Stop from MCP")
                     )))
+            let closeResult = await store.closeSession("other-session")
+            #expect(closeResult.terminalAndDrainedRunIDs == [otherRunID])
+            store.releaseClosedSession("other-session")
         }
     }
 
     @Test func streamableHTTPCancelDefaultsSelectorToActiveRunsInTransportSession() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "run-running" })
         )
 
         try await withHTTPServer(store: store) { server in
@@ -837,24 +1161,26 @@ struct CodexReviewMCPHTTPServerTests {
                 sessionID: sessionID,
                 cwd: "/tmp/project",
                 targetSummary: "Completed",
+                attemptID: "attempt-completed",
                 threadID: "thread-completed",
                 turnID: "turn-completed",
                 status: .succeeded,
+                startedAt: Date(timeIntervalSince1970: 1_000),
+                endedAt: Date(timeIntervalSince1970: 1_001),
                 summary: "Done"
-            )
-            let running = ReviewRunRecord.makeForTesting(
-                id: "run-running",
-                sessionID: sessionID,
-                cwd: "/tmp/project",
-                targetSummary: "Running",
-                threadID: "thread-running",
-                turnID: "turn-running",
-                status: .running,
-                summary: "Running"
             )
             store.loadForTesting(
                 serverState: .running,
-                reviewRuns: [completed, running]
+                reviewRuns: [completed]
+            )
+            let running = try await beginRunningReview(store: store, sessionID: sessionID)
+            try await server.registerSessionMemberForTesting(
+                makeHTTPTestRunID("run-completed"),
+                sessionID: sessionID
+            )
+            try await server.registerSessionMemberForTesting(
+                makeHTTPTestRunID("run-running"),
+                sessionID: sessionID
             )
 
             let response = try await postJSONRPC(
@@ -876,43 +1202,45 @@ struct CodexReviewMCPHTTPServerTests {
 
             #expect(response.value(for: ["result", "structuredContent", "runId"]) as? String == "run-running")
             #expect(response.value(for: ["result", "structuredContent", "cancelled"]) as? Bool == true)
-            #expect(completed.core.lifecycle.status == .succeeded)
-            #expect(running.core.lifecycle.status == .cancelled)
+            #expect(completed.presentation.status == .succeeded)
+            #expect(running.presentation.status == .cancelled)
         }
     }
 
     @Test func streamableHTTPReportsAmbiguousCancelSelectorCandidates() async throws {
         let backend = FakeCodexReviewBackend()
+        let startGate = AsyncGate()
+        await backend.holdStartReview(with: startGate)
+        let runIDs = Mutex(["run-running-1", "run-running-2"])
         let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: {
+                runIDs.withLock { runIDs in
+                    precondition(runIDs.isEmpty == false)
+                    return runIDs.removeFirst()
+                }
+            })
         )
 
         try await withHTTPServer(store: store) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
-            store.loadForTesting(
-                serverState: .running,
-                reviewRuns: [
-                    ReviewRunRecord.makeForTesting(
-                        id: "run-running-1",
-                        sessionID: sessionID,
-                        cwd: "/tmp/project",
-                        targetSummary: "First",
-                        threadID: "thread-1",
-                        turnID: "turn-1",
-                        status: .running,
-                        summary: "Running"
-                    ),
-                    ReviewRunRecord.makeForTesting(
-                        id: "run-running-2",
-                        sessionID: sessionID,
-                        cwd: "/tmp/project",
-                        targetSummary: "Second",
-                        threadID: "thread-2",
-                        turnID: "turn-2",
-                        status: .running,
-                        summary: "Running"
-                    ),
-                ]
+            let firstRunID = try await store.beginReview(
+                sessionID: sessionID,
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+            let secondRunID = try await store.beginReview(
+                sessionID: sessionID,
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+            #expect(firstRunID.rawValue == "run-running-1")
+            #expect(secondRunID.rawValue == "run-running-2")
+            try await server.registerSessionMemberForTesting(
+                makeHTTPTestRunID("run-running-1"),
+                sessionID: sessionID
+            )
+            try await server.registerSessionMemberForTesting(
+                makeHTTPTestRunID("run-running-2"),
+                sessionID: sessionID
             )
 
             let response = try await postJSONRPC(
@@ -943,24 +1271,16 @@ struct CodexReviewMCPHTTPServerTests {
     @Test func streamableHTTPCancelsDocumentedRunId() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "run-running" })
         )
 
         try await withHTTPServer(store: store) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
-            let running = ReviewRunRecord.makeForTesting(
-                id: "run-running",
-                sessionID: sessionID,
-                cwd: "/tmp/project",
-                targetSummary: "Running",
-                threadID: "thread-running",
-                turnID: "turn-running",
-                status: .running,
-                summary: "Running"
-            )
-            store.loadForTesting(
-                serverState: .running,
-                reviewRuns: [running]
+            let running = try await beginRunningReview(store: store, sessionID: sessionID)
+            try await server.registerSessionMemberForTesting(
+                makeHTTPTestRunID("run-running"),
+                sessionID: sessionID
             )
 
             let response = try await postJSONRPC(
@@ -981,13 +1301,42 @@ struct CodexReviewMCPHTTPServerTests {
             )
 
             #expect(response.value(for: ["result", "structuredContent", "runId"]) as? String == "run-running")
-            #expect(running.core.lifecycle.status == .cancelled)
+            #expect(running.presentation.status == .cancelled)
+        }
+    }
+
+    @Test func streamableHTTPMeasuresIdleWindowWithInjectedMonotonicClock() async throws {
+        let clock = ManualMCPHTTPServerClock()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        )
+
+        try await withHTTPServer(
+            store: store,
+            configuration: .init(
+                port: 0,
+                sessionTimeout: .seconds(10),
+                sessionCleanupInterval: .seconds(1),
+                sessionClock: clock.clock
+            )
+        ) { server in
+            let sessionID = try await initializeSession(endpoint: await server.url)
+
+            try await clock.waitForSleeperCount(1)
+            clock.advance(by: .seconds(10))
+            try await clock.waitForSleeperCount(1)
+            #expect(await server.sessionActiveRequestCountForTesting(sessionID: sessionID) == 0)
+
+            clock.advance(by: .seconds(1))
+            try await clock.waitForSleeperCount(1)
+            #expect(await server.sessionActiveRequestCountForTesting(sessionID: sessionID) == nil)
         }
     }
 
     @Test func streamableHTTPDoesNotExpireSessionWithActiveReviewRequest() async throws {
         let backend = FakeCodexReviewBackend()
         let gate = AsyncGate()
+        let clock = ManualMCPHTTPServerClock()
         await backend.holdStartReview(with: gate)
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -996,7 +1345,22 @@ struct CodexReviewMCPHTTPServerTests {
 
         try await withHTTPServer(
             store: store,
-            configuration: .init(port: 0, sessionTimeout: 1)
+            configuration: .init(
+                port: 0,
+                sessionTimeout: .seconds(1),
+                sessionCleanupInterval: .seconds(1),
+                sessionClock: clock.clock
+            ),
+            logProjectionProvider: { result in
+                .available(ReviewMCPLogProjection(
+                    result: result,
+                    turnID: "turn-1",
+                    threadItems: [],
+                    reviewOutputText: result.presentation.status == .succeeded
+                        ? "No issues found."
+                        : nil
+                ))
+            }
         ) { server in
             let endpoint = await server.url
             let sessionID = try await initializeSession(endpoint: endpoint)
@@ -1019,7 +1383,32 @@ struct CodexReviewMCPHTTPServerTests {
                 bodyData: requestBody
             )
             await backend.waitForStartReview()
-            await server.runSessionCleanupForTesting(now: .distantFuture)
+            try await clock.waitForSleeperCount(1)
+            clock.advance(by: .seconds(2))
+            try await clock.waitForSleeperCount(1)
+
+            let runningList = try await postJSONRPC(
+                endpoint: endpoint,
+                sessionID: sessionID,
+                body: [
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": [
+                        "name": "review_list",
+                        "arguments": [
+                            "cwd": "/tmp/project",
+                            "statuses": ["queued", "running"],
+                        ],
+                    ],
+                ]
+            )
+            let runningItems = try #require(
+                runningList.value(for: ["result", "structuredContent", "items"])
+                    as? [[String: Any]]
+            )
+            #expect(runningItems.compactMap { $0["runId"] as? String } == ["run-1"])
+
             await gate.open()
             await backend.yield(.completed(finalReview: "No issues found."))
             let resolved = try decodeSSEJSON(from: try await responseData)
@@ -1035,7 +1424,7 @@ struct CodexReviewMCPHTTPServerTests {
                 sessionID: sessionID,
                 body: [
                     "jsonrpc": "2.0",
-                    "id": 3,
+                    "id": 4,
                     "method": "tools/list",
                 ]
             )
@@ -1045,13 +1434,19 @@ struct CodexReviewMCPHTTPServerTests {
 
     @Test func streamableHTTPDoesNotExpireSessionWithOpenEventStream() async throws {
         let backend = FakeCodexReviewBackend()
+        let clock = ManualMCPHTTPServerClock()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
         )
 
         try await withHTTPServer(
             store: store,
-            configuration: .init(port: 0, sessionTimeout: 1)
+            configuration: .init(
+                port: 0,
+                sessionTimeout: .seconds(1),
+                sessionCleanupInterval: .seconds(1),
+                sessionClock: clock.clock
+            )
         ) { server in
             let endpoint = await server.url
             let sessionID = try await initializeSession(endpoint: endpoint)
@@ -1064,7 +1459,9 @@ struct CodexReviewMCPHTTPServerTests {
             let httpResponse = try #require(response as? HTTPURLResponse)
             #expect(httpResponse.statusCode == 200)
 
-            await server.runSessionCleanupForTesting(now: .distantFuture)
+            try await clock.waitForSleeperCount(1)
+            clock.advance(by: .seconds(2))
+            try await clock.waitForSleeperCount(1)
 
             let tools = try await postJSONRPC(
                 endpoint: endpoint,
@@ -1082,6 +1479,7 @@ struct CodexReviewMCPHTTPServerTests {
 
     @Test func streamableHTTPExpiresSessionAfterEventStreamDisconnects() async throws {
         let backend = FakeCodexReviewBackend()
+        let clock = ManualMCPHTTPServerClock()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
         )
@@ -1091,8 +1489,10 @@ struct CodexReviewMCPHTTPServerTests {
             configuration: .init(
                 host: "127.0.0.1",
                 port: 0,
-                sessionTimeout: 1,
-                streamHeartbeatInterval: .milliseconds(50)
+                sessionTimeout: .seconds(1),
+                sessionCleanupInterval: .seconds(1),
+                streamHeartbeatInterval: .milliseconds(50),
+                sessionClock: clock.clock
             )
         ) { server in
             let endpoint = await server.url
@@ -1104,7 +1504,9 @@ struct CodexReviewMCPHTTPServerTests {
             }
             #expect(streamReleased)
 
-            await server.runSessionCleanupForTesting(now: .distantFuture)
+            try await clock.waitForSleeperCount(1)
+            clock.advance(by: .seconds(2))
+            try await clock.waitForSleeperCount(1)
             #expect(await server.sessionActiveRequestCountForTesting(sessionID: sessionID) == nil)
         }
     }
@@ -1112,24 +1514,15 @@ struct CodexReviewMCPHTTPServerTests {
     @Test func streamableHTTPKeepsRunIDCancellationInTransportSession() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "run-other-session" })
         )
 
         try await withHTTPServer(store: store) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
-            let other = ReviewRunRecord.makeForTesting(
-                id: "run-other-session",
-                sessionID: "other-session",
-                cwd: "/tmp/project",
-                targetSummary: "Other",
-                threadID: "thread-other",
-                turnID: "turn-other",
-                status: .running,
-                summary: "Running"
-            )
-            store.loadForTesting(
-                serverState: .running,
-                reviewRuns: [other]
+            let other = try await beginRunningReview(
+                store: store,
+                sessionID: "other-session"
             )
 
             let response = try await postJSONRPC(
@@ -1150,43 +1543,42 @@ struct CodexReviewMCPHTTPServerTests {
             )
 
             #expect(response.value(for: ["result", "isError"]) as? Bool == true)
-            #expect(other.core.lifecycle.status == .running)
+            #expect(other.presentation.status == .running)
+            let closeResult = await store.closeSession("other-session")
+            #expect(closeResult.terminalAndDrainedRunIDs == [other.id])
+            store.releaseClosedSession("other-session")
         }
     }
 
-    @Test func streamableHTTPDeleteClosesStoreSession() async throws {
+    @Test func streamableHTTPDeleteFinishesItsRequestBeforeClosingStoreSession() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "run-running" })
         )
 
         try await withHTTPServer(store: store) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
-            let running = ReviewRunRecord.makeForTesting(
-                id: "run-running",
-                sessionID: sessionID,
-                cwd: "/tmp/project",
-                targetSummary: "Running",
-                threadID: "thread-running",
-                turnID: "turn-running",
-                status: .running,
-                summary: "Running"
-            )
-            store.loadForTesting(
-                serverState: .running,
-                reviewRuns: [running]
+            let running = try await beginRunningReview(store: store, sessionID: sessionID)
+            try await server.registerSessionMemberForTesting(
+                makeHTTPTestRunID("run-running"),
+                sessionID: sessionID
             )
 
             let response = try await deleteSession(endpoint: await server.url, sessionID: sessionID)
 
             #expect(response.statusCode == 200)
-            #expect(running.core.lifecycle.status == .cancelled)
-            await #expect(throws: (any Error).self) {
-                try await store.startReview(
-                    sessionID: sessionID,
-                    request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
-                )
-            }
+            #expect(running.presentation.status == .cancelled)
+            let staleSessionResponse = try await postJSONRPCStatus(
+                endpoint: await server.url,
+                sessionID: sessionID,
+                body: [
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/list",
+                ]
+            )
+            #expect(staleSessionResponse.statusCode == 404)
         }
     }
 
@@ -1253,6 +1645,38 @@ struct CodexReviewMCPHTTPServerTests {
         }
     }
 
+    private func beginRunningReview(
+        store: CodexReviewStore,
+        sessionID: String,
+        cwd: String = "/tmp/project"
+    ) async throws -> ReviewRunRecord {
+        let runID = try await store.beginReview(
+            sessionID: sessionID,
+            request: .init(cwd: cwd, target: .uncommittedChanges)
+        )
+        try #require(
+            await StoreSnapshotProbe(store: store).waitUntilRunStatus(
+                .running,
+                runID: runID.rawValue
+            ) != nil
+        )
+        return try #require(store.reviewRun(id: runID))
+    }
+
+    private func assertNoHTTPServerResources(
+        _ snapshot: CodexReviewMCPHTTPServer.ResourceSnapshot,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) {
+        #expect(snapshot.listenerCount == 0, sourceLocation: sourceLocation)
+        #expect(snapshot.eventLoopGroupCount == 0, sourceLocation: sourceLocation)
+        #expect(snapshot.sessionCount == 0, sourceLocation: sourceLocation)
+        #expect(snapshot.registrySessionCount == 0, sourceLocation: sourceLocation)
+        #expect(snapshot.cleanupTaskCount == 0, sourceLocation: sourceLocation)
+        #expect(snapshot.requestPumpTaskCount == 0, sourceLocation: sourceLocation)
+        #expect(snapshot.activeRequestWorkCount == 0, sourceLocation: sourceLocation)
+        #expect(snapshot.childChannelCount == 0, sourceLocation: sourceLocation)
+    }
+
     private func withHTTPServer<T>(
         store: CodexReviewStore,
         configuration: CodexReviewMCPHTTPServer.Configuration = .init(port: 0),
@@ -1272,9 +1696,11 @@ struct CodexReviewMCPHTTPServerTests {
         do {
             let result = try await operation(server)
             await server.stop()
+            assertNoHTTPServerResources(await server.resourceSnapshotForTesting())
             return result
         } catch {
             await server.stop()
+            assertNoHTTPServerResources(await server.resourceSnapshotForTesting())
             throw error
         }
     }
@@ -1339,7 +1765,12 @@ struct CodexReviewMCPHTTPServerTests {
         return data
     }
 
-    private nonisolated func openAndCloseRawEventStream(endpoint: URL, sessionID: String) async throws {
+    private nonisolated func openAndCloseRawEventStream(
+        endpoint: URL,
+        sessionID: String,
+        holdUntilServerCloses: Bool = false,
+        opened: AsyncGate? = nil
+    ) async throws {
         try await Task.detached {
             let components = try #require(URLComponents(url: endpoint, resolvingAgainstBaseURL: false))
             let host = try #require(components.host)
@@ -1414,6 +1845,21 @@ struct CodexReviewMCPHTTPServerTests {
             guard responseText.contains(" 200 ") else {
                 throw testError("Unexpected HTTP response: \(responseText)")
             }
+            await opened?.open()
+            if holdUntilServerCloses {
+                while true {
+                    let count = Darwin.recv(descriptor, &buffer, buffer.count, 0)
+                    if count == 0 {
+                        return
+                    }
+                    if count < 0 {
+                        guard errno == ECONNRESET else {
+                            throw currentPOSIXError()
+                        }
+                        return
+                    }
+                }
+            }
             Darwin.shutdown(descriptor, SHUT_RDWR)
         }.value
     }
@@ -1435,6 +1881,21 @@ struct CodexReviewMCPHTTPServerTests {
         let httpResponse = try #require(response as? HTTPURLResponse)
         #expect(httpResponse.statusCode == 200)
         return (data, httpResponse)
+    }
+
+    private nonisolated func postJSONRPCStatus(
+        endpoint: URL,
+        sessionID: String,
+        body: [String: Any]
+    ) async throws -> HTTPURLResponse {
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("text/event-stream, application/json", forHTTPHeaderField: "Accept")
+        request.setValue(sessionID, forHTTPHeaderField: "MCP-Session-Id")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (_, response) = try await URLSession.shared.data(for: request)
+        return try #require(response as? HTTPURLResponse)
     }
 
     private nonisolated func deleteSession(endpoint: URL, sessionID: String) async throws -> HTTPURLResponse {
@@ -1478,6 +1939,158 @@ struct CodexReviewMCPHTTPServerTests {
     }
 }
 
+private final class ManualMCPHTTPServerClock: Sendable {
+    private struct Sleeper {
+        let deadline: MCPHTTPServerClock.Instant
+        let continuation:
+            CheckedContinuation<Result<Void, CancellationError>, Never>
+    }
+
+    private struct SleeperCountWaiter {
+        let count: Int
+        let continuation:
+            CheckedContinuation<Result<Void, CancellationError>, Never>
+    }
+
+    private struct State {
+        var now = MCPHTTPServerClock.Instant.zero
+        var sleepers: [UUID: Sleeper] = [:]
+        var sleeperCountWaiters: [UUID: SleeperCountWaiter] = [:]
+        var isClosed = false
+    }
+
+    private let state = Mutex(State())
+
+    var clock: MCPHTTPServerClock {
+        MCPHTTPServerClock(
+            now: { [self] in
+                state.withLock { $0.now }
+            },
+            sleep: { [self] (duration: Duration) async throws(CancellationError) -> Void in
+                try await sleep(for: duration)
+            }
+        )
+    }
+
+    func advance(by duration: Duration) {
+        precondition(duration >= .zero, "A monotonic clock cannot move backwards.")
+        let continuations = state.withLock { state in
+            precondition(state.isClosed == false, "A closed manual clock cannot advance.")
+            state.now = state.now.advanced(by: duration)
+            let dueIDs = state.sleepers.compactMap { id, sleeper in
+                sleeper.deadline <= state.now ? id : nil
+            }
+            return dueIDs.compactMap { id in
+                state.sleepers.removeValue(forKey: id)?.continuation
+            }
+        }
+        for continuation in continuations {
+            continuation.resume(returning: .success(()))
+        }
+    }
+
+    func waitForSleeperCount(
+        _ count: Int
+    ) async throws(CancellationError) {
+        precondition(count >= 0)
+        let waiterID = UUID()
+        let result = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                var immediateResult: Result<Void, CancellationError>?
+                state.withLock { state in
+                    if Task.isCancelled || state.isClosed {
+                        immediateResult = .failure(CancellationError())
+                    } else if state.sleepers.count >= count {
+                        immediateResult = .success(())
+                    } else {
+                        state.sleeperCountWaiters[waiterID] = SleeperCountWaiter(
+                            count: count,
+                            continuation: continuation
+                        )
+                    }
+                }
+                if let immediateResult {
+                    continuation.resume(returning: immediateResult)
+                }
+            }
+        } onCancel: { [self] in
+            let continuation = state.withLock { state in
+                state.sleeperCountWaiters.removeValue(forKey: waiterID)?.continuation
+            }
+            continuation?.resume(returning: .failure(CancellationError()))
+        }
+        try result.get()
+    }
+
+    func close() {
+        let continuations = state.withLock { state in
+            guard state.isClosed == false else {
+                return [CheckedContinuation<Result<Void, CancellationError>, Never>]()
+            }
+            state.isClosed = true
+            let continuations = state.sleepers.values.map(\.continuation)
+                + state.sleeperCountWaiters.values.map(\.continuation)
+            state.sleepers.removeAll()
+            state.sleeperCountWaiters.removeAll()
+            return continuations
+        }
+        for continuation in continuations {
+            continuation.resume(returning: .failure(CancellationError()))
+        }
+    }
+
+    private func sleep(
+        for duration: Duration
+    ) async throws(CancellationError) {
+        guard duration > .zero else {
+            return
+        }
+        let sleeperID = UUID()
+        let result = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                var immediateResult: Result<Void, CancellationError>?
+                var countWaiters:
+                    [CheckedContinuation<Result<Void, CancellationError>, Never>] = []
+                state.withLock { state in
+                    if Task.isCancelled || state.isClosed {
+                        immediateResult = .failure(CancellationError())
+                    } else {
+                        let deadline = state.now.advanced(by: duration)
+                        if deadline <= state.now {
+                            immediateResult = .success(())
+                        } else {
+                            state.sleepers[sleeperID] = Sleeper(
+                                deadline: deadline,
+                                continuation: continuation
+                            )
+                            let satisfiedWaiterIDs = state.sleeperCountWaiters.compactMap {
+                                id,
+                                waiter in
+                                state.sleepers.count >= waiter.count ? id : nil
+                            }
+                            countWaiters = satisfiedWaiterIDs.compactMap { id in
+                                state.sleeperCountWaiters.removeValue(forKey: id)?.continuation
+                            }
+                        }
+                    }
+                }
+                for countWaiter in countWaiters {
+                    countWaiter.resume(returning: .success(()))
+                }
+                if let immediateResult {
+                    continuation.resume(returning: immediateResult)
+                }
+            }
+        } onCancel: { [self] in
+            let continuation = state.withLock { state in
+                state.sleepers.removeValue(forKey: sleeperID)?.continuation
+            }
+            continuation?.resume(returning: .failure(CancellationError()))
+        }
+        try result.get()
+    }
+}
+
 private nonisolated func currentPOSIXError() -> NSError {
     NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
 }
@@ -1488,6 +2101,14 @@ private nonisolated func testError(_ message: String) -> NSError {
         code: 1,
         userInfo: [NSLocalizedDescriptionKey: message]
     )
+}
+
+private func makeHTTPTestRunID(_ rawValue: String) -> ReviewRunID {
+    do {
+        return try ReviewRunID(validating: rawValue)
+    } catch {
+        preconditionFailure("Invalid explicit review run fixture: \(error)")
+    }
 }
 
 private func assertCompactLog(_ response: [String: Any], total: Int) {

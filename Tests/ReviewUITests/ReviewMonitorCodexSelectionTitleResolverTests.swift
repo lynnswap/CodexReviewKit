@@ -19,18 +19,16 @@ struct ReviewMonitorCodexSelectionTitleResolverTests {
         try await runtime.transport.enqueueThreadList(
             .init(
                 threads: [
-                    .init(
+                    try makeTitleResolverStoredThread(
                         id: appThreadID,
                         workspace: app,
                         name: "App review",
-                        sourceKind: .subAgentReview,
                         updatedAt: Date(timeIntervalSince1970: 3_000)
                     ),
-                    .init(
+                    try makeTitleResolverStoredThread(
                         id: "thread-tools",
                         workspace: tools,
                         name: "Tools review",
-                        sourceKind: .subAgentReview,
                         updatedAt: Date(timeIntervalSince1970: 2_000)
                     ),
                 ]
@@ -39,7 +37,7 @@ struct ReviewMonitorCodexSelectionTitleResolverTests {
         try await loadReviewChats(in: context)
         let resolver = ReviewMonitorCodexSelectionTitleResolver(modelContext: context)
 
-        let appWorkspace = try #require(context.model(for: workspaceID(for: app)))
+        let appWorkspace = try #require(context.registeredModel(for: workspaceID(for: app)))
         let workspaceGroup = try #require(appWorkspace.workspaceGroup)
         let appPath = app.standardizedFileURL.resolvingSymlinksInPath().path
 
@@ -65,11 +63,10 @@ struct ReviewMonitorCodexSelectionTitleResolverTests {
         try await runtime.transport.enqueueThreadList(
             .init(
                 threads: [
-                    .init(
+                    try makeTitleResolverStoredThread(
                         id: "thread-repo",
                         workspace: repo,
                         name: "Repo review",
-                        sourceKind: .subAgentReview,
                         updatedAt: Date(timeIntervalSince1970: 1_000)
                     )
                 ]
@@ -78,7 +75,7 @@ struct ReviewMonitorCodexSelectionTitleResolverTests {
         try await loadReviewChats(in: context)
         let resolver = ReviewMonitorCodexSelectionTitleResolver(modelContext: context)
 
-        let workspace = try #require(context.model(for: workspaceID(for: repo)))
+        let workspace = try #require(context.registeredModel(for: workspaceID(for: repo)))
         let workspaceGroup = try #require(workspace.workspaceGroup)
         let repoPath = repo.standardizedFileURL.resolvingSymlinksInPath().path
 
@@ -90,19 +87,23 @@ struct ReviewMonitorCodexSelectionTitleResolverTests {
                 ))
     }
 
-    @Test func resolvesUncategorizedChatButDoesNotTreatUnknownChatAsLoaded() async throws {
+    @Test func resolvesChatOutsideGitRepositoryButDoesNotTreatUnknownChatAsLoaded() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let context = CodexModelContainer(appServer: runtime.server).mainContext
         let floatingThreadID = CodexThreadID(rawValue: "thread-floating")
+        let workspace = try makeTitleResolverDirectory(
+            "Floating",
+            in: FileManager.default.temporaryDirectory
+        )
 
         try await runtime.transport.enqueueThreadList(
             .init(
                 threads: [
-                    .init(
+                    try makeTitleResolverStoredThread(
                         id: floatingThreadID,
+                        workspace: workspace,
                         name: "Floating review",
                         preview: "Uncategorized preview",
-                        sourceKind: .subAgentReview,
                         updatedAt: Date(timeIntervalSince1970: 1_000)
                     )
                 ]
@@ -115,7 +116,7 @@ struct ReviewMonitorCodexSelectionTitleResolverTests {
             resolver.titlePresentation(for: .chat(floatingThreadID))
                 == ReviewMonitorCodexSelectionTitlePresentation(
                     title: "Floating review",
-                    subtitle: ""
+                    subtitle: workspace.standardizedFileURL.resolvingSymlinksInPath().path
                 ))
         #expect(
             resolver.titlePresentation(for: .chat(CodexThreadID(rawValue: "thread-missing"))) == nil
@@ -160,6 +161,52 @@ private func sourceKindChatPredicate(_ sourceKinds: [CodexThreadSourceKind]) -> 
 
 private func workspaceID(for url: URL) -> CodexWorkspaceID {
     CodexWorkspaceID(rawValue: url.standardizedFileURL.resolvingSymlinksInPath().path)
+}
+
+private func makeTitleResolverStoredThread(
+    id: CodexThreadID,
+    workspace: URL,
+    name: String,
+    preview: String? = nil,
+    updatedAt: Date
+) throws -> CodexAppServerTestStoredThread {
+    let source = CodexAppServerTestSessionSource.subAgentReview
+    return try .init(
+        snapshot: .init(
+            id: id,
+            workspace: workspace,
+            name: name,
+            preview: preview ?? name,
+            modelProvider: "openai",
+            sourceKind: source.sourceKind,
+            createdAt: updatedAt,
+            updatedAt: updatedAt,
+            status: .idle,
+            ephemeral: false,
+            turns: []
+        ),
+        turns: [],
+        metadata: .init(
+            sessionID: "title-resolver-\(id.rawValue)",
+            cliVersion: "codex-review-kit-tests",
+            source: source
+        ),
+        runtimeMetadata: .init(
+            model: "gpt-5",
+            modelProvider: "openai",
+            serviceTier: nil,
+            cwd: workspace,
+            runtimeWorkspaceRoots: [workspace],
+            instructionSources: [],
+            approvalPolicy: .never,
+            approvalsReviewer: .user,
+            sandbox: .dangerFullAccess,
+            activePermissionProfile: nil,
+            reasoningEffort: nil,
+            multiAgentMode: .explicitRequestOnly
+        ),
+        isArchived: false
+    )
 }
 
 private func makeTitleResolverDirectory(_ name: String, in parent: URL) throws -> URL {

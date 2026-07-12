@@ -2,21 +2,25 @@ import Foundation
 
 package extension CodexReviewAPI.Read {
 struct Result: Codable, Sendable, Hashable {
-    package var runID: String
+    package var runID: ReviewRunID
     package var core: ReviewRunCore
+    package var presentation: ReviewRunPresentation
     package var elapsedSeconds: Int?
-    package var cancellable: Bool
+
+    package var cancellable: Bool {
+        presentation.isCancellable
+    }
 
     package init(
-        runID: String,
+        runID: ReviewRunID,
         core: ReviewRunCore,
-        elapsedSeconds: Int? = nil,
-        cancellable: Bool
+        presentation: ReviewRunPresentation,
+        elapsedSeconds: Int? = nil
     ) {
         self.runID = runID
         self.core = core
+        self.presentation = presentation
         self.elapsedSeconds = elapsedSeconds
-        self.cancellable = cancellable
     }
 }
 }
@@ -24,27 +28,31 @@ struct Result: Codable, Sendable, Hashable {
 
 package extension CodexReviewAPI.Run {
 struct ListItem: Codable, Sendable, Hashable {
-    package var runID: String
+    package var runID: ReviewRunID
     package var cwd: String
     package var targetSummary: String
     package var core: ReviewRunCore
+    package var presentation: ReviewRunPresentation
     package var elapsedSeconds: Int?
-    package var cancellable: Bool
+
+    package var cancellable: Bool {
+        presentation.isCancellable
+    }
 
     package init(
-        runID: String,
+        runID: ReviewRunID,
         cwd: String,
         targetSummary: String,
         core: ReviewRunCore,
-        elapsedSeconds: Int?,
-        cancellable: Bool
+        presentation: ReviewRunPresentation,
+        elapsedSeconds: Int?
     ) {
         self.runID = runID
         self.cwd = cwd
         self.targetSummary = targetSummary
         self.core = core
+        self.presentation = presentation
         self.elapsedSeconds = elapsedSeconds
-        self.cancellable = cancellable
     }
 }
 }
@@ -63,12 +71,12 @@ struct Result: Codable, Sendable, Hashable {
 
 package extension CodexReviewAPI.Run {
 struct Selector: Sendable, Hashable {
-    package var runID: String?
+    package var runID: ReviewRunID?
     package var cwd: String?
     package var statuses: [ReviewRunState]?
 
     package init(
-        runID: String? = nil,
+        runID: ReviewRunID? = nil,
         cwd: String? = nil,
         statuses: [ReviewRunState]? = nil
     ) {
@@ -92,7 +100,7 @@ extension CodexReviewAPI.Run.SelectionError: LocalizedError {
         switch self {
         case .ambiguous(let reviewRuns):
             let candidates = reviewRuns
-                .map { "- \($0.runID) [\($0.core.lifecycle.status.rawValue)] \($0.cwd) \($0.targetSummary)" }
+                .map { "- \($0.runID.rawValue) [\($0.core.status.rawValue)] \($0.cwd) \($0.targetSummary)" }
                 .joined(separator: "\n")
             return """
             Review run selector matched multiple review runs:
@@ -106,18 +114,21 @@ extension CodexReviewAPI.Run.SelectionError: LocalizedError {
 
 package extension CodexReviewAPI.Cancel {
 struct Outcome: Codable, Sendable, Hashable {
-    package var runID: String
+    package var runID: ReviewRunID
     package var cancelled: Bool
     package var core: ReviewRunCore
+    package var presentation: ReviewRunPresentation
 
     package init(
-        runID: String,
+        runID: ReviewRunID,
         cancelled: Bool,
-        core: ReviewRunCore
+        core: ReviewRunCore,
+        presentation: ReviewRunPresentation
     ) {
         self.runID = runID
         self.cancelled = cancelled
         self.core = core
+        self.presentation = presentation
     }
 }
 }

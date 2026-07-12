@@ -9,187 +9,71 @@ package protocol CodexReviewBackend: Sendable {
     func logout(_ account: CodexReviewBackendModel.Account.ID) async throws -> CodexReviewBackendModel.Auth.Snapshot
 
     func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt
-    func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason)
+    func interruptReview(_ attempt: ReviewAttempt, reason: CodexReviewBackendModel.CancellationReason)
         async throws
-    func prepareReviewRestart(_ run: CodexReviewBackendModel.Review.Run) async throws
+    func prepareReviewRestart(_ attempt: ReviewAttempt) async throws
         -> CodexReviewBackendModel.Review.RestartToken
     func restartPreparedReview(
         _ token: CodexReviewBackendModel.Review.RestartToken,
         request: CodexReviewBackendModel.Review.Start
     ) async throws -> BackendReviewAttempt
-    func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async
+    func discardPreparedReviewRestart(
+        _ token: CodexReviewBackendModel.Review.RestartToken
+    ) async -> [ReviewAttempt]
+    func cleanupReview(_ attempt: ReviewAttempt) async
+    func cleanupRetainedReviews(
+        _ attempts: [ReviewAttempt],
+        additionalThreadIDs: [ReviewThreadID]
+    ) async -> ReviewRetainedThreadCleanupResult
+}
+
+package struct ReviewRetainedThreadCleanupFailure: Codable, Equatable, Sendable {
+    package let threadID: ReviewThreadID
+    package let message: String
+
+    package init(threadID: ReviewThreadID, message: String) {
+        self.threadID = threadID
+        self.message = message
+    }
+}
+
+package struct ReviewRetainedThreadCleanupResult: Codable, Equatable, Sendable {
+    package let failures: [ReviewRetainedThreadCleanupFailure]
+
+    package init(failures: [ReviewRetainedThreadCleanupFailure] = []) {
+        self.failures = failures
+    }
+
+    package var succeeded: Bool {
+        failures.isEmpty
+    }
+
+    package var failureMessage: String? {
+        guard failures.isEmpty == false else {
+            return nil
+        }
+        return failures
+            .map { "\($0.threadID.rawValue): \($0.message)" }
+            .joined(separator: "; ")
+    }
 }
 
 package struct BackendReviewAttempt: Sendable {
-    package var run: CodexReviewBackendModel.Review.Run
-    package var events: BackendReviewEventMailbox
+    package let attempt: ReviewAttempt
+    package let observeTerminal: @Sendable () async throws -> ReviewBackendObservedTerminal
+    package let observedTerminalIfKnown: @Sendable () async -> ReviewBackendObservedTerminal?
+    package let finalizeTerminal: @Sendable (ReviewBackendObservedTerminal) async -> ReviewBackendTerminal
 
-    package init(run: CodexReviewBackendModel.Review.Run, events: BackendReviewEventMailbox = .init()) {
-        self.run = run
-        self.events = events
-    }
-}
-
-package actor BackendReviewEventMailbox {
-    private enum Terminal {
-        case finished
-        case cancelled
-        case failed(String)
-    }
-
-    private enum Delivery {
-        case event(CodexReviewBackendModel.Review.Event)
-        case finished
-        case cancelled
-        case failed(String)
-    }
-
-    private var bufferedEvents: [CodexReviewBackendModel.Review.Event] = []
-    private var terminal: Terminal?
-    private var waiters: [UUID: CheckedContinuation<Delivery, Never>] = [:]
-
-    package init() {}
-
-    package func next() async throws -> CodexReviewBackendModel.Review.Event? {
-        switch await nextDelivery() {
-        case .event(let event):
-            return event
-        case .finished:
-            return nil
-        case .cancelled:
-            throw CancellationError()
-        case .failed(let message):
-            throw BackendReviewEventMailboxError(message: message)
-        }
-    }
-
-    package func append(_ event: CodexReviewBackendModel.Review.Event) {
-        guard terminal == nil else {
-            return
-        }
-        if let waiterID = waiters.keys.first,
-            let waiter = waiters.removeValue(forKey: waiterID)
-        {
-            waiter.resume(returning: .event(event))
-        } else {
-            bufferedEvents.append(event)
-        }
-        if Self.isTerminal(event) {
-            terminal = .finished
-            resumeWaitersForTerminal()
-        }
-    }
-
-    package func append(contentsOf events: [CodexReviewBackendModel.Review.Event]) {
-        for event in events {
-            append(event)
-        }
-    }
-
-    package func finish() {
-        guard terminal == nil else {
-            return
-        }
-        terminal = .finished
-        resumeWaitersForTerminal()
-    }
-
-    package func fail(_ error: any Error) {
-        guard terminal == nil else {
-            return
-        }
-        terminal = error is CancellationError ? .cancelled : .failed(error.localizedDescription)
-        resumeWaitersForTerminal()
-    }
-
-    package func abandon() {
-        guard terminal == nil else {
-            return
-        }
-        terminal = .finished
-        bufferedEvents.removeAll(keepingCapacity: false)
-        resumeWaitersForTerminal()
-    }
-
-    package func isFinished() -> Bool {
-        terminal != nil && bufferedEvents.isEmpty
-    }
-
-    private func nextDelivery() async -> Delivery {
-        if bufferedEvents.isEmpty == false {
-            let event = bufferedEvents.removeFirst()
-            resumeWaitersForTerminal()
-            return .event(event)
-        }
-        if let terminal {
-            return delivery(for: terminal)
-        }
-        let waiterID = UUID()
-        return await withTaskCancellationHandler {
-            await withCheckedContinuation { continuation in
-                if bufferedEvents.isEmpty == false {
-                    let event = bufferedEvents.removeFirst()
-                    resumeWaitersForTerminal()
-                    continuation.resume(returning: .event(event))
-                } else if let terminal {
-                    continuation.resume(returning: delivery(for: terminal))
-                } else {
-                    waiters[waiterID] = continuation
-                }
-            }
-        } onCancel: {
-            Task {
-                await self.cancelWaiter(id: waiterID)
-            }
-        }
-    }
-
-    private func cancelWaiter(id: UUID) {
-        waiters.removeValue(forKey: id)?.resume(returning: .finished)
-    }
-
-    private func resumeWaitersForTerminal() {
-        guard bufferedEvents.isEmpty, let terminal else {
-            return
-        }
-        let delivery = delivery(for: terminal)
-        let waiters = Array(waiters.values)
-        self.waiters.removeAll(keepingCapacity: false)
-        for waiter in waiters {
-            waiter.resume(returning: delivery)
-        }
-    }
-
-    private func delivery(for terminal: Terminal) -> Delivery {
-        switch terminal {
-        case .finished:
-            return .finished
-        case .cancelled:
-            return .cancelled
-        case .failed(let message):
-            return .failed(message)
-        }
-    }
-
-    private static func isTerminal(_ event: CodexReviewBackendModel.Review.Event) -> Bool {
-        switch event {
-        case .completed, .interrupted, .failed, .cancelled:
-            return true
-        case .started:
-            return false
-        }
-    }
-}
-
-package struct BackendReviewEventMailboxError: LocalizedError, Sendable {
-    package var message: String
-
-    package init(message: String) {
-        self.message = message
-    }
-
-    package var errorDescription: String? {
-        message
+    package init(
+        attempt: ReviewAttempt,
+        observeTerminal: @escaping @Sendable () async throws -> ReviewBackendObservedTerminal,
+        observedTerminalIfKnown: @escaping @Sendable () async -> ReviewBackendObservedTerminal?,
+        finalizeTerminal: @escaping @Sendable (ReviewBackendObservedTerminal) async -> ReviewBackendTerminal
+    ) {
+        self.attempt = attempt
+        self.observeTerminal = observeTerminal
+        self.observedTerminalIfKnown = observedTerminalIfKnown
+        self.finalizeTerminal = finalizeTerminal
     }
 }
 
