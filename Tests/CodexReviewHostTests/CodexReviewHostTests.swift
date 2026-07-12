@@ -17,6 +17,7 @@ private extension CodexReviewStore {
         environment: [String: String],
         runtimePreferences: CodexReviewRuntime.Preferences = .defaults,
         externalURLOpener: @escaping ExternalURLOpener = { _ in },
+        deadlineClock: CodexAppServerTestDeadlineClock? = nil,
         mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
         mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
@@ -38,7 +39,8 @@ private extension CodexReviewStore {
                     transport: transport,
                     configuration: .init(localProcess: .init(
                         codexHomeURL: codexHomeURL
-                    ))
+                    )),
+                    deadlineClock: deadlineClock
                 ).server
             }
         )
@@ -49,6 +51,7 @@ private extension CodexReviewStore {
         environment: [String: String],
         runtimePreferences: CodexReviewRuntime.Preferences = .defaults,
         externalURLOpener: @escaping ExternalURLOpener = { _ in },
+        deadlineClock: CodexAppServerTestDeadlineClock? = nil,
         mcpHTTPServerFactory: (@MainActor @Sendable (
             CodexReviewStore,
             CodexReviewMCPHTTPServer.Configuration,
@@ -77,7 +80,8 @@ private extension CodexReviewStore {
                     transport: transport,
                     configuration: .init(localProcess: .init(
                         codexHomeURL: codexHomeURL
-                    ))
+                    )),
+                    deadlineClock: deadlineClock
                 ).server
             }
         )
@@ -970,6 +974,179 @@ struct CodexReviewHostTests {
         #expect(await transport.recordedRequests(for: .accountLoginCancel).count == 1)
         #expect(store.auth.isAuthenticating == false)
         #expect(store.serverURL == nil)
+    }
+
+    @Test func liveStoreCancelsLoginBeforeIsolatedRuntimeFactoryReturns() async throws {
+        let homeURL = try temporaryHome()
+        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "active@example.com",
+            accounts: ["active@example.com"]
+        )
+        let mainTransport = FakeCodexAppServerTransport()
+        try await mainTransport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "active@example.com",
+                planType: .pro
+            )),
+            requiresOpenAIAuth: false
+        )
+        try await mainTransport.enqueueRateLimits(try makeHostRateLimits(
+            planType: nil,
+            windowDurationMinutes: 300,
+            usedPercent: 10
+        ))
+        try await mainTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await mainTransport.enqueueModels(.init(models: []))
+
+        let lateRuntimeGate = CodexAppServerTestGate()
+        let lateTransport = FakeCodexAppServerTransport()
+        let nextTransport = FakeCodexAppServerTransport()
+        try await nextTransport.enqueueChatGPTLogin(
+            loginID: "login-next",
+            authenticationURL: testAuthenticationURL
+        )
+        try await nextTransport.enqueueChatGPTLoginCancellation(.canceled)
+        var isolatedFactoryCount = 0
+        var lateCodexHomeURL: URL?
+        let externalURLOpener = FakeExternalURLOpener()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            externalURLOpener: externalURLOpener.open,
+            transportFactory: { codexHomeURL in
+                if codexHomeURL == mainCodexHomeURL {
+                    return mainTransport
+                }
+                isolatedFactoryCount += 1
+                try FileManager.default.createDirectory(at: codexHomeURL, withIntermediateDirectories: true)
+                if isolatedFactoryCount == 1 {
+                    lateCodexHomeURL = codexHomeURL
+                    await lateRuntimeGate.waitIgnoringCancellation()
+                    return lateTransport
+                }
+                return nextTransport
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        let add = Task { @MainActor in
+            try await store.addAccount()
+        }
+        await lateRuntimeGate.waitUntilBlocked()
+        async let cancel: Void = store.cancelAuthentication()
+        await lateRuntimeGate.open()
+        try await add.value
+        await cancel
+
+        let resolvedLateCodexHomeURL = try #require(lateCodexHomeURL)
+        #expect(externalURLOpener.openedURLs.isEmpty)
+        #expect(await lateTransport.recordedRequests(for: .accountLoginStart).isEmpty)
+        #expect(FileManager.default.fileExists(atPath: resolvedLateCodexHomeURL.path) == false)
+
+        try await store.addAccount()
+        await nextTransport.waitForRequest(.accountLoginStart)
+        #expect(externalURLOpener.openedURLs == [testAuthenticationURL])
+        await store.cancelAuthentication()
+        await store.stop()
+    }
+
+    @Test func liveStoreCancelsLoginAfterStartRequestBeforeHandleBinding() async throws {
+        let homeURL = try temporaryHome()
+        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "active@example.com",
+            accounts: ["active@example.com"]
+        )
+        let mainTransport = FakeCodexAppServerTransport()
+        try await mainTransport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "active@example.com",
+                planType: .pro
+            )),
+            requiresOpenAIAuth: false
+        )
+        try await mainTransport.enqueueRateLimits(try makeHostRateLimits(
+            planType: nil,
+            windowDurationMinutes: 300,
+            usedPercent: 10
+        ))
+        try await mainTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await mainTransport.enqueueModels(.init(models: []))
+        let loginTransport = FakeCodexAppServerTransport()
+        try await loginTransport.enqueueChatGPTLogin(
+            loginID: "login-held",
+            authenticationURL: testAuthenticationURL
+        )
+        try await loginTransport.enqueueChatGPTLoginCancellation(.canceled)
+        let loginStartGate = CodexAppServerTestGate()
+        await loginTransport.holdNextIgnoringCancellation(
+            .accountLoginStart,
+            gate: loginStartGate
+        )
+        var isolatedCodexHomeURL: URL?
+        let externalURLOpener = FakeExternalURLOpener()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            externalURLOpener: externalURLOpener.open,
+            transportFactory: { codexHomeURL in
+                if codexHomeURL == mainCodexHomeURL {
+                    return mainTransport
+                }
+                isolatedCodexHomeURL = codexHomeURL
+                try FileManager.default.createDirectory(at: codexHomeURL, withIntermediateDirectories: true)
+                return loginTransport
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        let add = Task { @MainActor in
+            try await store.addAccount()
+        }
+        await loginTransport.waitForRequest(.accountLoginStart)
+        await loginStartGate.waitUntilBlocked()
+        async let cancel: Void = store.cancelAuthentication()
+        await loginStartGate.open()
+        try await add.value
+        await cancel
+
+        let resolvedIsolatedCodexHomeURL = try #require(isolatedCodexHomeURL)
+        #expect(externalURLOpener.openedURLs.isEmpty)
+        #expect(await loginTransport.recordedRequests(for: .accountLoginCancel).count == 1)
+        #expect(FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path) == false)
+        await store.stop()
+    }
+
+    @Test func liveStoreUsesInjectedMonotonicDeadlineForLoginCancellationAcknowledgement() async throws {
+        let transport = FakeCodexAppServerTransport()
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        try await transport.enqueueChatGPTLogin(
+            loginID: "login-deadline",
+            authenticationURL: testAuthenticationURL
+        )
+        let deadlineClock = CodexAppServerTestDeadlineClock()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            deadlineClock: deadlineClock,
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        try await store.addAccount()
+        let cancel = Task { @MainActor in
+            await store.cancelAuthentication()
+        }
+        await transport.waitForRequest(.accountLoginCancel)
+        try await deadlineClock.waitForSleeperCount(1)
+        deadlineClock.advance(by: .seconds(5))
+        await cancel.value
+
+        #expect(store.auth.isAuthenticating == false)
+        #expect(await transport.recordedRequests(for: .accountLoginCancel).count == 1)
+        await store.stop()
     }
 
     @Test func liveStoreKeepsNewLoginGenerationWhenOldNotificationsArrive() async throws {
