@@ -220,7 +220,11 @@ struct CodexReviewMCPHTTPServerTests {
     }
 
     @Test func streamableHTTPConcurrentStopJoinsOneResourceDrain() async throws {
-        let backend = FakeCodexReviewBackend()
+        let attempt = makeHTTPReviewAttempt(
+            attemptID: "attempt-concurrent-stop",
+            turnID: "turn-concurrent-stop"
+        )
+        let backend = FakeCodexReviewBackend(plannedAttempt: attempt)
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "run-server-stop" })
@@ -246,7 +250,11 @@ struct CodexReviewMCPHTTPServerTests {
     }
 
     @Test func streamableHTTPGlobalStopDrainsActivePostAndEventStreamWriter() async throws {
-        let backend = FakeCodexReviewBackend()
+        let attempt = makeHTTPReviewAttempt(
+            attemptID: "attempt-global-stop",
+            turnID: "turn-global-stop"
+        )
+        let backend = FakeCodexReviewBackend(plannedAttempt: attempt)
         let startGate = AsyncGate()
         await backend.holdStartReview(with: startGate)
         let store = CodexReviewStore.makeTestingStore(
@@ -359,7 +367,11 @@ struct CodexReviewMCPHTTPServerTests {
     }
 
     @Test func streamableHTTPCallsReviewStartWithCustomTarget() async throws {
-        let backend = FakeCodexReviewBackend()
+        let attempt = makeHTTPReviewAttempt(
+            attemptID: "attempt-custom-target",
+            turnID: "turn-1"
+        )
+        let backend = FakeCodexReviewBackend(plannedAttempt: attempt)
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "run-1" })
@@ -413,7 +425,7 @@ struct CodexReviewMCPHTTPServerTests {
                 sessionID: sessionID,
                 bodyData: requestBody
             )
-            await backend.yield(.completed(finalReview: "No issues found."))
+            await backend.yield(.completed(finalReview: "No issues found."), for: attempt)
             let resolved = try decodeSSEJSON(from: try await responseData)
 
             #expect(resolved.value(for: ["result", "isError"]) as? Bool == false)
@@ -448,7 +460,11 @@ struct CodexReviewMCPHTTPServerTests {
     }
 
     @Test func streamableHTTPOmitsRawFindingTextFromReviewStartResult() async throws {
-        let backend = FakeCodexReviewBackend()
+        let attempt = makeHTTPReviewAttempt(
+            attemptID: "attempt-finding-result",
+            turnID: "turn-1"
+        )
+        let backend = FakeCodexReviewBackend(plannedAttempt: attempt)
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "run-1" })
@@ -490,7 +506,7 @@ struct CodexReviewMCPHTTPServerTests {
                 sessionID: sessionID,
                 bodyData: requestBody
             )
-            await backend.yield(.completed(finalReview: reviewOutput))
+            await backend.yield(.completed(finalReview: reviewOutput), for: attempt)
             let resolved = try decodeSSEJSON(from: try await responseData)
 
             #expect(
@@ -508,7 +524,11 @@ struct CodexReviewMCPHTTPServerTests {
     }
 
     @Test func streamableHTTPBoundsClaudeReviewStartAndContinuesWithReviewAwait() async throws {
-        let backend = FakeCodexReviewBackend()
+        let attempt = makeHTTPReviewAttempt(
+            attemptID: "attempt-bounded-start",
+            turnID: "turn-1"
+        )
+        let backend = FakeCodexReviewBackend(plannedAttempt: attempt)
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "run-1" })
@@ -569,7 +589,7 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(
                 running.value(for: ["result", "structuredContent", "nextAction", "tool"]) as? String == "review_await")
 
-            await backend.yield(.completed(finalReview: "No issues found."))
+            await backend.yield(.completed(finalReview: "No issues found."), for: attempt)
             let awaited = try await postJSONRPC(
                 endpoint: endpoint,
                 sessionID: sessionID,
@@ -606,7 +626,11 @@ struct CodexReviewMCPHTTPServerTests {
     }
 
     @Test func streamableHTTPBindsReviewStartToTransportSessionWhenArgumentIsOmitted() async throws {
-        let backend = FakeCodexReviewBackend()
+        let attempt = makeHTTPReviewAttempt(
+            attemptID: "attempt-session-binding",
+            turnID: "turn-1"
+        )
+        let backend = FakeCodexReviewBackend(plannedAttempt: attempt)
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "run-1" })
@@ -650,7 +674,7 @@ struct CodexReviewMCPHTTPServerTests {
                 sessionID: sessionID,
                 bodyData: requestBody
             )
-            await backend.yield(.completed(finalReview: "No issues found."))
+            await backend.yield(.completed(finalReview: "No issues found."), for: attempt)
             let resolved = try decodeSSEJSON(from: try await responseData)
 
             #expect(resolved.value(for: ["result", "structuredContent", "runId"]) as? String == "run-1")
@@ -695,7 +719,11 @@ struct CodexReviewMCPHTTPServerTests {
     }
 
     @Test func streamableHTTPReportsFailedReviewStartAsToolError() async throws {
-        let backend = FakeCodexReviewBackend()
+        let attempt = makeHTTPReviewAttempt(
+            attemptID: "attempt-failed-start",
+            turnID: "turn-1"
+        )
+        let backend = FakeCodexReviewBackend(plannedAttempt: attempt)
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "run-1" })
@@ -730,7 +758,8 @@ struct CodexReviewMCPHTTPServerTests {
                             additionalDetails: "Retry later"
                         )
                     )
-                )
+                ),
+                for: attempt
             )
             let resolved = try decodeSSEJSON(from: try await responseData)
 
@@ -1031,7 +1060,11 @@ struct CodexReviewMCPHTTPServerTests {
     }
 
     @Test func streamableHTTPReviewReadDoesNotProjectRunningSummaryAsLogContent() async throws {
-        let backend = FakeCodexReviewBackend()
+        let attempt = makeHTTPReviewAttempt(
+            attemptID: "attempt-running-summary",
+            turnID: "turn-running-summary"
+        )
+        let backend = FakeCodexReviewBackend(plannedAttempt: attempt)
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "run-tool-progress" })
@@ -1071,15 +1104,14 @@ struct CodexReviewMCPHTTPServerTests {
     }
 
     @Test func streamableHTTPCancelsReviewByTransportScopedSelector() async throws {
-        let backend = FakeCodexReviewBackend(
-            nextAttempt: makeReviewAttemptForTesting(
-                attemptID: "attempt-1",
-                sourceThreadID: "thread-1",
-                activeTurnThreadID: "thread-1",
-                turnID: "turn-1",
-                model: "gpt-5"
-            )
+        let attempt = makeReviewAttemptForTesting(
+            attemptID: "attempt-1",
+            sourceThreadID: "thread-1",
+            activeTurnThreadID: "thread-1",
+            turnID: "turn-1",
+            model: "gpt-5"
         )
+        let backend = FakeCodexReviewBackend(plannedAttempt: attempt)
         let runIDs = Mutex(["run-running", "run-other-session"])
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -1096,6 +1128,10 @@ struct CodexReviewMCPHTTPServerTests {
             let running = try await beginRunningReview(store: store, sessionID: sessionID)
             let startGate = AsyncGate()
             await backend.holdStartReview(with: startGate)
+            await backend.planNextAttempt(makeHTTPReviewAttempt(
+                attemptID: "attempt-other-session",
+                turnID: "turn-other-session"
+            ))
             let otherRunID = try await store.beginReview(
                 sessionID: "other-session",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
@@ -1148,7 +1184,11 @@ struct CodexReviewMCPHTTPServerTests {
     }
 
     @Test func streamableHTTPCancelDefaultsSelectorToActiveRunsInTransportSession() async throws {
-        let backend = FakeCodexReviewBackend()
+        let attempt = makeHTTPReviewAttempt(
+            attemptID: "attempt-default-cancel-selector",
+            turnID: "turn-default-cancel-selector"
+        )
+        let backend = FakeCodexReviewBackend(plannedAttempt: attempt)
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "run-running" })
@@ -1208,7 +1248,15 @@ struct CodexReviewMCPHTTPServerTests {
     }
 
     @Test func streamableHTTPReportsAmbiguousCancelSelectorCandidates() async throws {
-        let backend = FakeCodexReviewBackend()
+        let firstAttempt = makeHTTPReviewAttempt(
+            attemptID: "attempt-ambiguous-first",
+            turnID: "turn-ambiguous-first"
+        )
+        let secondAttempt = makeHTTPReviewAttempt(
+            attemptID: "attempt-ambiguous-second",
+            turnID: "turn-ambiguous-second"
+        )
+        let backend = FakeCodexReviewBackend(plannedAttempt: firstAttempt)
         let startGate = AsyncGate()
         await backend.holdStartReview(with: startGate)
         let runIDs = Mutex(["run-running-1", "run-running-2"])
@@ -1228,6 +1276,8 @@ struct CodexReviewMCPHTTPServerTests {
                 sessionID: sessionID,
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
+            await backend.waitForStartReview()
+            await backend.planNextAttempt(secondAttempt)
             let secondRunID = try await store.beginReview(
                 sessionID: sessionID,
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
@@ -1269,7 +1319,11 @@ struct CodexReviewMCPHTTPServerTests {
     }
 
     @Test func streamableHTTPCancelsDocumentedRunId() async throws {
-        let backend = FakeCodexReviewBackend()
+        let attempt = makeHTTPReviewAttempt(
+            attemptID: "attempt-documented-run-id",
+            turnID: "turn-documented-run-id"
+        )
+        let backend = FakeCodexReviewBackend(plannedAttempt: attempt)
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "run-running" })
@@ -1334,7 +1388,11 @@ struct CodexReviewMCPHTTPServerTests {
     }
 
     @Test func streamableHTTPDoesNotExpireSessionWithActiveReviewRequest() async throws {
-        let backend = FakeCodexReviewBackend()
+        let attempt = makeHTTPReviewAttempt(
+            attemptID: "attempt-active-request",
+            turnID: "turn-1"
+        )
+        let backend = FakeCodexReviewBackend(plannedAttempt: attempt)
         let gate = AsyncGate()
         let clock = ManualMCPHTTPServerClock()
         await backend.holdStartReview(with: gate)
@@ -1410,7 +1468,7 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(runningItems.compactMap { $0["runId"] as? String } == ["run-1"])
 
             await gate.open()
-            await backend.yield(.completed(finalReview: "No issues found."))
+            await backend.yield(.completed(finalReview: "No issues found."), for: attempt)
             let resolved = try decodeSSEJSON(from: try await responseData)
 
             #expect(resolved.value(for: ["result", "structuredContent", "runId"]) as? String == "run-1")
@@ -1512,7 +1570,11 @@ struct CodexReviewMCPHTTPServerTests {
     }
 
     @Test func streamableHTTPKeepsRunIDCancellationInTransportSession() async throws {
-        let backend = FakeCodexReviewBackend()
+        let attempt = makeHTTPReviewAttempt(
+            attemptID: "attempt-run-id-cancellation",
+            turnID: "turn-run-id-cancellation"
+        )
+        let backend = FakeCodexReviewBackend(plannedAttempt: attempt)
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "run-other-session" })
@@ -1551,7 +1613,11 @@ struct CodexReviewMCPHTTPServerTests {
     }
 
     @Test func streamableHTTPDeleteFinishesItsRequestBeforeClosingStoreSession() async throws {
-        let backend = FakeCodexReviewBackend()
+        let attempt = makeHTTPReviewAttempt(
+            attemptID: "attempt-delete-close",
+            turnID: "turn-delete-close"
+        )
+        let backend = FakeCodexReviewBackend(plannedAttempt: attempt)
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "run-running" })
@@ -2109,6 +2175,15 @@ private func makeHTTPTestRunID(_ rawValue: String) -> ReviewRunID {
     } catch {
         preconditionFailure("Invalid explicit review run fixture: \(error)")
     }
+}
+
+private func makeHTTPReviewAttempt(attemptID: String, turnID: String) -> ReviewAttempt {
+    makeReviewAttemptForTesting(
+        attemptID: attemptID,
+        sourceThreadID: "source-\(attemptID)",
+        activeTurnThreadID: "active-\(attemptID)",
+        turnID: turnID
+    )
 }
 
 private func assertCompactLog(_ response: [String: Any], total: Int) {

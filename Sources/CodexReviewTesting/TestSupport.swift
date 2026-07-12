@@ -277,8 +277,8 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     private var settings: CodexReviewBackendModel.Settings.Snapshot
     private var auth: CodexReviewBackendModel.Auth.Snapshot
     private var commands: [Command] = []
-    private var nextAttempt: ReviewAttempt
-    private var nextRecoveredAttempt: ReviewAttempt?
+    private var plannedAttempts: [ReviewAttempt]
+    private var plannedRecoveredAttempts: [ReviewAttempt] = []
     private var discardedRestartAttempts: [ReviewAttempt] = []
     private var preparedRestartTokens: [String: CodexReviewBackendModel.Review.RestartToken] = [:]
     private var interruptFailureMessage: String?
@@ -314,16 +314,11 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     package init(
         settings: CodexReviewBackendModel.Settings.Snapshot = .init(),
         auth: CodexReviewBackendModel.Auth.Snapshot = .init(),
-        nextAttempt: ReviewAttempt = makeReviewAttemptForTesting(
-            attemptID: "attempt-1",
-            sourceThreadID: "thread-1",
-            activeTurnThreadID: "review-thread-1",
-            turnID: "turn-1"
-        )
+        plannedAttempt: ReviewAttempt? = nil
     ) {
         self.settings = settings
         self.auth = auth
-        self.nextAttempt = nextAttempt
+        self.plannedAttempts = plannedAttempt.map { [$0] } ?? []
     }
 
     package func recordedCommands() -> [Command] {
@@ -400,12 +395,12 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         restartPreparedReviewIgnoresCancellation = true
     }
 
-    package func setNextRecoveredAttempt(_ attempt: ReviewAttempt) {
-        nextRecoveredAttempt = attempt
+    package func planNextRecoveredAttempt(_ attempt: ReviewAttempt) {
+        plannedRecoveredAttempts.append(attempt)
     }
 
-    package func setNextAttempt(_ attempt: ReviewAttempt) {
-        nextAttempt = attempt
+    package func planNextAttempt(_ attempt: ReviewAttempt) {
+        plannedAttempts.append(attempt)
     }
 
     package func setDiscardedRestartAttempts(_ attempts: [ReviewAttempt]) {
@@ -640,6 +635,11 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         for waiter in waiters {
             waiter.resume()
         }
+        guard plannedAttempts.isEmpty == false else {
+            throw FakeCodexReviewBackendError(
+                message: "No review attempt was planned for startReview."
+            )
+        }
         if let startReviewGate {
             if startReviewIgnoresCancellation {
                 await startReviewGate.waitIgnoringCancellation()
@@ -647,7 +647,13 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
                 try await startReviewGate.wait()
             }
         }
-        return backendAttempt(for: nextAttempt)
+        guard plannedAttempts.isEmpty == false else {
+            throw FakeCodexReviewBackendError(
+                message: "No review attempt remained planned when startReview completed."
+            )
+        }
+        let plannedAttempt = plannedAttempts.removeFirst()
+        return backendAttempt(for: plannedAttempt)
     }
 
     package func interruptReview(
@@ -718,16 +724,12 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         if let recoveryFailureMessage {
             throw FakeCodexReviewBackendError(message: recoveryFailureMessage)
         }
-        let interruptedAttempt = token.interruptedAttempt
-        let recoveredAttempt =
-            nextRecoveredAttempt
-            ?? makeReviewAttemptForTesting(
-                attemptID: "attempt-recovered",
-                sourceThreadID: interruptedAttempt.threadIdentity.sourceThreadID.rawValue,
-                activeTurnThreadID: interruptedAttempt.threadIdentity.activeTurnThreadID.rawValue,
-                turnID: "turn-recovered",
-                model: interruptedAttempt.model ?? request.model
+        guard plannedRecoveredAttempts.isEmpty == false else {
+            throw FakeCodexReviewBackendError(
+                message: "No review attempt was planned for restartPreparedReview."
             )
+        }
+        let recoveredAttempt = plannedRecoveredAttempts.removeFirst()
         preparedRestartTokens.removeValue(forKey: token.id)
         return backendAttempt(for: recoveredAttempt)
     }
@@ -780,18 +782,16 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         ])
     }
 
-    package func yield(
-        _ terminal: FakeReviewTerminal, for attempt: ReviewAttempt? = nil
-    ) async {
-        await terminalSource(for: attempt ?? nextAttempt).yield(terminal)
+    package func yield(_ terminal: FakeReviewTerminal, for attempt: ReviewAttempt) async {
+        await terminalSource(for: attempt).yield(terminal)
     }
 
-    package func finishEvents(for attempt: ReviewAttempt? = nil) async {
-        await terminalSource(for: attempt ?? nextAttempt).finish()
+    package func finishEvents(for attempt: ReviewAttempt) async {
+        await terminalSource(for: attempt).finish()
     }
 
-    package func finishEvents(throwing error: any Error, for attempt: ReviewAttempt? = nil) async {
-        await terminalSource(for: attempt ?? nextAttempt).finish(throwing: error)
+    package func finishEvents(throwing error: any Error, for attempt: ReviewAttempt) async {
+        await terminalSource(for: attempt).finish(throwing: error)
     }
 
     package func finishEventMailboxes() async {

@@ -37,7 +37,13 @@ struct CodexReviewMCPServerTests {
     }
 
     @Test func reviewStartConvertsToSystemCommand() async throws {
-        let backend = FakeCodexReviewBackend()
+        let attempt = makeReviewAttemptForTesting(
+            attemptID: "attempt-review-start",
+            sourceThreadID: "thread-review-start",
+            activeTurnThreadID: "review-thread-review-start",
+            turnID: "turn-1"
+        )
+        let backend = FakeCodexReviewBackend(plannedAttempt: attempt)
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "run-1" })
@@ -59,7 +65,7 @@ struct CodexReviewMCPServerTests {
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
             waitTimeout: nil
         ))
-        await backend.yield(.completed(finalReview: "No issues found."))
+        await backend.yield(.completed(finalReview: "No issues found."), for: attempt)
         let resolved = try await response
 
         guard case .reviewStart(let snapshot) = resolved else {

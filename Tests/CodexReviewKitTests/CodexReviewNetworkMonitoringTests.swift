@@ -21,7 +21,13 @@ struct CodexReviewNetworkMonitoringTests {
     }
 
     @Test func unexpectedNetworkSourceFinishFailsAnOtherwiseLiveReview() async throws {
-        let backend = FakeCodexReviewBackend()
+        let attempt = makeReviewAttemptForTesting(
+            attemptID: "attempt-network-source-finish",
+            sourceThreadID: "thread-network-source-finish",
+            activeTurnThreadID: "review-thread-network-source-finish",
+            turnID: "turn-network-source-finish"
+        )
+        let backend = FakeCodexReviewBackend(plannedAttempt: attempt)
         let monitor = ManualCodexReviewNetworkMonitor()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -48,7 +54,13 @@ struct CodexReviewNetworkMonitoringTests {
     }
 
     @Test func terminalCandidateWinsWhenNetworkSourceFinishesAtTheSameBoundary() async throws {
-        let backend = FakeCodexReviewBackend()
+        let attempt = makeReviewAttemptForTesting(
+            attemptID: "attempt-terminal-network-race",
+            sourceThreadID: "thread-terminal-network-race",
+            activeTurnThreadID: "review-thread-terminal-network-race",
+            turnID: "turn-terminal-network-race"
+        )
+        let backend = FakeCodexReviewBackend(plannedAttempt: attempt)
         let monitor = ManualCodexReviewNetworkMonitor()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -67,7 +79,7 @@ struct CodexReviewNetworkMonitoringTests {
             ) != nil
         )
 
-        await backend.yield(.completed(finalReview: "No issues found."))
+        await backend.yield(.completed(finalReview: "No issues found."), for: attempt)
         monitor.finish()
         let read = try await result
 

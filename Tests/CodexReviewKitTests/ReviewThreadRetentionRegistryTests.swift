@@ -273,7 +273,8 @@ struct ReviewThreadRetentionRegistryTests {
     @Test func storeDoesNotPublishAttemptWhoseJournalCommitFailed() async throws {
         let journal = ControlledReviewThreadRetentionJournal()
         await journal.failReplacements("disk unavailable")
-        let backend = FakeCodexReviewBackend()
+        let attempt = makeRetentionAttempt(runID: "run-1")
+        let backend = FakeCodexReviewBackend(plannedAttempt: attempt)
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "run-1" }),
@@ -299,7 +300,8 @@ struct ReviewThreadRetentionRegistryTests {
     @Test func doubleFailureClosesAcceptanceGateUntilCleanupRecovery() async throws {
         let journal = ControlledReviewThreadRetentionJournal()
         await journal.failReplacements("disk unavailable")
-        let backend = FakeCodexReviewBackend()
+        let attempt = makeRetentionAttempt(runID: "run-1")
+        let backend = FakeCodexReviewBackend(plannedAttempt: attempt)
         await backend.failRetainedCleanup(message: "delete failed")
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -330,7 +332,8 @@ struct ReviewThreadRetentionRegistryTests {
 
     @Test func preservingRestartKeepsThreadsAndFinalStopRetiresThem() async throws {
         let journal = ControlledReviewThreadRetentionJournal()
-        let backend = FakeCodexReviewBackend()
+        let attempt = makeRetentionAttempt(runID: "run-1")
+        let backend = FakeCodexReviewBackend(plannedAttempt: attempt)
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "run-1" }),
@@ -342,7 +345,7 @@ struct ReviewThreadRetentionRegistryTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
-            await backend.yield(.completed(finalReview: "No issues found."))
+            await backend.yield(.completed(finalReview: "No issues found."), for: attempt)
             _ = try await started
 
             await store.restart()
@@ -369,7 +372,8 @@ struct ReviewThreadRetentionRegistryTests {
 
     @Test func finalCleanupFailureRetiresResolverButKeepsDurableTombstone() async throws {
         let journal = ControlledReviewThreadRetentionJournal()
-        let backend = FakeCodexReviewBackend()
+        let attempt = makeRetentionAttempt(runID: "run-1")
+        let backend = FakeCodexReviewBackend(plannedAttempt: attempt)
         await backend.failRetainedCleanup(message: "delete failed")
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -382,7 +386,7 @@ struct ReviewThreadRetentionRegistryTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
-            await backend.yield(.completed(finalReview: "No issues found."))
+            await backend.yield(.completed(finalReview: "No issues found."), for: attempt)
             _ = try await started
 
             await store.stop()
@@ -395,7 +399,8 @@ struct ReviewThreadRetentionRegistryTests {
 
     @Test func finalRetryDoesNotCleanPersistedQuarantineTwice() async throws {
         let journal = ControlledReviewThreadRetentionJournal()
-        let backend = FakeCodexReviewBackend()
+        let attempt = makeRetentionAttempt(runID: "run-1")
+        let backend = FakeCodexReviewBackend(plannedAttempt: attempt)
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "run-1" }),
@@ -406,7 +411,7 @@ struct ReviewThreadRetentionRegistryTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
-            await backend.yield(.completed(finalReview: "No issues found."))
+            await backend.yield(.completed(finalReview: "No issues found."), for: attempt)
             _ = try await started
 
             await backend.failRetainedCleanup(message: "delete failed")
@@ -422,6 +427,15 @@ struct ReviewThreadRetentionRegistryTests {
             #expect(retainedCleanups.count == 2)
         }
     }
+}
+
+private func makeRetentionAttempt(runID: String) -> ReviewAttempt {
+    makeReviewAttemptForTesting(
+        attemptID: "attempt-\(runID)",
+        sourceThreadID: "thread-\(runID)",
+        activeTurnThreadID: "review-thread-\(runID)",
+        turnID: "turn-\(runID)"
+    )
 }
 
 private actor ControlledReviewThreadRetentionJournal: ReviewThreadRetentionJournaling {
