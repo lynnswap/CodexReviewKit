@@ -2080,6 +2080,7 @@ struct CodexReviewHostTests {
     @Test func liveStoreStopCleansRecoveryWaitingReviewWithoutAppServerCleanup() async throws {
         let homeURL = try temporaryHome()
         let networkMonitor = ManualCodexReviewNetworkMonitor()
+        let workerClock = ContinuousClock()
         let transport = FakeCodexAppServerTransport()
         try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
         try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
@@ -2092,7 +2093,12 @@ struct CodexReviewHostTests {
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             networkMonitor: networkMonitor,
-            networkRecoveryPolicy: .init(sleep: { _ in }),
+            networkRecoveryPolicy: .init(
+                clock: .init(
+                    now: { workerClock.now },
+                    sleep: { _ in }
+                )
+            ),
             transport: transport
         )
 

@@ -537,6 +537,30 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func workerConnectivitySnapshotUsesInjectedMonotonicClock() {
+        let presentationDate = Date(timeIntervalSince1970: 42)
+        let instant = ContinuousClock().now.advanced(by: .seconds(5))
+        let snapshot = ReviewWorkerConnectivitySnapshot(
+            .init(
+                status: .requiresConnection,
+                observedAt: presentationDate
+            ),
+            clock: .init(
+                now: { instant },
+                sleep: { _ in }
+            )
+        )
+
+        switch snapshot.connectivity {
+        case .outage:
+            break
+        case .satisfied:
+            Issue.record("A requires-connection snapshot must normalize to a worker outage.")
+        }
+        #expect(snapshot.observedAt == instant)
+        #expect(snapshot.presentationDate == presentationDate)
+    }
+
     @Test func transientNetworkOutageDoesNotRecoverReview() async throws {
         let attempt = makeAttempt(fixtureID: "transient-outage")
         let backend = FakeCodexReviewBackend(plannedAttempt: attempt)
@@ -549,7 +573,9 @@ struct CodexReviewStoreCommandTests {
             networkRecoveryPolicy: .init(
                 outageDebounce: .seconds(10),
                 recoverySettle: .seconds(1),
-                sleep: { _ in try? await debounceGate.wait() }
+                clock: testReviewWorkerClock { _ in
+                    try? await debounceGate.wait()
+                }
             )
         )
         try await withStoreCommandTestCleanup(backend: backend, store: store) {
@@ -597,7 +623,7 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "run-1" }),
             networkMonitor: networkMonitor,
-            networkRecoveryPolicy: .init(sleep: { _ in })
+            networkRecoveryPolicy: .init(clock: testReviewWorkerClock { _ in })
         )
         try await withStoreCommandTestCleanup(backend: backend, store: store) {
             async let result = store.startReview(
@@ -647,7 +673,7 @@ struct CodexReviewStoreCommandTests {
             networkRecoveryPolicy: .init(
                 outageDebounce: .seconds(10),
                 recoverySettle: .seconds(1),
-                sleep: { _ in await sleeper.sleep() }
+                clock: testReviewWorkerClock { _ in await sleeper.sleep() }
             )
         )
         try await withStoreCommandTestCleanup(backend: backend, store: store) {
@@ -706,7 +732,7 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "run-1" }),
             networkMonitor: networkMonitor,
-            networkRecoveryPolicy: .init(sleep: { _ in })
+            networkRecoveryPolicy: .init(clock: testReviewWorkerClock { _ in })
         )
         try await withStoreCommandTestCleanup(backend: backend, store: store) {
             async let result = store.startReview(
@@ -769,7 +795,7 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "run-1" }),
             networkMonitor: networkMonitor,
-            networkRecoveryPolicy: .init(sleep: { _ in })
+            networkRecoveryPolicy: .init(clock: testReviewWorkerClock { _ in })
         )
         try await withStoreCommandTestCleanup(backend: backend, store: store) {
             async let result = store.startReview(
@@ -816,7 +842,7 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "run-1" }),
             networkMonitor: networkMonitor,
-            networkRecoveryPolicy: .init(sleep: { _ in })
+            networkRecoveryPolicy: .init(clock: testReviewWorkerClock { _ in })
         )
         try await withStoreCommandTestCleanup(backend: backend, store: store) {
             async let result = store.startReview(
@@ -862,7 +888,7 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "run-1" }),
             networkMonitor: networkMonitor,
-            networkRecoveryPolicy: .init(sleep: { _ in })
+            networkRecoveryPolicy: .init(clock: testReviewWorkerClock { _ in })
         )
         try await withStoreCommandTestCleanup(backend: backend, store: store) {
             async let result = store.startReview(
@@ -910,7 +936,7 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "run-1" }),
             networkMonitor: networkMonitor,
-            networkRecoveryPolicy: .init(sleep: { _ in })
+            networkRecoveryPolicy: .init(clock: testReviewWorkerClock { _ in })
         )
         try await withStoreCommandTestCleanup(backend: backend, store: store) {
             async let result = store.startReview(
@@ -976,7 +1002,7 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "run-1" }),
             networkMonitor: networkMonitor,
-            networkRecoveryPolicy: .init(sleep: { _ in })
+            networkRecoveryPolicy: .init(clock: testReviewWorkerClock { _ in })
         )
         let recorder = RuntimeStopCleanupRequestRecorder()
         try await withStoreCommandTestCleanup(backend: backend, store: store) {
@@ -1040,7 +1066,7 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "run-1" }),
             networkMonitor: networkMonitor,
-            networkRecoveryPolicy: .init(sleep: { _ in })
+            networkRecoveryPolicy: .init(clock: testReviewWorkerClock { _ in })
         )
         try await withStoreCommandTestCleanup(backend: backend, store: store) {
             async let running = store.startReview(
@@ -1128,7 +1154,7 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "run-1" }),
             networkMonitor: networkMonitor,
-            networkRecoveryPolicy: .init(sleep: { _ in })
+            networkRecoveryPolicy: .init(clock: testReviewWorkerClock { _ in })
         )
         let recorder = RuntimeStopCleanupRequestRecorder()
         try await withStoreCommandTestCleanup(backend: backend, store: store) {
@@ -1177,7 +1203,7 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "run-1" }),
             networkMonitor: networkMonitor,
-            networkRecoveryPolicy: .init(sleep: { _ in })
+            networkRecoveryPolicy: .init(clock: testReviewWorkerClock { _ in })
         )
         try await withStoreCommandTestCleanup(backend: backend, store: store) {
             async let result = store.startReview(
@@ -1208,7 +1234,11 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "run-1" }),
             networkMonitor: networkMonitor,
-            networkRecoveryPolicy: .init(sleep: { _ in try? await debounceGate.wait() })
+            networkRecoveryPolicy: .init(
+                clock: testReviewWorkerClock { _ in
+                    try? await debounceGate.wait()
+                }
+            )
         )
         try await withStoreCommandTestCleanup(backend: backend, store: store) {
             async let result = store.startReview(
@@ -1424,7 +1454,7 @@ struct CodexReviewStoreCommandTests {
             networkRecoveryPolicy: .init(
                 outageDebounce: .seconds(10),
                 recoverySettle: .seconds(1),
-                sleep: { _ in
+                clock: testReviewWorkerClock { _ in
                     await outageSleepStarted.open()
                     try? await debounceGate.wait()
                 }
@@ -2362,6 +2392,16 @@ private actor ControlledTestSleeper {
             try? await gate.wait()
         }
     }
+}
+
+private func testReviewWorkerClock(
+    sleep: @escaping @Sendable (Duration) async throws -> Void
+) -> ReviewWorkerClock {
+    let now = ContinuousClock().now
+    return .init(
+        now: { now },
+        sleep: sleep
+    )
 }
 
 private final class MutableTestClock: @unchecked Sendable {

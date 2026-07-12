@@ -3,7 +3,7 @@ import Foundation
 package struct ReviewWorkerState: Sendable {
     package struct Outage: Sendable {
         package let epoch: UInt64
-        package let observedAt: ContinuousClock.Instant
+        package let observedAt: ReviewWorkerClock.Instant
         package let presentationDate: Date
     }
 
@@ -48,17 +48,20 @@ package struct ReviewWorkerConnectivitySnapshot: Sendable {
     }
 
     package let connectivity: Connectivity
-    package let observedAt: ContinuousClock.Instant
+    package let observedAt: ReviewWorkerClock.Instant
     package let presentationDate: Date
 
-    init(_ snapshot: CodexReviewNetworkSnapshot) {
+    init(
+        _ snapshot: CodexReviewNetworkSnapshot,
+        clock: ReviewWorkerClock
+    ) {
         switch snapshot.status {
         case .satisfied:
             connectivity = .satisfied
         case .unsatisfied, .requiresConnection:
             connectivity = .outage
         }
-        observedAt = ContinuousClock().now
+        observedAt = clock.now
         presentationDate = snapshot.observedAt
     }
 }
@@ -398,7 +401,12 @@ struct ReviewStoreWorker {
             group.addTask {
                 await observeTerminal(backendAttempt, generation: generation)
             }
-            addNetworkChild(to: &group, source: networkSource, generation: generation)
+            addNetworkChild(
+                to: &group,
+                source: networkSource,
+                clock: policy.clock,
+                generation: generation
+            )
             var networkPhase = initialNetworkPhase
             if case .pendingOutage(let outage, _) = networkPhase {
                 addOutageTimer(
@@ -471,7 +479,12 @@ struct ReviewStoreWorker {
                 case .networkSnapshot(_, let snapshot):
                     switch (networkPhase, snapshot.connectivity) {
                     case (.satisfied, .satisfied):
-                        addNetworkChild(to: &group, source: networkSource, generation: generation)
+                        addNetworkChild(
+                            to: &group,
+                            source: networkSource,
+                            clock: policy.clock,
+                            generation: generation
+                        )
                     case (.satisfied, .outage):
                         let outage = ReviewWorkerState.Outage(
                             epoch: state.nextOutageEpoch,
@@ -487,9 +500,19 @@ struct ReviewStoreWorker {
                             generation: generation,
                             outageEpoch: outage.epoch
                         )
-                        addNetworkChild(to: &group, source: networkSource, generation: generation)
+                        addNetworkChild(
+                            to: &group,
+                            source: networkSource,
+                            clock: policy.clock,
+                            generation: generation
+                        )
                     case (.pendingOutage, .outage):
-                        addNetworkChild(to: &group, source: networkSource, generation: generation)
+                        addNetworkChild(
+                            to: &group,
+                            source: networkSource,
+                            clock: policy.clock,
+                            generation: generation
+                        )
                     case (.pendingOutage(_, let held), .satisfied):
                         let drain = await drainLiveGroup(&group, startingWith: signal, generation: generation)
                         if let terminal = drain.nonConnectionTerminal {
@@ -650,7 +673,12 @@ struct ReviewStoreWorker {
         let policy = networkRecoveryPolicy
         let source = ReviewWorkerNetworkSource(monitor: networkMonitor)
         return await withTaskGroup(of: ReviewWorkerSignal.self) { group in
-            addNetworkChild(to: &group, source: source, generation: generation)
+            addNetworkChild(
+                to: &group,
+                source: source,
+                clock: policy.clock,
+                generation: generation
+            )
             var connectivity = initialConnectivity
             if case .settling(let settleGeneration) = connectivity {
                 addSettleTimer(
@@ -681,7 +709,12 @@ struct ReviewStoreWorker {
                 case .networkSnapshot(_, let snapshot):
                     switch (connectivity, snapshot.connectivity) {
                     case (.unsatisfied, .outage):
-                        addNetworkChild(to: &group, source: source, generation: generation)
+                        addNetworkChild(
+                            to: &group,
+                            source: source,
+                            clock: policy.clock,
+                            generation: generation
+                        )
                     case (.unsatisfied(let next), .satisfied):
                         connectivity = .settling(generation: next)
                         state.stage = .waitingForNetwork(
@@ -697,9 +730,19 @@ struct ReviewStoreWorker {
                             outageEpoch: outage.epoch,
                             settleGeneration: next
                         )
-                        addNetworkChild(to: &group, source: source, generation: generation)
+                        addNetworkChild(
+                            to: &group,
+                            source: source,
+                            clock: policy.clock,
+                            generation: generation
+                        )
                     case (.settling, .satisfied):
-                        addNetworkChild(to: &group, source: source, generation: generation)
+                        addNetworkChild(
+                            to: &group,
+                            source: source,
+                            clock: policy.clock,
+                            generation: generation
+                        )
                     case (.settling(let current), .outage):
                         group.cancelAll()
                         while await group.next() != nil {}
@@ -1079,6 +1122,7 @@ private func observeTerminal(
 private func addNetworkChild(
     to group: inout TaskGroup<ReviewWorkerSignal>,
     source: ReviewWorkerNetworkSource,
+    clock: ReviewWorkerClock,
     generation: UInt64
 ) {
     group.addTask {
@@ -1087,7 +1131,7 @@ private func addNetworkChild(
         }
         return .networkSnapshot(
             generation: generation,
-            ReviewWorkerConnectivitySnapshot(snapshot)
+            ReviewWorkerConnectivitySnapshot(snapshot, clock: clock)
         )
     }
 }
@@ -1100,7 +1144,7 @@ private func addOutageTimer(
 ) {
     group.addTask {
         do {
-            try await policy.sleep(policy.outageDebounce)
+            try await policy.clock.sleep(for: policy.outageDebounce)
             return .outageDebounceElapsed(
                 generation: generation,
                 outageEpoch: outageEpoch
@@ -1123,7 +1167,7 @@ private func addSettleTimer(
 ) {
     group.addTask {
         do {
-            try await policy.sleep(policy.recoverySettle)
+            try await policy.clock.sleep(for: policy.recoverySettle)
             return .recoverySettleElapsed(
                 generation: generation,
                 outageEpoch: outageEpoch,
