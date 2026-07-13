@@ -1,12 +1,12 @@
 {
-  "originHash" : "1b4f9ba4dfd5ce21c93da061f474e71cfc5d004e1efc94e9d4077a182a5654e2",
+  "originHash" : "b3a6dabd1e4dad734df56004218f2685e3d22440e187c4164870830f5bd2588a",
   "pins" : [
     {
       "identity" : "codexkit",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/lynnswap/CodexKit.git",
       "state" : {
-        "revision" : "bd4b53b303b4020a8add142282409486ec4b1741"
+        "revision" : "1ee509b31660d2491c71be4931d9e515126eec08"
       }
     },
     {
@@ -75,10 +75,9 @@
     {
       "identity" : "swift-sdk",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/modelcontextprotocol/swift-sdk.git",
+      "location" : "https://github.com/lynnswap/swift-sdk.git",
       "state" : {
-        "revision" : "a0ae212ebf6eab5f754c3129608bc5557637e605",
-        "version" : "0.12.1"
+        "revision" : "fae7761fd5d257b24e1d9c49c6dc121e188e0d9b"
       }
     },
     {

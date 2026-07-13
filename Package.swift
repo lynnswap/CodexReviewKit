@@ -42,7 +42,10 @@ let package = Package(
         ),
     ],
     dependencies: [
-        .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", exact: "0.12.1"),
+        .package(
+            url: "https://github.com/lynnswap/swift-sdk.git",
+            revision: "fae7761fd5d257b24e1d9c49c6dc121e188e0d9b"
+        ),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.97.1"),
         .package(url: "https://github.com/lynnswap/ObservationBridge.git", .upToNextMinor(from: "0.12.0")),
         codexKitDependency,
