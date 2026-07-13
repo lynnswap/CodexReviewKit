@@ -259,6 +259,45 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
         }
     }
 
+    package func discardAllPreparedReviewRestarts(
+        ownedAttemptsByRunID: [ReviewRunID: ReviewAttempt]
+    ) async -> [ReviewRunID: [ReviewAttempt]] {
+        let retainedIdentitiesBySource = await appServer.discardAllPreparedReviewRestarts()
+        var retainedAttemptsByRunID: [ReviewRunID: [ReviewAttempt]] = [:]
+
+        for retainedIdentities in retainedIdentitiesBySource.values {
+            let owners = ownedAttemptsByRunID.filter { _, attempt in
+                retainedIdentities.contains(attempt.appServerReviewIdentity)
+            }
+            precondition(
+                owners.count == 1,
+                "A prepared-restart identity group must match exactly one retained review run."
+            )
+            guard let (runID, owner) = owners.first else {
+                preconditionFailure(
+                    "A prepared-restart identity group requires a retained review run."
+                )
+            }
+            retainedAttemptsByRunID[runID] = retainedIdentities.map { identity in
+                if identity == owner.appServerReviewIdentity {
+                    return owner
+                }
+                do {
+                    return try Self.reviewAttempt(
+                        for: identity,
+                        attemptID: makeAppServerReviewAttemptID(),
+                        fallbackModel: owner.model
+                    )
+                } catch {
+                    preconditionFailure(
+                        "CodexKit returned an invalid retained review identity: \(error.localizedDescription)"
+                    )
+                }
+            }
+        }
+        return retainedAttemptsByRunID
+    }
+
     package func cleanupReview(_ attempt: ReviewAttempt) async {
         finishReviewLocally(attempt)
     }

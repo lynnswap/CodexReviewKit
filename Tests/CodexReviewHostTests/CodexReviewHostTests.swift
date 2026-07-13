@@ -4961,6 +4961,70 @@ struct CodexReviewHostTests {
         #expect(methods.contains(.threadDelete) == false)
     }
 
+    @Test func liveStoreRetainsPreparedRestartOwnershipWhenConnectionTerminates() async throws {
+        let homeURL = try temporaryHome()
+        let networkMonitor = ManualCodexReviewNetworkMonitor()
+        let workerClock = ContinuousClock()
+        let transport = FakeCodexAppServerTransport()
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        try await transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
+        try await transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "thread-1")
+        try await transport.enqueueThreadResume(makeHostStoredThread(id: "thread-1"))
+        try await transport.enqueueSuccess(for: .turnInterrupt)
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: .init(
+                clock: .init(
+                    now: { workerClock.now },
+                    sleep: { _ in }
+                )
+            ),
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        await transport.waitForNotificationStreamCount(1)
+        let reviewRead = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            store.reviewRuns.first?.core.attempt?.turnID.rawValue == "turn-1"
+        })
+
+        networkMonitor.yield(.init(status: .unsatisfied))
+        await transport.waitForRequest(.turnInterrupt)
+        try await transport.notificationEmitter.emitTurnCompleted(
+            threadID: "thread-1",
+            turn: try CodexAppServerTestTurn(
+                snapshot: .init(id: "turn-1", state: .interrupted),
+                items: []
+            )
+        )
+        await transport.failConnection(.closed)
+
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            if case .failed = store.serverState {
+                return true
+            }
+            return false
+        })
+        let result = try await reviewRead.value
+        let journal = try await store.reviewThreadRetentionRegistry.snapshotForTesting()
+        let retained = try #require(journal.entries.first)
+
+        #expect(result.core.isTerminal)
+        #expect(journal.entries.count == 1)
+        #expect(retained.attempts.count == 1)
+        #expect(retained.attempts[0].turnID.rawValue == "turn-1")
+        #expect(store.serverURL == nil)
+    }
+
     @Test func liveStoreCleansIsolatedLoginRuntimeWhenMainNotificationStreamCloses() async throws {
         let homeURL = try temporaryHome()
         let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)

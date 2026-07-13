@@ -1252,7 +1252,14 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     ) async -> HostRuntimeStopResult {
         let runtime = session.runtime
         await session.mcpHTTPServer?.stop()
+        var didRetainPreparedRestarts = true
         if let appServerBackend = runtime?.backend {
+            let retainedAttemptsByRunID = await appServerBackend.discardAllPreparedReviewRestarts(
+                ownedAttemptsByRunID: store.runtimeStopReviewAttemptOwners()
+            )
+            didRetainPreparedRestarts = await store.retainPreparedRestartAttemptsForRuntimeStop(
+                retainedAttemptsByRunID
+            )
             await cleanupActiveReviewsForRuntimeTeardown(
                 store: store,
                 appServerBackend: appServerBackend,
@@ -1277,11 +1284,12 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             }
         }
         session.retainPrimaryAuthenticationHandoffForStop(primaryAuthenticationHandoff)
-        if let appServer = runtime?.appServer {
-            let retainedRestartIdentities = await appServer.discardAllPreparedReviewRestarts()
-            precondition(
-                retainedRestartIdentities.values.allSatisfy(\.isEmpty),
-                "Review workers must transfer every prepared-restart identity before runtime teardown."
+        guard didRetainPreparedRestarts else {
+            logger.error("Review runtime remains open because prepared-restart cleanup ownership could not be persisted")
+            return .init(
+                didReleaseResources: false,
+                didRetireRuns: false,
+                primaryAuthenticationHandoff: primaryAuthenticationHandoff
             )
         }
         var didRetireRuns = false

@@ -171,6 +171,31 @@ extension CodexReviewStore {
         )
     }
 
+    package func runtimeStopReviewAttemptOwners() -> [ReviewRunID: ReviewAttempt] {
+        Dictionary(uniqueKeysWithValues: orderedReviewRuns.compactMap { runRecord in
+            guard let attempt = runRecord.core.attempt else {
+                return nil
+            }
+            return (runRecord.id, attempt)
+        })
+    }
+
+    package func retainPreparedRestartAttemptsForRuntimeStop(
+        _ attemptsByRunID: [ReviewRunID: [ReviewAttempt]]
+    ) async -> Bool {
+        var didRetainAll = true
+        for runID in attemptsByRunID.keys.sorted(by: { $0.rawValue < $1.rawValue }) {
+            for attempt in attemptsByRunID[runID, default: []] {
+                do {
+                    try await claimReviewThreadOwnership(attempt, for: runID)
+                } catch {
+                    didRetainAll = false
+                }
+            }
+        }
+        return didRetainAll
+    }
+
     private func markActiveReviewCancellationsPendingForRuntimeStop(
         reason: ReviewCancellation
     ) {
