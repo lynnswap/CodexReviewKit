@@ -40,6 +40,7 @@ struct ReviewMonitorCodexChatLogSourceProjection {
     private var snapshot: CodexChatObservationSnapshot?
     private var cursor: Cursor?
     private var hasLogDocument = false
+    private var cachedPresentationState: ThreadPresentationState?
     private var projectedBlocksByLocator:
         [CodexChatItemLocator: [ReviewMonitorLogProjectedBlock]] = [:]
 
@@ -48,6 +49,7 @@ struct ReviewMonitorCodexChatLogSourceProjection {
         snapshot = nil
         cursor = nil
         hasLogDocument = false
+        cachedPresentationState = nil
         projectedBlocksByLocator.removeAll(keepingCapacity: false)
     }
 
@@ -97,13 +99,22 @@ struct ReviewMonitorCodexChatLogSourceProjection {
         guard var snapshot else {
             preconditionFailure("A chat observation update requires projection state.")
         }
+        let previousSnapshot = snapshot
         var turns = snapshot.thread.turns ?? []
+        var explicitlyChanged: Set<CodexChatItemLocator> = []
+        var removed: Set<CodexChatItemLocator> = []
+        var statusDependent: Set<CodexChatItemLocator> = []
+        var presentationChanged = false
         switch update {
         case .turnInserted(let turn, let index):
             precondition(turns.contains { $0.id == turn.id } == false)
             precondition(turns.indices.contains(index) || index == turns.endIndex)
             turns.insert(turn, at: index)
-            projectWholeTurn(turn, phase: snapshot.phase)
+            presentationChanged = cachedPresentationState?.hasExitedReviewMarker == true
+                || turn.items.contains(where: itemAffectsPresentation)
+            explicitlyChanged.formUnion(turn.items.map {
+                locator(for: $0, turnID: turn.id)
+            })
         case .turnUpdated(var turn, let index):
             let previousIndex = requiredTurnIndex(turn.id, in: turns)
             precondition(
@@ -115,38 +126,37 @@ struct ReviewMonitorCodexChatLogSourceProjection {
             turns.remove(at: previousIndex)
             precondition(turns.indices.contains(index) || index == turns.endIndex)
             turns.insert(turn, at: index)
+            presentationChanged = previousIndex != index
+                && cachedPresentationState?.hasExitedReviewMarker == true
             if previous.status != turn.status {
-                reprojectStatusDependentItems(in: turn, phase: snapshot.phase)
+                statusDependent.formUnion(turn.items.compactMap { item in
+                    logProjection.dependsOnTurnStatus(item)
+                        ? locator(for: item, turnID: turn.id)
+                        : nil
+                })
             }
         case .turnRemoved(let id):
             let index = requiredUniqueIndex(in: turns) { $0.id == id }
-            let removed = turns.remove(at: index)
-            for item in removed.items {
-                projectedBlocksByLocator.removeValue(
-                    forKey: locator(for: item, turnID: removed.id)
-                )
+            let removedTurn = turns.remove(at: index)
+            presentationChanged = cachedPresentationState?.hasExitedReviewMarker == true
+                || removedTurn.items.contains(where: itemAffectsPresentation)
+            for item in removedTurn.items {
+                removed.insert(locator(for: item, turnID: removedTurn.id))
             }
         case .itemInserted(let item, let turnID, let index):
             let turnIndex = requiredTurnIndex(turnID, in: turns)
             precondition(turns[turnIndex].items.contains {
                 itemMatches($0, id: item.id, kind: item.kind)
             } == false)
-            let previous = turns[turnIndex]
             precondition(
                 turns[turnIndex].items.indices.contains(index)
                     || index == turns[turnIndex].items.endIndex
             )
             turns[turnIndex].items.insert(item, at: index)
-            reconcileItemMutation(
-                previous: previous,
-                current: turns[turnIndex],
-                explicitlyChanged: [locator(for: item, turnID: turnID)],
-                removed: [],
-                phase: snapshot.phase
-            )
+            presentationChanged = itemAffectsPresentation(item)
+            explicitlyChanged.insert(locator(for: item, turnID: turnID))
         case .itemUpdated(let item, let turnID, let index):
             let turnIndex = requiredTurnIndex(turnID, in: turns)
-            let previous = turns[turnIndex]
             let previousIndex = requiredUniqueIndex(in: turns[turnIndex].items) {
                 itemMatches($0, id: item.id, kind: item.kind)
             }
@@ -158,41 +168,28 @@ struct ReviewMonitorCodexChatLogSourceProjection {
             turns[turnIndex].items.insert(item, at: index)
             let previousLocator = locator(for: previousItem, turnID: turnID)
             let currentLocator = locator(for: item, turnID: turnID)
-            reconcileItemMutation(
-                previous: previous,
-                current: turns[turnIndex],
-                explicitlyChanged: [currentLocator],
-                removed: previousLocator == currentLocator ? [] : [previousLocator],
-                phase: snapshot.phase
-            )
+            presentationChanged =
+                itemAffectsPresentation(previousItem) || itemAffectsPresentation(item)
+            explicitlyChanged.insert(currentLocator)
+            if previousLocator != currentLocator {
+                removed.insert(previousLocator)
+            }
         case .itemRemoved(let locator):
             let turnIndex = requiredTurnIndex(locator.turnID, in: turns)
-            let previous = turns[turnIndex]
             let itemIndex = requiredUniqueIndex(in: turns[turnIndex].items) {
                 itemMatches($0, id: locator.id, kind: locator.kind)
             }
-            turns[turnIndex].items.remove(at: itemIndex)
-            reconcileItemMutation(
-                previous: previous,
-                current: turns[turnIndex],
-                explicitlyChanged: [],
-                removed: [locator],
-                phase: snapshot.phase
-            )
+            let removedItem = turns[turnIndex].items.remove(at: itemIndex)
+            presentationChanged = itemAffectsPresentation(removedItem)
+            removed.insert(locator)
         case .itemTextAppended(let locator, let delta):
             let turnIndex = requiredTurnIndex(locator.turnID, in: turns)
-            let previous = turns[turnIndex]
             let itemIndex = requiredUniqueIndex(in: turns[turnIndex].items) {
                 itemMatches($0, id: locator.id, kind: locator.kind)
             }
+            presentationChanged = itemAffectsPresentation(turns[turnIndex].items[itemIndex])
             append(delta, to: &turns[turnIndex].items[itemIndex])
-            reconcileItemMutation(
-                previous: previous,
-                current: turns[turnIndex],
-                explicitlyChanged: [locator],
-                removed: [],
-                phase: snapshot.phase
-            )
+            explicitlyChanged.insert(locator)
         case .statusChanged(let status):
             snapshot.thread.status = status
         case .phaseChanged(let phase):
@@ -200,28 +197,45 @@ struct ReviewMonitorCodexChatLogSourceProjection {
             snapshot.phase = phase
             for turnID in affectedTurnIDs {
                 let turnIndex = requiredTurnIndex(turnID, in: turns)
-                reprojectStatusDependentItems(in: turns[turnIndex], phase: phase)
+                statusDependent.formUnion(turns[turnIndex].items.compactMap { item in
+                    logProjection.dependsOnTurnStatus(item)
+                        ? locator(for: item, turnID: turnID)
+                        : nil
+                })
             }
         }
         snapshot.thread.turns = turns
         self.snapshot = snapshot
+        reconcileProjection(
+            previous: previousSnapshot,
+            current: snapshot,
+            explicitlyChanged: explicitlyChanged.union(statusDependent),
+            removed: removed,
+            presentationChanged: presentationChanged
+        )
     }
 
     private mutating func replaceProjectionCache(
         with snapshot: CodexChatObservationSnapshot
     ) {
         projectedBlocksByLocator.removeAll(keepingCapacity: true)
+        let presentation = presentationState(for: snapshot, reportMissing: true)
+        cachedPresentationState = presentation
         for turn in snapshot.thread.turns ?? [] {
-            projectWholeTurn(turn, phase: snapshot.phase)
+            projectWholeTurn(
+                turn,
+                phase: snapshot.phase,
+                presentation: presentation
+            )
         }
     }
 
     private mutating func projectWholeTurn(
         _ turn: CodexTurnSnapshot,
-        phase: CodexChatPhase
+        phase: CodexChatPhase,
+        presentation: ThreadPresentationState
     ) {
         var seen: Set<CodexChatItemLocator> = []
-        let presentation = presentationState(for: turn, phase: phase, reportMissing: true)
         for item in turn.items {
             let locator = locator(for: item, turnID: turn.id)
             precondition(seen.insert(locator).inserted)
@@ -230,72 +244,69 @@ struct ReviewMonitorCodexChatLogSourceProjection {
         }
     }
 
-    private mutating func reconcileItemMutation(
-        previous: CodexTurnSnapshot,
-        current: CodexTurnSnapshot,
+    private mutating func reconcileProjection(
+        previous: CodexChatObservationSnapshot,
+        current: CodexChatObservationSnapshot,
         explicitlyChanged: Set<CodexChatItemLocator>,
         removed: Set<CodexChatItemLocator>,
-        phase: CodexChatPhase
+        presentationChanged: Bool
     ) {
-        precondition(previous.id == current.id)
-        let previousPresentation = presentationState(
-            for: previous,
-            phase: phase,
-            reportMissing: false
-        )
-        let currentPresentation = presentationState(
-            for: current,
-            phase: phase,
-            reportMissing: true
-        )
+        precondition(previous.thread.id == current.thread.id)
+        guard let previousPresentation = cachedPresentationState else {
+            preconditionFailure("Projection cache requires presentation state.")
+        }
+        let currentPresentation: ThreadPresentationState
+        if presentationChanged {
+            currentPresentation = presentationState(for: current, reportMissing: true)
+            cachedPresentationState = currentPresentation
+        } else {
+            currentPresentation = previousPresentation
+        }
 
         for locator in removed {
             precondition(projectedBlocksByLocator.removeValue(forKey: locator) != nil)
         }
 
         var locatorsToReproject = explicitlyChanged
-        if previousPresentation.hidesUserMessages != currentPresentation.hidesUserMessages {
-            for item in current.items where item.isUserMessage {
-                locatorsToReproject.insert(locator(for: item, turnID: current.id))
-            }
-        }
-
-        let changedSuppressionSourceIDs =
-            previousPresentation.suppressedRolloutSourceIDs
-                .symmetricDifference(currentPresentation.suppressedRolloutSourceIDs)
-        if changedSuppressionSourceIDs.isEmpty == false {
-            for item in current.items {
-                let facts = logProjection.presentationFacts(
-                    for: item,
-                    turnID: current.id,
-                    turnStatus: projectedStatus(for: current, phase: phase)
-                )
-                if changedSuppressionSourceIDs.contains(facts.sourceID) {
-                    locatorsToReproject.insert(locator(for: item, turnID: current.id))
+        if presentationChanged {
+            for turn in current.thread.turns ?? [] {
+                let userMessageVisibilityChanged =
+                    previousPresentation.hidesUserMessage(in: turn.id)
+                        != currentPresentation.hidesUserMessage(in: turn.id)
+                for item in turn.items {
+                    let locator = locator(for: item, turnID: turn.id)
+                    if userMessageVisibilityChanged && item.isUserMessage {
+                        locatorsToReproject.insert(locator)
+                    }
+                    let facts = logProjection.presentationFacts(
+                        for: item,
+                        turnID: turn.id,
+                        turnStatus: projectedStatus(for: turn, phase: current.phase)
+                    )
+                    let wasSuppressed = previousPresentation.suppressedRolloutSourceIDs
+                        .contains(facts.sourceID)
+                    let isSuppressed = currentPresentation.suppressedRolloutSourceIDs
+                        .contains(facts.sourceID)
+                    if wasSuppressed != isSuppressed {
+                        locatorsToReproject.insert(locator)
+                    }
                 }
             }
         }
 
         for locator in locatorsToReproject {
-            let itemIndex = requiredUniqueIndex(in: current.items) {
+            let turns = current.thread.turns ?? []
+            let turnIndex = requiredTurnIndex(locator.turnID, in: turns)
+            let turn = turns[turnIndex]
+            let itemIndex = requiredUniqueIndex(in: turn.items) {
                 itemMatches($0, id: locator.id, kind: locator.kind)
             }
             reproject(
-                current.items[itemIndex],
-                in: current,
-                phase: phase,
+                turn.items[itemIndex],
+                in: turn,
+                phase: current.phase,
                 presentation: currentPresentation
             )
-        }
-    }
-
-    private mutating func reprojectStatusDependentItems(
-        in turn: CodexTurnSnapshot,
-        phase: CodexChatPhase
-    ) {
-        let presentation = presentationState(for: turn, phase: phase, reportMissing: true)
-        for item in turn.items where logProjection.dependsOnTurnStatus(item) {
-            reproject(item, in: turn, phase: phase, presentation: presentation)
         }
     }
 
@@ -303,7 +314,7 @@ struct ReviewMonitorCodexChatLogSourceProjection {
         _ item: CodexThreadItem,
         in turn: CodexTurnSnapshot,
         phase: CodexChatPhase,
-        presentation: TurnPresentationState
+        presentation: ThreadPresentationState
     ) {
         let status = projectedStatus(for: turn, phase: phase)
         let facts = logProjection.presentationFacts(
@@ -318,29 +329,37 @@ struct ReviewMonitorCodexChatLogSourceProjection {
                 turnStatus: status,
                 chatCreatedAt: snapshot?.thread.createdAt,
                 chatUpdatedAt: snapshot?.thread.updatedAt,
-                suppressUserMessage: presentation.hidesUserMessages,
+                suppressUserMessage: presentation.hidesUserMessage(in: turn.id),
                 suppressRolloutCompanion:
                     presentation.suppressedRolloutSourceIDs.contains(facts.sourceID)
             )
     }
 
     private mutating func presentationState(
-        for turn: CodexTurnSnapshot,
-        phase: CodexChatPhase,
+        for snapshot: CodexChatObservationSnapshot,
         reportMissing: Bool
-    ) -> TurnPresentationState {
-        let status = projectedStatus(for: turn, phase: phase)
-        let facts = turn.items.map {
-            logProjection.presentationFacts(for: $0, turnID: turn.id, turnStatus: status)
+    ) -> ThreadPresentationState {
+        let facts = (snapshot.thread.turns ?? []).flatMap { turn in
+            let status = projectedStatus(for: turn, phase: snapshot.phase)
+            return turn.items.map {
+                logProjection.presentationFacts(
+                    for: $0,
+                    turnID: turn.id,
+                    turnStatus: status
+                )
+            }
         }
         let rollout = ReviewRolloutPresentationPolicy().evaluate(facts)
         if reportMissing {
             logProjection.reportMissingRolloutTargets(rollout.missingTargetSourceIDs)
         }
         return .init(
-            hidesUserMessages: ReviewTurnPresentationPolicy(items: facts)
-                .hidesUserMessage(in: turn.id),
-            suppressedRolloutSourceIDs: rollout.suppressedCompanionSourceIDs
+            userMessagePolicy: ReviewTurnPresentationPolicy(
+                items: facts,
+                additionalHiddenTurnIDs: rollout.hiddenUserMessageTurnIDs
+            ),
+            suppressedRolloutSourceIDs: rollout.suppressedCompanionSourceIDs,
+            hasExitedReviewMarker: facts.contains { $0.kind == .exitedReviewMode }
         )
     }
 
@@ -399,6 +418,19 @@ struct ReviewMonitorCodexChatLogSourceProjection {
         kind: CodexThreadItem.Kind
     ) -> Bool {
         item.id == id && item.kind == kind
+    }
+
+    private func itemAffectsPresentation(_ item: CodexThreadItem) -> Bool {
+        if item.kind == .enteredReviewMode
+            || item.kind == .exitedReviewMode
+            || item.origin == .reviewRolloutAssistant
+        {
+            return true
+        }
+        guard cachedPresentationState?.hasExitedReviewMarker == true else {
+            return false
+        }
+        return item.kind == .userMessage || item.kind == .agentMessage
     }
 
     private func itemsAreSemanticallyEqual(
@@ -509,9 +541,14 @@ struct ReviewMonitorCodexChatLogSourceProjection {
         return .clear
     }
 
-    private struct TurnPresentationState {
-        var hidesUserMessages: Bool
+    private struct ThreadPresentationState {
+        var userMessagePolicy: ReviewTurnPresentationPolicy
         var suppressedRolloutSourceIDs: Set<String>
+        var hasExitedReviewMarker: Bool
+
+        func hidesUserMessage(in turnID: CodexTurnID) -> Bool {
+            userMessagePolicy.hidesUserMessage(in: turnID)
+        }
     }
 }
 

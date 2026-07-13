@@ -497,6 +497,87 @@ struct ReviewMonitorCodexChatDetailTests {
         #expect(document?.text.contains("Keep this prompt visible.") == true)
     }
 
+    @Test func codexChatLogProjectionReconstructsPersistedReviewAcrossTurns()
+        async throws
+    {
+        var projection = ReviewMonitorCodexChatLogProjection()
+        let reviewPrompt = "Review the current code changes."
+        let finalReview = "No actionable correctness issues were identified."
+        let snapshot = CodexThreadSnapshot(
+            id: CodexThreadID(rawValue: "review-thread"),
+            sourceKind: .vscode,
+            turns: [
+                .init(
+                    id: CodexTurnID(rawValue: "outer-review-turn"),
+                    state: .completed,
+                    items: [
+                        .init(
+                            id: "entered-review",
+                            kind: .enteredReviewMode,
+                            content: .log("current changes")
+                        ),
+                        .init(
+                            id: "review-user-outer",
+                            kind: .userMessage,
+                            content: .message(.init(
+                                id: "review-user-outer",
+                                role: .user,
+                                text: reviewPrompt
+                            ))
+                        ),
+                        .init(
+                            id: "review-output",
+                            kind: .exitedReviewMode,
+                            content: .log(finalReview)
+                        ),
+                    ]
+                ),
+                .init(
+                    id: CodexTurnID(rawValue: "internal-reviewer-turn"),
+                    state: .completed,
+                    items: [
+                        .init(
+                            id: "item-1",
+                            kind: .userMessage,
+                            content: .message(.init(
+                                id: "item-1",
+                                role: .user,
+                                text: reviewPrompt
+                            ))
+                        ),
+                        .init(
+                            id: "item-2",
+                            kind: .userMessage,
+                            content: .message(.init(
+                                id: "item-2",
+                                role: .user,
+                                text: reviewPrompt
+                            ))
+                        ),
+                        .init(
+                            id: "item-3",
+                            kind: .agentMessage,
+                            content: .message(.init(
+                                id: "item-3",
+                                role: .assistant,
+                                text: finalReview
+                            ))
+                        ),
+                    ]
+                ),
+            ]
+        )
+
+        let document = projection.render(
+            from: snapshot,
+            chatCreatedAt: nil,
+            chatUpdatedAt: nil
+        )
+
+        #expect(document?.text == "current changes\n\n\(finalReview)")
+        #expect(document?.blocks.count == 2)
+    }
+
     @Test func codexChatLogProjectionSuppressesEquivalentTypedReviewRolloutCompanion() async throws {
         var projection = ReviewMonitorCodexChatLogProjection()
         let finalReview = """
@@ -534,38 +615,133 @@ struct ReviewMonitorCodexChatDetailTests {
         #expect(document?.blocks.count == 1)
     }
 
-    @Test func codexChatLogProjectionKeepsGeneralAssistantWithMatchingReviewText() async throws {
+    @Test func codexChatLogProjectionReconstructsInterruptedPersistedReviewAcrossTurns()
+        async throws
+    {
         var projection = ReviewMonitorCodexChatLogProjection()
-        let finalReview = "No issues found."
-        let turn = CodexTurnSnapshot(
-            id: CodexTurnID(rawValue: "turn-review"),
-            state: .completed,
-            items: [
+        let reviewPrompt =
+            "Review the current code changes (staged, unstaged, and untracked files)."
+        let snapshot = CodexThreadSnapshot(
+            id: CodexThreadID(rawValue: "interrupted-review-thread"),
+            sourceKind: .vscode,
+            turns: [
                 .init(
-                    id: "review-output",
-                    kind: .exitedReviewMode,
-                    content: .log(finalReview)
+                    id: CodexTurnID(rawValue: "outer-interrupted-review-turn"),
+                    state: .interrupted,
+                    items: [
+                        .init(
+                            id: "entered-review",
+                            kind: .enteredReviewMode,
+                            content: .log("current changes")
+                        ),
+                        .init(
+                            id: "review-output",
+                            kind: .exitedReviewMode,
+                            content: .log("Reviewer failed to output a response.")
+                        ),
+                    ]
                 ),
                 .init(
-                    id: "ordinary-assistant",
-                    kind: .agentMessage,
-                    content: .message(.init(
-                        id: "ordinary-assistant",
-                        role: .assistant,
-                        text: finalReview
-                    ))
+                    id: CodexTurnID(rawValue: "internal-interrupted-reviewer-turn"),
+                    state: .interrupted,
+                    items: [
+                        .init(
+                            id: "item-1",
+                            kind: .userMessage,
+                            content: .message(.init(
+                                id: "item-1",
+                                role: .user,
+                                text: reviewPrompt
+                            ))
+                        ),
+                        .init(
+                            id: "item-2",
+                            kind: .userMessage,
+                            content: .message(.init(
+                                id: "item-2",
+                                role: .user,
+                                text: reviewPrompt
+                            ))
+                        ),
+                        .init(
+                            id: "item-3",
+                            kind: .agentMessage,
+                            content: .message(.init(
+                                id: "item-3",
+                                role: .assistant,
+                                text: "Review was interrupted. Please re-run /review."
+                            ))
+                        ),
+                    ]
                 ),
             ]
         )
 
         let document = projection.render(
-            from: turn,
+            from: snapshot,
             chatCreatedAt: nil,
             chatUpdatedAt: nil
         )
 
+        #expect(document?.text == "current changes\n\nReviewer failed to output a response.")
         #expect(document?.blocks.count == 2)
-        #expect(document?.text == "\(finalReview)\n\n\(finalReview)")
+    }
+
+    @Test func codexChatLogProjectionKeepsGeneralAssistantWithMatchingReviewText() async throws {
+        var projection = ReviewMonitorCodexChatLogProjection()
+        let finalReview = "No issues found."
+        let snapshot = makeCodexThreadSnapshotForTesting(
+            chatID: CodexThreadID(rawValue: "review-thread"),
+            turns: [
+                .init(
+                    id: CodexTurnID(rawValue: "turn-review"),
+                    state: .completed,
+                    items: [
+                        .init(
+                            id: "review-output",
+                            kind: .exitedReviewMode,
+                            content: .log(finalReview)
+                        ),
+                    ]
+                ),
+                .init(
+                    id: CodexTurnID(rawValue: "ordinary-turn"),
+                    state: .completed,
+                    items: [
+                        .init(
+                            id: "ordinary-user",
+                            kind: .userMessage,
+                            content: .message(.init(
+                                id: "ordinary-user",
+                                role: .user,
+                                text: "Repeat the review result."
+                            ))
+                        ),
+                        .init(
+                            id: "ordinary-assistant",
+                            kind: .agentMessage,
+                            content: .message(.init(
+                                id: "ordinary-assistant",
+                                role: .assistant,
+                                text: finalReview
+                            ))
+                        ),
+                    ]
+                ),
+            ]
+        )
+
+        let document = projection.render(
+            from: snapshot,
+            chatCreatedAt: nil,
+            chatUpdatedAt: nil
+        )
+
+        #expect(document?.blocks.count == 3)
+        #expect(
+            document?.text
+                == "\(finalReview)\n\nRepeat the review result.\n\n\(finalReview)"
+        )
     }
 
     @Test func codexChatLogProjectionKeepsReviewRolloutCompanionWithDifferentText() async throws {
@@ -1565,6 +1741,335 @@ struct ReviewMonitorCodexChatDetailTests {
             payload: .update(.itemRemoved(.init(item: differentTarget, turnID: turnID)))
         ))
         #expect(removed?.sourceDocument?.text == "Review this change.\n\nNo issues found.")
+    }
+
+    @Test func codexChatSourceProjectionAppliesReviewThreadPolicyAcrossTurns() throws {
+        var projection = ReviewMonitorCodexChatLogSourceProjection()
+        let outerTurnID = CodexTurnID(rawValue: "outer-review-turn-stream")
+        let innerTurnID = CodexTurnID(rawValue: "inner-review-turn-stream")
+        let finalReview = "No actionable correctness issues were identified."
+        let companion = CodexThreadItem(
+            id: "review_rollout_assistant",
+            kind: .agentMessage,
+            content: .message(.init(
+                id: "review_rollout_assistant",
+                role: .assistant,
+                text: finalReview
+            ))
+        )
+        let thread = CodexThreadSnapshot(
+            id: "review-thread-stream",
+            sourceKind: .vscode,
+            turns: [
+                .init(
+                    id: outerTurnID,
+                    state: .inProgress,
+                    items: [.init(
+                        id: "entered-review-stream",
+                        kind: .enteredReviewMode,
+                        content: .log("current changes")
+                    )]
+                ),
+                .init(
+                    id: innerTurnID,
+                    state: .completed,
+                    items: [
+                        .init(
+                            id: "review-user-stream",
+                            kind: .userMessage,
+                            content: .message(.init(
+                                id: "review-user-stream",
+                                role: .user,
+                                text: "Review the current code changes."
+                            ))
+                        ),
+                        companion,
+                    ]
+                ),
+            ]
+        )
+        let initial = projection.apply(.init(
+            generation: 1,
+            sequence: 0,
+            payload: .snapshot(.init(
+                thread: thread,
+                phase: .running(turnID: outerTurnID)
+            ), reason: .initial)
+        ))
+        #expect(initial?.sourceDocument?.text == "current changes\n\n\(finalReview)")
+
+        let reviewOutput = CodexThreadItem(
+            id: "review-output-stream",
+            kind: .exitedReviewMode,
+            content: .log(finalReview)
+        )
+        let completed = projection.apply(.init(
+            generation: 1,
+            sequence: 1,
+            payload: .update(.itemInserted(
+                item: reviewOutput,
+                turnID: outerTurnID,
+                index: 1
+            ))
+        ))
+
+        let document = try #require(completed?.sourceDocument)
+        #expect(document.text == "current changes\n\n\(finalReview)")
+        #expect(document.blocks.count == 2)
+        #expect(document.blocks.contains { $0.id.rawValue.contains("review-output-stream") })
+        #expect(document.blocks.contains { $0.id.rawValue.contains("review_rollout_assistant") } == false)
+    }
+
+    @Test func codexChatSourceProjectionReevaluatesPersistedReviewPolicyAfterTurnMove() throws {
+        var projection = ReviewMonitorCodexChatLogSourceProjection()
+        let outerTurnID = CodexTurnID(rawValue: "outer-review-turn-move")
+        let interveningTurnID = CodexTurnID(rawValue: "intervening-turn-move")
+        let companionTurnID = CodexTurnID(rawValue: "companion-turn-move")
+        let reviewOutput = "No actionable issues were identified."
+        let outerTurn = CodexTurnSnapshot(
+            id: outerTurnID,
+            state: .completed,
+            items: [.init(
+                id: "review-output-move",
+                kind: .exitedReviewMode,
+                content: .log(reviewOutput)
+            )]
+        )
+        let interveningTurn = CodexTurnSnapshot(
+            id: interveningTurnID,
+            state: .completed,
+            items: [.init(
+                id: "intervening-message-move",
+                kind: .agentMessage,
+                content: .message(.init(
+                    id: "intervening-message-move",
+                    role: .assistant,
+                    text: "Intervening output"
+                ))
+            )]
+        )
+        let companionTurn = CodexTurnSnapshot(
+            id: companionTurnID,
+            state: .completed,
+            items: [
+                .init(
+                    id: "review-user-move-1",
+                    kind: .userMessage,
+                    content: .message(.init(
+                        id: "review-user-move-1",
+                        role: .user,
+                        text: "Review the current changes."
+                    ))
+                ),
+                .init(
+                    id: "review-user-move-2",
+                    kind: .userMessage,
+                    content: .message(.init(
+                        id: "review-user-move-2",
+                        role: .user,
+                        text: "Review the current changes."
+                    ))
+                ),
+                .init(
+                    id: "review-agent-move",
+                    kind: .agentMessage,
+                    content: .message(.init(
+                        id: "review-agent-move",
+                        role: .assistant,
+                        text: "Review was interrupted."
+                    ))
+                ),
+            ]
+        )
+        let initial = projection.apply(.init(
+            generation: 1,
+            sequence: 0,
+            payload: .snapshot(.init(
+                thread: .init(
+                    id: "thread-review-turn-move",
+                    turns: [outerTurn, interveningTurn, companionTurn]
+                ),
+                phase: .terminal(turnID: companionTurnID, disposition: .completed)
+            ), reason: .initial)
+        ))
+        #expect(initial?.sourceDocument?.text.contains("Review the current changes.") == true)
+
+        let moved = projection.apply(.init(
+            generation: 1,
+            sequence: 1,
+            payload: .update(.turnUpdated(interveningTurn, index: 2))
+        ))
+
+        #expect(moved?.sourceDocument?.text == "\(reviewOutput)\n\nIntervening output")
+    }
+
+    @Test func codexChatSourceProjectionReevaluatesPersistedReviewPolicyForStructuralTurnChanges() throws {
+        var projection = ReviewMonitorCodexChatLogSourceProjection()
+        let outerTurnID = CodexTurnID(rawValue: "outer-review-structural-change")
+        let companionTurnID = CodexTurnID(rawValue: "companion-review-structural-change")
+        let interveningTurnID = CodexTurnID(rawValue: "intervening-review-structural-change")
+        let reviewOutput = "No actionable issues were identified."
+        let outerTurn = CodexTurnSnapshot(
+            id: outerTurnID,
+            state: .completed,
+            items: [.init(
+                id: "review-output-structural-change",
+                kind: .exitedReviewMode,
+                content: .log(reviewOutput)
+            )]
+        )
+        let companionTurn = CodexTurnSnapshot(
+            id: companionTurnID,
+            state: .completed,
+            items: [
+                .init(
+                    id: "review-user-structural-change-1",
+                    kind: .userMessage,
+                    content: .message(.init(
+                        id: "review-user-structural-change-1",
+                        role: .user,
+                        text: "Review the current changes."
+                    ))
+                ),
+                .init(
+                    id: "review-user-structural-change-2",
+                    kind: .userMessage,
+                    content: .message(.init(
+                        id: "review-user-structural-change-2",
+                        role: .user,
+                        text: "Review the current changes."
+                    ))
+                ),
+                .init(
+                    id: "review-agent-structural-change",
+                    kind: .agentMessage,
+                    content: .message(.init(
+                        id: "review-agent-structural-change",
+                        role: .assistant,
+                        text: "Review was interrupted."
+                    ))
+                ),
+            ]
+        )
+        let initial = projection.apply(.init(
+            generation: 1,
+            sequence: 0,
+            payload: .snapshot(.init(
+                thread: .init(
+                    id: "thread-review-structural-change",
+                    turns: [outerTurn, companionTurn]
+                ),
+                phase: .terminal(turnID: companionTurnID, disposition: .completed)
+            ), reason: .initial)
+        ))
+        #expect(initial?.sourceDocument?.text == reviewOutput)
+
+        let interveningTurn = CodexTurnSnapshot(
+            id: interveningTurnID,
+            state: .completed,
+            items: [.init(
+                id: "command-structural-change",
+                kind: .commandExecution,
+                content: .command(.init(
+                    command: "/usr/bin/true",
+                    exitCode: 0,
+                    status: .completed
+                ))
+            )]
+        )
+        let inserted = projection.apply(.init(
+            generation: 1,
+            sequence: 1,
+            payload: .update(.turnInserted(interveningTurn, index: 1))
+        ))
+        #expect(inserted?.sourceDocument?.text.contains("Review the current changes.") == true)
+        #expect(inserted?.sourceDocument?.text.contains("Review was interrupted.") == true)
+
+        let removed = projection.apply(.init(
+            generation: 1,
+            sequence: 2,
+            payload: .update(.turnRemoved(id: interveningTurnID))
+        ))
+        #expect(removed?.sourceDocument?.text == reviewOutput)
+    }
+
+    @Test func codexChatSourceProjectionKeepsValidatedPersistedCompanionSuppressedAfterTextAppend()
+        throws
+    {
+        var projection = ReviewMonitorCodexChatLogSourceProjection()
+        let outerTurnID = CodexTurnID(rawValue: "outer-review-text-append")
+        let companionTurnID = CodexTurnID(rawValue: "companion-review-text-append")
+        let reviewOutput = "No actionable issues were identified."
+        let companion = CodexThreadItem(
+            id: "generic-review-agent-append",
+            kind: .agentMessage,
+            content: .message(.init(
+                id: "generic-review-agent-append",
+                role: .assistant,
+                text: "No actionable issues were"
+            ))
+        )
+        let thread = CodexThreadSnapshot(
+            id: "thread-review-text-append",
+            turns: [
+                .init(
+                    id: outerTurnID,
+                    state: .completed,
+                    items: [.init(
+                        id: "review-output-append",
+                        kind: .exitedReviewMode,
+                        content: .log(reviewOutput)
+                    )]
+                ),
+                .init(
+                    id: companionTurnID,
+                    state: .inProgress,
+                    items: [
+                .init(
+                    id: "review-user-append-1",
+                    kind: .userMessage,
+                    content: .message(.init(
+                        id: "review-user-append-1",
+                        role: .user,
+                        text: "Review the current changes."
+                    ))
+                ),
+                .init(
+                    id: "review-user-append-2",
+                    kind: .userMessage,
+                    content: .message(.init(
+                        id: "review-user-append-2",
+                        role: .user,
+                        text: "Review the current changes."
+                    ))
+                        ),
+                        companion,
+                    ]
+                ),
+            ]
+        )
+        let initial = projection.apply(.init(
+            generation: 1,
+            sequence: 0,
+            payload: .snapshot(.init(
+                thread: thread,
+                phase: .running(turnID: companionTurnID)
+            ), reason: .initial)
+        ))
+        #expect(initial?.sourceDocument?.text == reviewOutput)
+        #expect(initial?.sourceDocument?.blocks.count == 1)
+
+        let completed = projection.apply(.init(
+            generation: 1,
+            sequence: 1,
+            payload: .update(.itemTextAppended(
+                .init(item: companion, turnID: companionTurnID),
+                delta: " identified."
+            ))
+        ))
+
+        #expect(completed?.sourceDocument?.text == reviewOutput)
+        #expect(completed?.sourceDocument?.blocks.count == 1)
     }
 
     @Test func codexChatSourceProjectionAppliesPhaseOnlyToStatusDependentBlocks() throws {

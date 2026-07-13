@@ -2870,6 +2870,56 @@ struct ReviewUITests {
         #expect(visibleText.contains("11sReviewing JSONRPC requests") == false)
     }
 
+    @Test func completedCommandUsesLifecycleIntervalWhenReportedDurationIsInconsistent() throws {
+        let startedAt = Date(timeIntervalSince1970: 200)
+        var projection = ReviewMonitorLogDocumentProjection()
+        let source = projection.render(projectedBlocks: [
+            .init(
+                id: .init("command_1"),
+                kind: .command,
+                groupID: "cmd_1",
+                text: "$ git diff",
+                metadata: .init(
+                    sourceType: "commandExecution",
+                    status: "completed",
+                    itemID: "cmd_1",
+                    command: "git diff",
+                    startedAt: startedAt,
+                    completedAt: Date(timeIntervalSince1970: 205.327),
+                    durationMs: 0,
+                    commandStatus: "completed"
+                )
+            ),
+        ])
+
+        let display = ReviewMonitorCommandOutputDisplayDocument.make(from: source)
+        let visibleText = ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: display.text)
+        #expect(visibleText == "Ran git diff for 5s")
+    }
+
+    @Test func completedCommandWithoutTimingMetadataOmitsDuration() throws {
+        var projection = ReviewMonitorLogDocumentProjection()
+        let source = projection.render(projectedBlocks: [
+            .init(
+                id: .init("command_1"),
+                kind: .command,
+                groupID: "cmd_1",
+                text: "$ git diff",
+                metadata: .init(
+                    sourceType: "commandExecution",
+                    status: "completed",
+                    itemID: "cmd_1",
+                    command: "git diff",
+                    commandStatus: "completed"
+                )
+            ),
+        ])
+
+        let display = ReviewMonitorCommandOutputDisplayDocument.make(from: source)
+        let visibleText = ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: display.text)
+        #expect(visibleText == "Ran git diff")
+    }
+
     @Test func sourceDocumentReplacementTargetsMetadataChangedBlock() throws {
         let startedAt = Date(timeIntervalSince1970: 200)
         var projection = ReviewMonitorLogDocumentProjection()

@@ -156,8 +156,11 @@ struct ReviewMonitorCodexChatLogProjection {
             return nil
         }
         let presentationFacts = items.map(Self.presentationFacts)
-        let turnPolicy = ReviewTurnPresentationPolicy(items: presentationFacts)
         let rolloutPolicy = ReviewRolloutPresentationPolicy().evaluate(presentationFacts)
+        let turnPolicy = ReviewTurnPresentationPolicy(
+            items: presentationFacts,
+            additionalHiddenTurnIDs: rolloutPolicy.hiddenUserMessageTurnIDs
+        )
         reportMissingRolloutTargets(rolloutPolicy.missingTargetSourceIDs)
         let blocks = items.flatMap { item in
             if rolloutPolicy.suppressedCompanionSourceIDs.contains(item.sourceID) {
