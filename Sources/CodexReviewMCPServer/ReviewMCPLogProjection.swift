@@ -26,29 +26,17 @@ package struct ReviewMCPLogProjection: Sendable, Equatable {
         }
     }
 
-    var revision: String
-    var orderedEntryIDs: [String]
-    var activeEntryIDs: [String]
-    var activeEntryCount: Int
-    var latestEntryID: String?
     var turnID: CodexTurnID?
-    var finalLifecycleMessage: String?
     var finalResult: String?
     var items: [Item]
 
-    static func unavailable(result: CodexReviewAPI.Read.Result) -> Self {
-        Self(result: result)
+    static func unavailable(result _: CodexReviewAPI.Read.Result) -> Self {
+        Self()
     }
 
-    private init(result: CodexReviewAPI.Read.Result) {
-        self.revision = "\(result.runID.rawValue):unavailable"
+    private init() {
         self.items = []
-        self.orderedEntryIDs = []
-        self.activeEntryIDs = []
-        self.activeEntryCount = activeEntryIDs.count
-        self.latestEntryID = orderedEntryIDs.last
         self.turnID = nil
-        self.finalLifecycleMessage = nil
         self.finalResult = nil
     }
 
@@ -69,27 +57,8 @@ package struct ReviewMCPLogProjection: Sendable, Equatable {
                 content: content
             )
         }
-        let itemRevision = threadItems
-            .map { item in
-                // Digest the content, not just its length, so same-length
-                // edits still advance the revision clients compare.
-                "\(item.id):\(item.kind.rawValue):\(item.text?.stableLogDigest ?? "0")"
-            }
-            .joined(separator: "|")
-        self.revision = [
-            result.runID.rawValue,
-            status.rawValue,
-            result.core.endedAt?.timeIntervalSince1970.description ?? "running",
-            turnID.rawValue,
-            itemRevision,
-        ].joined(separator: ":")
         self.items = projectedItems
-        self.orderedEntryIDs = projectedItems.map(\.id)
-        self.activeEntryIDs = status.isTerminal ? [] : projectedItems.map(\.id)
-        self.activeEntryCount = activeEntryIDs.count
-        self.latestEntryID = orderedEntryIDs.last
         self.turnID = turnID
-        self.finalLifecycleMessage = status.isTerminal ? result.presentation.lifecycle.message : nil
         self.finalResult =
             status == .succeeded
             ? reviewOutputText.flatMap(Self.nonEmptyReviewOutput)
@@ -101,19 +70,6 @@ package struct ReviewMCPLogProjection: Sendable, Equatable {
             return nil
         }
         return value
-    }
-}
-
-private extension String {
-    // Process-stable FNV-1a digest; revisions are only compared against
-    // other revisions produced by the same server instance.
-    var stableLogDigest: String {
-        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
-        for byte in utf8 {
-            hash ^= UInt64(byte)
-            hash = hash &* 0x0000_0100_0000_01b3
-        }
-        return String(hash, radix: 16)
     }
 }
 

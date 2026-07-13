@@ -17,10 +17,6 @@ struct ReviewMCPLogProjectionTests {
             presentation: .init(core: core, executionPhase: .running(attemptGeneration: 0))
         ))
 
-        #expect(projection.orderedEntryIDs == [])
-        #expect(projection.activeEntryIDs == [])
-        #expect(projection.activeEntryCount == 0)
-        #expect(projection.latestEntryID == nil)
         #expect(projection.items.isEmpty)
         #expect(projection.finalResult == nil)
     }
@@ -37,9 +33,6 @@ struct ReviewMCPLogProjectionTests {
             presentation: .init(core: core, executionPhase: nil)
         ))
 
-        #expect(projection.activeEntryIDs == [])
-        #expect(projection.activeEntryCount == 0)
-        #expect(projection.finalLifecycleMessage == nil)
         #expect(projection.finalResult == nil)
         #expect(projection.items.isEmpty)
     }
@@ -76,14 +69,11 @@ struct ReviewMCPLogProjectionTests {
             reviewOutputText: nil
         )
 
-        #expect(projection.orderedEntryIDs == [
+        #expect(projection.items.map(\.id) == [
             "turn-1:assistant-1",
             "turn-1:reasoning-1",
             "turn-1:command-1",
         ])
-        #expect(projection.activeEntryIDs == projection.orderedEntryIDs)
-        #expect(projection.activeEntryCount == 3)
-        #expect(projection.latestEntryID == "turn-1:command-1")
         #expect(projection.items.map { $0.kind } == ["agentMessage", "reasoning", "commandExecution"])
         #expect(projection.items.map { $0.content.type } == ["message", "reasoning", "command"])
     }
@@ -115,7 +105,6 @@ struct ReviewMCPLogProjectionTests {
             reviewOutputText: "CodexChat final"
         )
 
-        #expect(projection.finalLifecycleMessage == "Review completed.")
         #expect(projection.finalResult == "CodexChat final")
     }
 }

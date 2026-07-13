@@ -51,15 +51,6 @@ Returns:
   - `hasFinalReview`
   - `finalReview` from the terminal Codex review response
   - `reviewResult` parsed finding state (`hasFindings`, `noFindings`, or `unknown`) with title/body/location fields when a final review is available
-- `log`
-  - `orderedEntryIds`
-  - `activeEntryIds`
-  - `activeEntryCount`
-  - `latestEntryId`
-  - `finalLifecycleMessage`
-  - `finalResult`
-  - `itemsPage`
-  - `items` for detailed reads
 
 Notes:
 
@@ -93,8 +84,7 @@ Inputs:
 - `runId` or `runID`
 
 Returns the same lightweight shape as `review_start`: `runId`, `run`,
-`lifecycle`, `review`, and a compact `log`. Use `review_read` when log item
-details are needed.
+`lifecycle`, and `review`. Use `review_read` when log item details are needed.
 
 If the run is still running after the bounded wait, call `review_await` again
 with the same `runId`.
@@ -110,8 +100,13 @@ Returns:
 - `run`
 - `lifecycle`
 - `review`
-- `log` with ordered item IDs, active item IDs, terminal lifecycle/final review
-  values, paging metadata, and item details.
+- `log` with a bounded tail page:
+  - `items` in display order
+  - `itemsPage` paging metadata
+
+Lifecycle and final review values remain in their top-level owners. Detailed
+log responses do not duplicate them or expose internal snapshot revision and
+entry-index fields.
 
 ### `review_list`
 

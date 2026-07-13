@@ -63,8 +63,7 @@ private extension CodexReviewAPI.Read.Result {
 
     func structuredContentForStartOrAwait(log: ReviewMCPLogProjection) -> Value {
         structuredContent(
-            includeLog: true,
-            includeDetails: false,
+            includeDetailedLog: false,
             includeNextAction: presentation.status.isTerminal == false,
             log: log
         )
@@ -72,16 +71,14 @@ private extension CodexReviewAPI.Read.Result {
 
     func structuredContentForRead(log: ReviewMCPLogProjection) -> Value {
         structuredContent(
-            includeLog: true,
-            includeDetails: true,
+            includeDetailedLog: true,
             includeNextAction: false,
             log: log
         )
     }
 
     func structuredContent(
-        includeLog: Bool,
-        includeDetails: Bool,
+        includeDetailedLog: Bool,
         includeNextAction: Bool,
         log: ReviewMCPLogProjection
     ) -> Value {
@@ -97,11 +94,8 @@ private extension CodexReviewAPI.Read.Result {
                 resolvedFinalReview: log.finalResult
             ),
         ]
-        if includeLog {
-            object["log"] =
-                includeDetails
-                ? log.structuredContentWithItems()
-                : log.structuredContent()
+        if includeDetailedLog {
+            object["log"] = log.structuredContentWithItems()
         }
         if includeNextAction {
             object["nextAction"] = .object([
@@ -114,52 +108,15 @@ private extension CodexReviewAPI.Read.Result {
 }
 
 private extension ReviewMCPLogProjection {
-    func structuredContent() -> Value {
-        var truncatedFields: [String] = []
-        let orderedEntryIDs = Array(self.orderedEntryIDs.suffix(Self.compactEntryIDLimit))
-        let activeEntryIDs = Array(self.activeEntryIDs.suffix(Self.compactEntryIDLimit))
-        if orderedEntryIDs.count < self.orderedEntryIDs.count {
-            truncatedFields.append("orderedEntryIds")
-        }
-        if activeEntryIDs.count < self.activeEntryIDs.count {
-            truncatedFields.append("activeEntryIds")
-        }
-        var object: [String: Value] = [
-            "revision": .string(revision),
-            "orderedEntryIds": .array(orderedEntryIDs.map(Value.string)),
-            "activeEntryIds": .array(activeEntryIDs.map(Value.string)),
-            "activeEntryCount": .int(activeEntryCount),
-            "latestEntryId": latestEntryID.map(Value.string) ?? .null,
-            "finalLifecycleMessage": boundedLogString(
-                finalLifecycleMessage,
-                field: "finalLifecycleMessage",
-                truncatedFields: &truncatedFields
-            ),
-            "finalResult": boundedLogString(
-                finalResult,
-                field: "finalResult",
-                truncatedFields: &truncatedFields
-            ),
-        ]
-        let page = LogEntryPage.unreturned(total: items.count)
-        object["items"] = .array([])
-        object["itemsPage"] = page.structuredContent()
-        object["truncatedFields"] = .array(truncatedFields.map(Value.string))
-        return .object(object)
-    }
-
     func structuredContentWithItems() -> Value {
         // Long reviews can accumulate huge transcripts; detailed reads return
         // a bounded tail page so MCP responses stay small, with the page
-        // metadata pointing at the omitted head. The entry id arrays are
-        // bounded to the same window so no field scales with the full
-        // transcript.
+        // metadata pointing at the omitted head.
         let limit = Self.detailedItemsLimit
         let total = items.count
         let pageItems = Array(items.suffix(limit))
         let returned = pageItems.count
         let offset = total - returned
-        let pageItemIDs = Set(pageItems.map(\.id))
         let page = LogEntryPage(
             total: total,
             offset: offset,
@@ -170,35 +127,12 @@ private extension ReviewMCPLogProjection {
             previousOffset: offset > 0 ? max(0, offset - limit) : nil,
             nextOffset: nil
         )
-        var truncatedFields: [String] = []
-        var object: [String: Value] = [
-            "revision": .string(revision),
-            "orderedEntryIds": .array(
-                orderedEntryIDs.filter(pageItemIDs.contains).map(Value.string)
-            ),
-            "activeEntryIds": .array(
-                activeEntryIDs.filter(pageItemIDs.contains).map(Value.string)
-            ),
-            "activeEntryCount": .int(activeEntryCount),
-            "latestEntryId": latestEntryID.map(Value.string) ?? .null,
-            "finalLifecycleMessage": boundedLogString(
-                finalLifecycleMessage,
-                field: "finalLifecycleMessage",
-                truncatedFields: &truncatedFields
-            ),
-            "finalResult": boundedLogString(
-                finalResult,
-                field: "finalResult",
-                truncatedFields: &truncatedFields
-            ),
-        ]
-        object["items"] = .array(pageItems.map { $0.structuredContent() })
-        object["itemsPage"] = page.structuredContent()
-        object["truncatedFields"] = .array(truncatedFields.map(Value.string))
-        return .object(object)
+        return .object([
+            "items": .array(pageItems.map { $0.structuredContent() }),
+            "itemsPage": page.structuredContent(),
+        ])
     }
 
-    private static var compactEntryIDLimit: Int { 100 }
     private static var detailedItemsLimit: Int { 100 }
 }
 
@@ -262,10 +196,6 @@ private struct LogEntryPage {
     var previousOffset: Int?
     var nextOffset: Int?
 
-    var range: Range<Int> {
-        offset..<offset + returned
-    }
-
     init(
         total: Int,
         offset: Int,
@@ -286,19 +216,6 @@ private struct LogEntryPage {
         self.nextOffset = nextOffset
     }
 
-    static func unreturned(total: Int) -> LogEntryPage {
-        LogEntryPage(
-            total: total,
-            offset: 0,
-            limit: 0,
-            returned: 0,
-            hasMoreBefore: false,
-            hasMoreAfter: total > 0,
-            previousOffset: nil,
-            nextOffset: total > 0 ? 0 : nil
-        )
-    }
-
     func structuredContent() -> Value {
         .object([
             "total": .int(total),
@@ -311,17 +228,6 @@ private struct LogEntryPage {
             "nextOffset": nextOffset.map(Value.int) ?? .null,
         ])
     }
-}
-
-private func boundedLogString(
-    _ value: String?,
-    field: String,
-    truncatedFields: inout [String]
-) -> Value {
-    guard let value else {
-        return .null
-    }
-    return boundedLogString(value, field: field, truncatedFields: &truncatedFields)
 }
 
 private func boundedLogString(

@@ -445,7 +445,41 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(
                 resolved.value(for: ["result", "structuredContent", "review", "reviewResult", "state"]) as? String
                     == "noFindings")
-            assertCompactLog(resolved, total: 2)
+            #expect(resolved.value(for: ["result", "structuredContent", "log"]) == nil)
+
+            let read = try await postJSONRPC(
+                endpoint: endpoint,
+                sessionID: sessionID,
+                body: [
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": [
+                        "name": "review_read",
+                        "arguments": ["runId": "run-1"],
+                    ],
+                ]
+            )
+            let log = try #require(
+                read.value(for: ["result", "structuredContent", "log"]) as? [String: Any]
+            )
+            #expect((log["items"] as? [[String: Any]])?.count == 2)
+            let itemsPage = try #require(log["itemsPage"] as? [String: Any])
+            #expect(itemsPage["total"] as? Int == 2)
+            #expect(itemsPage["offset"] as? Int == 0)
+            #expect(itemsPage["returned"] as? Int == 2)
+            for removedField in [
+                "revision",
+                "orderedEntryIds",
+                "activeEntryIds",
+                "activeEntryCount",
+                "latestEntryId",
+                "finalLifecycleMessage",
+                "finalResult",
+                "truncatedFields",
+            ] {
+                #expect(log[removedField] == nil)
+            }
             let commands = await backend.recordedCommands()
             #expect(
                 commands.contains(
@@ -585,7 +619,7 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(running.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String == "running")
             #expect(running.value(for: ["result", "structuredContent", "logs"]) == nil)
             #expect(running.value(for: ["result", "structuredContent", "rawLogText"]) == nil)
-            assertCompactLog(running, total: 1)
+            #expect(running.value(for: ["result", "structuredContent", "log"]) == nil)
             #expect(
                 running.value(for: ["result", "structuredContent", "nextAction", "tool"]) as? String == "review_await")
 
@@ -620,7 +654,7 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(
                 awaited.value(for: ["result", "structuredContent", "review", "reviewResult", "state"]) as? String
                     == "noFindings")
-            assertCompactLog(awaited, total: 1)
+            #expect(awaited.value(for: ["result", "structuredContent", "log"]) == nil)
             #expect(awaited.value(for: ["result", "structuredContent", "logs"]) == nil)
         }
     }
@@ -1096,10 +1130,12 @@ struct CodexReviewMCPHTTPServerTests {
 
             let log = try #require(
                 response.value(for: ["result", "structuredContent", "log"]) as? [String: Any])
-            #expect(log["activeEntryIds"] as? [String] == [])
-            #expect(log["activeEntryCount"] as? Int == 0)
             let items = try #require(log["items"] as? [[String: Any]])
             #expect(items.isEmpty)
+            #expect(log["revision"] == nil)
+            #expect(log["orderedEntryIds"] == nil)
+            #expect(log["activeEntryIds"] == nil)
+            #expect(log["activeEntryCount"] == nil)
         }
     }
 
@@ -2184,20 +2220,6 @@ private func makeHTTPReviewAttempt(attemptID: String, turnID: String) -> ReviewA
         activeTurnThreadID: "active-\(attemptID)",
         turnID: turnID
     )
-}
-
-private func assertCompactLog(_ response: [String: Any], total: Int) {
-    let log = response.value(for: ["result", "structuredContent", "log"]) as? [String: Any]
-    #expect(log != nil)
-    #expect(log?["revision"] is String)
-    #expect((log?["orderedEntryIds"] as? [String])?.count == min(total, 100))
-    #expect((log?["activeEntryIds"] as? [String]) != nil)
-    #expect(log?["activeEntryCount"] is Int)
-    let itemsPage = log?["itemsPage"] as? [String: Any]
-    #expect(itemsPage?["total"] as? Int == total)
-    #expect(itemsPage?["limit"] as? Int == 0)
-    #expect(itemsPage?["returned"] as? Int == 0)
-    #expect((log?["items"] as? [[String: Any]])?.isEmpty == true)
 }
 
 private extension [String: Any] {

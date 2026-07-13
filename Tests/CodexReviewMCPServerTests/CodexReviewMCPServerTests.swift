@@ -76,7 +76,6 @@ struct CodexReviewMCPServerTests {
         let log = snapshot.log
         #expect(read.runID.rawValue == "run-1")
         #expect(read.presentation.status == .succeeded)
-        #expect(log.finalLifecycleMessage == "Review completed.")
         #expect(log.finalResult == "No issues found.")
         #expect(log.items.isEmpty)
     }
