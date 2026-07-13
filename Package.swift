@@ -8,7 +8,7 @@ let packageDirectory = URL(fileURLWithPath: #filePath)
 let localCodexKitPath = packageDirectory
     .appendingPathComponent("dependencies/CodexKit", isDirectory: true)
     .path
-let codexKitFallbackRevision = "02a6c29775d8610675c29636346df6d662188a9f"
+let codexKitFallbackRevision = "dce646bbd58b26aca46cb45662e34222786f36c0"
 let codexKitDependency: Package.Dependency =
     FileManager.default.fileExists(atPath: "\(localCodexKitPath)/Package.swift")
         ? .package(path: localCodexKitPath)
