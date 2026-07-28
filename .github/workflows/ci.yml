@@ -81,13 +81,34 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard:
-          - CodexReviewKitTests
-          - CodexReviewAppServerTests
-          - CodexReviewMCPServerTests
-          - CodexReviewHostTests
-          - ReviewUITests
-          - remaining
+        include:
+          - shard: CodexReviewKitTests
+            filter: CodexReviewKitTests
+            skip: ''
+          - shard: CodexReviewAppServerTests
+            filter: CodexReviewAppServerTests
+            skip: ''
+          - shard: CodexReviewMCPServerTests
+            filter: CodexReviewMCPServerTests
+            skip: ''
+          - shard: CodexReviewHostTests-a-d
+            filter: '^CodexReviewHostTests\.CodexReviewHostTests/liveStore[A-D]'
+            skip: ''
+          - shard: CodexReviewHostTests-e-j
+            filter: '^CodexReviewHostTests\.CodexReviewHostTests/liveStore[E-J]'
+            skip: ''
+          - shard: CodexReviewHostTests-k-r
+            filter: '^CodexReviewHostTests\.CodexReviewHostTests/liveStore[K-R]'
+            skip: ''
+          - shard: CodexReviewHostTests-remaining
+            filter: '^CodexReviewHostTests\.'
+            skip: '^CodexReviewHostTests\.CodexReviewHostTests/liveStore[A-R]'
+          - shard: ReviewUITests
+            filter: ReviewUITests
+            skip: ''
+          - shard: remaining
+            filter: ''
+            skip: 'CodexReviewKitTests|CodexReviewAppServerTests|CodexReviewMCPServerTests|CodexReviewHostTests|ReviewUITests'
     steps:
       - name: Check out repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -106,20 +127,18 @@ jobs:
           fail-on-cache-miss: true
 
       - name: Run package test shard
+        env:
+          TEST_FILTER: ${{ matrix.filter }}
+          TEST_SKIP: ${{ matrix.skip }}
         run: |
-          if [[ "${{ matrix.shard }}" == "remaining" ]]; then
-            swift test \
-              --skip-build \
-              --build-system swiftbuild \
-              --no-parallel \
-              --skip 'CodexReviewKitTests|CodexReviewAppServerTests|CodexReviewMCPServerTests|CodexReviewHostTests|ReviewUITests'
-          else
-            swift test \
-              --skip-build \
-              --build-system swiftbuild \
-              --no-parallel \
-              --filter "${{ matrix.shard }}"
-          fi
+          args=(
+            --skip-build
+            --build-system swiftbuild
+            --no-parallel
+          )
+          [[ -z "$TEST_FILTER" ]] || args+=(--filter "$TEST_FILTER")
+          [[ -z "$TEST_SKIP" ]] || args+=(--skip "$TEST_SKIP")
+          swift test "${args[@]}"
 
   monitor-build:
     name: ReviewMonitor Test Build (macOS)
