@@ -321,7 +321,7 @@ struct ReviewMonitorCodexChatLogProjection {
         for sourceID in sourceIDs
         where reportedMissingRolloutTargetSourceIDs.insert(sourceID).inserted {
             projectionLogger.error(
-                "Review rollout companion has no exited-review target in its turn: \(sourceID, privacy: .public)"
+                "Review rollout companion has no exited-review target in its review sequence: \(sourceID, privacy: .public)"
             )
         }
     }

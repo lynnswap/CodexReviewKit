@@ -497,7 +497,7 @@ struct ReviewMonitorCodexChatDetailTests {
         #expect(document?.text.contains("Keep this prompt visible.") == true)
     }
 
-    @Test func codexChatLogProjectionReconstructsPersistedReviewAcrossTurns()
+    @Test func codexChatLogProjectionConsumesNormalizedReviewAcrossTurns()
         async throws
     {
         var projection = ReviewMonitorCodexChatLogProjection()
@@ -555,10 +555,10 @@ struct ReviewMonitorCodexChatDetailTests {
                             ))
                         ),
                         .init(
-                            id: "item-3",
+                            id: "review_rollout_assistant",
                             kind: .agentMessage,
                             content: .message(.init(
-                                id: "item-3",
+                                id: "review_rollout_assistant",
                                 role: .assistant,
                                 text: finalReview
                             ))
@@ -615,7 +615,7 @@ struct ReviewMonitorCodexChatDetailTests {
         #expect(document?.blocks.count == 1)
     }
 
-    @Test func codexChatLogProjectionReconstructsInterruptedPersistedReviewAcrossTurns()
+    @Test func codexChatLogProjectionConsumesNormalizedInterruptedReviewAcrossTurns()
         async throws
     {
         var projection = ReviewMonitorCodexChatLogProjection()
@@ -664,10 +664,10 @@ struct ReviewMonitorCodexChatDetailTests {
                             ))
                         ),
                         .init(
-                            id: "item-3",
+                            id: "review_rollout_assistant",
                             kind: .agentMessage,
                             content: .message(.init(
-                                id: "item-3",
+                                id: "review_rollout_assistant",
                                 role: .assistant,
                                 text: "Review was interrupted. Please re-run /review."
                             ))
@@ -744,7 +744,9 @@ struct ReviewMonitorCodexChatDetailTests {
         )
     }
 
-    @Test func codexChatLogProjectionKeepsReviewRolloutCompanionWithDifferentText() async throws {
+    @Test func codexChatLogProjectionSuppressesTypedReviewRolloutCompanionWithDifferentText()
+        async throws
+    {
         var projection = ReviewMonitorCodexChatLogProjection()
         let turn = CodexTurnSnapshot(
             id: CodexTurnID(rawValue: "turn-review"),
@@ -773,9 +775,8 @@ struct ReviewMonitorCodexChatDetailTests {
             chatUpdatedAt: nil
         )
 
-        #expect(document?.blocks.count == 2)
-        #expect(document?.text.contains("Review failed before producing findings.") == true)
-        #expect(document?.text.contains("The review child was interrupted.") == true)
+        #expect(document?.blocks.count == 1)
+        #expect(document?.text == "Review failed before producing findings.")
     }
 
     @Test func codexChatLogProjectionKeepsReviewRolloutCompanionWhenTargetIsMissing() async throws {
@@ -819,6 +820,43 @@ struct ReviewMonitorCodexChatDetailTests {
             policyResult.missingTargetSourceIDs
                 == ["turn-review:agentMessage:review_rollout_assistant"]
         )
+    }
+
+    @Test func reviewRolloutPolicyDoesNotUseOutputFromAnEarlierReview() {
+        let firstTurnID = CodexTurnID(rawValue: "first-review")
+        let secondTurnID = CodexTurnID(rawValue: "second-review")
+        let companionTurnID = CodexTurnID(rawValue: "second-review-companion")
+        let companionSourceID = "second-review-companion:agentMessage:companion"
+        let policyResult = ReviewRolloutPresentationPolicy().evaluate([
+            .init(
+                sourceID: "first-review:exitedReviewMode:output",
+                turnID: firstTurnID,
+                kind: .exitedReviewMode,
+                origin: .currentV2Item,
+                semanticRelation: nil,
+                displayText: "No issues found."
+            ),
+            .init(
+                sourceID: "second-review:enteredReviewMode:input",
+                turnID: secondTurnID,
+                kind: .enteredReviewMode,
+                origin: .currentV2Item,
+                semanticRelation: nil,
+                displayText: "current changes"
+            ),
+            .init(
+                sourceID: companionSourceID,
+                turnID: companionTurnID,
+                kind: .agentMessage,
+                origin: .reviewRolloutAssistant,
+                semanticRelation: .companionOf(.exitedReviewMode),
+                displayText: "The second review was interrupted."
+            ),
+        ])
+
+        #expect(policyResult.suppressedCompanionSourceIDs.isEmpty)
+        #expect(policyResult.missingTargetSourceIDs == [companionSourceID])
+        #expect(policyResult.hiddenUserMessageTurnIDs == [companionTurnID])
     }
 
     @Test func codexChatLogProjectionKeepsMatchingReviewOutputsFromDifferentTurns() async throws {
@@ -1731,8 +1769,7 @@ struct ReviewMonitorCodexChatDetailTests {
             ))
         ))
         #expect(
-            different?.sourceDocument?.text
-                == "Review stopped before producing findings.\n\nNo issues found."
+            different?.sourceDocument?.text == "Review stopped before producing findings."
         )
 
         let removed = projection.apply(.init(
@@ -1820,7 +1857,9 @@ struct ReviewMonitorCodexChatDetailTests {
         #expect(document.blocks.contains { $0.id.rawValue.contains("review_rollout_assistant") } == false)
     }
 
-    @Test func codexChatSourceProjectionReevaluatesPersistedReviewPolicyAfterTurnMove() throws {
+    @Test func codexChatSourceProjectionKeepsNormalizedCompanionSuppressedAfterTurnMove()
+        throws
+    {
         var projection = ReviewMonitorCodexChatLogSourceProjection()
         let outerTurnID = CodexTurnID(rawValue: "outer-review-turn-move")
         let interveningTurnID = CodexTurnID(rawValue: "intervening-turn-move")
@@ -1871,10 +1910,10 @@ struct ReviewMonitorCodexChatDetailTests {
                     ))
                 ),
                 .init(
-                    id: "review-agent-move",
+                    id: "review_rollout_assistant",
                     kind: .agentMessage,
                     content: .message(.init(
-                        id: "review-agent-move",
+                        id: "review_rollout_assistant",
                         role: .assistant,
                         text: "Review was interrupted."
                     ))
@@ -1892,7 +1931,7 @@ struct ReviewMonitorCodexChatDetailTests {
                 phase: .terminal(turnID: companionTurnID, disposition: .completed)
             ), reason: .initial)
         ))
-        #expect(initial?.sourceDocument?.text.contains("Review the current changes.") == true)
+        #expect(initial?.sourceDocument?.text == "\(reviewOutput)\n\nIntervening output")
 
         let moved = projection.apply(.init(
             generation: 1,
@@ -1903,7 +1942,9 @@ struct ReviewMonitorCodexChatDetailTests {
         #expect(moved?.sourceDocument?.text == "\(reviewOutput)\n\nIntervening output")
     }
 
-    @Test func codexChatSourceProjectionReevaluatesPersistedReviewPolicyForStructuralTurnChanges() throws {
+    @Test func codexChatSourceProjectionKeepsNormalizedCompanionSuppressedAcrossStructuralChanges()
+        throws
+    {
         var projection = ReviewMonitorCodexChatLogSourceProjection()
         let outerTurnID = CodexTurnID(rawValue: "outer-review-structural-change")
         let companionTurnID = CodexTurnID(rawValue: "companion-review-structural-change")
@@ -1941,10 +1982,10 @@ struct ReviewMonitorCodexChatDetailTests {
                     ))
                 ),
                 .init(
-                    id: "review-agent-structural-change",
+                    id: "review_rollout_assistant",
                     kind: .agentMessage,
                     content: .message(.init(
-                        id: "review-agent-structural-change",
+                        id: "review_rollout_assistant",
                         role: .assistant,
                         text: "Review was interrupted."
                     ))
@@ -1982,8 +2023,7 @@ struct ReviewMonitorCodexChatDetailTests {
             sequence: 1,
             payload: .update(.turnInserted(interveningTurn, index: 1))
         ))
-        #expect(inserted?.sourceDocument?.text.contains("Review the current changes.") == true)
-        #expect(inserted?.sourceDocument?.text.contains("Review was interrupted.") == true)
+        #expect(inserted?.sourceDocument?.text == "\(reviewOutput)\n\n$ /usr/bin/true")
 
         let removed = projection.apply(.init(
             generation: 1,
@@ -1993,7 +2033,7 @@ struct ReviewMonitorCodexChatDetailTests {
         #expect(removed?.sourceDocument?.text == reviewOutput)
     }
 
-    @Test func codexChatSourceProjectionKeepsValidatedPersistedCompanionSuppressedAfterTextAppend()
+    @Test func codexChatSourceProjectionKeepsNormalizedCompanionSuppressedAfterTextAppend()
         throws
     {
         var projection = ReviewMonitorCodexChatLogSourceProjection()
@@ -2001,10 +2041,10 @@ struct ReviewMonitorCodexChatDetailTests {
         let companionTurnID = CodexTurnID(rawValue: "companion-review-text-append")
         let reviewOutput = "No actionable issues were identified."
         let companion = CodexThreadItem(
-            id: "generic-review-agent-append",
+            id: "review_rollout_assistant",
             kind: .agentMessage,
             content: .message(.init(
-                id: "generic-review-agent-append",
+                id: "review_rollout_assistant",
                 role: .assistant,
                 text: "No actionable issues were"
             ))
