@@ -1,14 +1,6 @@
 {
-  "originHash" : "65901b7ce6192fac6f7533d6026fb25cfcaef3f7f1431beef0889dcf0feacea2",
+  "originHash" : "6c55e0749603b3a3418923fe53a26d7fca40e9ae5808ac604c91bb89a9212236",
   "pins" : [
-    {
-      "identity" : "codexkit",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/lynnswap/CodexKit.git",
-      "state" : {
-        "revision" : "dce646bbd58b26aca46cb45662e34222786f36c0"
-      }
-    },
     {
       "identity" : "eventsource",
       "kind" : "remoteSourceControl",
