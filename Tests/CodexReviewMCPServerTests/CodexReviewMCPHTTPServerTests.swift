@@ -831,7 +831,20 @@ struct CodexReviewMCPHTTPServerTests {
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
         )
-        try await withHTTPServer(store: store) { server in
+        try await withHTTPServer(
+            store: store,
+            logProjectionProvider: { result in
+                guard let attempt = result.core.attempt else {
+                    return .unavailable
+                }
+                return .available(ReviewMCPLogProjection(
+                    result: result,
+                    turnID: .init(rawValue: attempt.turnID.rawValue),
+                    threadItems: [],
+                    reviewOutputText: "No issues found."
+                ))
+            }
+        ) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
             let included = ReviewRunRecord.makeForTesting(
                 id: "run-included",
@@ -903,6 +916,9 @@ struct CodexReviewMCPHTTPServerTests {
 
             let items = try #require(response.value(for: ["result", "structuredContent", "items"]) as? [[String: Any]])
             #expect(items.compactMap { $0["runId"] as? String } == ["run-included"])
+            let review = try #require(items.first?["review"] as? [String: Any])
+            #expect(review["hasFinalReview"] as? Bool == true)
+            #expect(review["finalReview"] as? String == "No issues found.")
         }
     }
 
@@ -1216,6 +1232,81 @@ struct CodexReviewMCPHTTPServerTests {
             let closeResult = await store.closeSession("other-session")
             #expect(closeResult.terminalAndDrainedRunIDs == [otherRunID])
             store.releaseClosedSession("other-session")
+        }
+    }
+
+    @Test func streamableHTTPCancelPreservesAlreadyFinishedReviewOutput() async throws {
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        )
+
+        try await withHTTPServer(
+            store: store,
+            logProjectionProvider: { result in
+                guard let attempt = result.core.attempt else {
+                    return .unavailable
+                }
+                return .available(ReviewMCPLogProjection(
+                    result: result,
+                    turnID: .init(rawValue: attempt.turnID.rawValue),
+                    threadItems: [],
+                    reviewOutputText: "No issues found."
+                ))
+            }
+        ) { server in
+            let sessionID = try await initializeSession(endpoint: await server.url)
+            store.loadForTesting(
+                serverState: .running,
+                reviewRuns: [
+                    .makeForTesting(
+                        id: "run-completed",
+                        sessionID: sessionID,
+                        cwd: "/tmp/project",
+                        targetSummary: "Completed",
+                        attemptID: "attempt-completed",
+                        threadID: "thread-completed",
+                        turnID: "turn-completed",
+                        status: .succeeded,
+                        startedAt: Date(timeIntervalSince1970: 1_000),
+                        endedAt: Date(timeIntervalSince1970: 1_001),
+                        summary: "Done"
+                    )
+                ]
+            )
+            try await server.registerSessionMemberForTesting(
+                makeHTTPTestRunID("run-completed"),
+                sessionID: sessionID
+            )
+
+            let response = try await postJSONRPC(
+                endpoint: await server.url,
+                sessionID: sessionID,
+                body: [
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": [
+                        "name": "review_cancel",
+                        "arguments": [
+                            "runId": "run-completed",
+                            "reason": "Already complete",
+                        ],
+                    ],
+                ]
+            )
+
+            #expect(response.value(for: ["result", "structuredContent", "runId"]) as? String == "run-completed")
+            #expect(response.value(for: ["result", "structuredContent", "cancelled"]) as? Bool == false)
+            #expect(
+                response.value(for: [
+                    "result", "structuredContent", "review", "hasFinalReview",
+                ]) as? Bool == true
+            )
+            #expect(
+                response.value(for: [
+                    "result", "structuredContent", "review", "finalReview",
+                ]) as? String == "No issues found."
+            )
         }
     }
 

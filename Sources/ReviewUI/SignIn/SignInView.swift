@@ -18,10 +18,8 @@ struct SignInView: View {
                 Task { @MainActor in
                     do {
                         try await store.performPrimaryAuthenticationAction()
-                    } catch let failure as CodexReviewAuthenticationFailure {
-                        authenticationFailureMessage = failure.localizedDescription
                     } catch {
-                        preconditionFailure("Unexpected authentication error: \(error)")
+                        authenticationFailureMessage = error.localizedDescription
                     }
                 }
             } label: {

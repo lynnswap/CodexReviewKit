@@ -53,6 +53,40 @@ package extension CodexReviewMCP.Tool {
             self.log = log
         }
     }
+
+    internal struct ReviewListItemSnapshot: Equatable, Sendable {
+        var result: CodexReviewAPI.Run.ListItem
+        var log: ReviewMCPLogProjection
+
+        init(
+            result: CodexReviewAPI.Run.ListItem,
+            log: ReviewMCPLogProjection
+        ) {
+            self.result = result
+            self.log = log
+        }
+    }
+
+    internal struct ReviewListSnapshot: Equatable, Sendable {
+        var items: [ReviewListItemSnapshot]
+
+        init(items: [ReviewListItemSnapshot]) {
+            self.items = items
+        }
+    }
+
+    internal struct ReviewCancelSnapshot: Equatable, Sendable {
+        var result: CodexReviewAPI.Cancel.Outcome
+        var log: ReviewMCPLogProjection
+
+        init(
+            result: CodexReviewAPI.Cancel.Outcome,
+            log: ReviewMCPLogProjection
+        ) {
+            self.result = result
+            self.log = log
+        }
+    }
 }
 
 package extension CodexReviewMCP.Tool {
@@ -60,8 +94,8 @@ package extension CodexReviewMCP.Tool {
         case reviewStart(ReviewSnapshot)
         case reviewAwait(ReviewSnapshot)
         case reviewRead(ReviewSnapshot)
-        case reviewList(CodexReviewAPI.List.Result)
-        case reviewCancel(CodexReviewAPI.Cancel.Outcome)
+        case reviewList(ReviewListSnapshot)
+        case reviewCancel(ReviewCancelSnapshot)
     }
 }
 
@@ -125,23 +159,25 @@ package final class CodexReviewMCPServer {
             )
             return .reviewRead(snapshot)
         case .reviewList(let sessionID, let cwd, let statuses, let limit):
-            return .reviewList(store.listReviews(
+            let result = store.listReviews(
                 sessionID: sessionID,
                 cwd: cwd,
                 statuses: statuses,
                 limit: limit,
                 allowedRunIDs: allowedRunIDs
-            ))
+            )
+            return .reviewList(try await reviewListSnapshot(result))
         case .reviewCancel(let sessionID, let selector, let reason):
             let runRecord = try store.resolveRun(
                 sessionID: sessionID,
                 selector: selector.defaultingToActiveStatusesForCancellation(),
                 allowedRunIDs: allowedRunIDs
             )
-            return .reviewCancel(try await store.cancelReview(
+            let result = try await store.cancelReview(
                 runID: runRecord.id,
                 cancellation: reason
-            ))
+            )
+            return .reviewCancel(try await reviewCancelSnapshot(result))
         }
     }
 
@@ -187,6 +223,50 @@ package final class CodexReviewMCPServer {
         let lookup = try await logProjectionProvider?(result) ?? .unavailable
         let log = try resolvedLogProjection(lookup, for: result)
         return .init(result: result, log: log)
+    }
+
+    private func reviewListSnapshot(
+        _ result: CodexReviewAPI.List.Result
+    ) async throws -> CodexReviewMCP.Tool.ReviewListSnapshot {
+        var items: [CodexReviewMCP.Tool.ReviewListItemSnapshot] = []
+        items.reserveCapacity(result.items.count)
+        for item in result.items {
+            let readResult = CodexReviewAPI.Read.Result(
+                runID: item.runID,
+                core: item.core,
+                presentation: item.presentation,
+                elapsedSeconds: item.elapsedSeconds
+            )
+            items.append(.init(
+                result: item,
+                log: try await terminalReviewProjection(for: readResult)
+            ))
+        }
+        return .init(items: items)
+    }
+
+    private func reviewCancelSnapshot(
+        _ result: CodexReviewAPI.Cancel.Outcome
+    ) async throws -> CodexReviewMCP.Tool.ReviewCancelSnapshot {
+        let readResult = CodexReviewAPI.Read.Result(
+            runID: result.runID,
+            core: result.core,
+            presentation: result.presentation
+        )
+        return .init(
+            result: result,
+            log: try await terminalReviewProjection(for: readResult)
+        )
+    }
+
+    private func terminalReviewProjection(
+        for result: CodexReviewAPI.Read.Result
+    ) async throws -> ReviewMCPLogProjection {
+        guard result.presentation.status == .succeeded else {
+            return .unavailable(result: result)
+        }
+        let lookup = try await logProjectionProvider?(result) ?? .unavailable
+        return try resolvedLogProjection(lookup, for: result)
     }
 
     private func resolvedLogProjection(

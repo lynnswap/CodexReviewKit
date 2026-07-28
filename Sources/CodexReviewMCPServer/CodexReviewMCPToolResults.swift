@@ -253,24 +253,26 @@ private extension String {
     }
 }
 
-private extension CodexReviewAPI.Run.ListItem {
+private extension CodexReviewMCP.Tool.ReviewListItemSnapshot {
     func structuredContent() -> Value {
         .object([
-            "runId": .string(runID.rawValue),
-            "cwd": .string(cwd),
-            "targetSummary": .string(targetSummary),
-            "run": core.structuredRunContent(),
-            "lifecycle": presentation.structuredLifecycleContent(
-                core: core,
-                elapsedSeconds: elapsedSeconds,
-                cancellable: presentation.isCancellable
+            "runId": .string(result.runID.rawValue),
+            "cwd": .string(result.cwd),
+            "targetSummary": .string(result.targetSummary),
+            "run": result.core.structuredRunContent(),
+            "lifecycle": result.presentation.structuredLifecycleContent(
+                core: result.core,
+                elapsedSeconds: result.elapsedSeconds,
+                cancellable: result.presentation.isCancellable
             ),
-            "review": core.structuredReviewContent(),
+            "review": result.core.structuredReviewContent(
+                resolvedFinalReview: log.finalResult
+            ),
         ])
     }
 }
 
-private extension CodexReviewAPI.List.Result {
+private extension CodexReviewMCP.Tool.ReviewListSnapshot {
     func structuredContent() -> Value {
         .object([
             "items": .array(items.map { $0.structuredContent() })
@@ -278,10 +280,10 @@ private extension CodexReviewAPI.List.Result {
     }
 }
 
-private extension CodexReviewAPI.Cancel.Outcome {
+private extension CodexReviewMCP.Tool.ReviewCancelSnapshot {
     func textContent() -> String {
-        if cancelled {
-            presentation.cancellation?.message ?? "Review cancelled."
+        if result.cancelled {
+            result.presentation.cancellation?.message ?? "Review cancelled."
         } else {
             "Review was already finished."
         }
@@ -289,15 +291,17 @@ private extension CodexReviewAPI.Cancel.Outcome {
 
     func structuredContent() -> Value {
         return .object([
-            "runId": .string(runID.rawValue),
-            "cancelled": .bool(cancelled),
-            "run": core.structuredRunContent(),
-            "lifecycle": presentation.structuredLifecycleContent(
-                core: core,
+            "runId": .string(result.runID.rawValue),
+            "cancelled": .bool(result.cancelled),
+            "run": result.core.structuredRunContent(),
+            "lifecycle": result.presentation.structuredLifecycleContent(
+                core: result.core,
                 elapsedSeconds: nil,
-                cancellable: presentation.isCancellable
+                cancellable: result.presentation.isCancellable
             ),
-            "review": core.structuredReviewContent(),
+            "review": result.core.structuredReviewContent(
+                resolvedFinalReview: log.finalResult
+            ),
         ])
     }
 }

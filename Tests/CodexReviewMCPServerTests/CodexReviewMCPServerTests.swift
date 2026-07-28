@@ -90,6 +90,45 @@ struct CodexReviewMCPServerTests {
         }
     }
 
+    @Test func reviewListResolvesSucceededRunProjection() async throws {
+        let runID = try ReviewRunID(validating: "run-succeeded")
+        let server = succeededServer(runID: runID)
+
+        let response = try await server.handle(.reviewList(
+            sessionID: nil,
+            cwd: nil,
+            statuses: [.succeeded],
+            limit: nil
+        ))
+
+        guard case .reviewList(let snapshot) = response else {
+            Issue.record("Expected reviewList response")
+            return
+        }
+        #expect(snapshot.items.count == 1)
+        #expect(snapshot.items.first?.result.runID == runID)
+        #expect(snapshot.items.first?.log.finalResult == "No issues found.")
+    }
+
+    @Test func reviewCancelResolvesAlreadyFinishedRunProjection() async throws {
+        let runID = try ReviewRunID(validating: "run-succeeded")
+        let server = succeededServer(runID: runID)
+
+        let response = try await server.handle(.reviewCancel(
+            sessionID: nil,
+            selector: .init(runID: runID),
+            reason: .system()
+        ))
+
+        guard case .reviewCancel(let snapshot) = response else {
+            Issue.record("Expected reviewCancel response")
+            return
+        }
+        #expect(snapshot.result.runID == runID)
+        #expect(snapshot.result.cancelled == false)
+        #expect(snapshot.log.finalResult == "No issues found.")
+    }
+
     @Test func succeededRunRejectsEmptyAndMismatchedProjection() async throws {
         let runID = try ReviewRunID(validating: "run-succeeded")
         let store = succeededStore(runID: runID)
@@ -135,6 +174,20 @@ struct CodexReviewMCPServerTests {
         await #expect(throws: ReviewMCPError.projectionRefreshFailed(runID: runID, failure: failure)) {
             _ = try await server.handle(.reviewRead(sessionID: nil, runID: runID))
         }
+    }
+
+    private func succeededServer(runID: ReviewRunID) -> CodexReviewMCPServer {
+        CodexReviewMCPServer(
+            store: succeededStore(runID: runID),
+            logProjectionProvider: { result in
+                .available(ReviewMCPLogProjection(
+                    result: result,
+                    turnID: "turn-1",
+                    threadItems: [],
+                    reviewOutputText: "No issues found."
+                ))
+            }
+        )
     }
 
     private func succeededStore(runID: ReviewRunID) -> CodexReviewStore {

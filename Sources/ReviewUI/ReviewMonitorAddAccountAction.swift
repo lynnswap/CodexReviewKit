@@ -1,34 +1,26 @@
-import AppKit
 import CodexReviewKit
 
 @MainActor
 enum ReviewMonitorAddAccountAction {
     static func perform(store: CodexReviewStore) {
         Task {
-            do {
+            await perform(store: store) {
                 try await store.addAccount()
-            } catch let failure as CodexReviewAuthenticationFailure {
-                await presentFailureAlert(
-                    title: "Failed to Add Account",
-                    message: failure.localizedDescription
-                )
-            } catch {
-                preconditionFailure("Unexpected authentication error: \(error)")
             }
         }
     }
 
-    private static func presentFailureAlert(
-        title: String,
-        message: String
+    static func perform(
+        store: CodexReviewStore,
+        operation: () async throws -> Void
     ) async {
-        await MainActor.run {
-            let alert = NSAlert()
-            alert.alertStyle = .warning
-            alert.messageText = title
-            alert.informativeText = message
-            alert.addButton(withTitle: "OK")
-            alert.runModal()
+        do {
+            try await operation()
+        } catch {
+            store.auth.presentAccountActionAlert(
+                title: "Failed to Add Account",
+                message: error.localizedDescription
+            )
         }
     }
 }
