@@ -127,7 +127,7 @@ struct ReviewMonitorCodexChatLogSourceProjection {
             precondition(turns.indices.contains(index) || index == turns.endIndex)
             turns.insert(turn, at: index)
             presentationChanged = previousIndex != index
-                && cachedPresentationState?.hasExitedReviewMarker == true
+                && turn.items.contains(where: itemAffectsPresentation)
             if previous.status != turn.status {
                 statusDependent.formUnion(turn.items.compactMap { item in
                     logProjection.dependsOnTurnStatus(item)

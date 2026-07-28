@@ -1704,6 +1704,65 @@ struct ReviewMonitorCodexChatDetailTests {
         #expect(thirdRange.lowerBound < movedSecondRange.lowerBound)
     }
 
+    @Test func codexChatSourceProjectionReevaluatesEnteredReviewMarkerAfterTurnMove() throws {
+        var projection = ReviewMonitorCodexChatLogSourceProjection()
+        let markerTurnID = CodexTurnID(rawValue: "turn-review-marker")
+        let companionTurnID = CodexTurnID(rawValue: "turn-review-companion")
+        let markerTurn = CodexTurnSnapshot(
+            id: markerTurnID,
+            state: .completed,
+            items: [.init(
+                id: "review-marker",
+                kind: .enteredReviewMode,
+                content: .log("Reviewing current changes")
+            )]
+        )
+        let companionTurn = CodexTurnSnapshot(
+            id: companionTurnID,
+            state: .completed,
+            items: [
+                .init(
+                    id: "review-user",
+                    kind: .userMessage,
+                    content: .message(.init(
+                        id: "review-user",
+                        role: .user,
+                        text: "Review the current changes."
+                    ))
+                ),
+                .init(
+                    id: "review_rollout_assistant",
+                    kind: .agentMessage,
+                    content: .message(.init(
+                        id: "review_rollout_assistant",
+                        role: .assistant,
+                        text: "Review was interrupted."
+                    ))
+                ),
+            ]
+        )
+        let initial = projection.apply(.init(
+            generation: 1,
+            sequence: 0,
+            payload: .snapshot(.init(
+                thread: .init(
+                    id: "thread-review-marker-move",
+                    turns: [markerTurn, companionTurn]
+                ),
+                phase: .terminal(turnID: companionTurnID, disposition: .completed)
+            ), reason: .initial)
+        ))
+        #expect(initial?.sourceDocument?.text.contains("Review the current changes.") == false)
+
+        let moved = projection.apply(.init(
+            generation: 1,
+            sequence: 1,
+            payload: .update(.turnUpdated(markerTurn, index: 1))
+        ))
+
+        #expect(moved?.sourceDocument?.text.contains("Review the current changes.") == true)
+    }
+
     @Test func codexChatSourceProjectionTargetsMarkerAndRolloutPolicyChanges() throws {
         var projection = ReviewMonitorCodexChatLogSourceProjection()
         let turnID = CodexTurnID(rawValue: "turn-review-policy")

@@ -228,7 +228,8 @@ struct AppServerClientTests {
             on: runtime,
             threadID: "thread-1",
             turnID: "turn-1",
-            state: .completed
+            state: .completed,
+            itemsLoadState: .notLoaded
         )
 
         #expect(
@@ -1178,12 +1179,14 @@ private extension CodexAppServerTestTransport {
 private func makeTestTurn(
     id: CodexTurnID,
     state: CodexTurnSnapshot.State = .completed,
+    itemsLoadState: CodexTurnItemsLoadState = .full,
     items: [CodexAppServerTestItem] = []
 ) throws -> CodexAppServerTestTurn {
     try .init(
         snapshot: .init(
             id: id,
             state: state,
+            itemsLoadState: itemsLoadState,
             items: items.map(\.domainProjection)
         ),
         items: items
@@ -1195,11 +1198,17 @@ private func emitTurn(
     threadID: CodexThreadID,
     turnID: CodexTurnID,
     state: CodexTurnSnapshot.State,
+    itemsLoadState: CodexTurnItemsLoadState = .full,
     items: [CodexAppServerTestItem] = []
 ) async throws {
     try await runtime.notificationEmitter.emitTurnCompleted(
         threadID: threadID,
-        turn: makeTestTurn(id: turnID, state: state, items: items)
+        turn: makeTestTurn(
+            id: turnID,
+            state: state,
+            itemsLoadState: itemsLoadState,
+            items: items
+        )
     )
 }
 
