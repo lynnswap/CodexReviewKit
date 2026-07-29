@@ -3,17 +3,17 @@ import Observation
 
 @MainActor
 @Observable
-public final class CodexReviewAccount: Identifiable, Hashable {
+package final class CodexReviewAccount: Identifiable, Hashable {
     @MainActor
     @Observable
-    public final class RateLimitWindow: Identifiable, Hashable {
-        nonisolated public let id: String
-        nonisolated public let accountKey: String
-        nonisolated public let windowDurationMinutes: Int
-        public var usedPercent: Int
-        public var resetsAt: Date?
+    package final class RateLimitWindow: Identifiable, Hashable {
+        nonisolated package let id: String
+        nonisolated package let accountKey: String
+        nonisolated package let windowDurationMinutes: Int
+        package var usedPercent: Int
+        package var resetsAt: Date?
 
-        public init(
+        package init(
             accountKey: String = "__standalone__",
             windowDurationMinutes: Int,
             usedPercent: Int,
@@ -35,47 +35,47 @@ public final class CodexReviewAccount: Identifiable, Hashable {
             self.resetsAt = resetsAt
         }
 
-        public static nonisolated func == (lhs: RateLimitWindow, rhs: RateLimitWindow) -> Bool {
+        package static nonisolated func == (lhs: RateLimitWindow, rhs: RateLimitWindow) -> Bool {
             lhs.id == rhs.id
         }
 
-        public nonisolated func hash(into hasher: inout Hasher) {
+        package nonisolated func hash(into hasher: inout Hasher) {
             hasher.combine(id)
         }
     }
 
-    public nonisolated static func normalizedEmail(_ email: String) -> String {
+    package nonisolated static func normalizedEmail(_ email: String) -> String {
         email
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
     }
-    nonisolated public let id: String
-    public package(set) var email: String
-    public package(set) var maskedEmail: String
+    nonisolated package let id: String
+    package var email: String
+    package var maskedEmail: String
     package private(set) var kind: CodexReviewBackendModel.Account.Kind
-    public var planType: String?
+    package var planType: String?
     package private(set) var capabilities: CodexReviewBackendModel.Account.Capabilities
-    public package(set) var rateLimits: [RateLimitWindow] = []
-    public package(set) var isSwitching = false
-    public package(set) var lastRateLimitFetchAt: Date?
-    public package(set) var lastRateLimitError: String?
+    package var rateLimits: [RateLimitWindow] = []
+    package var isSwitching = false
+    package var lastRateLimitFetchAt: Date?
+    package var lastRateLimitError: String?
 
-    public var requiresReauthentication: Bool {
+    package var requiresReauthentication: Bool {
         lastRateLimitError.map(Self.requiresReauthentication(errorMessage:)) ?? false
     }
 
-    public var rateLimitStatusMessage: String? {
+    package var rateLimitStatusMessage: String? {
         if requiresReauthentication {
             return "Sign in again"
         }
         return lastRateLimitError
     }
 
-    nonisolated public var accountKey: String {
+    nonisolated package var accountKey: String {
         id
     }
 
-    public convenience init(
+    package convenience init(
         accountKey: String? = nil,
         email: String,
         planType: String? = nil
@@ -343,11 +343,11 @@ private func maskedReviewAccountEmailSegment(_ segment: String) -> String {
 }
 
 extension CodexReviewAccount {
-    public static nonisolated func == (lhs: CodexReviewAccount, rhs: CodexReviewAccount) -> Bool {
+    package static nonisolated func == (lhs: CodexReviewAccount, rhs: CodexReviewAccount) -> Bool {
         lhs.id == rhs.id
     }
 
-    public nonisolated func hash(into hasher: inout Hasher) {
+    package nonisolated func hash(into hasher: inout Hasher) {
         hasher.combine(id)
     }
 }

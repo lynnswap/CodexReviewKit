@@ -1,4 +1,5 @@
-import CodexKit
+import CodexAppServerKit
+import CodexDataKit
 import CodexAppServerKitTesting
 import CodexReviewKit
 import Foundation
@@ -22,18 +23,6 @@ private actor ReviewMonitorPreviewSnapshotMutationQueue {
     }
 }
 
-private actor ReviewMonitorPreviewArchivedChatIDs {
-    private var ids: Set<CodexThreadID> = []
-
-    func insert(_ id: CodexThreadID) {
-        ids.insert(id)
-    }
-
-    func contains(_ id: CodexThreadID) -> Bool {
-        ids.contains(id)
-    }
-}
-
 private actor ReviewMonitorPreviewCancelledChatIDs {
     private var ids: Set<CodexThreadID> = []
 
@@ -46,35 +35,43 @@ private actor ReviewMonitorPreviewCancelledChatIDs {
     }
 }
 
-private struct ReviewMonitorPreviewStoredThreadItem: Sendable {
+struct ReviewMonitorPreviewStoredThreadItem: Sendable {
     var item: CodexThreadItem
     var turnID: CodexTurnID
+    var fixtureItem: CodexAppServerTestItem?
 }
 
-@MainActor
-struct ReviewMonitorPreviewChatLogFixture {
+struct ReviewMonitorPreviewChatLogFixture: Sendable {
     let chatID: CodexThreadID
     let title: String
-    let preview: String?
-    let model: String?
-    let workspaceCWD: String?
-    let updatedAt: Date?
+    let preview: String
+    let model: String
+    let modelProvider: String
+    let workspaceCWD: String
+    let createdAt: Date
+    let updatedAt: Date
     let recencyAt: Date?
-    let status: CodexThreadStatus?
+    let status: CodexThreadStatus
     let cwd: String
     let streamID: String
     let isRunning: Bool
-    let initialThreadSnapshot: CodexThreadSnapshot
+    let storedThread: CodexAppServerTestStoredThread
+
+    var initialThreadSnapshot: CodexThreadSnapshot {
+        storedThread.snapshot
+    }
 
     init(
         chatID: CodexThreadID,
         title: String,
-        preview: String?,
-        model: String?,
-        workspaceCWD: String?,
-        updatedAt: Date?,
+        preview: String,
+        model: String,
+        modelProvider: String,
+        workspaceCWD: String,
+        createdAt: Date,
+        updatedAt: Date,
         recencyAt: Date?,
-        status: CodexThreadStatus?,
+        status: CodexThreadStatus,
         cwd: String,
         streamID: String,
         isRunning: Bool,
@@ -84,40 +81,85 @@ struct ReviewMonitorPreviewChatLogFixture {
         self.title = title
         self.preview = preview
         self.model = model
+        self.modelProvider = modelProvider
         self.workspaceCWD = workspaceCWD
+        self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.recencyAt = recencyAt
         self.status = status
         self.cwd = cwd
         self.streamID = streamID
         self.isRunning = isRunning
-        self.initialThreadSnapshot = initialThreadSnapshot
+        do {
+            self.storedThread = try makePreviewStoredThread(
+                chatID: chatID,
+                title: title,
+                preview: preview,
+                model: model,
+                modelProvider: modelProvider,
+                workspaceCWD: workspaceCWD,
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                recencyAt: recencyAt,
+                status: status,
+                cwd: cwd,
+                initialThreadSnapshot: initialThreadSnapshot
+            )
+        } catch {
+            preconditionFailure("Invalid Preview stored-thread fixture: \(error)")
+        }
     }
 }
 
-@MainActor
-final class ReviewMonitorPreviewAppServerRuntime {
-    let modelSource = ReviewMonitorCodexModelSource()
+enum ReviewMonitorPreviewRuntimeNotification: Sendable {
+    case itemLifecycle(
+        ReviewMonitorPreviewStoredThreadItem,
+        ReviewMonitorPreviewChatLogFixture
+    )
+    case textDelta(
+        delta: String,
+        itemID: String,
+        turnID: CodexTurnID,
+        chatID: CodexThreadID,
+        kind: CodexThreadItem.Kind,
+        content: CodexThreadItem.Content
+    )
+    case stream(
+        ReviewMonitorPreviewContent.PreviewChatLogStreamStep,
+        ReviewMonitorPreviewStoredThreadItem,
+        ReviewMonitorPreviewChatLogFixture
+    )
+    case cancelled(
+        CodexAppServerTestStoredThread,
+        ReviewMonitorPreviewChatLogFixture
+    )
+}
 
+struct ReviewMonitorPreviewStreamMutation: Sendable {
+    let tick: Int
+    let notifications: [ReviewMonitorPreviewRuntimeNotification]
+}
+
+@MainActor
+final class ReviewMonitorPreviewRuntimeEventSink {
     private let fixtures: [ReviewMonitorPreviewChatLogFixture]
     private let fixturesByChatID: [CodexThreadID: ReviewMonitorPreviewChatLogFixture]
-    private var threadStore: CodexAppServerTestThreadStore
-    private var runtime: CodexAppServerTestRuntime?
-    private var container: CodexModelContainer?
-    private var startTask: Task<Void, Never>?
-    private var streamTask: Task<Void, Never>?
-    private var notificationTask: Task<Void, Never>?
+    let threadStore: CodexAppServerTestThreadStore
+    private var turnCompletionNotificationCount = 0
     private let snapshotMutationQueue = ReviewMonitorPreviewSnapshotMutationQueue()
-    private let archivedChatIDs = ReviewMonitorPreviewArchivedChatIDs()
     private let cancelledChatIDs = ReviewMonitorPreviewCancelledChatIDs()
-    private var tick = 0
+    private(set) var currentTick = 0
 
     init(fixtures: [ReviewMonitorPreviewChatLogFixture]) {
         self.fixtures = fixtures
         self.fixturesByChatID = Dictionary(uniqueKeysWithValues: fixtures.map { ($0.chatID, $0) })
-        self.threadStore = CodexAppServerTestThreadStore(
-            threads: fixtures.map(\.threadSnapshot)
-        )
+        do {
+            self.threadStore = try CodexAppServerTestThreadStore(
+                threads: fixtures.map(\.storedThread)
+            )
+        } catch {
+            preconditionFailure("Invalid Preview thread store: \(error)")
+        }
     }
 
     var initialChatID: CodexThreadID? {
@@ -132,261 +174,187 @@ final class ReviewMonitorPreviewAppServerRuntime {
     }
 
     func snapshotForTesting(chatID: CodexThreadID) async -> CodexThreadSnapshot? {
-        await threadStore.snapshot(id: chatID)
+        await threadStore.storedThread(id: chatID)?.snapshot
     }
 
-    func interruptRequestCountForTesting() async -> Int {
-        guard let runtime else {
-            return 0
-        }
-        return await runtime.transport.recordedRequests(method: "turn/interrupt").count
+    func turnCompletionNotificationCountForTesting() -> Int {
+        turnCompletionNotificationCount
     }
 
-    func archiveRequestCountForTesting() async -> Int {
-        guard let runtime else {
-            return 0
-        }
-        return await runtime.transport.recordedRequests(method: "thread/archive").count
-    }
-
-    func upsertPreviewItem(
-        id: String,
-        kind: CodexThreadItem.Kind,
-        content: CodexThreadItem.Content,
+    func prepareUpsertPreviewItem(
+        _ item: CodexAppServerTestItem,
         to chatID: CodexThreadID
-    ) async {
+    ) async -> ReviewMonitorPreviewRuntimeNotification? {
         guard let fixture = fixturesByChatID[chatID] else {
-            return
+            return nil
         }
-        guard let item = await upsertStoredItem(
-            id: id,
-            kind: kind,
-            content: content,
-            in: fixture
-        ) else {
-            return
+        guard let storedItem = await upsertStoredItem(item, in: fixture) else {
+            return nil
         }
-        start()
-        enqueueNotification { [weak self] in
-            await self?.emitItem(item, for: fixture)
-        }
+        return .itemLifecycle(storedItem, fixture)
     }
 
-    func appendPreviewText(
+    func prepareAppendPreviewText(
         _ delta: String,
         to chatID: CodexThreadID,
         itemID: String,
         kind: CodexThreadItem.Kind,
         content: CodexThreadItem.Content
-    ) async {
+    ) async -> ReviewMonitorPreviewRuntimeNotification? {
         guard delta.isEmpty == false,
               fixturesByChatID[chatID] != nil else {
-            return
+            return nil
         }
         guard let item = await appendStoredText(
             delta,
             itemID: itemID,
-            kind: kind,
-            content: content,
             in: chatID
         ) else {
-            return
+            return nil
         }
-        start()
-        enqueueNotification { [weak self] in
-            do {
-                try await self?.ensureStarted()
-                guard let runtime = self?.runtime else {
-                    return
-                }
-                try await self?.emitTextDelta(
-                    delta,
-                    itemID: itemID,
-                    turnID: item.turnID,
-                    chatID: chatID,
-                    kind: kind,
-                    content: item.item.content,
-                    runtime: runtime
-                )
-            } catch {
-            }
-        }
+        return .textDelta(
+            delta: delta,
+            itemID: itemID,
+            turnID: item.turnID,
+            chatID: chatID,
+            kind: kind,
+            content: item.item.content
+        )
     }
 
-    private func enqueueNotification(_ operation: @escaping @MainActor () async -> Void) {
-        let previousTask = notificationTask
-        notificationTask = Task { @MainActor in
-            await previousTask?.value
-            await operation()
-        }
-    }
-
-    func start() {
-        guard startTask == nil, runtime == nil else {
-            return
-        }
-        startTask = Task { @MainActor [weak self] in
-            do {
-                try await self?.startNow()
-            } catch {
-            }
-        }
-    }
-
-    func startStreaming(interval: Duration) {
-        start()
-        guard streamTask == nil else {
-            return
-        }
-        streamTask = Task { @MainActor [weak self] in
-            while Task.isCancelled == false {
-                try? await Task.sleep(for: interval)
-                guard let self, Task.isCancelled == false else {
-                    return
-                }
-                _ = await self.appendPreviewStreamTick(
-                    after: self.tick,
-                    emitsNotifications: true
-                )
-            }
-        }
-    }
-
-    @discardableResult
-    func appendPreviewStreamTick(
-        after currentTick: Int = 0,
-        emitsNotifications: Bool = false
-    ) async -> Int {
-        var runningFixtures: [ReviewMonitorPreviewChatLogFixture] = []
-        for fixture in fixtures where fixture.isRunning {
-            if await cancelledChatIDs.contains(fixture.chatID) == false {
-                runningFixtures.append(fixture)
+    func prepareStreamMutation(
+        after currentTick: Int
+    ) async -> ReviewMonitorPreviewStreamMutation {
+        var runningFixtures: [(index: Int, fixture: ReviewMonitorPreviewChatLogFixture)] = []
+        for (index, fixture) in fixtures.filter(\.isRunning).enumerated() {
+            if await cancelledChatIDs.contains(fixture.chatID) == false,
+                await threadStore.storedThread(id: fixture.chatID)?.isArchived == false
+            {
+                runningFixtures.append((index, fixture))
             }
         }
         guard runningFixtures.isEmpty == false else {
-            return currentTick
-        }
-
-        if emitsNotifications {
-            do {
-                try await ensureStarted()
-            } catch {
-                return currentTick
-            }
+            return .init(tick: currentTick, notifications: [])
         }
 
         let nextTick = currentTick + 1
-        for (index, fixture) in runningFixtures.enumerated() {
-            guard let frame = ReviewMonitorPreviewContent.streamFrame(
-                forRunningChatAt: index,
-                tick: nextTick
-            ) else {
+        var notifications: [ReviewMonitorPreviewRuntimeNotification] = []
+        for (index, fixture) in runningFixtures {
+            guard
+                let frame = ReviewMonitorPreviewContent.streamFrame(
+                    forRunningChatAt: index,
+                    tick: nextTick
+                )
+            else {
                 continue
             }
-        guard let storedItem = await apply(frame.step, cycle: frame.cycle, for: fixture) else {
-            continue
-        }
-        if emitsNotifications {
-            enqueueNotification { [weak self] in
-                await self?.emit(frame.step, storedItem: storedItem, for: fixture)
+            guard let storedItem = await apply(frame.step, cycle: frame.cycle, for: fixture) else {
+                continue
             }
+            notifications.append(.stream(frame.step, storedItem, fixture))
         }
-        }
-        tick = nextTick
-        return nextTick
+        self.currentTick = nextTick
+        return .init(tick: nextTick, notifications: notifications)
     }
 
-    private func ensureStarted() async throws {
-        if runtime != nil {
-            return
-        }
-        if let startTask {
-            await startTask.value
-            return
-        }
-        try await startNow()
-    }
-
-    private func startNow() async throws {
-        if runtime != nil {
-            return
-        }
-        let runtime = try await CodexAppServerTestRuntime.start(threadStore: threadStore)
-        let container = CodexModelContainer(appServer: runtime.server)
-        self.runtime = runtime
-        try await rebindRuntimeToCurrentThreadStore(runtime)
-        await runtime.transport.handle(method: "turn/interrupt") { params in
-            let request = try JSONDecoder().decode(PreviewTurnInterruptParams.self, from: params)
-            let threadID = CodexThreadID(rawValue: request.threadID)
-            await self.cancelPreviewChat(threadID)
-            return Data("{}".utf8)
-        }
-        self.container = container
-        modelSource.install(container: container)
-    }
-
-    private func rebindRuntimeToCurrentThreadStore(_ runtime: CodexAppServerTestRuntime) async throws {
-        var reboundStore: CodexAppServerTestThreadStore
-        repeat {
-            reboundStore = threadStore
-            try await runtime.transport.stubThreads(reboundStore)
-            let archivedChatIDs = archivedChatIDs
-            let store = reboundStore
-            await runtime.transport.handle(method: "thread/archive") { params in
-                let request = try JSONDecoder().decode(PreviewThreadArchiveParams.self, from: params)
-                let threadID = CodexThreadID(rawValue: request.threadID)
-                await archivedChatIDs.insert(threadID)
-                await store.remove(id: threadID)
-                return Data("{}".utf8)
-            }
-        } while reboundStore !== threadStore
-    }
-
-    private func cancelPreviewChat(_ chatID: CodexThreadID) async {
+    func prepareCancellation(
+        chatID: CodexThreadID
+    ) async -> ReviewMonitorPreviewRuntimeNotification? {
         guard let fixture = fixturesByChatID[chatID] else {
-            return
+            return nil
         }
         await cancelledChatIDs.insert(chatID)
-        guard let cancelledSnapshot = await updateStoredSnapshot(for: fixture, mutation: { snapshot in
-            snapshot.turns = snapshot.turns?.map { turn in
-                var turn = turn
-                if turn.status.isTerminalForPreview == false {
-                    turn.status = .cancelled
-                }
-                return turn
+        let cancelledThread: CodexAppServerTestStoredThread? = await snapshotMutationQueue.run { @MainActor [weak self] in
+            guard let self,
+                  let stored = await self.threadStore.storedThread(id: fixture.chatID) else {
+                return nil
             }
-        }) else {
-            return
+            do {
+                let turns = try stored.turns.map { turn in
+                    guard turn.snapshot.state.isTerminalForPreview == false else {
+                        return turn
+                    }
+                    var snapshot = turn.snapshot
+                    snapshot.state = .interrupted
+                    return try CodexAppServerTestTurn(
+                        snapshot: snapshot,
+                        items: turn.items
+                    )
+                }
+                let updated = try stored.replacingTurns(turns).replacingStatus(.idle)
+                await self.threadStore.upsert(updated)
+                return updated
+            } catch {
+                preconditionFailure("Failed to interrupt a Preview stored thread: \(error)")
+            }
         }
-        enqueueNotification { [weak self] in
-            await self?.emitCancelledState(cancelledSnapshot, for: fixture)
+        guard let cancelledThread else {
+            return nil
+        }
+        return .cancelled(cancelledThread, fixture)
+    }
+
+    func emit(
+        _ notification: ReviewMonitorPreviewRuntimeNotification,
+        using runtime: CodexAppServerTestRuntime
+    ) async throws {
+        switch notification {
+        case .itemLifecycle(let storedItem, let fixture):
+            try await emitItemLifecycle(storedItem, for: fixture, using: runtime)
+        case .textDelta(let delta, let itemID, let turnID, let chatID, let kind, let content):
+            try await emitTextDelta(
+                delta,
+                itemID: itemID,
+                turnID: turnID,
+                chatID: chatID,
+                kind: kind,
+                content: content,
+                runtime: runtime
+            )
+        case .stream(let step, let storedItem, let fixture):
+            try await emit(step, storedItem: storedItem, for: fixture, using: runtime)
+        case .cancelled(let storedThread, let fixture):
+            try await emitCancelledState(storedThread, for: fixture, using: runtime)
         }
     }
 
     private func emit(
         _ step: ReviewMonitorPreviewContent.PreviewChatLogStreamStep,
         storedItem: ReviewMonitorPreviewStoredThreadItem,
-        for fixture: ReviewMonitorPreviewChatLogFixture
-    ) async {
-        guard let runtime else {
-            return
-        }
-        do {
-            switch step.mode {
-            case .textDelta:
-                try await emitTextDelta(
-                    step.deltaText ?? "",
-                    itemID: storedItem.item.id,
-                    turnID: storedItem.turnID,
-                    chatID: fixture.chatID,
-                    kind: storedItem.item.kind,
-                    content: storedItem.item.content,
-                    runtime: runtime
-                )
-            case .update, .complete:
-                await emitItem(storedItem, for: fixture)
+        for fixture: ReviewMonitorPreviewChatLogFixture,
+        using runtime: CodexAppServerTestRuntime
+    ) async throws {
+        switch step.mode {
+        case .textDelta:
+            try await emitTextDelta(
+                step.deltaText ?? "",
+                itemID: storedItem.item.id,
+                turnID: storedItem.turnID,
+                chatID: fixture.chatID,
+                kind: storedItem.item.kind,
+                content: storedItem.item.content,
+                runtime: runtime
+            )
+        case .update, .complete:
+            guard let fixtureItem = storedItem.fixtureItem else {
+                preconditionFailure("A preview item lifecycle event requires its canonical fixture item.")
             }
-        } catch {
+            switch step.mode {
+            case .update:
+                try await runtime.notificationEmitter.emitItemStarted(
+                    threadID: fixture.chatID,
+                    turnID: storedItem.turnID,
+                    item: fixtureItem
+                )
+            case .complete:
+                try await runtime.notificationEmitter.emitItemCompleted(
+                    threadID: fixture.chatID,
+                    turnID: storedItem.turnID,
+                    item: fixtureItem
+                )
+            case .textDelta:
+                preconditionFailure("Text deltas are handled above.")
+            }
         }
     }
 
@@ -402,176 +370,130 @@ final class ReviewMonitorPreviewAppServerRuntime {
         )
         switch step.mode {
         case .update, .complete:
-            return await upsertStoredItem(
-                id: itemID,
-                kind: step.kind,
-                content: step.content,
-                in: fixture
-            )
+            do {
+                return await upsertStoredItem(
+                    try makePreviewTestItem(
+                        id: itemID,
+                        kind: step.kind,
+                        content: step.content,
+                        cwd: fixture.cwd
+                    ),
+                    in: fixture
+                )
+            } catch {
+                preconditionFailure("Invalid preview item fixture: \(error)")
+            }
         case .textDelta:
             return await appendStoredText(
                 step.deltaText ?? "",
                 itemID: itemID,
-                kind: step.kind,
-                content: step.content,
                 in: fixture.chatID
             )
         }
     }
 
     private func upsertStoredItem(
-        id: String,
-        kind: CodexThreadItem.Kind,
-        content: CodexThreadItem.Content,
+        _ fixtureItem: CodexAppServerTestItem,
         in fixture: ReviewMonitorPreviewChatLogFixture
     ) async -> ReviewMonitorPreviewStoredThreadItem? {
-        let fallbackTurnID = fixture.previewFallbackTurnID
-        return await updateStoredSnapshot(for: fixture) { snapshot in
-            let turnID = snapshot.ensurePreviewTurn(fallback: fallbackTurnID)
-            let item = CodexThreadItem(
-                id: id,
-                kind: kind,
-                content: content
-            )
-            guard let turnIndex = snapshot.turns?.lastIndex(where: { $0.id == turnID }) else {
+        return await snapshotMutationQueue.run { @MainActor [weak self] in
+            guard let self,
+                  await self.cancelledChatIDs.contains(fixture.chatID) == false,
+                  let stored = await self.threadStore.storedThread(id: fixture.chatID),
+                  stored.isArchived == false else {
                 return nil
             }
-            if let itemIndex = snapshot.turns?[turnIndex].items.firstIndex(where: { $0.id == item.id }) {
-                snapshot.turns?[turnIndex].items[itemIndex] = item
-            } else {
-                snapshot.turns?[turnIndex].items.append(item)
+            do {
+                var turns = stored.turns
+                let turnIndex = try turns.requirePreviewTurn()
+                var items = turns[turnIndex].items
+                if let itemIndex = items.firstIndex(where: {
+                    $0.domainProjection.id == fixtureItem.domainProjection.id
+                }) {
+                    items[itemIndex] = fixtureItem
+                } else {
+                    items.append(fixtureItem)
+                }
+                turns[turnIndex] = try turns[turnIndex].replacingItems(items)
+                await self.threadStore.upsert(try stored.replacingTurns(turns))
+                return ReviewMonitorPreviewStoredThreadItem(
+                    item: fixtureItem.domainProjection,
+                    turnID: turns[turnIndex].snapshot.id,
+                    fixtureItem: fixtureItem
+                )
+            } catch {
+                preconditionFailure("Failed to update a Preview stored item: \(error)")
             }
-            return ReviewMonitorPreviewStoredThreadItem(item: item, turnID: turnID)
         }
     }
 
     private func appendStoredText(
         _ delta: String,
         itemID: String,
-        kind: CodexThreadItem.Kind,
-        content: CodexThreadItem.Content,
         in chatID: CodexThreadID
     ) async -> ReviewMonitorPreviewStoredThreadItem? {
         guard delta.isEmpty == false,
               let fixture = fixturesByChatID[chatID] else {
             return nil
         }
-        let fallbackTurnID = fixture.previewFallbackTurnID
-        return await updateStoredSnapshot(for: fixture) { snapshot in
-            let turnID = snapshot.ensurePreviewTurn(fallback: fallbackTurnID)
-            guard let turnIndex = snapshot.turns?.lastIndex(where: { $0.id == turnID }) else {
+        return await snapshotMutationQueue.run { @MainActor [weak self] in
+            guard let self,
+                  await self.cancelledChatIDs.contains(fixture.chatID) == false,
+                  let stored = await self.threadStore.storedThread(id: fixture.chatID),
+                  stored.isArchived == false else {
                 return nil
             }
-            if let itemIndex = snapshot.turns?[turnIndex].items.firstIndex(where: { $0.id == itemID }) {
-                snapshot.turns?[turnIndex].items[itemIndex].content.appendPreviewText(delta)
-                guard let item = snapshot.turns?[turnIndex].items[itemIndex] else {
-                    return nil
+            do {
+                var turns = stored.turns
+                let turnIndex = try turns.requirePreviewTurn()
+                var items = turns[turnIndex].items
+                guard let itemIndex = items.firstIndex(where: {
+                    $0.domainProjection.id == itemID
+                }) else {
+                    preconditionFailure("A preview text delta requires a previously started item.")
                 }
-                return ReviewMonitorPreviewStoredThreadItem(item: item, turnID: turnID)
-            }
-            var item = CodexThreadItem(
-                id: itemID,
-                kind: kind,
-                content: content
-            )
-            item.content.appendPreviewText(delta)
-            snapshot.turns?[turnIndex].items.append(item)
-            return ReviewMonitorPreviewStoredThreadItem(item: item, turnID: turnID)
-        }
-    }
-
-    private func updateStoredSnapshot(
-        for fixture: ReviewMonitorPreviewChatLogFixture,
-        _ mutation: @escaping @Sendable (inout CodexThreadSnapshot) -> ReviewMonitorPreviewStoredThreadItem?
-    ) async -> ReviewMonitorPreviewStoredThreadItem? {
-        await snapshotMutationQueue.run { @MainActor [weak self] in
-            guard let self,
-                  var snapshot = await self.threadStore.snapshot(id: fixture.chatID),
-                  let item = mutation(&snapshot) else {
-                return nil
-            }
-            await self.replaceThreadStorePreservingFixtureOrder(
-                with: fixture.threadSnapshot(snapshot)
-            )
-            return item
-        }
-    }
-
-    private func updateStoredSnapshot(
-        for fixture: ReviewMonitorPreviewChatLogFixture,
-        mutation: @escaping @Sendable (inout CodexThreadSnapshot) -> Void
-    ) async -> CodexThreadSnapshot? {
-        await snapshotMutationQueue.run { @MainActor [weak self] in
-            guard let self,
-                  var snapshot = await self.threadStore.snapshot(id: fixture.chatID) else {
-                return nil
-            }
-            mutation(&snapshot)
-            await self.replaceThreadStorePreservingFixtureOrder(
-                with: fixture.threadSnapshot(snapshot, status: .idle)
-            )
-            return snapshot
-        }
-    }
-
-    private func replaceThreadStorePreservingFixtureOrder(
-        with updatedSnapshot: CodexThreadSnapshot
-    ) async {
-        let currentStore = threadStore
-        let storedSnapshots = await currentStore.snapshots()
-        let fixtureSnapshotIDs = Set(fixtures.map(\.chatID))
-        var orderedFixtureSnapshots: [CodexThreadSnapshot] = []
-        for fixture in fixtures {
-            if await archivedChatIDs.contains(fixture.chatID) {
-                continue
-            }
-            if fixture.chatID == updatedSnapshot.id {
-                orderedFixtureSnapshots.append(updatedSnapshot)
-                continue
-            }
-            orderedFixtureSnapshots.append(
-                await currentStore.snapshot(id: fixture.chatID) ?? fixture.threadSnapshot
-            )
-        }
-        let nonFixtureSnapshots = storedSnapshots.filter { snapshot in
-            fixtureSnapshotIDs.contains(snapshot.id) == false
-        }
-        let replacementStore = CodexAppServerTestThreadStore(
-            threads: orderedFixtureSnapshots + nonFixtureSnapshots
-        )
-        threadStore = replacementStore
-        do {
-            if let runtime {
-                try await rebindRuntimeToCurrentThreadStore(runtime)
-            }
-        } catch {
-        }
-    }
-
-    private func emitItem(
-        _ storedItem: ReviewMonitorPreviewStoredThreadItem,
-        for fixture: ReviewMonitorPreviewChatLogFixture
-    ) async {
-        do {
-            try await ensureStarted()
-            guard let runtime else {
-                return
-            }
-            await runtime.transport.waitForNotificationStreamCount(1)
-            await runtime.transport.waitForRequest(method: "thread/read")
-            try await runtime.transport.emitServerNotification(
-                method: "item/updated",
-                params: PreviewThreadItemParams(
-                    threadID: fixture.chatID.rawValue,
-                    turnID: storedItem.turnID.rawValue,
-                    item: makePreviewNotificationItem(
-                        id: storedItem.item.id,
-                        kind: storedItem.item.kind,
-                        content: storedItem.item.content
-                    )
+                var item = items[itemIndex].domainProjection
+                item.content.appendPreviewText(delta)
+                let fixtureItem = try makePreviewTestItem(
+                    id: item.id,
+                    kind: item.kind,
+                    content: item.content,
+                    cwd: fixture.cwd
                 )
+                items[itemIndex] = fixtureItem
+                turns[turnIndex] = try turns[turnIndex].replacingItems(items)
+                await self.threadStore.upsert(try stored.replacingTurns(turns))
+                return ReviewMonitorPreviewStoredThreadItem(
+                    item: item,
+                    turnID: turns[turnIndex].snapshot.id,
+                    fixtureItem: fixtureItem
+                )
+            } catch {
+                preconditionFailure("Failed to append Preview stored text: \(error)")
+            }
+        }
+    }
+
+    private func emitItemLifecycle(
+        _ storedItem: ReviewMonitorPreviewStoredThreadItem,
+        for fixture: ReviewMonitorPreviewChatLogFixture,
+        using runtime: CodexAppServerTestRuntime
+    ) async throws {
+        guard let fixtureItem = storedItem.fixtureItem else {
+            preconditionFailure("A preview item lifecycle event requires its canonical fixture item.")
+        }
+        if storedItem.item.isTerminalPreviewItem {
+            try await runtime.notificationEmitter.emitItemCompleted(
+                threadID: fixture.chatID,
+                turnID: storedItem.turnID,
+                item: fixtureItem
             )
-        } catch {
+        } else {
+            try await runtime.notificationEmitter.emitItemStarted(
+                threadID: fixture.chatID,
+                turnID: storedItem.turnID,
+                item: fixtureItem
+            )
         }
     }
 
@@ -587,76 +509,79 @@ final class ReviewMonitorPreviewAppServerRuntime {
         guard delta.isEmpty == false else {
             return
         }
-        await runtime.transport.waitForNotificationStreamCount(1)
-        await runtime.transport.waitForRequest(method: "thread/read")
         if isReasoningDelta(kind: kind, content: content) {
-            let method: String
-            let summaryIndex: Int?
-            let contentIndex: Int?
             if case .reasoning(let reasoning) = content,
                reasoning.summary.isEmpty == false {
-                method = "item/reasoning/summaryTextDelta"
-                summaryIndex = 0
-                contentIndex = nil
-            } else {
-                method = "item/reasoning/textDelta"
-                summaryIndex = nil
-                contentIndex = 0
-            }
-            try await runtime.transport.emitServerNotification(
-                method: method,
-                params: PreviewTurnDeltaParams(
-                    threadID: chatID.rawValue,
-                    turnID: turnID.rawValue,
+                try await runtime.notificationEmitter.emitReasoningSummaryTextDelta(
+                    threadID: chatID,
+                    turnID: turnID,
                     itemID: itemID,
-                    delta: delta,
-                    phase: nil,
-                    summaryIndex: summaryIndex,
-                    contentIndex: contentIndex
+                    summaryIndex: 0,
+                    delta: delta
                 )
-            )
+            } else {
+                try await runtime.notificationEmitter.emitReasoningTextDelta(
+                    threadID: chatID,
+                    turnID: turnID,
+                    itemID: itemID,
+                    contentIndex: 0,
+                    delta: delta
+                )
+            }
             return
         }
         switch kind {
         case .commandExecution:
-            try await emitOutputDelta(
-                method: "item/commandExecution/outputDelta",
-                delta: delta,
-                itemID: itemID,
+            try await runtime.notificationEmitter.emitCommandExecutionOutputDelta(
+                threadID: chatID,
                 turnID: turnID,
-                chatID: chatID,
-                runtime: runtime
+                itemID: itemID,
+                delta: delta
             )
         case .fileChange:
-            try await emitOutputDelta(
-                method: "item/fileChange/outputDelta",
-                delta: delta,
-                itemID: itemID,
+            guard case .fileChange(let fileChange) = content,
+                  let path = fileChange.path,
+                  let output = fileChange.output else {
+                throw CodexAppServerTestError.invalidFixture(
+                    "Preview file-change deltas require a path and accumulated diff."
+                )
+            }
+            try await runtime.notificationEmitter.emitFileChangePatchUpdated(
+                threadID: chatID,
                 turnID: turnID,
-                chatID: chatID,
-                runtime: runtime
+                itemID: itemID,
+                changes: [.init(path: path, kind: .update(movePath: nil), diff: output)]
             )
-        case .mcpToolCall, .dynamicToolCall, .collabAgentToolCall, .subAgentActivity:
-            try await emitOutputDelta(
-                method: "item/mcpToolCall/progress",
-                delta: delta,
-                itemID: itemID,
+        case .mcpToolCall:
+            guard case .toolCall(let toolCall) = content,
+                  let message = toolCall.result else {
+                throw CodexAppServerTestError.invalidFixture(
+                    "Preview MCP progress requires an accumulated result message."
+                )
+            }
+            try await runtime.notificationEmitter.emitMCPToolCallProgress(
+                threadID: chatID,
                 turnID: turnID,
-                chatID: chatID,
-                runtime: runtime
+                itemID: itemID,
+                message: message
+            )
+        case .plan:
+            try await runtime.notificationEmitter.emitPlanDelta(
+                threadID: chatID,
+                turnID: turnID,
+                itemID: itemID,
+                delta: delta
+            )
+        case .dynamicToolCall, .collabAgentToolCall, .subAgentActivity:
+            throw CodexAppServerTestError.invalidFixture(
+                "Unsupported Preview current-v2 delta kind \(kind.rawValue)."
             )
         default:
-            try await runtime.transport.emitServerNotification(
-                method: "item/agentMessage/delta",
-                params: PreviewTurnDeltaParams(
-                    threadID: chatID.rawValue,
-                    turnID: turnID.rawValue,
-                    itemID: itemID,
-                    delta: delta,
-                    phase: "final_answer",
-                    summaryIndex: nil,
-                    contentIndex: nil
-                )
+            try await runtime.notificationEmitter.emitAgentMessageDelta(
+                threadID: chatID,
+                turnID: turnID,
+                itemID: itemID,
+                delta: delta
             )
         }
     }
@@ -674,305 +599,290 @@ final class ReviewMonitorPreviewAppServerRuntime {
         return false
     }
 
-    private func emitOutputDelta(
-        method: String,
-        delta: String,
-        itemID: String,
-        turnID: CodexTurnID,
-        chatID: CodexThreadID,
-        runtime: CodexAppServerTestRuntime
+    private func emitCancelledState(
+        _ storedThread: CodexAppServerTestStoredThread,
+        for fixture: ReviewMonitorPreviewChatLogFixture,
+        using runtime: CodexAppServerTestRuntime
     ) async throws {
-        try await runtime.transport.emitServerNotification(
-            method: method,
-            params: PreviewTurnDeltaParams(
-                threadID: chatID.rawValue,
-                turnID: turnID.rawValue,
-                itemID: itemID,
-                delta: delta,
-                phase: nil,
-                summaryIndex: nil,
-                contentIndex: nil
-            )
+        try await runtime.notificationEmitter.emitThreadStatusChanged(
+            threadID: fixture.chatID,
+            status: .idle
+        )
+        guard let turn = storedThread.turns.last else {
+            preconditionFailure("A cancelled Preview thread must own its interrupted turn.")
+        }
+        try await runtime.notificationEmitter.emitTurnCompleted(
+            threadID: fixture.chatID,
+            turn: turn
+        )
+        turnCompletionNotificationCount += 1
+    }
+}
+
+private func makePreviewStoredThread(
+    chatID: CodexThreadID,
+    title: String,
+    preview: String,
+    model: String,
+    modelProvider: String,
+    workspaceCWD: String,
+    createdAt: Date,
+    updatedAt: Date,
+    recencyAt: Date?,
+    status: CodexThreadStatus,
+    cwd: String,
+    initialThreadSnapshot: CodexThreadSnapshot
+) throws -> CodexAppServerTestStoredThread {
+    guard initialThreadSnapshot.id == chatID else {
+        throw CodexAppServerTestError.invalidFixture(
+            "Preview thread identity must match its initial snapshot."
         )
     }
-
-    private func emitCancelledState(
-        _ snapshot: CodexThreadSnapshot,
-        for fixture: ReviewMonitorPreviewChatLogFixture
-    ) async {
-        do {
-            try await ensureStarted()
-            guard let runtime else {
-                return
-            }
-            await runtime.transport.waitForNotificationStreamCount(1)
-            let turnID = snapshot.turns?.last?.id ?? fixture.previewFallbackTurnID
-            try await runtime.transport.emitServerNotification(
-                method: "thread/status/changed",
-                params: PreviewThreadStatusParams(
-                    threadID: fixture.chatID.rawValue,
-                    status: .init(type: "idle")
-                )
+    let workspace = URL(fileURLWithPath: workspaceCWD, isDirectory: true)
+    guard model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+        throw CodexAppServerTestError.invalidFixture(
+            "Preview stored threads require an explicit model."
+        )
+    }
+    guard let initialTurns = initialThreadSnapshot.turns,
+          initialTurns.isEmpty == false else {
+        throw CodexAppServerTestError.invalidFixture(
+            "Preview stored threads require an explicit turn."
+        )
+    }
+    guard modelProvider.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+        throw CodexAppServerTestError.invalidFixture(
+            "Preview stored threads require an explicit model provider."
+        )
+    }
+    let turns = try initialTurns.map { turn in
+        let items = try turn.items.map {
+            try makePreviewTestItem(
+                id: $0.id,
+                kind: $0.kind,
+                content: $0.content,
+                cwd: cwd
             )
-            try await runtime.transport.emitServerNotification(
-                method: "turn/completed",
-                params: PreviewTurnCompletedParams(
-                    threadID: fixture.chatID.rawValue,
-                    turn: .init(
-                        id: turnID.rawValue,
-                        status: "cancelled",
-                        completedAt: Int(Date().timeIntervalSince1970)
-                    )
-                )
-            )
-        } catch {
         }
+        var snapshot = turn
+        snapshot.items = items.map(\.domainProjection)
+        return try CodexAppServerTestTurn(snapshot: snapshot, items: items)
+    }
+    return try .init(
+        snapshot: .init(
+            id: chatID,
+            workspace: workspace,
+            name: title,
+            preview: preview,
+            modelProvider: modelProvider,
+            sourceKind: .appServer,
+            createdAt: createdAt.previewWholeSecondDate,
+            updatedAt: updatedAt.previewWholeSecondDate,
+            recencyAt: recencyAt?.previewWholeSecondDate,
+            status: status,
+            ephemeral: false,
+            turns: turns.map(\.snapshot)
+        ),
+        turns: turns,
+        metadata: .init(
+            sessionID: "preview-session-\(chatID.rawValue)",
+            cliVersion: "codex-preview",
+            source: .appServer
+        ),
+        runtimeMetadata: .init(
+            model: model,
+            modelProvider: modelProvider,
+            serviceTier: nil,
+            cwd: workspace,
+            runtimeWorkspaceRoots: [workspace],
+            instructionSources: [],
+            approvalPolicy: .never,
+            approvalsReviewer: .user,
+            sandbox: .dangerFullAccess,
+            activePermissionProfile: nil,
+            reasoningEffort: nil,
+            multiAgentMode: .explicitRequestOnly
+        ),
+        isArchived: false
+    )
+}
+
+private func makePreviewTestItem(
+    id: String,
+    kind: CodexThreadItem.Kind,
+    content: CodexThreadItem.Content,
+    cwd: String
+) throws -> CodexAppServerTestItem {
+    switch (kind, content) {
+    case (.userMessage, .message(let message)):
+        return try .userMessage(id: id, text: message.text)
+    case (.enteredReviewMode, .log(let review)):
+        return try .enteredReviewMode(id: id, review: review)
+    case (.exitedReviewMode, .log(let review)):
+        return try .exitedReviewMode(id: id, review: review)
+    default:
+        break
+    }
+    switch content {
+    case .message(let message):
+        return try .agentMessage(id: id, text: message.text, phase: message.phase)
+    case .plan(let text):
+        return try .plan(id: id, text: text)
+    case .reasoning(let reasoning):
+        return try .reasoning(id: id, summary: reasoning.summary, content: reasoning.content)
+    case .command(let command):
+        return try .commandExecution(
+            id: id,
+            command: command.command,
+            cwd: URL(fileURLWithPath: command.cwd ?? cwd, isDirectory: true),
+            processID: command.processID,
+            source: .agent,
+            status: command.status.previewCommandStatus,
+            aggregatedOutput: command.output,
+            exitCode: command.exitCode.flatMap(Int32.init(exactly:)),
+            duration: command.duration
+        )
+    case .fileChange(let fileChange):
+        let path = fileChange.path ?? URL(fileURLWithPath: cwd, isDirectory: true)
+            .appendingPathComponent("Preview.patch")
+            .path
+        return try .fileChange(
+            id: id,
+            changes: [
+                CodexFileUpdateChange(
+                    path: path,
+                    kind: .update(movePath: nil),
+                    diff: fileChange.output ?? ""
+                )
+            ],
+            status: fileChange.status.previewPatchStatus
+        )
+    case .toolCall(let toolCall):
+        guard let server = toolCall.server, let tool = toolCall.name else {
+            throw CodexAppServerTestError.invalidFixture(
+                "Preview MCP tool calls require server and tool names."
+            )
+        }
+        let result = previewMCPResultComponents(toolCall.result)
+        return try .mcpToolCall(
+            id: id,
+            server: server,
+            tool: tool,
+            status: toolCall.status.previewMCPStatus,
+            resultContent: result.content,
+            structuredContent: result.structuredContent,
+            resultMetadata: result.metadata,
+            errorMessage: toolCall.error
+        )
+    case .contextCompaction(let text):
+        guard text?.isEmpty != false else {
+            throw CodexAppServerTestError.invalidFixture(
+                "Current-v2 context-compaction fixtures do not carry display text."
+            )
+        }
+        return try .contextCompaction(id: id)
+    case .diagnostic, .log, .unknown:
+        throw CodexAppServerTestError.invalidFixture(
+            "Unsupported current-v2 preview item kind \(kind.rawValue)."
+        )
     }
 }
 
-private struct PreviewTurnInterruptParams: Decodable, Sendable {
-    var threadID: String
-
-    enum CodingKeys: String, CodingKey {
-        case threadID = "threadId"
+func previewMCPResultComponents(
+    _ flattenedResult: String?
+) -> (
+    content: [CodexJSONValue]?,
+    structuredContent: CodexJSONValue?,
+    metadata: CodexJSONValue?
+) {
+    guard let flattenedResult else {
+        return (nil, nil, nil)
     }
+    if let data = flattenedResult.data(using: .utf8),
+       let value = try? JSONDecoder().decode(CodexJSONValue.self, from: data),
+       case .object(let fields) = value,
+       case .array(let content)? = fields["content"] {
+        return (
+            content,
+            fields["structuredContent"]?.nilIfJSONNull,
+            fields["_meta"]?.nilIfJSONNull
+        )
+    }
+    return ([.string(flattenedResult)], nil, nil)
 }
 
-private struct PreviewThreadItemParams: Encodable, Sendable {
-    var threadID: String
-    var turnID: String
-    var item: Item
-
-    enum CodingKeys: String, CodingKey {
-        case threadID = "threadId"
-        case turnID = "turnId"
-        case item
-    }
-
-    struct Item: Encodable, Sendable {
-        var id: String
-        var type: String
-        var text: String?
-        var phase: String?
-        var command: String?
-        var cwd: String?
-        var output: String?
-        var exitCode: Int?
-        var status: String?
-        var path: String?
-    }
-}
-
-private struct PreviewThreadArchiveParams: Decodable, Sendable {
-    var threadID: String
-
-    enum CodingKeys: String, CodingKey {
-        case threadID = "threadId"
-    }
-}
-
-private struct PreviewThreadStatusParams: Encodable, Sendable {
-    var threadID: String
-    var status: Status
-
-    enum CodingKeys: String, CodingKey {
-        case threadID = "threadId"
-        case status
-    }
-
-    struct Status: Encodable, Sendable {
-        var type: String
-    }
-}
-
-private struct PreviewTurnCompletedParams: Encodable, Sendable {
-    var threadID: String
-    var turn: Turn
-
-    enum CodingKeys: String, CodingKey {
-        case threadID = "threadId"
-        case turn
-    }
-
-    struct Turn: Encodable, Sendable {
-        var id: String
-        var status: String?
-        var completedAt: Int?
+private extension CodexJSONValue {
+    var nilIfJSONNull: Self? {
+        self == .null ? nil : self
     }
 }
 
 private extension Optional where Wrapped == CodexTurnStatus {
-    var isTerminalForPreview: Bool {
+    var previewCommandStatus: CodexAppServerTestItem.CommandStatus {
         switch self {
-        case .completed?, .failed?, .interrupted?, .cancelled?:
-            true
-        case .running?, .unknown?, nil:
+        case .some(.completed): .completed
+        case .some(.failed), .some(.interrupted): .failed
+        case .some(.inProgress), .some(.unknown), .none: .inProgress
+        }
+    }
+
+    var previewPatchStatus: CodexAppServerTestItem.PatchStatus {
+        switch self {
+        case .some(.completed): .completed
+        case .some(.failed), .some(.interrupted): .failed
+        case .some(.inProgress), .some(.unknown), .none: .inProgress
+        }
+    }
+
+    var previewMCPStatus: CodexAppServerTestItem.MCPStatus {
+        switch self {
+        case .some(.completed): .completed
+        case .some(.failed), .some(.interrupted): .failed
+        case .some(.inProgress), .some(.unknown), .none: .inProgress
+        }
+    }
+}
+
+private extension CodexThreadItem {
+    var isTerminalPreviewItem: Bool {
+        switch content {
+        case .command(let command):
+            command.status != nil && command.status != .inProgress
+        case .fileChange(let fileChange):
+            fileChange.status != nil && fileChange.status != .inProgress
+        case .toolCall(let toolCall):
+            toolCall.status != nil && toolCall.status != .inProgress
+        default:
             false
         }
     }
 }
 
-private struct PreviewTurnDeltaParams: Encodable, Sendable {
-    var threadID: String
-    var turnID: String
-    var itemID: String
-    var delta: String
-    var phase: String?
-    var summaryIndex: Int?
-    var contentIndex: Int?
-
-    enum CodingKeys: String, CodingKey {
-        case threadID = "threadId"
-        case turnID = "turnId"
-        case itemID = "itemId"
-        case delta
-        case phase
-        case summaryIndex
-        case contentIndex
-    }
-}
-
-private func makePreviewNotificationItem(
-    id: String,
-    kind: CodexThreadItem.Kind,
-    content: CodexThreadItem.Content
-) -> PreviewThreadItemParams.Item {
-    PreviewThreadItemParams.Item(
-        id: id,
-        type: previewNotificationItemType(kind: kind, content: content),
-        text: previewNotificationText(content),
-        phase: previewNotificationPhase(content),
-        command: previewNotificationCommand(content),
-        cwd: previewNotificationCWD(content),
-        output: previewNotificationOutput(content),
-        exitCode: previewNotificationExitCode(content),
-        status: previewNotificationStatus(content),
-        path: previewNotificationPath(content)
-    )
-}
-
-private func previewNotificationItemType(
-    kind: CodexThreadItem.Kind,
-    content: CodexThreadItem.Content
-) -> String {
-    switch content {
-    case .diagnostic:
-        "diagnostic"
-    default:
-        kind.rawValue
-    }
-}
-
-private func previewNotificationText(_ content: CodexThreadItem.Content) -> String? {
-    switch content {
-    case .message(let message):
-        message.text
-    case .plan(let text), .diagnostic(let text), .log(let text):
-        text
-    case .reasoning(let reasoning):
-        reasoning.text
-    case .toolCall(let toolCall):
-        toolCall.result ?? toolCall.error ?? toolCall.name
-    case .contextCompaction(let text):
-        text
-    case .command, .fileChange, .unknown:
-        nil
-    }
-}
-
-private func previewNotificationPhase(_ content: CodexThreadItem.Content) -> String? {
-    if case .message(let message) = content {
-        return message.phase?.rawValue
-    }
-    return nil
-}
-
-private func previewNotificationCommand(_ content: CodexThreadItem.Content) -> String? {
-    if case .command(let command) = content {
-        return command.command
-    }
-    return nil
-}
-
-private func previewNotificationCWD(_ content: CodexThreadItem.Content) -> String? {
-    if case .command(let command) = content {
-        return command.cwd
-    }
-    return nil
-}
-
-private func previewNotificationOutput(_ content: CodexThreadItem.Content) -> String? {
-    switch content {
-    case .command(let command):
-        return command.output
-    case .fileChange(let fileChange):
-        return fileChange.output
-    default:
-        return nil
-    }
-}
-
-private func previewNotificationExitCode(_ content: CodexThreadItem.Content) -> Int? {
-    if case .command(let command) = content {
-        return command.exitCode
-    }
-    return nil
-}
-
-private func previewNotificationStatus(_ content: CodexThreadItem.Content) -> String? {
-    switch content {
-    case .command(let command):
-        command.status?.rawValue
-    case .fileChange(let fileChange):
-        fileChange.status?.rawValue
-    case .toolCall(let toolCall):
-        toolCall.status?.rawValue
-    default:
-        nil
-    }
-}
-
-private func previewNotificationPath(_ content: CodexThreadItem.Content) -> String? {
-    if case .fileChange(let fileChange) = content {
-        return fileChange.path
-    }
-    return nil
-}
-
-private extension ReviewMonitorPreviewChatLogFixture {
-    var threadSnapshot: CodexThreadSnapshot {
-        threadSnapshot(initialThreadSnapshot)
-    }
-
-    var previewFallbackTurnID: CodexTurnID {
-        initialThreadSnapshot.turns?.last?.id ?? CodexTurnID(rawValue: "preview-turn")
-    }
-
-    func threadSnapshot(
-        _ snapshot: CodexThreadSnapshot,
-        status: CodexThreadStatus? = nil
-    ) -> CodexThreadSnapshot {
-        CodexThreadSnapshot(
-            id: chatID,
-            workspace: workspaceCWD.map { URL(fileURLWithPath: $0, isDirectory: true) },
-            name: title,
-            preview: preview,
-            modelProvider: model,
-            updatedAt: updatedAt,
-            recencyAt: recencyAt,
-            status: status ?? self.status,
-            turns: snapshot.turns
-        )
-    }
-}
-
-private extension CodexThreadSnapshot {
-    mutating func ensurePreviewTurn(fallback turnID: CodexTurnID) -> CodexTurnID {
-        if let existingTurnID = turns?.last?.id {
-            return existingTurnID
+private extension CodexTurnSnapshot.State {
+    var isTerminalForPreview: Bool {
+        switch self {
+        case .completed, .failed, .interrupted:
+            true
+        case .inProgress, .unknown:
+            false
         }
-        turns = [CodexTurnSnapshot(id: turnID, status: .running)]
-        return turnID
+    }
+}
+
+private extension Array where Element == CodexAppServerTestTurn {
+    func requirePreviewTurn() throws -> Index {
+        guard isEmpty == false else {
+            throw CodexAppServerTestError.invalidFixture(
+                "A Preview stored thread must own an explicit turn."
+            )
+        }
+        return index(before: endIndex)
+    }
+}
+
+private extension Date {
+    var previewWholeSecondDate: Date {
+        Date(timeIntervalSince1970: timeIntervalSince1970.rounded(.towardZero))
     }
 }
 

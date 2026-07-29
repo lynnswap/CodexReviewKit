@@ -1,58 +1,117 @@
 import Foundation
-import CodexKit
-@_spi(Testing) import CodexReviewKit
+import CodexAppServerKit
+import CodexAppServerKitTesting
+import CodexDataKit
+import CodexReviewKit
 import ReviewUI
 
 @MainActor
 public final class ReviewMonitorPreviewContentSource {
     public let store: CodexReviewStore
-    let runtime: ReviewMonitorPreviewAppServerRuntime
+    private weak var lifetime: PreviewRuntimeLifetime?
 
-    public var codexModelSource: ReviewMonitorCodexModelSource {
-        runtime.modelSource
+    package var codexModelSource: ReviewMonitorCodexModelSource {
+        requireLifetime().modelSource
     }
 
     init(
         store: CodexReviewStore,
-        runtime: ReviewMonitorPreviewAppServerRuntime
+        lifetime: PreviewRuntimeLifetime
     ) {
         self.store = store
-        self.runtime = runtime
+        self.lifetime = lifetime
+    }
+
+    isolated deinit {
+        lifetime?.signalCancellation()
     }
 
     var initialChatID: CodexThreadID? {
-        runtime.initialChatID
+        requireLifetime().initialChatID
     }
 
     func start() {
-        runtime.start()
+        requireLifetime().start()
     }
 
     func startStreaming(interval: Duration) {
-        runtime.startStreaming(interval: interval)
+        requireLifetime().startStreaming(interval: interval)
+    }
+
+    package func startStreamingForTesting(interval: Duration) {
+        requireLifetime().startStreaming(interval: interval)
+    }
+
+    package func cancelStreamingForTesting() {
+        requireLifetime().cancelStreaming()
+    }
+
+    package func stopStreamingForTesting() async {
+        await requireLifetime().stopStreaming()
     }
 
     @discardableResult
-    public func appendPreviewChatLogStreamTick(
+    package func appendPreviewChatLogStreamTick(
         after tick: Int = 0,
         emitsNotifications: Bool = false
     ) async -> Int {
-        await runtime.appendPreviewStreamTick(
+        await requireLifetime().appendPreviewStreamTick(
             after: tick,
             emitsNotifications: emitsNotifications
         )
     }
 
-    public func snapshotForTesting(chatID: CodexThreadID) async -> CodexThreadSnapshot? {
-        await runtime.snapshotForTesting(chatID: chatID)
+    package func snapshotForTesting(chatID: CodexThreadID) async -> CodexThreadSnapshot? {
+        await requireLifetime().snapshotForTesting(chatID: chatID)
     }
 
-    public func interruptRequestCountForTesting() async -> Int {
-        await runtime.interruptRequestCountForTesting()
+    package func observedTurnStateForTesting(
+        chatID: CodexThreadID
+    ) -> CodexTurnSnapshot.State? {
+        requireLifetime().observedTurnStateForTesting(chatID: chatID)
     }
 
-    public func archiveRequestCountForTesting() async -> Int {
-        await runtime.archiveRequestCountForTesting()
+    package func interruptRequestCountForTesting() async -> Int {
+        await requireLifetime().interruptRequestCountForTesting()
+    }
+
+    package func turnCompletionNotificationCountForTesting() -> Int {
+        requireLifetime().turnCompletionNotificationCountForTesting()
+    }
+
+    package func archiveRequestCountForTesting() async -> Int {
+        await requireLifetime().archiveRequestCountForTesting()
+    }
+
+    package func startAndWaitForTesting() async {
+        await requireLifetime().startAndWaitForTesting()
+    }
+
+    var runtimeLifetimeForTesting: PreviewRuntimeLifetime? {
+        lifetime
+    }
+
+    package var runtimeTransportForTesting: CodexAppServerTestTransport? {
+        lifetime?.runtimeTransportForTesting
+    }
+
+    package var modelContainerForTesting: CodexModelContainer? {
+        lifetime?.modelContainerForTesting
+    }
+
+    package var activeRuntimeTaskCountForTesting: Int {
+        lifetime?.activeTaskCountForTesting ?? 0
+    }
+
+    package var stopOperationCountForTesting: Int {
+        lifetime?.stopOperationCountForTesting ?? 0
+    }
+
+    private func requireLifetime() -> PreviewRuntimeLifetime {
+        guard let lifetime else {
+            preconditionFailure("A preview content source requires its store-owned runtime lifetime.")
+        }
+        return lifetime
     }
 }
 
@@ -110,7 +169,7 @@ public enum ReviewMonitorPreviewContent {
             itemName: String? = nil,
             kind: CodexThreadItem.Kind,
             content: CodexThreadItem.Content,
-            mode: PreviewStreamMode = .complete,
+            mode: PreviewStreamMode,
             deltaText: String? = nil,
             chunkByWord: Bool = false,
             delayBeforeFrameCount: Int,
@@ -127,7 +186,7 @@ public enum ReviewMonitorPreviewContent {
         }
     }
 
-    package enum PreviewStreamMode {
+    package enum PreviewStreamMode: Sendable {
         case update
         case complete
         case textDelta
@@ -152,12 +211,12 @@ public enum ReviewMonitorPreviewContent {
             CodexThreadItem(
                 id: id,
                 kind: kind,
-                content: content
+                content: content.rebindingMessageID(to: id)
             )
         }
     }
 
-    package struct PreviewChatLogStreamStep {
+    package struct PreviewChatLogStreamStep: Sendable {
         let itemName: String
         let kind: CodexThreadItem.Kind
         let content: CodexThreadItem.Content
@@ -168,19 +227,26 @@ public enum ReviewMonitorPreviewContent {
             CodexThreadItem(
                 id: id,
                 kind: kind,
-                content: content
+                content: content.rebindingMessageID(to: id)
             )
         }
     }
 
-    package struct PreviewStreamFrame {
+    package struct PreviewStreamFrame: Sendable {
         let step: PreviewChatLogStreamStep
         let cycle: Int
     }
 
-    public static func makeStore() -> CodexReviewStore {
+    package static func makeStore() -> CodexReviewStore {
+        makeStore(runtimeLifetime: nil)
+    }
+
+    private static func makeStore(
+        runtimeLifetime: PreviewRuntimeLifetime?
+    ) -> CodexReviewStore {
         let store = CodexReviewStore.makePreviewStore(
-            seed: .init(initialSettingsSnapshot: makePreviewSettingsSnapshot())
+            seed: .init(initialSettingsSnapshot: makePreviewSettingsSnapshot()),
+            runtimeLifetime: runtimeLifetime
         )
         let accounts = makePreviewAccounts()
         store.loadForTesting(
@@ -194,28 +260,23 @@ public enum ReviewMonitorPreviewContent {
 
     public static func makeContentSource() -> ReviewMonitorPreviewContentSource {
         let chatLogFixtures = makeChatLogFixtures()
-        let store = makeStore()
-        let previewRuntime = ReviewMonitorPreviewAppServerRuntime(
+        let lifetime = PreviewRuntimeLifetime(
             fixtures: chatLogFixtures
         )
         return ReviewMonitorPreviewContentSource(
-            store: store,
-            runtime: previewRuntime
+            store: makeStore(runtimeLifetime: lifetime),
+            lifetime: lifetime
         )
     }
 
-    public static func makeCommandOutputStore() -> CodexReviewStore {
+    package static func makeCommandOutputStore() -> CodexReviewStore {
         makeCommandOutputContentSource().store
     }
 
-    public static func makeCommandOutputContentSource() -> ReviewMonitorPreviewContentSource {
-        let store = CodexReviewStore.makePreviewStore(
-            seed: .init(initialSettingsSnapshot: makePreviewSettingsSnapshot())
-        )
-        let accounts = makePreviewAccounts()
+    package static func makeCommandOutputContentSource() -> ReviewMonitorPreviewContentSource {
         let cwd = "/path/to/workspace-alpha"
         let now = Date()
-        let chatItems = makeCommandOutputPreviewChatLogItems()
+        let chatItems = makeCommandOutputPreviewChatLogItems(cwd: cwd)
         let chatID = CodexThreadID(rawValue: "preview-command-output-panel")
         let turnID = CodexTurnID(rawValue: "preview-command-output-turn")
         let chatFixture = PreviewChatFixture(
@@ -232,18 +293,14 @@ public enum ReviewMonitorPreviewContent {
             endedAt: nil,
             chatItems: chatItems
         )
-        store.loadForTesting(
-            serverState: .running,
-            account: accounts.first,
-            persistedAccounts: accounts,
-            serverURL: URL(string: "http://localhost:9417/mcp")
-        )
         let fixture = makeChatLogFixture(
-            for: chatFixture
+            for: chatFixture,
+            referenceDate: now
         )
+        let lifetime = PreviewRuntimeLifetime(fixtures: [fixture])
         return ReviewMonitorPreviewContentSource(
-            store: store,
-            runtime: ReviewMonitorPreviewAppServerRuntime(fixtures: [fixture])
+            store: makeStore(runtimeLifetime: lifetime),
+            lifetime: lifetime
         )
     }
 
@@ -297,6 +354,16 @@ public enum ReviewMonitorPreviewContent {
             let itemName = template.itemName ?? "stream-\(templateIndex)"
             let streamText = template.deltaText ?? ""
             let chunks = template.chunkByWord ? wordChunks(in: streamText) : [streamText]
+            if case .textDelta = template.mode {
+                schedule.append(
+                    PreviewChatLogStreamStep(
+                        itemName: itemName,
+                        kind: template.kind,
+                        content: template.content,
+                        mode: .update,
+                        deltaText: nil
+                    ))
+            }
             for (index, chunk) in chunks.enumerated() {
                 if index > 0 && template.chunkIntervalFrameCount > 1 {
                     schedule.append(contentsOf: Array(repeating: nil, count: template.chunkIntervalFrameCount - 1))
@@ -334,8 +401,13 @@ public enum ReviewMonitorPreviewContent {
 
     private static let previewStreamTemplates: [PreviewStreamTemplate] = [
         .init(
-            kind: CodexThreadItem.Kind(rawValue: "event"),
-            content: .diagnostic("Turn started: \(previewTurnID(1))"),
+            kind: .agentMessage,
+            content: .message(.init(
+                id: "turn-started",
+                role: .assistant,
+                text: "Turn started: \(previewTurnID(1))"
+            )),
+            mode: .complete,
             delayBeforeFrameCount: 1
         ),
         .init(
@@ -347,6 +419,7 @@ public enum ReviewMonitorPreviewContent {
                         [in_progress] Preserve active find UI while streaming
                         [pending] Run focused UI tests
                         """),
+            mode: .complete,
             delayBeforeFrameCount: interItemDelayFrameCount
         ),
         .init(
@@ -356,7 +429,7 @@ public enum ReviewMonitorPreviewContent {
                 .init(
                     command:
                         "/bin/zsh -lc \"rg -n 'ReviewMonitorLog' Sources/ReviewUI && swift test --filter ReviewUI\"",
-                    status: .running
+                    status: .inProgress
                 )),
             mode: .update,
             delayBeforeFrameCount: interItemDelayFrameCount
@@ -366,7 +439,8 @@ public enum ReviewMonitorPreviewContent {
             kind: .commandExecution,
             content: .command(
                 .init(
-                    command: "",
+                    command:
+                        "/bin/zsh -lc \"rg -n 'ReviewMonitorLog' Sources/ReviewUI && swift test --filter ReviewUI\"",
                     output: """
                         Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift:42: private let logDocumentView = ReviewMonitorLogDocumentView()
                         Sources/ReviewUI/Detail/ReviewMonitorLogDocumentView.swift:20: final class ReviewMonitorLogDocumentView
@@ -375,15 +449,19 @@ public enum ReviewMonitorPreviewContent {
                     exitCode: 0,
                     status: .completed
                 )),
+            mode: .complete,
             delayBeforeFrameCount: commandCompletionDelayFrameCount
         ),
         .init(
             kind: .mcpToolCall,
             content: .toolCall(
                 .init(
+                    server: "codex_review",
+                    name: "review_read",
                     result: "MCP codex_review.review_read started.",
-                    status: .running
+                    status: .inProgress
                 )),
+            mode: .update,
             delayBeforeFrameCount: interItemDelayFrameCount
         ),
         .init(
@@ -403,7 +481,7 @@ public enum ReviewMonitorPreviewContent {
                 .init(
                     command:
                         "/bin/zsh -lc \"sed -n '1,240p' Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift\"",
-                    status: .running
+                    status: .inProgress
                 )),
             mode: .update,
             delayBeforeFrameCount: interItemDelayFrameCount
@@ -413,7 +491,8 @@ public enum ReviewMonitorPreviewContent {
             kind: .commandExecution,
             content: .command(
                 .init(
-                    command: "",
+                    command:
+                        "/bin/zsh -lc \"sed -n '1,240p' Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift\"",
                     output: """
                         import AppKit
                         import ObjectiveC.runtime
@@ -426,28 +505,41 @@ public enum ReviewMonitorPreviewContent {
                     exitCode: 0,
                     status: .completed
                 )),
+            mode: .complete,
             delayBeforeFrameCount: commandCompletionDelayFrameCount
         ),
         .init(
             itemName: "context-compaction",
-            kind: .contextCompaction,
-            content: .contextCompaction("Automatically compacting context"),
+            kind: .agentMessage,
+            content: .message(.init(
+                id: "context-compaction",
+                role: .assistant,
+                text: "Automatically compacting context"
+            )),
             mode: .update,
             delayBeforeFrameCount: interItemDelayFrameCount
         ),
         .init(
             itemName: "context-compaction",
-            kind: .contextCompaction,
-            content: .contextCompaction("Context automatically compacted"),
+            kind: .agentMessage,
+            content: .message(.init(
+                id: "context-compaction",
+                role: .assistant,
+                text: "Context automatically compacted"
+            )),
+            mode: .complete,
             delayBeforeFrameCount: compactionCompletionDelayFrameCount
         ),
         .init(
             kind: .mcpToolCall,
             content: .toolCall(
                 .init(
+                    server: "codex_review",
+                    name: "review_read",
                     result: "File changes updated.",
                     status: .completed
                 )),
+            mode: .complete,
             delayBeforeFrameCount: interItemDelayFrameCount
         ),
         .init(
@@ -480,13 +572,16 @@ public enum ReviewMonitorPreviewContent {
                     text:
                         "The preview stream now mixes commands, tool events, reasoning summaries, and visible assistant output instead of one repeated message kind.\n",
                 )),
+            mode: .complete,
             delayBeforeFrameCount: interItemDelayFrameCount
         ),
     ]
 
     private static let previewChatLogStreamSchedule = chatLogStreamSchedule(from: previewStreamTemplates)
 
-    private static func makeCommandOutputPreviewChatLogItems() -> [PreviewChatLogItemTemplate] {
+    private static func makeCommandOutputPreviewChatLogItems(
+        cwd: String
+    ) -> [PreviewChatLogItemTemplate] {
         let output = """
             Command line invocation:
                 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild test -project Tools/ReviewMonitor/CodexReviewMonitor.xcodeproj -scheme CodexReviewMonitor
@@ -502,10 +597,9 @@ public enum ReviewMonitorPreviewContent {
             Test Suite 'Selected tests' passed.
             """
         return [
-            diagnosticItem(
+            messageItem(
                 "command-output-event",
-                kind: CodexThreadItem.Kind(rawValue: "event"),
-                message: "Turn started: preview-command-output-panel"
+                text: "Turn started: preview-command-output-panel"
             ),
             messageItem(
                 "command-output-intro",
@@ -520,10 +614,14 @@ public enum ReviewMonitorPreviewContent {
             commandStartedItem(
                 "preview-command-output",
                 command:
-                    "xcodebuild test -project Tools/ReviewMonitor/CodexReviewMonitor.xcodeproj -scheme CodexReviewMonitor"
+                    "xcodebuild test -project Tools/ReviewMonitor/CodexReviewMonitor.xcodeproj -scheme CodexReviewMonitor",
+                cwd: cwd
             ),
             commandCompletedItem(
                 "preview-command-output",
+                command:
+                    "xcodebuild test -project Tools/ReviewMonitor/CodexReviewMonitor.xcodeproj -scheme CodexReviewMonitor",
+                cwd: cwd,
                 output: output,
                 exitCode: 0,
                 status: .completed
@@ -533,7 +631,7 @@ public enum ReviewMonitorPreviewContent {
         ]
     }
 
-    public static func makePreviewAccounts() -> [CodexReviewAccount] {
+    package static func makePreviewAccounts() -> [CodexReviewAccount] {
         [
             makePreviewAccount(
                 email: "workspace@example.com",
@@ -550,7 +648,7 @@ public enum ReviewMonitorPreviewContent {
         ]
     }
 
-    public static func makePreviewAccount(
+    package static func makePreviewAccount(
         email: String = "review@example.com",
         usedPercents: (short: Int, long: Int) = (short: 34, long: 61)
     ) -> CodexReviewAccount {
@@ -636,7 +734,11 @@ public enum ReviewMonitorPreviewContent {
         for (workspaceIndex, cwd) in workspacePaths.enumerated() {
             let workspaceName = URL(fileURLWithPath: cwd).lastPathComponent
             for (chatIndex, definition) in makeChatDefinitions(for: workspaceName).enumerated() {
-                let chatItems = makePreviewChatLogItems(for: definition, workspaceName: workspaceName)
+                let chatItems = makePreviewChatLogItems(
+                    for: definition,
+                    workspaceName: workspaceName,
+                    cwd: cwd
+                )
                 let chatID = CodexThreadID(rawValue: "preview-thread-\(workspaceIndex)-\(chatIndex)")
                 let turnID = CodexTurnID(rawValue: "preview-turn-\(workspaceIndex)-\(chatIndex)")
                 let chatFixture = PreviewChatFixture(
@@ -655,7 +757,8 @@ public enum ReviewMonitorPreviewContent {
                 )
                 chatLogFixtures.append(
                     makeChatLogFixture(
-                        for: chatFixture
+                        for: chatFixture,
+                        referenceDate: now
                     ))
             }
         }
@@ -663,12 +766,15 @@ public enum ReviewMonitorPreviewContent {
     }
 
     private static func makeChatLogFixture(
-        for chatFixture: PreviewChatFixture
+        for chatFixture: PreviewChatFixture,
+        referenceDate: Date
     ) -> ReviewMonitorPreviewChatLogFixture {
         let turn = CodexTurnSnapshot(
             id: chatFixture.turnID,
-            status: CodexTurnStatus(chatFixture.lifecycle),
-            errorMessage: chatFixture.lifecycle == .failed ? chatFixture.summary : nil,
+            state: CodexTurnSnapshot.State(
+                chatFixture.lifecycle,
+                failureMessage: chatFixture.summary
+            ),
             items: makeInitialChatItems(
                 streamID: chatFixture.id,
                 chatItems: chatFixture.chatItems
@@ -681,11 +787,15 @@ public enum ReviewMonitorPreviewContent {
         return ReviewMonitorPreviewChatLogFixture(
             chatID: chatFixture.chatID,
             title: chatFixture.targetSummary,
-            preview: chatFixture.initialMessage.nilIfEmpty ?? chatFixture.summary.nilIfEmpty,
+            preview: chatFixture.initialMessage.nilIfEmpty
+                ?? chatFixture.summary.nilIfEmpty
+                ?? chatFixture.targetSummary,
             model: chatFixture.model,
+            modelProvider: "openai",
             workspaceCWD: chatFixture.cwd,
-            updatedAt: chatFixture.endedAt ?? chatFixture.startedAt,
-            recencyAt: chatFixture.endedAt ?? chatFixture.startedAt,
+            createdAt: chatFixture.startedAt ?? referenceDate,
+            updatedAt: chatFixture.endedAt ?? chatFixture.startedAt ?? referenceDate,
+            recencyAt: chatFixture.endedAt ?? chatFixture.startedAt ?? referenceDate,
             status: CodexThreadStatus(previewLifecycle: chatFixture.lifecycle),
             cwd: chatFixture.cwd,
             streamID: chatFixture.id,
@@ -718,18 +828,6 @@ public enum ReviewMonitorPreviewContent {
         return items
     }
 
-    private static func diagnosticItem(
-        _ itemName: String,
-        kind: CodexThreadItem.Kind,
-        message: String
-    ) -> PreviewChatLogItemTemplate {
-        .init(
-            itemName: itemName,
-            kind: kind,
-            content: .diagnostic(message)
-        )
-    }
-
     private static func messageItem(_ itemName: String, text: String) -> PreviewChatLogItemTemplate {
         .init(
             itemName: itemName,
@@ -758,51 +856,70 @@ public enum ReviewMonitorPreviewContent {
         )
     }
 
-    private static func contextCompactionItem(
-        _ itemName: String,
-        title: String
-    ) -> PreviewChatLogItemTemplate {
+    private static func contextCompactionItem(_ itemName: String) -> PreviewChatLogItemTemplate {
         .init(
             itemName: itemName,
             kind: .contextCompaction,
-            content: .contextCompaction(title)
+            content: .contextCompaction(nil)
         )
     }
 
     private static func commandStartedItem(
         _ itemName: String,
         command: String,
-        cwd: String? = nil
+        cwd: String
     ) -> PreviewChatLogItemTemplate {
-        .init(
-            itemName: itemName,
-            kind: .commandExecution,
-            content: .command(
-                .init(
-                    command: command,
-                    cwd: cwd,
-                    status: .running
-                ))
-        )
+        do {
+            let fixture = try CodexAppServerTestItem.commandExecution(
+                id: itemName,
+                command: command,
+                cwd: URL(fileURLWithPath: cwd, isDirectory: true),
+                status: .inProgress
+            )
+            return .init(
+                itemName: itemName,
+                kind: fixture.domainProjection.kind,
+                content: fixture.domainProjection.content
+            )
+        } catch {
+            preconditionFailure("Invalid Preview command fixture: \(error)")
+        }
     }
 
     private static func commandCompletedItem(
         _ itemName: String,
+        command: String,
+        cwd: String,
         output: String,
         exitCode: Int,
         status: CodexTurnStatus
     ) -> PreviewChatLogItemTemplate {
-        .init(
-            itemName: itemName,
-            kind: .commandExecution,
-            content: .command(
-                .init(
-                    command: "",
-                    output: output,
-                    exitCode: exitCode,
-                    status: status
-                ))
-        )
+        let fixtureStatus: CodexAppServerTestItem.CommandStatus
+        switch status {
+        case .completed:
+            fixtureStatus = .completed
+        case .failed:
+            fixtureStatus = .failed
+        case .inProgress, .interrupted, .unknown:
+            preconditionFailure("Invalid terminal Preview command status \(status.rawValue).")
+        }
+        do {
+            let fixture = try CodexAppServerTestItem.commandExecution(
+                id: itemName,
+                command: command,
+                cwd: URL(fileURLWithPath: cwd, isDirectory: true),
+                status: fixtureStatus,
+                aggregatedOutput: output,
+                exitCode: Int32(exactly: exitCode)
+            )
+            return .init(
+                itemName: itemName,
+                kind: fixture.domainProjection.kind,
+                content: fixture.domainProjection.content
+            )
+        } catch {
+            preconditionFailure("Invalid Preview command fixture: \(error)")
+        }
     }
 
     private static func toolCallItem(
@@ -810,47 +927,74 @@ public enum ReviewMonitorPreviewContent {
         result: String,
         status: CodexTurnStatus
     ) -> PreviewChatLogItemTemplate {
-        return PreviewChatLogItemTemplate(
-            itemName: itemName,
-            kind: .mcpToolCall,
-            content: .toolCall(.init(result: result, status: status))
-        )
+        let fixtureStatus: CodexAppServerTestItem.MCPStatus
+        switch status {
+        case .inProgress:
+            fixtureStatus = .inProgress
+        case .completed:
+            fixtureStatus = .completed
+        case .failed:
+            fixtureStatus = .failed
+        case .interrupted, .unknown:
+            preconditionFailure("Invalid Preview MCP status \(status.rawValue).")
+        }
+        do {
+            let fixture = try CodexAppServerTestItem.mcpToolCall(
+                id: itemName,
+                server: "codex_review",
+                tool: "review_start",
+                status: fixtureStatus,
+                resultContent: [.string(result)]
+            )
+            return .init(
+                itemName: itemName,
+                kind: fixture.domainProjection.kind,
+                content: fixture.domainProjection.content
+            )
+        } catch {
+            preconditionFailure("Invalid Preview MCP fixture: \(error)")
+        }
     }
 
     private static func makePreviewChatLogItems(
         for definition: PreviewChatDefinition,
-        workspaceName: String
+        workspaceName: String,
+        cwd: String
     ) -> [PreviewChatLogItemTemplate] {
         switch definition.lifecycle {
         case .running:
-            return makeRunningPreviewChatLogItems(for: definition, workspaceName: workspaceName)
+            return makeRunningPreviewChatLogItems(
+                for: definition,
+                workspaceName: workspaceName,
+                cwd: cwd
+            )
         case .queued:
             return [
-                diagnosticItem(
+                messageItem(
                     "queued-event-\(workspaceName)-\(definition.targetSummary)",
-                    kind: CodexThreadItem.Kind(rawValue: "event"),
-                    message: "Queued review for \(definition.targetSummary)."
+                    text: "Queued review for \(definition.targetSummary)."
                 ),
-                diagnosticItem(
+                messageItem(
                     "queued-progress-\(workspaceName)-\(definition.targetSummary)",
-                    kind: CodexThreadItem.Kind(rawValue: "progress"),
-                    message: definition.summary
+                    text: definition.summary
                 ),
             ]
         case .failed:
             let commandName = "preview-failed-command-\(workspaceName)-\(definition.targetSummary)"
             return [
-                diagnosticItem(
+                messageItem(
                     "failed-event-\(workspaceName)-\(definition.targetSummary)",
-                    kind: CodexThreadItem.Kind(rawValue: "event"),
-                    message: "Turn started: preview-failed-\(workspaceName.lowercased())"
+                    text: "Turn started: preview-failed-\(workspaceName.lowercased())"
                 ),
                 commandStartedItem(
                     commandName,
-                    command: "/bin/zsh -lc \"swift test --build-system swiftbuild --no-parallel\""
+                    command: "/bin/zsh -lc \"swift test --build-system swiftbuild --no-parallel\"",
+                    cwd: cwd
                 ),
                 commandCompletedItem(
                     commandName,
+                    command: "/bin/zsh -lc \"swift test --build-system swiftbuild --no-parallel\"",
+                    cwd: cwd,
                     output: """
                         Building for debugging...
                         Test Suite 'ReviewUITests' started.
@@ -859,25 +1003,22 @@ public enum ReviewMonitorPreviewContent {
                     exitCode: 1,
                     status: .failed
                 ),
-                diagnosticItem(
+                messageItem(
                     "failed-error-\(workspaceName)-\(definition.targetSummary)",
-                    kind: .error,
-                    message: definition.summary
+                    text: definition.summary
                 ),
                 messageItem(
                     "failed-message-\(workspaceName)-\(definition.targetSummary)", text: definition.initialMessage),
             ]
         case .cancelled:
             return [
-                diagnosticItem(
+                messageItem(
                     "cancelled-event-\(workspaceName)-\(definition.targetSummary)",
-                    kind: CodexThreadItem.Kind(rawValue: "event"),
-                    message: "Turn started: preview-cancelled-\(workspaceName.lowercased())"
+                    text: "Turn started: preview-cancelled-\(workspaceName.lowercased())"
                 ),
-                diagnosticItem(
+                messageItem(
                     "cancelled-progress-\(workspaceName)-\(definition.targetSummary)",
-                    kind: CodexThreadItem.Kind(rawValue: "progress"),
-                    message: definition.summary
+                    text: definition.summary
                 ),
                 messageItem(
                     "cancelled-message-\(workspaceName)-\(definition.targetSummary)", text: definition.initialMessage),
@@ -885,17 +1026,19 @@ public enum ReviewMonitorPreviewContent {
         case .succeeded:
             let commandName = "preview-complete-command-\(workspaceName)-\(definition.targetSummary)"
             return [
-                diagnosticItem(
+                messageItem(
                     "complete-event-\(workspaceName)-\(definition.targetSummary)",
-                    kind: CodexThreadItem.Kind(rawValue: "event"),
-                    message: "Turn started: preview-complete-\(workspaceName.lowercased())"
+                    text: "Turn started: preview-complete-\(workspaceName.lowercased())"
                 ),
                 commandStartedItem(
                     commandName,
-                    command: "/bin/zsh -lc \"swift test --filter ReviewUI\""
+                    command: "/bin/zsh -lc \"swift test --filter ReviewUI\"",
+                    cwd: cwd
                 ),
                 commandCompletedItem(
                     commandName,
+                    command: "/bin/zsh -lc \"swift test --filter ReviewUI\"",
+                    cwd: cwd,
                     output: """
                         Test Suite 'ReviewUITests' started.
                         Test commandOutputRendersCollapsedTextKitPanelAndExpandsInline passed.
@@ -916,26 +1059,24 @@ public enum ReviewMonitorPreviewContent {
 
     private static func makeRunningPreviewChatLogItems(
         for definition: PreviewChatDefinition,
-        workspaceName: String
+        workspaceName: String,
+        cwd: String
     ) -> [PreviewChatLogItemTemplate] {
         let sourceReadItemName = "preview-initial-source-read-\(workspaceName)-\(definition.targetSummary)"
         let sourceReadCommand =
             "sed -n '1,260p' Sources/ReviewUI/Detail/ReviewMonitorCommandOutputDisplayDocument.swift"
         let initialCommandName = "preview-initial-command-\(workspaceName)-\(definition.targetSummary)"
         return [
-            diagnosticItem(
+            messageItem(
                 "running-event-\(workspaceName)-\(definition.targetSummary)",
-                kind: CodexThreadItem.Kind(rawValue: "event"),
-                message: "Turn started: preview-\(workspaceName.lowercased())"
+                text: "Turn started: preview-\(workspaceName.lowercased())"
             ),
-            diagnosticItem(
+            messageItem(
                 "running-progress-\(workspaceName)-\(definition.targetSummary)",
-                kind: CodexThreadItem.Kind(rawValue: "progress"),
-                message: "Reviewing \(definition.targetSummary)"
+                text: "Reviewing \(definition.targetSummary)"
             ),
             contextCompactionItem(
-                "preview-initial-context-compaction-\(workspaceName)-\(definition.targetSummary)",
-                title: "Context automatically compacted"
+                "preview-initial-context-compaction-\(workspaceName)-\(definition.targetSummary)"
             ),
             planItem(
                 "preview-initial-plan-\(workspaceName)-\(definition.targetSummary)",
@@ -947,10 +1088,13 @@ public enum ReviewMonitorPreviewContent {
             ),
             commandStartedItem(
                 initialCommandName,
-                command: "/bin/zsh -lc \"git diff --stat && rg -n 'ReviewMonitor' Sources Tests\""
+                command: "/bin/zsh -lc \"git diff --stat && rg -n 'ReviewMonitor' Sources Tests\"",
+                cwd: cwd
             ),
             commandCompletedItem(
                 initialCommandName,
+                command: "/bin/zsh -lc \"git diff --stat && rg -n 'ReviewMonitor' Sources Tests\"",
+                cwd: cwd,
                 output: """
                     Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift | 34 +++++++++++++++++
                     Sources/ReviewUI/Detail/ReviewMonitorLogDocumentView.swift | 18 ++++++++--
@@ -964,12 +1108,13 @@ public enum ReviewMonitorPreviewContent {
             ),
             commandStartedItem(
                 sourceReadItemName,
-                command: "/bin/zsh -lc \"\(sourceReadCommand)\""
+                command: "/bin/zsh -lc \"\(sourceReadCommand)\"",
+                cwd: cwd
             ),
             toolCallItem(
                 "running-tool-\(workspaceName)-\(definition.targetSummary)",
                 result: "MCP codex_review.review_start started.",
-                status: .running
+                status: .inProgress
             ),
             reasoningItem(
                 "preview-initial-summary-\(workspaceName)-\(definition.targetSummary)",
@@ -1061,28 +1206,30 @@ private extension CodexThreadStatus {
     }
 }
 
-private extension CodexTurnStatus {
-    init(_ lifecycle: ReviewMonitorPreviewContent.PreviewChatLifecycle) {
-        switch lifecycle {
-        case .queued, .running:
-            self = .running
-        case .succeeded:
-            self = .completed
-        case .failed:
-            self = .failed
-        case .cancelled:
-            self = .cancelled
+private extension CodexThreadItem.Content {
+    func rebindingMessageID(to id: String) -> Self {
+        guard case .message(var message) = self else {
+            return self
         }
+        message.id = id
+        return .message(message)
     }
 }
 
-private extension CodexDataPhase {
-    init(_ lifecycle: ReviewMonitorPreviewContent.PreviewChatLifecycle, errorMessage: String?) {
+private extension CodexTurnSnapshot.State {
+    init(
+        _ lifecycle: ReviewMonitorPreviewContent.PreviewChatLifecycle,
+        failureMessage: String
+    ) {
         switch lifecycle {
-        case .queued, .running, .succeeded, .cancelled:
-            self = .loaded
+        case .queued, .running:
+            self = .inProgress
+        case .succeeded:
+            self = .completed
         case .failed:
-            self = .failed(errorMessage ?? "Review failed")
+            self = .failed(CodexTurnError(message: failureMessage))
+        case .cancelled:
+            self = .interrupted
         }
     }
 }

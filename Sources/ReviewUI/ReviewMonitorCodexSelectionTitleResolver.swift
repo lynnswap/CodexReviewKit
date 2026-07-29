@@ -1,4 +1,5 @@
-import CodexKit
+import CodexAppServerKit
+import CodexDataKit
 
 @MainActor
 struct ReviewMonitorCodexSelectionTitlePresentation: Equatable, Sendable {
@@ -19,7 +20,7 @@ final class ReviewMonitorCodexSelectionTitleResolver {
     ) -> ReviewMonitorCodexSelectionTitlePresentation? {
         switch selection {
         case .workspaceGroup(let id):
-            guard let workspaceGroup = modelContext.model(for: id) else {
+            guard let workspaceGroup = modelContext.registeredModel(for: id) else {
                 return nil
             }
             return Self.titlePresentation(for: workspaceGroup)

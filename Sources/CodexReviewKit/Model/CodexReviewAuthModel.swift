@@ -1,9 +1,43 @@
 import Foundation
 import Observation
 
+package enum CodexReviewAuthenticationFailure: Error, Equatable, Sendable {
+    case alreadyInProgress
+    case accountMutationBlockedByAuthentication
+    case runtime(message: String)
+    case urlOpen(URL)
+    case login(message: String?)
+    case nonExportableCredentialStore
+    case persistenceInconsistent(message: String)
+    case accountCommit(message: String)
+    case protocolViolation(message: String)
+}
+
+extension CodexReviewAuthenticationFailure: LocalizedError {
+    package var errorDescription: String? {
+        switch self {
+        case .alreadyInProgress:
+            "Authentication is already in progress."
+        case .accountMutationBlockedByAuthentication:
+            "The account cannot be changed while authentication is in progress."
+        case .runtime(let message),
+             .persistenceInconsistent(let message),
+             .accountCommit(let message),
+             .protocolViolation(let message):
+            message
+        case .urlOpen(let url):
+            "Failed to open the authentication URL: \(url.absoluteString)"
+        case .login(let message):
+            message ?? "Authentication failed."
+        case .nonExportableCredentialStore:
+            "The authenticated credentials cannot be imported into the account registry."
+        }
+    }
+}
+
 @MainActor
 @Observable
-public final class CodexReviewAuthModel {
+package final class CodexReviewAuthModel {
     package enum PendingAccountAction: Equatable, Sendable {
         case switchAccount(accountKey: String)
         case signOutActiveAccount
@@ -52,13 +86,13 @@ public final class CodexReviewAuthModel {
         package let message: String
     }
 
-    public struct Progress: Sendable, Equatable {
-        public var title: String
-        public var detail: String
-        public var browserURL: String?
-        public var userCode: String?
+    package struct Progress: Sendable, Equatable {
+        package var title: String
+        package var detail: String
+        package var browserURL: String?
+        package var userCode: String?
 
-        public init(
+        package init(
             title: String,
             detail: String,
             browserURL: String? = nil,
@@ -71,54 +105,52 @@ public final class CodexReviewAuthModel {
         }
     }
 
-    public enum Phase: Sendable, Equatable {
+    package enum Phase: Sendable, Equatable {
         case signedOut
         case signingIn(Progress)
-        case failed(message: String)
+        case failed(CodexReviewAuthenticationFailure)
     }
 
-    public package(set) var phase: Phase = .signedOut
-    public package(set) var persistedAccounts: [CodexReviewAccount] = []
-    public package(set) var persistedActiveAccountKey: String?
+    package var phase: Phase = .signedOut
+    package var persistedAccounts: [CodexReviewAccount] = []
+    package var persistedActiveAccountKey: String?
     package private(set) var detachedAccount: CodexReviewAccount?
-    public private(set) var selectedAccount: CodexReviewAccount?
+    package private(set) var selectedAccount: CodexReviewAccount?
 
-    public package(set) var authenticationFailureCount = 0
-    public package(set) var warningMessage: String?
     package private(set) var pendingAccountAction: PendingAccountAction?
     package private(set) var accountActionAlert: AccountActionAlert?
 
-    public var progress: Progress? {
+    package var progress: Progress? {
         guard case .signingIn(let progress) = phase else {
             return nil
         }
         return progress
     }
 
-    public var isAuthenticating: Bool {
+    package var isAuthenticating: Bool {
         progress != nil
     }
 
-    public var isAuthenticated: Bool {
+    package var isAuthenticated: Bool {
         selectedAccount != nil
     }
 
-    public var accounts: [CodexReviewAccount] {
+    package var accounts: [CodexReviewAccount] {
         guard let detachedAccount else {
             return persistedAccounts
         }
         return persistedAccounts + [detachedAccount]
     }
 
-    public var hasAccounts: Bool {
+    package var hasAccounts: Bool {
         accounts.isEmpty == false
     }
 
-    public var errorMessage: String? {
-        guard case .failed(let message) = phase else {
+    package var errorMessage: String? {
+        guard case .failed(let failure) = phase else {
             return nil
         }
-        return message
+        return failure.localizedDescription
     }
 
     package static func makePreview() -> CodexReviewAuthModel {
@@ -193,16 +225,6 @@ public final class CodexReviewAuthModel {
 
     package func updatePhase(_ phase: Phase) {
         self.phase = phase
-    }
-
-    package func recordAuthenticationFailure(message: String) {
-        authenticationFailureCount += 1
-        warningMessage = nil
-        phase = .failed(message: message)
-    }
-
-    package func updateWarning(message: String?) {
-        warningMessage = message?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
     }
 
     package func selectPersistedAccount(_ persistedAccountID: CodexReviewAccount.ID?) {

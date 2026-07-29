@@ -1,5 +1,5 @@
 import AppKit
-import CodexKit
+import CodexDataKit
 import CodexReviewKit
 
 @MainActor
@@ -19,7 +19,7 @@ public final class ReviewMonitorWindowController: NSWindowController {
     private static let frameAutosaveName = NSWindow.FrameAutosaveName("ReviewMonitor.MainWindow")
     private let rootViewController: ReviewMonitorRootViewController
 
-    public convenience init(store: CodexReviewStore) {
+    package convenience init(store: CodexReviewStore) {
         self.init(
             store: store,
             codexModelSource: nil,
@@ -28,7 +28,7 @@ public final class ReviewMonitorWindowController: NSWindowController {
         )
     }
 
-    public convenience init(
+    package convenience init(
         store: CodexReviewStore,
         codexModelContext: CodexModelContext
     ) {
@@ -52,7 +52,7 @@ public final class ReviewMonitorWindowController: NSWindowController {
         )
     }
 
-    package convenience init(
+    public convenience init(
         store: CodexReviewStore,
         codexModelSource: ReviewMonitorCodexModelSource,
         showSettings: @escaping @MainActor () -> Void

@@ -1,6 +1,7 @@
 import AppKit
 import CodexAppServerKitTesting
-import CodexKit
+import CodexAppServerKit
+import CodexDataKit
 import Foundation
 import ObservationBridge
 import SwiftUI
@@ -49,6 +50,35 @@ extension ReviewUITests {
 
         #expect(transport.renderedStateForTesting.selection == .chat(selectedChatID.rawValue))
         #expect(snapshot.log.isEmpty == false)
+    }
+
+    @Test func previewRuntimeReleasesAfterContentSourceDeallocation() async throws {
+        weak var releasedModelSource: ReviewMonitorCodexModelSource?
+        do {
+            let previewContent = ReviewMonitorPreviewContent.makeContentSource()
+            let modelSource = previewContent.codexModelSource
+            releasedModelSource = modelSource
+            previewContent.startStreamingForTesting(interval: .seconds(60))
+            try await waitForCondition {
+                modelSource.modelContext != nil
+            }
+        }
+
+        try await waitForCondition {
+            releasedModelSource == nil
+        }
+    }
+
+    @Test func previewFixtureRuntimeReleasesAfterStoreDeallocationAndPrune() {
+        weak var releasedRuntime: AnyObject?
+        do {
+            let store = CodexReviewStore.makePreviewStore()
+            releasedRuntime = installPreviewChatLogSourceForTesting(on: store, fixtures: [])
+        }
+
+        let probeStore = CodexReviewStore.makePreviewStore()
+        #expect(previewRuntimeForTesting(on: probeStore) == nil)
+        #expect(releasedRuntime == nil)
     }
 
     @Test func previewContentViewControllerRendersSidebarFromFakeAppServer() async throws {
@@ -102,6 +132,17 @@ extension ReviewUITests {
                 isChatActive: true
             ) == .directChat
         )
+        _ = try await advancePreviewStreamBeyondMCPFixture(
+            previewContent,
+            transport: transport,
+            selectedChatID: selectedChatID
+        )
+        let remainingRunningChatID = CodexThreadID(rawValue: "preview-thread-0-1")
+        let remainingItemCount = try #require(
+            await previewContent.snapshotForTesting(chatID: remainingRunningChatID)
+        ).items.count
+        previewContent.startStreamingForTesting(interval: .milliseconds(1))
+        defer { previewContent.cancelStreamingForTesting() }
 
         var presentedCancelItem = false
         var cancelItemWasEnabled = false
@@ -126,12 +167,16 @@ extension ReviewUITests {
         try await withTestTimeout(.seconds(2)) {
             while true {
                 let snapshot = await previewContent.snapshotForTesting(chatID: selectedChatID)
-                if snapshot?.turns?.last?.status == .cancelled {
+                if snapshot?.turns?.last?.state == .interrupted {
                     break
                 }
                 try Task.checkCancellation()
                 await Task.yield()
             }
+        }
+        try await waitForCondition {
+            previewContent.observedTurnStateForTesting(chatID: selectedChatID) == .interrupted
+                && previewContent.turnCompletionNotificationCountForTesting() == 1
         }
         try await waitForCondition {
             sidebar.codexSidebarSectionsForTesting.chat(id: selectedChatID)?.status == .idle
@@ -161,6 +206,20 @@ extension ReviewUITests {
         }
         #expect(presentedCancelItemAfterCancellation)
         #expect(cancelItemEnabledAfterCancellation == false)
+
+        try await withTestTimeout(.seconds(2)) {
+            while await previewContent.snapshotForTesting(chatID: remainingRunningChatID)?.items.count
+                == remainingItemCount
+            {
+                try Task.checkCancellation()
+                await Task.yield()
+            }
+        }
+        let updatedRemainingSnapshot = try #require(
+            await previewContent.snapshotForTesting(chatID: remainingRunningChatID)
+        )
+        #expect(updatedRemainingSnapshot.items.count > remainingItemCount)
+        await previewContent.stopStreamingForTesting()
     }
 
     @Test func inactiveChatContextMenuArchiveSkipsConfirmationAndRemovesSidebarChat() async throws {
@@ -181,7 +240,7 @@ extension ReviewUITests {
                     )
                 ]
             ))
-        try await runtime.transport.enqueueEmpty(for: "thread/archive")
+        try await runtime.transport.enqueueSuccess(for: .threadArchive)
 
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running)
@@ -215,11 +274,11 @@ extension ReviewUITests {
 
         #expect(archiveMenuState.presented)
         #expect(archiveMenuState.enabled)
-        await runtime.transport.waitForRequest(method: "thread/archive")
+        await runtime.transport.waitForRequest(.threadArchive)
         try await waitForCondition {
             sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(chatID)) == nil
         }
-        #expect(await runtime.transport.recordedRequests(method: "thread/archive").count == 1)
+        #expect(await runtime.transport.recordedRequests(for: .threadArchive).count == 1)
         #expect(confirmationRequestCount == 0)
     }
 
@@ -277,7 +336,7 @@ extension ReviewUITests {
         try await waitForCondition {
             confirmedChatIDs == [chatID]
         }
-        #expect(await runtime.transport.recordedRequests(method: "thread/archive").isEmpty)
+        #expect(await runtime.transport.recordedRequests(for: .threadArchive).isEmpty)
         #expect(sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(chatID)) == "Rejected active archive chat")
     }
 
@@ -299,7 +358,7 @@ extension ReviewUITests {
                     )
                 ]
             ))
-        try await runtime.transport.enqueueEmpty(for: "thread/archive")
+        try await runtime.transport.enqueueSuccess(for: .threadArchive)
 
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running)
@@ -333,11 +392,11 @@ extension ReviewUITests {
 
         #expect(archiveMenuState.presented)
         #expect(archiveMenuState.enabled)
-        await runtime.transport.waitForRequest(method: "thread/archive")
+        await runtime.transport.waitForRequest(.threadArchive)
         try await waitForCondition {
             sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(chatID)) == nil
         }
-        #expect(await runtime.transport.recordedRequests(method: "thread/archive").count == 1)
+        #expect(await runtime.transport.recordedRequests(for: .threadArchive).count == 1)
         #expect(confirmedChatIDs == [chatID])
     }
 
@@ -354,11 +413,24 @@ extension ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
 
-        let sidebar = viewController.splitViewControllerForTesting.sidebarViewControllerForTesting
+        let splitViewController = viewController.splitViewControllerForTesting
+        let sidebar = splitViewController.sidebarViewControllerForTesting
+        let transport = splitViewController.transportViewControllerForTesting
         try await waitForCondition {
             sidebar.sidebarKindForTesting == .chatList
                 && sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(selectedChatID)) != nil
         }
+        _ = try await advancePreviewStreamBeyondMCPFixture(
+            previewContent,
+            transport: transport,
+            selectedChatID: selectedChatID
+        )
+        let remainingRunningChatID = CodexThreadID(rawValue: "preview-thread-0-1")
+        let remainingItemCount = try #require(
+            await previewContent.snapshotForTesting(chatID: remainingRunningChatID)
+        ).items.count
+        previewContent.startStreamingForTesting(interval: .milliseconds(1))
+        defer { previewContent.cancelStreamingForTesting() }
 
         var confirmedChatIDs: [CodexThreadID] = []
         sidebar.setChatArchiveConfirmationForTesting { chatID, _ in
@@ -385,6 +457,20 @@ extension ReviewUITests {
         }
         #expect(await previewContent.archiveRequestCountForTesting() == 1)
         #expect(confirmedChatIDs == [selectedChatID])
+
+        try await withTestTimeout(.seconds(2)) {
+            while await previewContent.snapshotForTesting(chatID: remainingRunningChatID)?.items.count
+                == remainingItemCount
+            {
+                try Task.checkCancellation()
+                await Task.yield()
+            }
+        }
+        let updatedRemainingSnapshot = try #require(
+            await previewContent.snapshotForTesting(chatID: remainingRunningChatID)
+        )
+        #expect(updatedRemainingSnapshot.items.count > remainingItemCount)
+        await previewContent.stopStreamingForTesting()
     }
 
     @Test func activeChatContextMenuCancelFallsBackWhenMatchingReviewRunIsTerminal() async throws {
@@ -404,7 +490,7 @@ extension ReviewUITests {
                         updatedAt: Date(timeIntervalSince1970: 5_000),
                         status: .active(activeFlags: []),
                         turns: [
-                            .init(id: turnID, status: .running)
+                            .init(id: turnID, state: .inProgress)
                         ]
                     )
                 ]
@@ -414,16 +500,18 @@ extension ReviewUITests {
                 id: chatID,
                 status: .active(activeFlags: []),
                 turns: [
-                    .init(id: turnID, status: .running)
+                    .init(id: turnID, state: .inProgress)
                 ]
             ))
-        try await runtime.transport.enqueueEmpty(for: "turn/interrupt")
+        try await runtime.transport.enqueueSuccess(for: .turnInterrupt)
 
         let terminalRun = ReviewRunRecord.makeForTesting(
             id: "terminal-run",
             cwd: repo.path,
             targetSummary: "Terminal review run",
+            attemptID: "terminal-attempt",
             threadID: chatID.rawValue,
+            reviewThreadID: chatID.rawValue,
             turnID: "terminal-turn",
             status: .succeeded,
             startedAt: Date(timeIntervalSince1970: 4_000),
@@ -471,8 +559,8 @@ extension ReviewUITests {
 
         #expect(presentedCancelItem)
         #expect(cancelItemWasEnabled)
-        await runtime.transport.waitForRequest(method: "turn/interrupt")
-        let interruptRequestCount = await runtime.transport.recordedRequests(method: "turn/interrupt").count
+        await runtime.transport.waitForRequest(.turnInterrupt)
+        let interruptRequestCount = await runtime.transport.recordedRequests(for: .turnInterrupt).count
         #expect(interruptRequestCount == 1)
     }
 
@@ -493,7 +581,7 @@ extension ReviewUITests {
                         updatedAt: Date(timeIntervalSince1970: 5_000),
                         status: .active(activeFlags: []),
                         turns: [
-                            .init(id: turnID, status: .running)
+                            .init(id: turnID, state: .inProgress)
                         ]
                     )
                 ]
@@ -503,16 +591,18 @@ extension ReviewUITests {
                 id: chatID,
                 status: .active(activeFlags: []),
                 turns: [
-                    .init(id: turnID, status: .running)
+                    .init(id: turnID, state: .inProgress)
                 ]
             ))
-        try await runtime.transport.enqueueEmpty(for: "turn/interrupt")
+        try await runtime.transport.enqueueSuccess(for: .turnInterrupt)
 
         let terminalRun = ReviewRunRecord.makeForTesting(
             id: "a-terminal-run",
             cwd: repo.path,
             targetSummary: "Terminal review run",
+            attemptID: "terminal-attempt",
             threadID: chatID.rawValue,
+            reviewThreadID: chatID.rawValue,
             turnID: "terminal-review-turn",
             status: .succeeded,
             startedAt: Date(timeIntervalSince1970: 4_100),
@@ -523,7 +613,9 @@ extension ReviewUITests {
             id: "z-pending-cancellation-run",
             cwd: repo.path,
             targetSummary: "Pending cancellation review run",
+            attemptID: "pending-cancellation-attempt",
             threadID: chatID.rawValue,
+            reviewThreadID: chatID.rawValue,
             turnID: "pending-review-turn",
             status: .running,
             cancellationRequested: true,
@@ -571,8 +663,8 @@ extension ReviewUITests {
         // command is visible but disabled.
         #expect(cancelItemWasEnabled == false)
         try await Task.sleep(for: .milliseconds(100))
-        let resumeRequestCount = await runtime.transport.recordedRequests(method: "thread/resume").count
-        let interruptRequestCount = await runtime.transport.recordedRequests(method: "turn/interrupt").count
+        let resumeRequestCount = await runtime.transport.recordedRequests(for: .threadResume).count
+        let interruptRequestCount = await runtime.transport.recordedRequests(for: .turnInterrupt).count
         #expect(resumeRequestCount == 0)
         #expect(interruptRequestCount == 0)
     }
@@ -2016,6 +2108,15 @@ extension ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         transport.view.layoutSubtreeIfNeeded()
 
+        try await waitForCondition {
+            let visibleFragmentBounds = transport.logVisibleFragmentBoundsForTesting
+            let visibleBottomInViewport =
+                visibleFragmentBounds.maxY - transport.logVerticalScrollOffsetForTesting
+            let bottomGap = transport.logViewportHeightForTesting - visibleBottomInViewport
+            return abs(bottomGap) < 120
+                && transport.isLogPinnedToBottomForTesting
+                && transport.logStaleFragmentViewCountForTesting == 0
+        }
         let visibleFragmentBounds = transport.logVisibleFragmentBoundsForTesting
         let visibleBottomInViewport = visibleFragmentBounds.maxY - transport.logVerticalScrollOffsetForTesting
         let bottomGap = transport.logViewportHeightForTesting - visibleBottomInViewport
@@ -2129,8 +2230,8 @@ extension ReviewUITests {
         #expect(appendedText.contains("delta/") == false)
         #expect(appendedText.count < 160)
         #expect(appendedItems.count == 1)
-        #expect(appendedItems.first?.kind.rawValue == "event")
-        #expect(appendedItems.first.map(diagnosticMessage)?.contains("preview-turn") == true)
+        #expect(appendedItems.first?.kind == .agentMessage)
+        #expect(appendedItems.first?.text?.contains("preview-turn") == true)
     }
 
     @Test func previewChatStreamUsesMixedLogKinds() async throws {
@@ -2147,21 +2248,19 @@ extension ReviewUITests {
         let updatedSnapshot = try #require(await source.snapshotForTesting(chatID: runningChatID))
         let appendedItems = Array(updatedSnapshot.items.dropFirst(initialItemCount))
         let appendedKinds = appendedItems.map { $0.kind.rawValue }
-        #expect(appendedKinds.contains("event"))
         #expect(appendedKinds.contains("commandExecution"))
         #expect(appendedKinds.contains("mcpToolCall"))
         #expect(appendedKinds.contains("plan"))
-        #expect(appendedKinds.contains("contextCompaction"))
         #expect(appendedKinds.contains("reasoning"))
         #expect(appendedKinds.contains("agentMessage"))
-        #expect(Set(appendedKinds).count >= 6)
+        #expect(Set(appendedKinds).count >= 5)
         #expect(Set(appendedItems.map { $0.id }).count == appendedItems.count)
 
         let compactionItems = updatedSnapshot.items
             .dropFirst(initialItemCount)
-            .filter { $0.kind.rawValue == "contextCompaction" }
+            .filter { $0.id.contains("context-compaction") }
         let compactionItem = try #require(compactionItems.last)
-        #expect(contextCompactionTitle(compactionItem) == "Context automatically compacted")
+        #expect(compactionItem.text == "Context automatically compacted")
         let renderedLog = updatedSnapshot.items.compactMap { $0.text }.joined(separator: "\n")
         #expect(renderedLog.contains("Context automatically compacted"))
         #expect(renderedLog.contains("Automatically compacting context") == false)
@@ -2177,7 +2276,7 @@ extension ReviewUITests {
         tick = await source.appendPreviewChatLogStreamTick(after: tick)
         var snapshot = try #require(await source.snapshotForTesting(chatID: runningChatID))
         #expect(snapshot.items.count == initialItemCount + 1)
-        #expect(snapshot.items.last?.kind.rawValue == "event")
+        #expect(snapshot.items.last?.kind == .agentMessage)
 
         for _ in 0..<38 {
             tick = await source.appendPreviewChatLogStreamTick(after: tick)
@@ -2227,6 +2326,70 @@ extension ReviewUITests {
 
 }
 
+private extension CodexAppServerTestTurn {
+    init(id: CodexTurnID, state: CodexTurnSnapshot.State) throws {
+        try self.init(
+            snapshot: .init(id: id, state: state),
+            items: []
+        )
+    }
+}
+
+private extension CodexAppServerTestStoredThread {
+    init(
+        id: CodexThreadID,
+        workspace: URL? = nil,
+        name: String? = nil,
+        preview: String? = nil,
+        updatedAt: Date = Date(timeIntervalSince1970: 0),
+        recencyAt: Date? = nil,
+        status: CodexThreadStatus = .idle,
+        turns: [CodexAppServerTestTurn] = []
+    ) throws {
+        let cwd = workspace ?? URL(
+            fileURLWithPath: "/tmp/codex-review-ui-shell",
+            isDirectory: true
+        )
+        try self.init(
+            snapshot: .init(
+                id: id,
+                workspace: cwd,
+                name: name,
+                preview: preview ?? name ?? id.rawValue,
+                modelProvider: "openai",
+                sourceKind: .appServer,
+                createdAt: updatedAt,
+                updatedAt: updatedAt,
+                recencyAt: recencyAt ?? updatedAt,
+                status: status,
+                ephemeral: false,
+                turns: turns.map(\.snapshot)
+            ),
+            turns: turns,
+            metadata: .init(
+                sessionID: "session-\(id.rawValue)",
+                cliVersion: "codex-cli-test",
+                source: .appServer
+            ),
+            runtimeMetadata: .init(
+                model: "gpt-5",
+                modelProvider: "openai",
+                serviceTier: nil,
+                cwd: cwd,
+                runtimeWorkspaceRoots: [cwd],
+                instructionSources: [],
+                approvalPolicy: .never,
+                approvalsReviewer: .user,
+                sandbox: .dangerFullAccess,
+                activePermissionProfile: nil,
+                reasoningEffort: nil,
+                multiAgentMode: .explicitRequestOnly
+            ),
+            isArchived: false
+        )
+    }
+}
+
 @MainActor
 private func previewSelectedChatID(in store: CodexReviewStore) -> CodexThreadID? {
     _ = store
@@ -2261,6 +2424,30 @@ private func performChatContextMenuItemForTesting(
         menu.performActionForItem(at: itemIndex)
     }
     return (presented: presented, enabled: enabled)
+}
+
+@MainActor
+private func advancePreviewStreamBeyondMCPFixture(
+    _ previewContent: ReviewMonitorPreviewContentSource,
+    transport: ReviewMonitorTransportViewController,
+    selectedChatID: CodexThreadID
+) async throws -> Int {
+    var tick = 0
+    for _ in 0..<220 {
+        tick = await previewContent.appendPreviewChatLogStreamTick(
+            after: tick,
+            emitsNotifications: true
+        )
+    }
+
+    _ = try await awaitTransportRender(
+        transport,
+        expectedSelection: .chat(selectedChatID.rawValue),
+        timeout: .seconds(5)
+    ) { snapshot in
+        snapshot.log.contains("Checking whether")
+    }
+    return tick
 }
 
 @MainActor
@@ -2320,6 +2507,7 @@ private func renderDetailLogForShellLayoutTesting(
     }
     viewController.view.layoutSubtreeIfNeeded()
     transport.view.layoutSubtreeIfNeeded()
+    transport.scrollLogToBottomForTesting()
 }
 
 private func makeSidebarReviewChatFilterDefaultsForTesting() throws -> (defaults: UserDefaults, suiteName: String) {

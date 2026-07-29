@@ -16,7 +16,11 @@ struct ReviewObservationAwaiterTests {
         }
         await Task.yield()
 
-        run.updateStateForTesting(status: .succeeded, summary: "Done")
+        run.updateStateForTesting(
+            status: .succeeded,
+            endedAt: Date(timeIntervalSince1970: 20),
+            summary: "Done"
+        )
 
         let result = await task.value
         #expect(result)
@@ -33,7 +37,11 @@ struct ReviewObservationAwaiterTests {
         }
         await Task.yield()
 
-        run.updateStateForTesting(status: .cancelled, summary: "Stop")
+        run.updateStateForTesting(
+            status: .cancelled,
+            endedAt: Date(timeIntervalSince1970: 20),
+            summary: "Stop"
+        )
 
         let result = await task.value
         #expect(result)
@@ -50,11 +58,30 @@ struct ReviewObservationAwaiterTests {
         #expect(result == false)
     }
 
+    @Test func cancellationResumesWithoutWaitingForObservationOrTimeout() async {
+        let run = makeRunningRun()
+        let task = Task { @MainActor in
+            await ReviewObservationAwaiter.waitUntilTerminal(
+                run: run,
+                timeout: .seconds(60)
+            )
+        }
+        await Task.yield()
+
+        task.cancel()
+
+        #expect(await task.value == false)
+    }
+
     private func makeRunningRun() -> ReviewRunRecord {
         ReviewRunRecord.makeForTesting(
             id: "run-awaiter",
             targetSummary: "Uncommitted changes",
+            attemptID: "attempt-awaiter",
+            threadID: "thread-awaiter",
+            turnID: "turn-awaiter",
             status: .running,
+            startedAt: Date(timeIntervalSince1970: 10),
             summary: "Running review."
         )
     }

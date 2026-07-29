@@ -1,10 +1,10 @@
-public enum CodexReviewServerState: Sendable, Equatable {
+package enum CodexReviewServerState: Sendable, Equatable {
     case stopped
     case starting
     case running
     case failed(String)
 
-    public var isRestartAvailable: Bool {
+    package var isRestartAvailable: Bool {
         switch self {
         case .stopped, .starting, .failed:
             true
@@ -13,7 +13,7 @@ public enum CodexReviewServerState: Sendable, Equatable {
         }
     }
 
-    public var displayText: String {
+    package var displayText: String {
         switch self {
         case .stopped:
             "Stopped"
@@ -26,7 +26,7 @@ public enum CodexReviewServerState: Sendable, Equatable {
         }
     }
 
-    public var failureMessage: String? {
+    package var failureMessage: String? {
         guard case .failed(let message) = self else {
             return nil
         }

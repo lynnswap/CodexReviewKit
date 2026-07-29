@@ -1,5 +1,6 @@
 import Foundation
-import CodexKit
+import CodexAppServerKit
+import CodexDataKit
 import CodexReviewKit
 
 package enum CodexReviewMCP {
@@ -8,7 +9,7 @@ package enum CodexReviewMCP {
 
 package typealias ReviewMCPLogProjectionProvider = @MainActor @Sendable (
     CodexReviewAPI.Read.Result
-) async -> ReviewMCPLogProjection?
+) async throws -> ReviewChatProjectionLookup
 
 package extension CodexReviewMCP.Tool {
     enum Name: String, Codable, Equatable, Sendable, CaseIterable {
@@ -35,8 +36,8 @@ package extension CodexReviewMCP.Tool {
 package extension CodexReviewMCP.Tool {
     enum Request: Equatable, Sendable {
         case reviewStart(sessionID: String, request: CodexReviewAPI.Start.Request, waitTimeout: Duration?)
-        case reviewAwait(sessionID: String?, runID: String, waitTimeout: Duration)
-        case reviewRead(sessionID: String?, runID: String)
+        case reviewAwait(sessionID: String?, runID: ReviewRunID, waitTimeout: Duration)
+        case reviewRead(sessionID: String?, runID: ReviewRunID)
         case reviewList(sessionID: String?, cwd: String?, statuses: [ReviewRunState]?, limit: Int?)
         case reviewCancel(sessionID: String?, selector: CodexReviewAPI.Run.Selector, reason: ReviewCancellation)
     }
@@ -52,6 +53,40 @@ package extension CodexReviewMCP.Tool {
             self.log = log
         }
     }
+
+    internal struct ReviewListItemSnapshot: Equatable, Sendable {
+        var result: CodexReviewAPI.Run.ListItem
+        var log: ReviewMCPLogProjection
+
+        init(
+            result: CodexReviewAPI.Run.ListItem,
+            log: ReviewMCPLogProjection
+        ) {
+            self.result = result
+            self.log = log
+        }
+    }
+
+    internal struct ReviewListSnapshot: Equatable, Sendable {
+        var items: [ReviewListItemSnapshot]
+
+        init(items: [ReviewListItemSnapshot]) {
+            self.items = items
+        }
+    }
+
+    internal struct ReviewCancelSnapshot: Equatable, Sendable {
+        var result: CodexReviewAPI.Cancel.Outcome
+        var log: ReviewMCPLogProjection
+
+        init(
+            result: CodexReviewAPI.Cancel.Outcome,
+            log: ReviewMCPLogProjection
+        ) {
+            self.result = result
+            self.log = log
+        }
+    }
 }
 
 package extension CodexReviewMCP.Tool {
@@ -59,8 +94,8 @@ package extension CodexReviewMCP.Tool {
         case reviewStart(ReviewSnapshot)
         case reviewAwait(ReviewSnapshot)
         case reviewRead(ReviewSnapshot)
-        case reviewList(CodexReviewAPI.List.Result)
-        case reviewCancel(CodexReviewAPI.Cancel.Outcome)
+        case reviewList(ReviewListSnapshot)
+        case reviewCancel(ReviewCancelSnapshot)
     }
 }
 
@@ -87,25 +122,23 @@ package final class CodexReviewMCPServer {
         ]
     }
 
-    func handle(_ request: CodexReviewMCP.Tool.Request) async throws -> CodexReviewMCP.Tool.Response {
+    func handle(
+        _ request: CodexReviewMCP.Tool.Request,
+        allowedRunIDs: Set<ReviewRunID>? = nil
+    ) async throws -> CodexReviewMCP.Tool.Response {
         switch request {
         case .reviewStart(let sessionID, let reviewRequest, let waitTimeout):
-            let result: CodexReviewAPI.Read.Result
-            if let waitTimeout {
-                result = try await store.startReview(
-                    sessionID: sessionID,
-                    request: reviewRequest,
-                    waitTimeout: waitTimeout
-                )
-            } else {
-                result = try await store.startReview(sessionID: sessionID, request: reviewRequest)
-            }
-            let snapshot = try await reviewSnapshot(
-                result,
-                sessionID: sessionID
+            let runID = try await beginReview(
+                sessionID: sessionID,
+                request: reviewRequest
             )
-            return .reviewStart(snapshot)
+            return try await finishReviewStart(
+                sessionID: sessionID,
+                runID: runID,
+                waitTimeout: waitTimeout
+            )
         case .reviewAwait(let sessionID, let runID, let waitTimeout):
+            try requireAllowed(runID, allowedRunIDs: allowedRunIDs)
             let snapshot = try await reviewSnapshot(
                 try await store.awaitReview(
                     sessionID: sessionID,
@@ -116,6 +149,7 @@ package final class CodexReviewMCPServer {
             )
             return .reviewAwait(snapshot)
         case .reviewRead(let sessionID, let runID):
+            try requireAllowed(runID, allowedRunIDs: allowedRunIDs)
             let snapshot = try await reviewSnapshot(
                 try store.readReview(
                     sessionID: sessionID,
@@ -125,21 +159,57 @@ package final class CodexReviewMCPServer {
             )
             return .reviewRead(snapshot)
         case .reviewList(let sessionID, let cwd, let statuses, let limit):
-            return .reviewList(store.listReviews(
+            let result = store.listReviews(
                 sessionID: sessionID,
                 cwd: cwd,
                 statuses: statuses,
-                limit: limit
-            ))
+                limit: limit,
+                allowedRunIDs: allowedRunIDs
+            )
+            return .reviewList(try await reviewListSnapshot(result))
         case .reviewCancel(let sessionID, let selector, let reason):
             let runRecord = try store.resolveRun(
                 sessionID: sessionID,
-                selector: selector.defaultingToActiveStatusesForCancellation()
+                selector: selector.defaultingToActiveStatusesForCancellation(),
+                allowedRunIDs: allowedRunIDs
             )
-            return .reviewCancel(try await store.cancelReview(
+            let result = try await store.cancelReview(
                 runID: runRecord.id,
                 cancellation: reason
-            ))
+            )
+            return .reviewCancel(try await reviewCancelSnapshot(result))
+        }
+    }
+
+    func beginReview(
+        sessionID: String,
+        request: CodexReviewAPI.Start.Request
+    ) async throws -> ReviewRunID {
+        try await store.beginReview(sessionID: sessionID, request: request)
+    }
+
+    func finishReviewStart(
+        sessionID: String,
+        runID: ReviewRunID,
+        waitTimeout: Duration?
+    ) async throws -> CodexReviewMCP.Tool.Response {
+        let result = try await store.awaitReview(
+            sessionID: sessionID,
+            runID: runID,
+            timeout: waitTimeout
+        )
+        return .reviewStart(try await reviewSnapshot(result, sessionID: sessionID))
+    }
+
+    private func requireAllowed(
+        _ runID: ReviewRunID,
+        allowedRunIDs: Set<ReviewRunID>?
+    ) throws {
+        guard let allowedRunIDs else {
+            return
+        }
+        guard allowedRunIDs.contains(runID) else {
+            throw MCPReviewSessionRegistryError.runNotFound(runID)
         }
     }
 
@@ -150,12 +220,95 @@ package final class CodexReviewMCPServer {
         if let sessionID {
             _ = try store.resolveRun(sessionID: sessionID, selector: .init(runID: result.runID))
         }
-        let log = await logProjectionProvider?(result) ?? ReviewMCPLogProjection.unavailable(result: result)
+        let lookup = try await logProjectionProvider?(result) ?? .unavailable
+        let log = try resolvedLogProjection(lookup, for: result)
         return .init(result: result, log: log)
     }
 
-    package func closeSession(_ sessionID: String) async {
-        await store.closeSession(sessionID)
+    private func reviewListSnapshot(
+        _ result: CodexReviewAPI.List.Result
+    ) async throws -> CodexReviewMCP.Tool.ReviewListSnapshot {
+        var items: [CodexReviewMCP.Tool.ReviewListItemSnapshot] = []
+        items.reserveCapacity(result.items.count)
+        for item in result.items {
+            let readResult = CodexReviewAPI.Read.Result(
+                runID: item.runID,
+                core: item.core,
+                presentation: item.presentation,
+                elapsedSeconds: item.elapsedSeconds
+            )
+            items.append(.init(
+                result: item,
+                log: try await terminalReviewProjection(for: readResult)
+            ))
+        }
+        return .init(items: items)
+    }
+
+    private func reviewCancelSnapshot(
+        _ result: CodexReviewAPI.Cancel.Outcome
+    ) async throws -> CodexReviewMCP.Tool.ReviewCancelSnapshot {
+        let readResult = CodexReviewAPI.Read.Result(
+            runID: result.runID,
+            core: result.core,
+            presentation: result.presentation
+        )
+        return .init(
+            result: result,
+            log: try await terminalReviewProjection(for: readResult)
+        )
+    }
+
+    private func terminalReviewProjection(
+        for result: CodexReviewAPI.Read.Result
+    ) async throws -> ReviewMCPLogProjection {
+        guard result.presentation.status == .succeeded else {
+            return .unavailable(result: result)
+        }
+        let lookup = try await logProjectionProvider?(result) ?? .unavailable
+        return try resolvedLogProjection(lookup, for: result)
+    }
+
+    private func resolvedLogProjection(
+        _ lookup: ReviewChatProjectionLookup,
+        for result: CodexReviewAPI.Read.Result
+    ) throws -> ReviewMCPLogProjection {
+        switch lookup {
+        case .available(let projection):
+            guard let attempt = result.core.attempt,
+                  projection.turnID?.rawValue == attempt.turnID.rawValue else {
+                throw ReviewMCPError.projectionInvariantViolation(runID: result.runID)
+            }
+            if result.presentation.status == .succeeded,
+               projection.finalResult?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                throw ReviewMCPError.projectionInvariantViolation(runID: result.runID)
+            }
+            return projection
+        case .unavailable:
+            guard result.presentation.status != .succeeded else {
+                throw ReviewMCPError.projectionInvariantViolation(runID: result.runID)
+            }
+            return .unavailable(result: result)
+        case .refreshFailed(let failure):
+            throw ReviewMCPError.projectionRefreshFailed(
+                runID: result.runID,
+                failure: failure
+            )
+        }
+    }
+
+    package func closeSession(
+        _ sessionID: String
+    ) async -> MCPReviewSessionStoreCloseResult {
+        let result = await store.closeSession(sessionID)
+        return .init(
+            terminalAndDrainedRunIDs: result.terminalAndDrainedRunIDs,
+            failedRunIDs: result.failedRunIDs
+        )
+    }
+
+    package func releaseClosedSession(_ sessionID: String) {
+        store.releaseClosedSession(sessionID)
     }
 
     package func hasActiveReviews(in sessionID: String) -> Bool {
@@ -168,36 +321,36 @@ package extension CodexReviewMCPServer {
         modelContext: CodexModelContext
     ) -> ReviewMCPLogProjectionProvider {
         { result in
-            guard let turnID = result.core.run.turnID?.nilIfEmpty else {
-                return nil
+            guard let attempt = result.core.attempt else {
+                return .unavailable
             }
-            guard let threadID = (result.core.run.reviewThreadID ?? result.core.run.threadID)?.nilIfEmpty else {
-                return nil
-            }
+            let turnID = attempt.turnID.rawValue
+            let threadID = attempt.threadIdentity.activeTurnThreadID.rawValue
 
             let chat = modelContext.model(for: CodexThreadID(rawValue: threadID))
             do {
                 try await modelContext.refresh(chat, includeTurns: true)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let failure as CodexFetchFailure {
+                return .refreshFailed(failure)
+            } catch let failure as CodexAppServerError {
+                return .refreshFailed(.appServer(failure))
             } catch {
-                return nil
+                preconditionFailure("CodexDataKit refresh threw an unsupported error: \(error)")
             }
             let codexTurnID = CodexTurnID(rawValue: turnID)
             guard chat.turn(id: codexTurnID) != nil else {
-                return nil
+                return .unavailable
             }
-            return ReviewMCPLogProjection(
+            let transcript = chat.transcript(in: codexTurnID)
+            return .available(ReviewMCPLogProjection(
                 result: result,
                 turnID: codexTurnID,
-                threadItems: chat.items(in: codexTurnID).map(\.threadItemForReviewMCP)
-            )
+                threadItems: transcript.items,
+                reviewOutputText: transcript.reviewOutputText
+            ))
         }
-    }
-}
-
-@MainActor
-private extension CodexItem {
-    var threadItemForReviewMCP: CodexThreadItem {
-        CodexThreadItem(id: itemID, kind: kind, content: content, rawPayload: rawPayload)
     }
 }
 

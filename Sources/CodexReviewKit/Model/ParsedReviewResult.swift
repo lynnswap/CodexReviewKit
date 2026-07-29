@@ -1,38 +1,38 @@
 import Foundation
 
-public struct ParsedReviewResult: Codable, Sendable, Hashable {
-    public enum State: String, Codable, Sendable, Hashable {
+package struct ParsedReviewResult: Codable, Sendable, Hashable {
+    package enum State: String, Codable, Sendable, Hashable {
         case hasFindings
         case noFindings
         case unknown
     }
 
-    public enum Source: String, Codable, Sendable, Hashable {
+    package enum Source: String, Codable, Sendable, Hashable {
         case parsedFinalReviewText
         case unrecognizedFindingBlock
         case notAvailable
     }
 
-    public struct Finding: Codable, Sendable, Hashable {
-        public struct Location: Codable, Sendable, Hashable {
-            public var path: String
-            public var startLine: Int
-            public var endLine: Int
+    package struct Finding: Codable, Sendable, Hashable {
+        package struct Location: Codable, Sendable, Hashable {
+            package var path: String
+            package var startLine: Int
+            package var endLine: Int
 
-            public init(path: String, startLine: Int, endLine: Int) {
+            package init(path: String, startLine: Int, endLine: Int) {
                 self.path = path
                 self.startLine = startLine
                 self.endLine = endLine
             }
         }
 
-        public var title: String
-        public var body: String
-        public var priority: Int?
-        public var location: Location?
-        public var rawText: String
+        package var title: String
+        package var body: String
+        package var priority: Int?
+        package var location: Location?
+        package var rawText: String
 
-        public init(
+        package init(
             title: String,
             body: String,
             priority: Int? = nil,
@@ -47,15 +47,15 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         }
     }
 
-    public static let currentParserVersion = 1
+    package static let currentParserVersion = 1
 
-    public var state: State
-    public var findingCount: Int?
-    public var findings: [Finding]
-    public var source: Source
-    public var parserVersion: Int
+    package var state: State
+    package var findingCount: Int?
+    package var findings: [Finding]
+    package var source: Source
+    package var parserVersion: Int
 
-    public init(
+    package init(
         state: State,
         findingCount: Int?,
         findings: [Finding],
@@ -69,7 +69,7 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         self.parserVersion = parserVersion
     }
 
-    public static func notAvailable() -> ParsedReviewResult {
+    package static func notAvailable() -> ParsedReviewResult {
         ParsedReviewResult(
             state: .unknown,
             findingCount: nil,
@@ -78,7 +78,7 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         )
     }
 
-    public static func parse(finalReviewText text: String?) -> ParsedReviewResult {
+    package static func parse(finalReviewText text: String?) -> ParsedReviewResult {
         guard let text = text?.trimmingCharacters(in: .whitespacesAndNewlines),
               text.isEmpty == false
         else {

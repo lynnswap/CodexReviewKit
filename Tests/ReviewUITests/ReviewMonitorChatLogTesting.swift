@@ -1,6 +1,8 @@
 import Foundation
 import Testing
-import CodexKit
+import CodexAppServerKitTesting
+import CodexAppServerKit
+import CodexDataKit
 @_spi(Testing) @testable import CodexReviewKit
 @testable import ReviewChatLogUI
 @testable import ReviewUI
@@ -25,8 +27,8 @@ func makeReviewMonitorPreviewContentViewControllerForPreview(
     return rootViewController
 }
 
-struct ReviewChatLogEntryForTesting: Sendable, Hashable {
-    enum Kind: String, Sendable, Hashable {
+struct ReviewChatLogEntryForTesting: Sendable {
+    enum Kind: String, Sendable {
         case command
         case commandOutput
         case fileChange
@@ -44,10 +46,10 @@ struct ReviewChatLogEntryForTesting: Sendable, Hashable {
         case event
     }
 
-    struct Metadata: Sendable, Hashable {
+    struct Metadata: Sendable {
         var sourceType: String?
         var title: String?
-        var status: String?
+        var status: CodexTurnStatus?
         var itemID: String?
         var command: String?
         var cwd: String?
@@ -55,12 +57,12 @@ struct ReviewChatLogEntryForTesting: Sendable, Hashable {
         var startedAt: Date?
         var completedAt: Date?
         var durationMs: Int?
-        var commandStatus: String?
+        var commandStatus: CodexTurnStatus?
 
         init(
             sourceType: String? = nil,
             title: String? = nil,
-            status: String? = nil,
+            status: CodexTurnStatus? = nil,
             itemID: String? = nil,
             command: String? = nil,
             cwd: String? = nil,
@@ -68,7 +70,7 @@ struct ReviewChatLogEntryForTesting: Sendable, Hashable {
             startedAt: Date? = nil,
             completedAt: Date? = nil,
             durationMs: Int? = nil,
-            commandStatus: String? = nil
+            commandStatus: CodexTurnStatus? = nil
         ) {
             self.sourceType = sourceType
             self.title = title
@@ -115,11 +117,12 @@ struct ReviewChatFixtureForTesting {
         var id: CodexThreadID
         var title: String
         var preview: String?
-        var model: String?
+        var model: String
         var workspaceCWD: String?
-        var updatedAt: Date?
-        var recencyAt: Date?
-        var status: CodexThreadStatus?
+        var createdAt: Date
+        var updatedAt: Date
+        var recencyAt: Date
+        var status: CodexThreadStatus
     }
 
     var id: String
@@ -173,7 +176,7 @@ func makeReviewChatFixtureForTesting(
     cwd: String = "/tmp/repo",
     title: String,
     preview: String? = nil,
-    model: String? = "gpt-5",
+    model: String = "gpt-5",
     chatID: CodexThreadID? = nil,
     turnID: CodexTurnID? = nil,
     status: ReviewChatFixtureStatus = .succeeded,
@@ -184,7 +187,10 @@ func makeReviewChatFixtureForTesting(
 ) -> ReviewChatFixtureForTesting {
     let resolvedChatID = chatID ?? CodexThreadID(rawValue: id)
     let resolvedTurnID = turnID ?? CodexTurnID(rawValue: "\(id):preview-turn")
-    let resolvedUpdatedAt = updatedAt ?? startedAt
+    guard let resolvedCreatedAt = startedAt ?? updatedAt else {
+        preconditionFailure("A Preview test chat requires an explicit creation time.")
+    }
+    let resolvedUpdatedAt = updatedAt ?? resolvedCreatedAt
     let chat = ReviewChatFixtureForTesting.Chat(
         rowID: .chat(resolvedChatID),
         id: resolvedChatID,
@@ -192,6 +198,7 @@ func makeReviewChatFixtureForTesting(
         preview: preview,
         model: model,
         workspaceCWD: cwd,
+        createdAt: resolvedCreatedAt,
         updatedAt: resolvedUpdatedAt,
         recencyAt: resolvedUpdatedAt,
         status: CodexThreadStatus(chatFixtureStatusForTesting: status)
@@ -200,8 +207,10 @@ func makeReviewChatFixtureForTesting(
     let initialSnapshot = makeCodexThreadSnapshotForTesting(
         chatID: resolvedChatID,
         turnID: resolvedTurnID,
-        turnStatus: CodexTurnStatus(chatFixtureStatusForTesting: status),
-        turnErrorDescription: errorMessage,
+        turnState: CodexTurnSnapshot.State(
+            chatFixtureStatusForTesting: status,
+            errorMessage: errorMessage
+        ),
         items: ReviewChatLogFixtureStore.items(for: resolvedChatID, turnID: resolvedTurnID)
     )
     return ReviewChatFixtureForTesting(
@@ -243,13 +252,13 @@ func replaceChatLogTextForTesting(
 func installPreviewChatLogSourceForTesting(
     on store: CodexReviewStore,
     fixtures: [ReviewChatFixtureForTesting]
-) -> ReviewMonitorPreviewAppServerRuntime {
+) -> PreviewRuntimeLifetime {
     let fixtures = fixtures.map(makePreviewChatLogFixtureForTesting)
-    let runtime = ReviewMonitorPreviewAppServerRuntime(fixtures: fixtures)
+    let runtime = PreviewRuntimeLifetime(fixtures: fixtures)
     let retainer = ReviewChatLogFixtureRetainer(
         store: store,
         runtime: runtime,
-        chatIDs: Set(fixtures.map(\.chatID))
+        cwdByChatID: Dictionary(uniqueKeysWithValues: fixtures.map { ($0.chatID, $0.cwd) })
     )
     runStorePreviewSupportRetainers.append(retainer)
     previewSupportRetainersByStore[ObjectIdentifier(store)] = retainer
@@ -257,7 +266,7 @@ func installPreviewChatLogSourceForTesting(
 }
 
 @MainActor
-func previewRuntimeForTesting(on store: CodexReviewStore) -> ReviewMonitorPreviewAppServerRuntime? {
+func previewRuntimeForTesting(on store: CodexReviewStore) -> PreviewRuntimeLifetime? {
     prunePreviewSupportRetainersByStore()
     guard let retainer = previewSupportRetainersByStore[ObjectIdentifier(store)],
           retainer.store === store
@@ -270,6 +279,7 @@ func previewRuntimeForTesting(on store: CodexReviewStore) -> ReviewMonitorPrevie
 
 @MainActor
 private func prunePreviewSupportRetainersByStore() {
+    runStorePreviewSupportRetainers.removeAll { $0.store == nil }
     previewSupportRetainersByStore = previewSupportRetainersByStore.filter { _, retainer in
         retainer.store != nil
     }
@@ -422,8 +432,8 @@ func makePreviewAppServerRuntimeForTesting(
     streamID: String,
     isRunning: Bool,
     initialSnapshot: CodexThreadSnapshot
-) -> ReviewMonitorPreviewAppServerRuntime {
-    ReviewMonitorPreviewAppServerRuntime(
+) -> PreviewRuntimeLifetime {
+    PreviewRuntimeLifetime(
         fixtures: [
             makePreviewChatLogFixtureForTesting(
                 chat: chat,
@@ -501,8 +511,7 @@ func codexThreadSnapshotForTesting(_ fixture: ReviewChatFixtureForTesting) -> Co
 func makeCodexThreadSnapshotForTesting(
     chatID: CodexThreadID,
     turnID: CodexTurnID,
-    turnStatus: CodexTurnStatus = .completed,
-    turnErrorDescription: String? = nil,
+    turnState: CodexTurnSnapshot.State = .completed,
     items: [CodexThreadItem] = []
 ) -> CodexThreadSnapshot {
     makeCodexThreadSnapshotForTesting(
@@ -510,8 +519,7 @@ func makeCodexThreadSnapshotForTesting(
         turns: [
             .init(
                 id: turnID,
-                status: turnStatus,
-                errorMessage: turnErrorDescription,
+                state: turnState,
                 items: items
             )
         ]
@@ -527,7 +535,12 @@ func makeCodexThreadSnapshotForTesting(
     var resolvedTurns = turns
     if items.isEmpty == false {
         if resolvedTurns.isEmpty {
-            resolvedTurns = [CodexTurnSnapshot(id: CodexTurnID(rawValue: "\(chatID.rawValue):preview-turn"))]
+            resolvedTurns = [
+                CodexTurnSnapshot(
+                    id: CodexTurnID(rawValue: "\(chatID.rawValue):preview-turn"),
+                    state: .inProgress
+                )
+            ]
         }
         resolvedTurns[resolvedTurns.count - 1].items = items
     }
@@ -545,12 +558,17 @@ func makePreviewChatLogFixtureForTesting(
     isRunning: Bool,
     initialSnapshot: CodexThreadSnapshot
 ) -> ReviewMonitorPreviewChatLogFixture {
-    ReviewMonitorPreviewChatLogFixture(
+    guard let workspaceCWD = chat.workspaceCWD else {
+        preconditionFailure("A Preview test chat requires an explicit workspace.")
+    }
+    return ReviewMonitorPreviewChatLogFixture(
         chatID: chat.id,
         title: chat.title,
-        preview: chat.preview,
+        preview: chat.preview ?? chat.title,
         model: chat.model,
-        workspaceCWD: chat.workspaceCWD,
+        modelProvider: "openai",
+        workspaceCWD: workspaceCWD,
+        createdAt: chat.createdAt,
         updatedAt: chat.updatedAt,
         recencyAt: chat.recencyAt,
         status: chat.status,
@@ -612,26 +630,36 @@ private enum ReviewChatLogFixtureStore {
 @MainActor
 private final class ReviewChatLogFixtureRetainer {
     weak var store: CodexReviewStore?
-    let runtime: ReviewMonitorPreviewAppServerRuntime
-    private var chatIDs: Set<CodexThreadID>
+    let runtime: PreviewRuntimeLifetime
+    private var cwdByChatID: [CodexThreadID: String]
 
-    init(store: CodexReviewStore, runtime: ReviewMonitorPreviewAppServerRuntime, chatIDs: Set<CodexThreadID>) {
+    init(
+        store: CodexReviewStore,
+        runtime: PreviewRuntimeLifetime,
+        cwdByChatID: [CodexThreadID: String]
+    ) {
         self.store = store
         self.runtime = runtime
-        self.chatIDs = chatIDs
+        self.cwdByChatID = cwdByChatID
     }
 
     func contains(chatID: CodexThreadID) -> Bool {
-        chatIDs.contains(chatID)
+        cwdByChatID[chatID] != nil
     }
 
     func upsert(chatID: CodexThreadID, items: [CodexThreadItem]) async {
+        guard let cwd = cwdByChatID[chatID] else {
+            preconditionFailure("Missing preview fixture workspace for \(chatID.rawValue).")
+        }
         let previousItemsByID = Dictionary(
             uniqueKeysWithValues: await runtime.snapshotForTesting(chatID: chatID)?.items.map { ($0.id, $0) } ?? []
         )
         for item in items {
             guard let previousItem = previousItemsByID[item.id] else {
-                await runtime.upsertPreviewItem(id: item.id, kind: item.kind, content: item.content, to: chatID)
+                await runtime.upsertPreviewItem(
+                    makeAppServerTestItemForTesting(item, cwd: cwd),
+                    to: chatID
+                )
                 continue
             }
             guard previousItem != item else {
@@ -654,8 +682,107 @@ private final class ReviewChatLogFixtureRetainer {
                     content: previousItem.content
                 )
             } else {
-                await runtime.upsertPreviewItem(id: item.id, kind: item.kind, content: item.content, to: chatID)
+                await runtime.upsertPreviewItem(
+                    makeAppServerTestItemForTesting(item, cwd: cwd),
+                    to: chatID
+                )
             }
+        }
+    }
+}
+
+private func makeAppServerTestItemForTesting(
+    _ item: CodexThreadItem,
+    cwd: String
+) -> CodexAppServerTestItem {
+    do {
+        switch item.content {
+        case .message(let message):
+            return try .agentMessage(id: item.id, text: message.text, phase: message.phase)
+        case .plan(let text):
+            return try .plan(id: item.id, text: text)
+        case .reasoning(let reasoning):
+            guard item.kind == .reasoning else {
+                preconditionFailure("Legacy reasoning fixture kinds cannot emit current-v2 notifications.")
+            }
+            return try .reasoning(
+                id: item.id,
+                summary: reasoning.summary,
+                content: reasoning.content
+            )
+        case .command(let command):
+            return try .commandExecution(
+                id: item.id,
+                command: command.command,
+                cwd: URL(fileURLWithPath: command.cwd ?? cwd, isDirectory: true),
+                status: command.status.appServerTestCommandStatus,
+                aggregatedOutput: command.output,
+                exitCode: command.exitCode.flatMap(Int32.init(exactly:)),
+                duration: command.duration
+            )
+        case .fileChange(let fileChange):
+            return try .fileChange(
+                id: item.id,
+                changes: [
+                    CodexFileUpdateChange(
+                        path: fileChange.path ?? URL(fileURLWithPath: cwd)
+                            .appendingPathComponent("Preview.patch").path,
+                        kind: .update(movePath: nil),
+                        diff: fileChange.output ?? ""
+                    )
+                ],
+                status: fileChange.status.appServerTestPatchStatus
+            )
+        case .toolCall(let toolCall):
+            guard let server = toolCall.server, let name = toolCall.name else {
+                preconditionFailure("MCP preview fixtures require server and tool names.")
+            }
+            let result = previewMCPResultComponents(toolCall.result)
+            return try .mcpToolCall(
+                id: item.id,
+                server: server,
+                tool: name,
+                status: toolCall.status.appServerTestMCPStatus,
+                resultContent: result.content,
+                structuredContent: result.structuredContent,
+                resultMetadata: result.metadata,
+                errorMessage: toolCall.error
+            )
+        case .contextCompaction(let text):
+            guard text?.isEmpty != false else {
+                preconditionFailure("Current-v2 context compaction has no text payload.")
+            }
+            return try .contextCompaction(id: item.id)
+        case .diagnostic, .log, .unknown:
+            preconditionFailure("Unsupported current-v2 preview item kind \(item.kind.rawValue).")
+        }
+    } catch {
+        preconditionFailure("Invalid current-v2 preview fixture: \(error)")
+    }
+}
+
+private extension Optional where Wrapped == CodexTurnStatus {
+    var appServerTestCommandStatus: CodexAppServerTestItem.CommandStatus {
+        switch self {
+        case .some(.completed): .completed
+        case .some(.failed), .some(.interrupted): .failed
+        case .some(.inProgress), .some(.unknown), .none: .inProgress
+        }
+    }
+
+    var appServerTestPatchStatus: CodexAppServerTestItem.PatchStatus {
+        switch self {
+        case .some(.completed): .completed
+        case .some(.failed), .some(.interrupted): .failed
+        case .some(.inProgress), .some(.unknown), .none: .inProgress
+        }
+    }
+
+    var appServerTestMCPStatus: CodexAppServerTestItem.MCPStatus {
+        switch self {
+        case .some(.completed): .completed
+        case .some(.failed), .some(.interrupted): .failed
+        case .some(.inProgress), .some(.unknown), .none: .inProgress
         }
     }
 }
@@ -681,7 +808,23 @@ private func makeChatItems(
             orderedIDs.append(itemID)
         }
     }
-    return orderedIDs.compactMap { accumulated[$0]?.snapshot }
+    var items = orderedIDs.compactMap { accumulated[$0]?.snapshot }
+    for index in items.indices.dropLast() {
+        switch items[index].content {
+        case .command(var command) where command.status == .inProgress:
+            command.status = .completed
+            items[index].content = .command(command)
+        case .fileChange(var fileChange) where fileChange.status == .inProgress:
+            fileChange.status = .completed
+            items[index].content = .fileChange(fileChange)
+        case .toolCall(var toolCall) where toolCall.status == .inProgress:
+            toolCall.status = .completed
+            items[index].content = .toolCall(toolCall)
+        default:
+            break
+        }
+    }
+    return items
 }
 
 private struct ReviewChatLogAccumulatedItem {
@@ -732,7 +875,7 @@ private struct ReviewChatLogAccumulatedItem {
                         status: status
                     ))
             )
-        case .agentMessage:
+        case .agentMessage, .progress:
             snapshot = .init(
                 id: itemID,
                 kind: .agentMessage,
@@ -752,20 +895,20 @@ private struct ReviewChatLogAccumulatedItem {
         case .reasoning, .rawReasoning:
             snapshot = .init(
                 id: itemID,
-                kind: entry.kind == .rawReasoning ? .init(rawValue: "rawReasoning") : .reasoning,
+                kind: .reasoning,
                 content: .reasoning(.init(content: (existing?.reasoningText ?? "") + entry.text))
             )
         case .reasoningSummary:
             snapshot = .init(
                 id: itemID,
-                kind: .init(rawValue: "reasoningSummary"),
+                kind: .reasoning,
                 content: .reasoning(.init(summary: (existing?.reasoningText ?? "") + entry.text))
             )
         case .contextCompaction:
             snapshot = .init(
                 id: itemID,
                 kind: .contextCompaction,
-                content: .contextCompaction(entry.text)
+                content: .contextCompaction(nil)
             )
         case .toolCall:
             snapshot = .init(
@@ -773,7 +916,7 @@ private struct ReviewChatLogAccumulatedItem {
                 kind: .mcpToolCall,
                 content: .toolCall(.init(result: (existing?.toolResult ?? "") + entry.text, status: status))
             )
-        case .diagnostic, .error, .progress, .event:
+        case .diagnostic, .error, .event:
             snapshot = .init(
                 id: itemID,
                 kind: .init(rawValue: entry.kind.rawValue),
@@ -846,28 +989,23 @@ private extension CodexThreadStatus {
     }
 }
 
-private extension CodexTurnStatus {
-    init(chatFixtureStatusForTesting status: ReviewChatFixtureStatus) {
+private extension CodexTurnSnapshot.State {
+    init(
+        chatFixtureStatusForTesting status: ReviewChatFixtureStatus,
+        errorMessage: String?
+    ) {
         switch status {
         case .queued, .running:
-            self = .running
+            self = .inProgress
         case .succeeded:
             self = .completed
         case .failed:
-            self = .failed
+            guard let errorMessage else {
+                preconditionFailure("A failed review chat fixture requires an explicit error message.")
+            }
+            self = .failed(CodexTurnError(message: errorMessage))
         case .cancelled:
-            self = .cancelled
-        }
-    }
-}
-
-private extension CodexDataPhase {
-    init(chatFixtureStatusForTesting status: ReviewChatFixtureStatus, errorMessage: String?) {
-        switch status {
-        case .queued, .running, .succeeded, .cancelled:
-            self = .loaded
-        case .failed:
-            self = .failed(errorMessage ?? "Review failed")
+            self = .interrupted
         }
     }
 }
@@ -883,10 +1021,9 @@ private func chatLogCommandText(for entry: ReviewChatLogEntryForTesting) -> Stri
 }
 
 private func codexTurnStatus(for entry: ReviewChatLogEntryForTesting) -> CodexTurnStatus? {
-    guard let rawValue = entry.metadata?.commandStatus ?? entry.metadata?.status else {
-        return entry.kind == .command ? .running : nil
-    }
-    return CodexTurnStatus(rawValue: rawValue)
+    entry.metadata?.commandStatus
+        ?? entry.metadata?.status
+        ?? (entry.kind == .command ? .inProgress : nil)
 }
 
 extension CodexThreadSnapshot {

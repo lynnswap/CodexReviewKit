@@ -1,5 +1,6 @@
 import Foundation
 import ObservationBridge
+import Synchronization
 
 @MainActor
 package enum ReviewObservationAwaiter {
@@ -11,71 +12,90 @@ package enum ReviewObservationAwaiter {
             return true
         }
 
-        let waiter = ReviewTerminalObservationWaiter()
-        return await withTaskCancellationHandler {
-            await withCheckedContinuation { continuation in
-                waiter.begin(
-                    run: run,
-                    timeout: timeout,
-                    continuation: continuation
-                )
-            }
-        } onCancel: {
-            Task { @MainActor in
-                waiter.cancel()
-            }
-        }
-    }
-}
-
-@MainActor
-private final class ReviewTerminalObservationWaiter {
-    private var token: PortableObservationTracking.Token?
-    private var timeoutTask: Task<Void, Never>?
-    private var continuation: CheckedContinuation<Bool, Never>?
-    private var isResolved = false
-
-    func begin(
-        run: ReviewRunRecord,
-        timeout: Duration?,
-        continuation: CheckedContinuation<Bool, Never>
-    ) {
-        self.continuation = continuation
-        token = withPortableContinuousObservation { [weak self, run] event in
-            _ = run.core.lifecycle.status
+        let signal = ReviewTerminalObservationSignal()
+        let token = withPortableContinuousObservation { [run, signal] event in
+            _ = run.core.status
             guard run.isTerminal else {
                 return
             }
             event.cancel()
-            self?.resolve(true)
+            signal.finish(true)
         }
-        if let timeout {
-            timeoutTask = Task { @MainActor [weak self] in
+        defer {
+            token.cancel()
+            signal.finish(false)
+        }
+
+        guard let timeout else {
+            return await signal.wait()
+        }
+        return await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                await signal.wait()
+            }
+            group.addTask {
                 do {
                     try await Task.sleep(for: timeout)
+                    return false
                 } catch {
-                    return
+                    return false
                 }
-                self?.resolve(false)
+            }
+            let result = await group.next() ?? false
+            group.cancelAll()
+            return result
+        }
+    }
+}
+
+private final class ReviewTerminalObservationSignal: Sendable {
+    private enum State: Sendable {
+        case idle
+        case waiting(CheckedContinuation<Bool, Never>)
+        case finished(Bool)
+    }
+
+    private let state = Mutex<State>(.idle)
+
+    func wait() async -> Bool {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                let immediate = state.withLock { state -> Bool? in
+                    switch state {
+                    case .idle where Task.isCancelled:
+                        state = .finished(false)
+                        return false
+                    case .idle:
+                        state = .waiting(continuation)
+                        return nil
+                    case .waiting:
+                        preconditionFailure("A terminal observation signal is single-consumer.")
+                    case .finished(let result):
+                        return result
+                    }
+                }
+                if let immediate {
+                    continuation.resume(returning: immediate)
+                }
+            }
+        } onCancel: {
+            finish(false)
+        }
+    }
+
+    func finish(_ result: Bool) {
+        let continuation = state.withLock { state -> CheckedContinuation<Bool, Never>? in
+            switch state {
+            case .idle:
+                state = .finished(result)
+                return nil
+            case .waiting(let continuation):
+                state = .finished(result)
+                return continuation
+            case .finished:
+                return nil
             }
         }
-    }
-
-    func cancel() {
-        resolve(false)
-    }
-
-    private func resolve(_ result: Bool) {
-        guard isResolved == false else {
-            return
-        }
-        isResolved = true
-        timeoutTask?.cancel()
-        timeoutTask = nil
-        token?.cancel()
-        token = nil
-        let continuation = continuation
-        self.continuation = nil
         continuation?.resume(returning: result)
     }
 }

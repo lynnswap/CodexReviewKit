@@ -1,5 +1,6 @@
 import AppKit
-import CodexKit
+import CodexAppServerKit
+import CodexDataKit
 import OSLog
 
 private let logger = Logger(subsystem: "CodexReviewKit", category: "chat-log-target")
@@ -25,7 +26,6 @@ package final class ReviewMonitorCodexChatLogTarget {
 
     private let logScrollView = ReviewMonitorLogScrollView()
     private var logRenderer = ReviewMonitorLogRenderer()
-    private var selectedChatObservation: CodexChatObservation?
     private var selectedChatLogTask: Task<Void, Never>?
     private var boundModelContext: CodexModelContext?
     private var boundChatID: CodexThreadID?
@@ -48,7 +48,6 @@ package final class ReviewMonitorCodexChatLogTarget {
     package init() {}
 
     isolated deinit {
-        selectedChatObservation?.cancel()
         selectedChatLogTask?.cancel()
         pendingLogSourceChangeTask?.cancel()
         logRenderTask?.cancel()
@@ -70,7 +69,6 @@ package final class ReviewMonitorCodexChatLogTarget {
         logger.debug(
             "Binding Codex chat log chatID=\(selectedChatID.rawValue, privacy: .public) switchingChat=\(isSwitchingRenderedChat, privacy: .public)"
         )
-        cancelSelectedChatObservation()
         cancelPendingLogSourceChange()
         resetLogRenderer()
         logProjection.reset()
@@ -88,10 +86,7 @@ package final class ReviewMonitorCodexChatLogTarget {
     @discardableResult
     package func clear() -> Bool {
         cacheBoundLogScrollTarget()
-        // Keep the cancelled task referenced so the next bind can await its
-        // teardown before re-observing.
         selectedChatLogTask?.cancel()
-        cancelSelectedChatObservation()
         cancelPendingLogSourceChange()
         boundChatID = nil
         boundModelContext = nil
@@ -154,54 +149,35 @@ package final class ReviewMonitorCodexChatLogTarget {
         target: LogRenderTarget,
         initialRestorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget
     ) {
-        let previousTask = selectedChatLogTask
-        previousTask?.cancel()
+        selectedChatLogTask?.cancel()
         selectedChatLogTask = Task { @MainActor [weak self, weak chat, weak modelContext] in
-            // Wait for the previous observation task to unwind so its possibly
-            // in-flight observation registration is released before observing
-            // again; otherwise observe() can throw chatObservationAlreadyActive.
-            await previousTask?.value
             guard Task.isCancelled == false, let chat, let modelContext else {
                 return
             }
             do {
                 let observation = try await modelContext.observe(chat)
                 guard Task.isCancelled == false,
-                    let self,
-                    self.boundChat === chat,
-                    self.isCurrentLogRenderTarget(target)
+                    self?.boundChat === chat,
+                    self?.isCurrentLogRenderTarget(target) == true
                 else {
-                    observation.cancel()
+                    await observation.close()
                     return
                 }
-                self.selectedChatObservation = observation
-                self.publishSelectedCodexChatLogChange(
-                    self.logProjection.applyBaseline(
-                        from: observation.chat,
-                        chatCreatedAt: chat.createdAt,
-                        chatUpdatedAt: chat.updatedAt
-                    ),
-                    target: target,
-                    initialRestorationTarget: initialRestorationTarget
-                )
-                for await update in observation.updates {
+                for await event in observation.updates {
                     guard Task.isCancelled == false,
-                        self.boundChat === chat,
-                        self.isCurrentLogRenderTarget(target)
+                        let owner = self,
+                        owner.boundChat === chat,
+                        owner.isCurrentLogRenderTarget(target)
                     else {
-                        return
+                        break
                     }
-                    self.publishSelectedCodexChatLogChange(
-                        self.logProjection.apply(
-                            update,
-                            in: observation.chat,
-                            chatCreatedAt: chat.createdAt,
-                            chatUpdatedAt: chat.updatedAt
-                        ),
+                    owner.publishSelectedCodexChatLogChange(
+                        owner.logProjection.apply(event),
                         target: target,
                         initialRestorationTarget: initialRestorationTarget
                     )
                 }
+                await observation.close()
             } catch is CancellationError {
             } catch {
                 logger.error(
@@ -328,11 +304,6 @@ package final class ReviewMonitorCodexChatLogTarget {
         appliedLogRenderGeneration = logRenderGeneration
         hasAppliedBoundLog = false
         logRenderer = ReviewMonitorLogRenderer()
-    }
-
-    private func cancelSelectedChatObservation() {
-        selectedChatObservation?.cancel()
-        selectedChatObservation = nil
     }
 
     private func cancelPendingLogSourceChange() {
@@ -848,7 +819,6 @@ package final class ReviewMonitorCodexChatLogTarget {
                 }
                 selectedChatLogTask?.cancel()
                 selectedChatLogTask = nil
-                cancelSelectedChatObservation()
                 cancelPendingLogSourceChange()
                 resetLogRenderer()
                 boundChatID = chatID

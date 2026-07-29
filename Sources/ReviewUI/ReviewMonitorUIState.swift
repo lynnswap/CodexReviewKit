@@ -1,10 +1,10 @@
 import Observation
-import CodexKit
+import CodexAppServerKit
 import CodexReviewKit
 
 @MainActor
 @Observable
-public final class ReviewMonitorUIState {
+package final class ReviewMonitorUIState {
     let auth: CodexReviewAuthModel
     private let persistSidebarReviewChatFilter: (SidebarReviewChatFilter) -> Void
     var selection: ReviewMonitorSelection?

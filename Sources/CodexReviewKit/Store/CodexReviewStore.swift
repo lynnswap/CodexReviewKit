@@ -4,10 +4,10 @@ import Observation
 @MainActor
 @Observable
 public final class CodexReviewStore {
-    public package(set) var serverState: CodexReviewServerState = .stopped
-    public let auth: CodexReviewAuthModel
+    package var serverState: CodexReviewServerState = .stopped
+    package let auth: CodexReviewAuthModel
     package let settings: SettingsStore
-    public package(set) var serverURL: URL?
+    package var serverURL: URL?
     package var reviewRuns: Set<ReviewRunRecord> = []
     package var shouldAutoStartEmbeddedServer: Bool {
         backend.seed.shouldAutoStartEmbeddedServer
@@ -20,7 +20,8 @@ public final class CodexReviewStore {
     @ObservationIgnored package let networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy
     @ObservationIgnored package let clock: CodexReviewClock
     @ObservationIgnored package let idGenerator: CodexReviewIDGenerator
-    @ObservationIgnored let runtimeState = CodexReviewStoreRuntimeState()
+    @ObservationIgnored package let reviewThreadRetentionRegistry: ReviewThreadRetentionRegistry
+    @ObservationIgnored let runtimeState = ReviewStoreRuntime()
     @ObservationIgnored package var closedSessions: Set<String> = []
     @ObservationIgnored package var accountRateLimitAutoRefreshDriver: CodexReviewStoreRateLimitAutoRefreshDriver?
 
@@ -31,7 +32,8 @@ public final class CodexReviewStore {
         clock: CodexReviewClock = .init(),
         idGenerator: CodexReviewIDGenerator = .init(),
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
-        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default
+        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
+        reviewThreadRetentionJournal: (any ReviewThreadRetentionJournaling)? = nil
     ) {
         self.backend = backend
         self.networkMonitor = networkMonitor
@@ -39,6 +41,15 @@ public final class CodexReviewStore {
         self.diagnosticsURL = diagnosticsURL
         self.clock = clock
         self.idGenerator = idGenerator
+        let retentionJournal: any ReviewThreadRetentionJournaling
+        if let reviewThreadRetentionJournal {
+            retentionJournal = reviewThreadRetentionJournal
+        } else if let journalURL = backend.reviewThreadRetentionJournalURL {
+            retentionJournal = FileReviewThreadRetentionJournal(fileURL: journalURL)
+        } else {
+            retentionJournal = InMemoryReviewThreadRetentionJournal()
+        }
+        self.reviewThreadRetentionRegistry = ReviewThreadRetentionRegistry(journal: retentionJournal)
         self.auth = CodexReviewAuthModel()
         self.settings = SettingsStore(snapshot: backend.seed.initialSettingsSnapshot)
         self.settingsService = settingsService ?? CodexReviewSettingsService(
@@ -64,19 +75,23 @@ public final class CodexReviewStore {
 
     isolated deinit {
         accountRateLimitAutoRefreshDriver?.cancel()
-        runtimeState.cancelAllWorkers()
+        runtimeState.signalCancellation()
     }
 
-    public static func makePreviewStore(diagnosticsURL: URL? = nil) -> CodexReviewStore {
+    package static func makePreviewStore(diagnosticsURL: URL? = nil) -> CodexReviewStore {
         makePreviewStore(seed: .init(), diagnosticsURL: diagnosticsURL)
     }
 
     package static func makePreviewStore(
         seed: CodexReviewStoreSeed,
+        runtimeLifetime: (any CodexReviewPreviewRuntimeLifetime)? = nil,
         diagnosticsURL: URL? = nil
     ) -> CodexReviewStore {
         CodexReviewStore(
-            backend: PreviewCodexReviewStoreBackend(seed: seed),
+            backend: PreviewCodexReviewStoreBackend(
+                seed: seed,
+                runtimeLifetime: runtimeLifetime
+            ),
             diagnosticsURL: diagnosticsURL,
             networkMonitor: StaticCodexReviewNetworkMonitor()
         )
@@ -88,7 +103,8 @@ public final class CodexReviewStore {
         clock: CodexReviewClock = .init(),
         idGenerator: CodexReviewIDGenerator = .init(),
         networkMonitor: any CodexReviewNetworkMonitoring = StaticCodexReviewNetworkMonitor(),
-        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default
+        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
+        reviewThreadRetentionJournal: (any ReviewThreadRetentionJournaling)? = nil
     ) -> CodexReviewStore {
         CodexReviewStore(
             backend: backend,
@@ -96,11 +112,22 @@ public final class CodexReviewStore {
             clock: clock,
             idGenerator: idGenerator,
             networkMonitor: networkMonitor,
-            networkRecoveryPolicy: networkRecoveryPolicy
+            networkRecoveryPolicy: networkRecoveryPolicy,
+            reviewThreadRetentionJournal: reviewThreadRetentionJournal
         )
     }
 
     public func start(forceRestartIfNeeded: Bool = false) async {
+        await start(
+            forceRestartIfNeeded: forceRestartIfNeeded,
+            restartAdmission: nil
+        )
+    }
+
+    private func start(
+        forceRestartIfNeeded: Bool,
+        restartAdmission: CodexReviewRuntimeRestartAdmission?
+    ) async {
         switch serverState {
         case .stopped, .failed:
             break
@@ -114,52 +141,84 @@ public final class CodexReviewStore {
         serverState = .starting
         serverURL = nil
         writeDiagnosticsIfNeeded()
-        await backend.start(store: self, forceRestartIfNeeded: forceRestartIfNeeded)
+        if let restartAdmission {
+            await backend.resumeRuntimeRestart(
+                store: self,
+                admission: restartAdmission
+            )
+        } else {
+            await backend.start(store: self, forceRestartIfNeeded: forceRestartIfNeeded)
+        }
         await settingsService.refreshIfRunning(serverState: serverState)
         startAccountRateLimitAutoRefresh()
     }
 
     public func stop() async {
-        let locallyCancelledReviewRunIDs: [String]
-        if backend.invokesRuntimeStopReviewCleanupDuringStop {
-            locallyCancelledReviewRunIDs = []
-        } else {
-            locallyCancelledReviewRunIDs = await requestActiveReviewCancellationsForRuntimeStop()
+        await stop(purpose: .finalStoreShutdownRetiringRuns)
+    }
+
+    private func stop(purpose: CodexReviewRuntimeStopPurpose) async {
+        if backend.invokesRuntimeStopReviewCleanupDuringStop == false {
+            _ = await closeActiveReviewSessions(
+                reason: .system(message: "Review runtime stopped.")
+            )
         }
-        await backend.stop(store: self)
-        let remainingLocallyCancelledReviewRunIDs = cancelActiveReviewsLocallyForRuntimeStop(cancelWorkers: false)
-        cancelAndDetachReviewWorkersForRuntimeStop(
-            runIDs: Array(Set(locallyCancelledReviewRunIDs + remainingLocallyCancelledReviewRunIDs))
-        )
+        if backend.invokesRuntimeStopReviewCleanupDuringStop == false,
+           purpose.retiresRuns,
+           await retireReviewRunsForFinalStoreStop() == false
+        {
+            transitionToFailed("Review thread retention recovery is quarantined; the runtime remains open.")
+            return
+        }
+        await backend.stop(store: self, purpose: purpose)
+        runtimeState.signalCancellation()
+        for task in runtimeState.allWorkerTasks() + runtimeState.cancellationOperationTasks() {
+            await task.value
+        }
+        if purpose.retiresRuns,
+           await reviewThreadRetentionRegistry.acceptance().isAccepting == false
+        {
+            transitionToFailed("Review thread retention recovery is quarantined; the runtime remains open.")
+            return
+        }
         transitionToStopped()
     }
 
-    public func restart() async {
-        await stop()
-        await start(forceRestartIfNeeded: true)
+    package func restart() async {
+        guard let admission = backend.beginRuntimeRestart() else {
+            return
+        }
+        await stop(purpose: .runtimeRestartPreservingRuns)
+        guard backend.claimRuntimeRestart(admission) else {
+            return
+        }
+        await start(
+            forceRestartIfNeeded: true,
+            restartAdmission: admission
+        )
     }
 
-    public func waitUntilStopped() async {
+    package func waitUntilStopped() async {
         await backend.waitUntilStopped()
     }
 
-    public func refreshAuthentication() async {
+    package func refreshAuthentication() async {
         await backend.refreshAuth(auth: auth)
     }
 
-    public func signIn() async {
-        await backend.signIn(auth: auth)
+    package func signIn() async throws {
+        try await backend.signIn(auth: auth)
     }
 
-    public func addAccount() async {
-        await backend.addAccount(auth: auth)
+    package func addAccount() async throws {
+        try await backend.addAccount(auth: auth)
     }
 
-    public func cancelAuthentication() async {
+    package func cancelAuthentication() async {
         await backend.cancelAuthentication(auth: auth)
     }
 
-    package func performPrimaryAuthenticationAction() async {
+    package func performPrimaryAuthenticationAction() async throws {
         if auth.isAuthenticating {
             await cancelAuthentication()
             return
@@ -175,10 +234,10 @@ public final class CodexReviewStore {
         else {
             return
         }
-        await signIn()
+        try await signIn()
     }
 
-    public func logout() async {
+    package func logout() async {
         if auth.isAuthenticating, auth.selectedAccount == nil {
             await cancelAuthentication()
             return
@@ -187,12 +246,12 @@ public final class CodexReviewStore {
             try await signOutActiveAccount()
         } catch {
             if auth.errorMessage == nil, auth.isAuthenticated {
-                auth.updatePhase(.failed(message: error.localizedDescription))
+                auth.updatePhase(.failed(.runtime(message: error.localizedDescription)))
             }
         }
     }
 
-    public func signOutActiveAccount() async throws {
+    package func signOutActiveAccount() async throws {
         try await backend.signOutActiveAccount(auth: auth)
     }
 
@@ -253,12 +312,6 @@ public final class CodexReviewStore {
             }
             do {
                 try await self.executePendingAccountAction(action)
-                if let warningMessage = self.auth.warningMessage {
-                    self.auth.presentAccountActionAlert(
-                        title: "Account Updated With Warning",
-                        message: warningMessage
-                    )
-                }
             } catch {
                 self.auth.presentAccountActionAlert(
                     title: action.failureTitle,
@@ -363,8 +416,8 @@ public final class CodexReviewStore {
         }
         let reviewRuns: [CodexReviewStoreDiagnosticsSnapshot.Run] = orderedReviewRuns.map { runRecord in
             return CodexReviewStoreDiagnosticsSnapshot.Run(
-                status: runRecord.core.lifecycle.status.rawValue,
-                lifecycleMessage: runRecord.core.lifecycleMessage
+                status: runRecord.core.status.rawValue,
+                lifecycleMessage: runRecord.presentation.lifecycle.message
             )
         }
         let snapshot = CodexReviewStoreDiagnosticsSnapshot(
@@ -390,15 +443,15 @@ public final class CodexReviewStore {
         writeDiagnosticsIfNeeded()
     }
 
-    public var hasRunningReviewRuns: Bool {
+    package var hasRunningReviewRuns: Bool {
         reviewRuns.contains(where: { $0.isTerminal == false })
     }
 
-    public var runningReviewRunCount: Int {
+    package var runningReviewRunCount: Int {
         reviewRuns.filter { $0.isTerminal == false }.count
     }
 
-    public var canPerformPrimaryAuthenticationAction: Bool {
+    package var canPerformPrimaryAuthenticationAction: Bool {
         if auth.isAuthenticating {
             return true
         }

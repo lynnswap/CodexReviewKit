@@ -229,12 +229,6 @@ enum ReviewMonitorCommandOutputDisplayDocument {
             return primary
         }
 
-        let durationMs =
-            primary.durationMs ?? fallback.durationMs
-            ?? commandDurationMs(
-                startedAt: primary.startedAt ?? fallback.startedAt,
-                completedAt: primary.completedAt ?? fallback.completedAt
-            )
         let title = primary.title ?? fallback.title
         let status = primary.status ?? fallback.status
         let detail = primary.detail ?? fallback.detail
@@ -244,6 +238,9 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         let exitCode = primary.exitCode ?? fallback.exitCode
         let startedAt = primary.startedAt ?? fallback.startedAt
         let completedAt = primary.completedAt ?? fallback.completedAt
+        let durationMs =
+            commandDurationMs(startedAt: startedAt, completedAt: completedAt)
+            ?? primary.durationMs ?? fallback.durationMs
         let commandActions = primary.commandActions ?? fallback.commandActions
         let commandStatus = primary.commandStatus ?? fallback.commandStatus
         let namespace = primary.namespace ?? fallback.namespace
@@ -618,11 +615,11 @@ enum ReviewMonitorCommandOutputDisplayDocument {
             durationMs = commandDurationMs(startedAt: startedAt, completedAt: currentDate)
         } else {
             durationMs =
-                metadata?.durationMs
-                ?? commandDurationMs(
+                commandDurationMs(
                     startedAt: metadata?.startedAt,
                     completedAt: metadata?.completedAt
                 )
+                ?? metadata?.durationMs
         }
         guard let durationMs else {
             return nil
@@ -682,6 +679,11 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         }
         if normalizedStatus == "cancelled" || normalizedStatus == "canceled" {
             return "Cancelled"
+        }
+        if normalizedStatus == "inprogress" || normalizedStatus == "in_progress"
+            || normalizedStatus == "started" || normalizedStatus == "running"
+        {
+            return "running"
         }
         return rawStatus?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
     }

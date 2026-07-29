@@ -1,14 +1,30 @@
 import Foundation
 
 @MainActor
+package protocol CodexReviewPreviewRuntimeLifetime: AnyObject {
+    func signalCancellation()
+    func stop() async
+    func waitUntilStopped() async
+}
+
+@MainActor
 package class PreviewCodexReviewStoreBackend: CodexReviewStoreBackend {
     package let seed: CodexReviewStoreSeed
     package var isActive = false
     package var currentSettingsSnapshot: CodexReviewSettings.Snapshot
+    private let runtimeLifetime: (any CodexReviewPreviewRuntimeLifetime)?
 
-    package init(seed: CodexReviewStoreSeed = .init()) {
+    package init(
+        seed: CodexReviewStoreSeed = .init(),
+        runtimeLifetime: (any CodexReviewPreviewRuntimeLifetime)? = nil
+    ) {
         self.seed = seed
+        self.runtimeLifetime = runtimeLifetime
         currentSettingsSnapshot = seed.initialSettingsSnapshot
+    }
+
+    isolated deinit {
+        runtimeLifetime?.signalCancellation()
     }
 
     package var initialSettingsSnapshot: CodexReviewSettings.Snapshot {
@@ -22,11 +38,14 @@ package class PreviewCodexReviewStoreBackend: CodexReviewStoreBackend {
         store.transitionToFailed(Self.previewUnavailableMessage)
     }
 
-    package func stop(store _: CodexReviewStore) async {
+    package func stop(store _: CodexReviewStore, purpose _: CodexReviewRuntimeStopPurpose) async {
+        await runtimeLifetime?.stop()
         isActive = false
     }
 
-    package func waitUntilStopped() async {}
+    package func waitUntilStopped() async {
+        await runtimeLifetime?.waitUntilStopped()
+    }
 
     package func refreshSettings() async throws -> CodexReviewSettings.Snapshot {
         currentSettingsSnapshot
@@ -66,19 +85,15 @@ package class PreviewCodexReviewStoreBackend: CodexReviewStoreBackend {
         }
     }
 
-    package func signIn(auth: CodexReviewAuthModel) async {
-        auth.updatePhase(.failed(message: Self.previewAuthenticationFailureMessage))
+    package func signIn(auth: CodexReviewAuthModel) async throws {
+        auth.updatePhase(.failed(.runtime(message: Self.previewAuthenticationFailureMessage)))
     }
 
-    package func addAccount(auth: CodexReviewAuthModel) async {
-        auth.updatePhase(.failed(message: Self.previewAuthenticationFailureMessage))
+    package func addAccount(auth: CodexReviewAuthModel) async throws {
+        auth.updatePhase(.failed(.runtime(message: Self.previewAuthenticationFailureMessage)))
     }
 
-    package func cancelAuthentication(auth: CodexReviewAuthModel) async {
-        if auth.selectedAccount == nil {
-            auth.updatePhase(.signedOut)
-        }
-    }
+    package func cancelAuthentication(auth _: CodexReviewAuthModel) async {}
 
     package func switchAccount(auth: CodexReviewAuthModel, accountKey: String) async throws {
         guard auth.persistedAccounts.contains(where: { $0.accountKey == accountKey }) else {
@@ -137,9 +152,9 @@ package class PreviewCodexReviewStoreBackend: CodexReviewStoreBackend {
         throw CodexReviewAPI.Error.io(Self.previewUnavailableMessage)
     }
 
-    package func interruptReview(_: CodexReviewBackendModel.Review.Run, reason _: CodexReviewBackendModel.CancellationReason) async throws {}
+    package func interruptReview(_: ReviewAttempt, reason _: CodexReviewBackendModel.CancellationReason) async throws {}
 
-    package func prepareReviewRestart(_: CodexReviewBackendModel.Review.Run) async throws -> CodexReviewBackendModel.Review.RestartToken {
+    package func prepareReviewRestart(_: ReviewAttempt) async throws -> CodexReviewBackendModel.Review.RestartToken {
         throw CodexReviewAPI.Error.io(Self.previewUnavailableMessage)
     }
 
@@ -150,7 +165,20 @@ package class PreviewCodexReviewStoreBackend: CodexReviewStoreBackend {
         throw CodexReviewAPI.Error.io(Self.previewUnavailableMessage)
     }
 
-    package func cleanupReview(_: CodexReviewBackendModel.Review.Run) async {}
+    package func discardPreparedReviewRestart(
+        _: CodexReviewBackendModel.Review.RestartToken
+    ) async -> [ReviewAttempt] {
+        preconditionFailure("Preview backend cannot own a prepared review restart token.")
+    }
+
+    package func cleanupReview(_: ReviewAttempt) async {}
+
+    package func cleanupRetainedReviews(
+        _: [ReviewAttempt],
+        additionalThreadIDs _: [ReviewThreadID]
+    ) async -> ReviewRetainedThreadCleanupResult {
+        .init()
+    }
 
     fileprivate static let previewUnavailableMessage = "Embedded server is unavailable in preview mode."
     fileprivate static let previewAuthenticationFailureMessage = "Authentication is unavailable in preview mode."

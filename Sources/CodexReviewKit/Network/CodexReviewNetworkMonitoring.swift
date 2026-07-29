@@ -46,18 +46,18 @@ package protocol CodexReviewNetworkMonitoring: Sendable {
 }
 
 package struct CodexReviewNetworkRecoveryPolicy: Sendable {
-    package var outageDebounce: Duration
-    package var recoverySettle: Duration
-    package var sleep: @Sendable (Duration) async throws -> Void
+    package let outageDebounce: Duration
+    package let recoverySettle: Duration
+    package let clock: ReviewWorkerClock
 
     package init(
         outageDebounce: Duration = .seconds(10),
         recoverySettle: Duration = .seconds(1),
-        sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
+        clock: ReviewWorkerClock = .continuous
     ) {
         self.outageDebounce = outageDebounce
         self.recoverySettle = recoverySettle
-        self.sleep = sleep
+        self.clock = clock
     }
 
     package static var `default`: Self {
@@ -75,7 +75,6 @@ package struct StaticCodexReviewNetworkMonitor: CodexReviewNetworkMonitoring {
     package func snapshots() -> AsyncStream<CodexReviewNetworkSnapshot> {
         AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
             continuation.yield(snapshot)
-            continuation.finish()
         }
     }
 }

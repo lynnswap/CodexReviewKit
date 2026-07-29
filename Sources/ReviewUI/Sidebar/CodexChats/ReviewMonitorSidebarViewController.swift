@@ -1,5 +1,6 @@
 import AppKit
-import CodexKit
+import CodexAppServerKit
+import CodexDataKit
 import Foundation
 import ObservationBridge
 import CodexReviewKit
@@ -97,7 +98,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private var codexSidebarObservation: PortableObservationTracking.Token?
     private var codexSidebarTransactionTask: Task<Void, Never>?
     private var codexSidebarFetchTask: Task<Void, Never>?
-    private var codexSidebarResultsController: CodexFetchedResultsController<CodexChat>?
+    private var codexSidebarResults: CodexFetchedResults<CodexChat>?
     private var codexSidebarModelContext: CodexModelContext?
     private var codexSidebarPresentationOrder = ReviewMonitorCodexSidebarPresentationOrder()
     private let codexSidebarOutlineTree = ReviewMonitorCodexSidebarOutlineTree()
@@ -278,14 +279,14 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     static var defaultCodexSidebarDescriptor: CodexFetchDescriptor<CodexChat> {
         CodexFetchDescriptor<CodexChat>(
             predicate: #Predicate<CodexChat> { $0.isArchived == false },
-            sortBy: [SortDescriptor(\.recencyAt, order: .reverse)]
+            sortBy: [CodexSortDescriptor(\.recencyAt, order: .reverse)]
         )
     }
 
-    private static func makeCodexSidebarFetchedResultsController(
+    private static func makeCodexSidebarFetchedResults(
         modelContext: CodexModelContext
-    ) -> CodexFetchedResultsController<CodexChat> {
-        modelContext.fetchedResultsController(
+    ) -> CodexFetchedResults<CodexChat> {
+        modelContext.fetchedResults(
             for: defaultCodexSidebarDescriptor,
             sectionedBy: .workspaceGroup
         )
@@ -305,7 +306,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         if let modelContext,
             let codexSidebarModelContext,
             codexSidebarModelContext === modelContext,
-            codexSidebarResultsController != nil
+            codexSidebarResults != nil
         {
             return
         }
@@ -315,45 +316,45 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         codexSidebarTransactionTask = nil
         guard let modelContext else {
             codexSidebarModelContext = nil
-            codexSidebarResultsController = nil
+            codexSidebarResults = nil
             applyCodexSidebarSourceSections([])
             return
         }
 
-        let resultsController = Self.makeCodexSidebarFetchedResultsController(modelContext: modelContext)
+        let results = Self.makeCodexSidebarFetchedResults(modelContext: modelContext)
         codexSidebarModelContext = modelContext
-        codexSidebarResultsController = resultsController
-        codexSidebarTransactionTask = Task { @MainActor [weak self, resultsController] in
-            for await transaction in resultsController.transactions {
+        codexSidebarResults = results
+        codexSidebarTransactionTask = Task { @MainActor [weak self, results] in
+            for await transaction in results.transactions {
                 guard let self,
-                    self.codexSidebarResultsController === resultsController
+                    self.codexSidebarResults === results
                 else {
                     return
                 }
-                self.applyCodexSidebarTransaction(transaction, controller: resultsController)
+                self.applyCodexSidebarTransaction(transaction, results: results)
             }
         }
-        codexSidebarFetchTask = Task { @MainActor [weak self, resultsController] in
+        codexSidebarFetchTask = Task { @MainActor [weak self, results] in
             do {
-                try await resultsController.performFetch()
+                try await results.performFetch()
             } catch is CancellationError {
             } catch {
             }
-            guard self?.codexSidebarResultsController === resultsController
+            guard self?.codexSidebarResults === results
             else {
                 return
             }
-            self?.applyCodexSidebarSourceSections(resultsController.sections)
+            self?.applyCodexSidebarSourceSections(results.sections)
             self?.codexSidebarFetchTask = nil
         }
     }
 
     private func applyCodexSidebarTransaction(
         _ transaction: CodexFetchedResultsTransaction<CodexChat>,
-        controller: CodexFetchedResultsController<CodexChat>
+        results: CodexFetchedResults<CodexChat>
     ) {
         clearRemovedChatSelectionIfNeeded(transaction)
-        applyCodexSidebarSourceSections(controller.sections)
+        applyCodexSidebarSourceSections(results.sections)
     }
 
     private func clearRemovedChatSelectionIfNeeded(
@@ -374,7 +375,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private var codexSidebarSourceSections: [CodexFetchSection<CodexChat>] {
-        codexSidebarResultsController?.sections ?? []
+        codexSidebarResults?.sections ?? []
     }
 
     private func codexSidebarVisibleSections(
@@ -871,7 +872,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         else {
             return nil
         }
-        return displayedCodexChat(id: id)
+        return codexSidebarModelContext?.registeredModel(for: id)
+            ?? currentChatSelection(id: id)
     }
 
     private func dragPayload(for item: Any) -> SidebarDragPayload? {
@@ -1549,7 +1551,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
 
         var codexSidebarSectionsForTesting: [CodexFetchSection<CodexChat>] {
-            codexSidebarResultsController?.sections ?? []
+            codexSidebarResults?.sections ?? []
         }
 
         var codexSidebarRootTitlesForTesting: [String] {
@@ -1635,8 +1637,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
 
         func refreshCodexSidebarForTesting() async throws {
-            try await codexSidebarResultsController?.refresh()
-            applyCodexSidebarSourceSections(codexSidebarResultsController?.sections ?? [])
+            try await codexSidebarResults?.refresh()
+            applyCodexSidebarSourceSections(codexSidebarResults?.sections ?? [])
         }
 
         var sidebarFullReloadCountForTesting: Int {
