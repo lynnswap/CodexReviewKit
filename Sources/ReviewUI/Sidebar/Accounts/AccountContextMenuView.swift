@@ -18,7 +18,7 @@ struct AccountContextMenuView: View {
     }
 
     var body: some View {
-        Section(account.reviewMonitorDisplayName){
+        Section(account.reviewMonitorIdentityName){
             Button("Switch", systemImage: "arrow.triangle.swap") {
                 store.requestSwitchAccountFromUserAction(account)
             }

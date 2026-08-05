@@ -12,6 +12,15 @@ extension CodexReviewAccount {
             "Amazon Bedrock"
         }
     }
+
+    var reviewMonitorIdentityName: String {
+        switch kind {
+        case .chatGPT:
+            email
+        case .apiKey, .amazonBedrock:
+            reviewMonitorDisplayName
+        }
+    }
 }
 
 struct ReviewMonitorAccountRowView: View {

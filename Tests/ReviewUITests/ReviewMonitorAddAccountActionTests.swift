@@ -40,6 +40,11 @@ struct ReviewMonitorAddAccountActionTests {
     }
 
     @Test func nonChatGPTAccountsUseProviderNamesInsteadOfEmailMasking() {
+        let chatGPTAccount = CodexReviewAccount(
+            accountKey: "chatgpt@example.com",
+            email: "chatgpt@example.com",
+            kind: .chatGPT
+        )
         let apiKeyAccount = CodexReviewAccount(
             accountKey: "api-key",
             email: "api-key@example.invalid",
@@ -54,6 +59,9 @@ struct ReviewMonitorAddAccountActionTests {
         #expect(apiKeyAccount.reviewMonitorDisplayName == "API Key")
         #expect(apiKeyAccount.reviewMonitorDisplayName.contains("@") == false)
         #expect(bedrockAccount.reviewMonitorDisplayName == "Amazon Bedrock")
+        #expect(chatGPTAccount.reviewMonitorIdentityName == "chatgpt@example.com")
+        #expect(apiKeyAccount.reviewMonitorIdentityName == "API Key")
+        #expect(bedrockAccount.reviewMonitorIdentityName == "Amazon Bedrock")
     }
 
     @Test func operationFailureUsesTheAccountActionAlertFlow() async throws {
