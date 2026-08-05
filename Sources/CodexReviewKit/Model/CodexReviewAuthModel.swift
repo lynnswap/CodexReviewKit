@@ -7,6 +7,7 @@ package enum CodexReviewAuthenticationFailure: Error, Equatable, Sendable {
     case runtime(message: String)
     case urlOpen(URL)
     case login(message: String?)
+    case apiKeyAccountAlreadyExists
     case nonExportableCredentialStore
     case persistenceInconsistent(message: String)
     case accountCommit(message: String)
@@ -29,6 +30,8 @@ extension CodexReviewAuthenticationFailure: LocalizedError {
             "Failed to open the authentication URL: \(url.absoluteString)"
         case .login(let message):
             message ?? "Authentication failed."
+        case .apiKeyAccountAlreadyExists:
+            "An API-key account already exists. Remove it before adding a different API key."
         case .nonExportableCredentialStore:
             "The authenticated credentials cannot be imported into the account registry."
         }

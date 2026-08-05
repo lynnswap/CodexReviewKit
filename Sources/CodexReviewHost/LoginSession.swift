@@ -10,9 +10,36 @@ struct LoginRuntime: Sendable {
     let usesPrimaryRuntime: Bool
 }
 
-enum LoginRequest: Sendable {
-    case signIn
-    case addAccount
+enum LoginProvider: Equatable, Sendable {
+    case chatGPT
+    case apiKey
+
+    init(_ method: CodexReviewAuthenticationMethod) {
+        switch method {
+        case .chatGPT:
+            self = .chatGPT
+        case .apiKey:
+            self = .apiKey
+        }
+    }
+
+    var expectedProvider: ExpectedRuntimeAccount.Provider {
+        switch self {
+        case .chatGPT:
+            .chatGPT
+        case .apiKey:
+            .apiKey
+        }
+    }
+
+    var successfulLoginExpectation: ExpectedRuntimeAccount {
+        switch self {
+        case .chatGPT:
+            .anyChatGPT
+        case .apiKey:
+            .observedAccount(accountKey: "api-key", provider: .apiKey)
+        }
+    }
 }
 
 enum LoginPurpose: Equatable, Sendable {
@@ -35,7 +62,10 @@ enum LoginActivation: Equatable, Sendable {
 }
 
 enum LoginRootObservation: Sendable {
-    case outcome(CodexLoginOutcome)
+    case chatGPTOutcome(CodexLoginOutcome)
+    case apiKeySucceeded
+    case apiKeyOutcomeUnknown
+    case cancelled
     case failure(CodexReviewAuthenticationFailure)
     case waiterCancelled(message: String?)
 }
@@ -64,8 +94,9 @@ enum PrimaryAuthenticationReconciliationResult: Equatable, Sendable {
 }
 
 enum PrimaryAuthenticationReconciliationCause: Sendable {
-    case committed(CodexLoginReconciliationReason)
-    case cancelOutcomeUnknown(previousActiveAccountKey: String?)
+    case chatGPTCommitted(CodexLoginReconciliationReason)
+    case chatGPTCancelOutcomeUnknown(previousActiveAccountKey: String?)
+    case apiKeyOutcomeUnknown(previousActiveAccountKey: String?)
 }
 
 @MainActor
@@ -140,6 +171,11 @@ actor LoginStartCompletion {
 }
 
 actor LoginOperationState {
+    enum CancellationAction: Sendable {
+        case chatGPT(CodexLoginHandle)
+        case apiKeyRootTask
+    }
+
     enum BindDisposition: Sendable {
         case proceed
         case cancel
@@ -154,6 +190,7 @@ actor LoginOperationState {
         case acquiringRuntime
         case runtimeBound(LoginRuntime)
         case loginPending(LoginRuntime, CodexLoginHandle)
+        case apiKeyPending(LoginRuntime)
         case resourcesTaken
     }
 
@@ -163,7 +200,7 @@ actor LoginOperationState {
     private var preCommitFailureClaimed = false
     private var urlPresentationClaimed = false
 
-    func requestCancellation() -> CodexLoginHandle? {
+    func requestCancellation() -> CancellationAction? {
         if preCommitFailureClaimed == false {
             cancellationRequested = true
         }
@@ -173,11 +210,17 @@ actor LoginOperationState {
         guard cancellationClaimed == false else {
             return nil
         }
-        guard case .loginPending(_, let handle) = phase else {
+        let action: CancellationAction
+        switch phase {
+        case .loginPending(_, let handle):
+            action = .chatGPT(handle)
+        case .apiKeyPending:
+            action = .apiKeyRootTask
+        case .acquiringRuntime, .runtimeBound, .resourcesTaken:
             return nil
         }
         cancellationClaimed = true
-        return handle
+        return action
     }
 
     func recordCancellationIntent() {
@@ -198,6 +241,13 @@ actor LoginOperationState {
         return .fail
     }
 
+    func claimKnownAPIKeyFailure() {
+        guard preCommitFailureClaimed == false else {
+            preconditionFailure("A known API-key failure can be claimed only once.")
+        }
+        preCommitFailureClaimed = true
+    }
+
     func bind(runtime: LoginRuntime) -> BindDisposition {
         guard case .acquiringRuntime = phase else {
             preconditionFailure("A login runtime can be bound only once.")
@@ -212,6 +262,19 @@ actor LoginOperationState {
             preconditionFailure("A login handle must bind to its reserved runtime exactly once.")
         }
         phase = .loginPending(runtime, handle)
+        guard cancellationRequested else {
+            return .proceed
+        }
+        cancellationClaimed = true
+        return .cancel
+    }
+
+    func bindAPIKey(runtime: LoginRuntime) -> BindDisposition {
+        guard case .runtimeBound(let boundRuntime) = phase,
+              boundRuntime.appServer === runtime.appServer else {
+            preconditionFailure("An API-key login must bind to its reserved runtime exactly once.")
+        }
+        phase = .apiKeyPending(runtime)
         guard cancellationRequested else {
             return .proceed
         }
@@ -236,7 +299,7 @@ actor LoginOperationState {
         switch phase {
         case .acquiringRuntime, .resourcesTaken:
             return nil
-        case .runtimeBound(let runtime), .loginPending(let runtime, _):
+        case .runtimeBound(let runtime), .loginPending(let runtime, _), .apiKeyPending(let runtime):
             return runtime
         }
     }
@@ -250,7 +313,7 @@ actor LoginOperationState {
 
     func takeOwnedRuntime() -> LoginRuntime? {
         switch phase {
-        case .runtimeBound(let runtime), .loginPending(let runtime, _):
+        case .runtimeBound(let runtime), .loginPending(let runtime, _), .apiKeyPending(let runtime):
             guard runtime.usesPrimaryRuntime == false else {
                 return nil
             }
@@ -286,11 +349,12 @@ final class LoginSession {
 
     let generationID: UUID
     let purpose: LoginPurpose
+    let provider: LoginProvider
     let previousActiveAccountKey: String?
     private let mutationLease: AccountRegistryStore.MutationLease
     private let operationState = LoginOperationState()
     private let startCompletion = LoginStartCompletion()
-    private let rootOperation: RootOperation
+    private var rootOperation: RootOperation?
     private let terminationHandler: TerminationHandler
     private let cancellationTimeout: Duration
     private var rootTask: Task<LoginRootObservation, Never>?
@@ -302,6 +366,7 @@ final class LoginSession {
     init(
         generationID: UUID,
         purpose: LoginPurpose,
+        provider: LoginProvider,
         previousActiveAccountKey: String?,
         mutationLease: AccountRegistryStore.MutationLease,
         cancellationTimeout: Duration = .seconds(5),
@@ -310,6 +375,7 @@ final class LoginSession {
     ) {
         self.generationID = generationID
         self.purpose = purpose
+        self.provider = provider
         self.previousActiveAccountKey = previousActiveAccountKey
         self.mutationLease = mutationLease
         self.cancellationTimeout = cancellationTimeout
@@ -323,7 +389,10 @@ final class LoginSession {
         }
         let operationState = operationState
         let startCompletion = startCompletion
-        let rootOperation = rootOperation
+        guard let rootOperation else {
+            preconditionFailure("A login session root operation can be consumed only once.")
+        }
+        self.rootOperation = nil
         rootTask = Task { @MainActor in
             await rootOperation(operationState, startCompletion)
         }
@@ -472,11 +541,16 @@ final class LoginSession {
         }
         var cancellationFailureMessage: String?
         if reason.requestsSDKCancellation,
-           let handle = await operationState.requestCancellation() {
-            do {
-                _ = try await handle.cancel(acknowledgementTimeout: cancellationTimeout)
-            } catch {
-                cancellationFailureMessage = error.localizedDescription
+           let cancellationAction = await operationState.requestCancellation() {
+            switch cancellationAction {
+            case .chatGPT(let handle):
+                do {
+                    _ = try await handle.cancel(acknowledgementTimeout: cancellationTimeout)
+                } catch {
+                    cancellationFailureMessage = error.localizedDescription
+                    rootTask.cancel()
+                }
+            case .apiKeyRootTask:
                 rootTask.cancel()
             }
         }

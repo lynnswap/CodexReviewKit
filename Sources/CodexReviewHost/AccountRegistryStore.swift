@@ -29,8 +29,9 @@ actor AccountRegistryStore {
         let before: Snapshot
     }
 
-    struct PreparedMutation: Hashable, Sendable {
+    struct PreparedMutation: Sendable {
         let id: UUID
+        let expectedAccount: ExpectedRuntimeAccount
     }
 
     enum PreparedAbortDisposition: Sendable {
@@ -47,6 +48,20 @@ actor AccountRegistryStore {
     }
 
     struct AuthenticationMutation: Sendable {
+        enum ProductCommitCancellationPolicy: Equatable, Sendable {
+            case cancellationPreventsCommit
+            case confirmedSuccessOverridesCancellation
+
+            init(_ method: CodexReviewAuthenticationMethod) {
+                switch method {
+                case .chatGPT:
+                    self = .cancellationPreventsCommit
+                case .apiKey:
+                    self = .confirmedSuccessOverridesCancellation
+                }
+            }
+        }
+
         let lease: MutationLease
         let purpose: LoginPurpose
         let previousActiveAccountKey: String?
@@ -67,7 +82,7 @@ actor AccountRegistryStore {
     }
 
     private enum MutationKind: Equatable {
-        case authentication
+        case authentication(AuthenticationMutation.ProductCommitCancellationPolicy)
         case account
     }
 
@@ -330,7 +345,9 @@ actor AccountRegistryStore {
         )
     }
 
-    func beginAuthenticationMutation(request: LoginRequest) async throws -> AuthenticationMutation {
+    func beginAuthenticationMutation(
+        request: CodexReviewAuthenticationRequest
+    ) async throws -> AuthenticationMutation {
         if let activeMutation {
             switch activeMutation.kind {
             case .authentication:
@@ -340,6 +357,17 @@ actor AccountRegistryStore {
             }
         }
         let snapshot = try Disk.loadSnapshotWithoutMaintenance(codexHomeURL: codexHomeURL)
+        let productCommitCancellationPolicy = AuthenticationMutation
+            .ProductCommitCancellationPolicy(request.method)
+        if case .apiKey = request.method {
+            guard snapshot.accounts.contains(where: { $0.accountKey == "api-key" }) == false else {
+                throw CodexReviewAuthenticationFailure.apiKeyAccountAlreadyExists
+            }
+            precondition(
+                snapshot.activeAccountKey != "api-key",
+                "The fixed API-key identity cannot be active without its registry entry."
+            )
+        }
         let purpose: LoginPurpose = switch request {
         case .signIn:
             .signIn
@@ -347,7 +375,7 @@ actor AccountRegistryStore {
             snapshot.activeAccountKey == nil ? .signIn : .addAccountPreservingActive
         }
         let mutation = AuthenticationMutation(
-            lease: installMutation(kind: .authentication),
+            lease: installMutation(kind: .authentication(productCommitCancellationPolicy)),
             purpose: purpose,
             previousActiveAccountKey: snapshot.activeAccountKey
         )
@@ -378,7 +406,8 @@ actor AccountRegistryStore {
 
     func requestAuthenticationCancellation(_ lease: MutationLease) async {
         guard activeMutation?.lease == lease,
-              activeMutation?.kind == .authentication else {
+              let kind = activeMutation?.kind,
+              case .authentication = kind else {
             return
         }
         if activeMutation?.productCommitClaimed == false {
@@ -400,11 +429,19 @@ actor AccountRegistryStore {
 
     private func claimAuthenticationProductCommit(_ lease: MutationLease) -> Bool {
         guard activeMutation?.lease == lease,
-              activeMutation?.kind == .authentication else {
+              let kind = activeMutation?.kind,
+              case .authentication(let cancellationPolicy) = kind else {
             preconditionFailure("Only the active authentication lease can claim its product commit.")
         }
-        guard activeMutation?.cancellationRequested == false else {
-            return false
+        if activeMutation?.cancellationRequested == true {
+            switch cancellationPolicy {
+            case .cancellationPreventsCommit:
+                return false
+            case .confirmedSuccessOverridesCancellation:
+                // The API-key SDK cannot return success after a pre-write cancellation.
+                // A success at this boundary confirms the written request's outcome.
+                break
+            }
         }
         activeMutation?.productCommitClaimed = true
         return true

@@ -43,8 +43,10 @@ package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend {
     func stop(store: CodexReviewStore, purpose: CodexReviewRuntimeStopPurpose) async
     func waitUntilStopped() async
     func refreshAuth(auth: CodexReviewAuthModel) async
-    func signIn(auth: CodexReviewAuthModel) async throws
-    func addAccount(auth: CodexReviewAuthModel) async throws
+    func authenticate(
+        auth: CodexReviewAuthModel,
+        request: CodexReviewAuthenticationRequest
+    ) async throws
     func cancelAuthentication(auth: CodexReviewAuthModel) async
     func switchAccount(auth: CodexReviewAuthModel, accountKey: String) async throws
     func removeAccount(auth: CodexReviewAuthModel, accountKey: String) async throws

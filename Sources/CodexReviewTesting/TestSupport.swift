@@ -995,11 +995,19 @@ private extension ReviewLifecyclePresentation {
 
 @MainActor
 package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
+    package enum AuthenticationCommand: Equatable, Sendable {
+        case signInWithChatGPT
+        case signInWithAPIKey
+        case addChatGPTAccount
+        case addAPIKeyAccount
+    }
+
     package let reviewBackend: FakeCodexReviewBackend
     package let seed: CodexReviewStoreSeed
     package var currentSettingsSnapshot: CodexReviewSettings.Snapshot
     package private(set) var isActive = false
     package private(set) var startRequests: [Bool] = []
+    package private(set) var authenticationCommands: [AuthenticationCommand] = []
 
     package init(
         reviewBackend: FakeCodexReviewBackend,
@@ -1049,17 +1057,33 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         }
     }
 
-    package func signIn(auth: CodexReviewAuthModel) async throws {
+    package func authenticate(
+        auth: CodexReviewAuthModel,
+        request: CodexReviewAuthenticationRequest
+    ) async throws {
+        let command: AuthenticationCommand = switch request {
+        case .signIn(using: .chatGPT):
+            .signInWithChatGPT
+        case .signIn(using: .apiKey):
+            .signInWithAPIKey
+        case .addAccount(using: .chatGPT):
+            .addChatGPTAccount
+        case .addAccount(using: .apiKey):
+            .addAPIKeyAccount
+        }
+        authenticationCommands.append(command)
+        let detail: String = switch request.method {
+        case .chatGPT:
+            "Complete sign in in your browser, then return to ReviewMonitor."
+        case .apiKey:
+            "Authenticating with API key."
+        }
         auth.updatePhase(.signingIn(.init(
             title: "Sign in to Codex",
-            detail: "Complete sign in in your browser, then return to ReviewMonitor.",
+            detail: detail,
             browserURL: nil,
             userCode: nil
         )))
-    }
-
-    package func addAccount(auth: CodexReviewAuthModel) async throws {
-        try await signIn(auth: auth)
     }
 
     package func cancelAuthentication(auth: CodexReviewAuthModel) async {

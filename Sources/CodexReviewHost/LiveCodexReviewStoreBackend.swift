@@ -43,7 +43,7 @@ package typealias CodexReviewMCPHTTPServerBindChecker = @MainActor @Sendable (
 package typealias CodexReviewAuthenticationMutationDidBegin = @Sendable () async -> Void
 package typealias CodexReviewAuthenticationCancellationDidRequest = @Sendable () async -> Void
 package typealias CodexReviewAuthenticationProductCommitDidApply = @Sendable () async -> Void
-package typealias CodexReviewAuthenticationHandleDidBind = @Sendable () async -> Void
+package typealias CodexReviewAuthenticationOperationDidBind = @Sendable () async -> Void
 package typealias CodexReviewAccountRegistryLoadDidBegin = @Sendable () async -> Void
 package typealias CodexReviewAppServerCloser = @MainActor @Sendable (CodexAppServer) async -> Void
 package typealias CodexReviewFinalRuntimeRetirementDidClaim = @MainActor @Sendable () async -> Void
@@ -95,7 +95,7 @@ public extension CodexReviewStore {
         authenticationMutationDidBegin: CodexReviewAuthenticationMutationDidBegin? = nil,
         authenticationCancellationDidRequest: CodexReviewAuthenticationCancellationDidRequest? = nil,
         authenticationProductCommitDidApply: CodexReviewAuthenticationProductCommitDidApply? = nil,
-        authenticationHandleDidBind: CodexReviewAuthenticationHandleDidBind? = nil,
+        authenticationOperationDidBind: CodexReviewAuthenticationOperationDidBind? = nil,
         accountRegistryLoadDidBegin: CodexReviewAccountRegistryLoadDidBegin? = nil,
         finalRuntimeRetirementDidClaim: CodexReviewFinalRuntimeRetirementDidClaim? = nil,
         finalShutdownDidRequest: CodexReviewFinalShutdownDidRequest? = nil,
@@ -115,7 +115,7 @@ public extension CodexReviewStore {
             authenticationMutationDidBegin: authenticationMutationDidBegin,
             authenticationCancellationDidRequest: authenticationCancellationDidRequest,
             authenticationProductCommitDidApply: authenticationProductCommitDidApply,
-            authenticationHandleDidBind: authenticationHandleDidBind,
+            authenticationOperationDidBind: authenticationOperationDidBind,
             accountRegistryLoadDidBegin: accountRegistryLoadDidBegin,
             finalRuntimeRetirementDidClaim: finalRuntimeRetirementDidClaim,
             finalShutdownDidRequest: finalShutdownDidRequest,
@@ -143,7 +143,7 @@ public extension CodexReviewStore {
         authenticationMutationDidBegin: CodexReviewAuthenticationMutationDidBegin? = nil,
         authenticationCancellationDidRequest: CodexReviewAuthenticationCancellationDidRequest? = nil,
         authenticationProductCommitDidApply: CodexReviewAuthenticationProductCommitDidApply? = nil,
-        authenticationHandleDidBind: CodexReviewAuthenticationHandleDidBind? = nil,
+        authenticationOperationDidBind: CodexReviewAuthenticationOperationDidBind? = nil,
         accountRegistryLoadDidBegin: CodexReviewAccountRegistryLoadDidBegin? = nil,
         finalRuntimeRetirementDidClaim: CodexReviewFinalRuntimeRetirementDidClaim? = nil,
         finalShutdownDidRequest: CodexReviewFinalShutdownDidRequest? = nil,
@@ -164,7 +164,7 @@ public extension CodexReviewStore {
                 authenticationMutationDidBegin: authenticationMutationDidBegin,
                 authenticationCancellationDidRequest: authenticationCancellationDidRequest,
                 authenticationProductCommitDidApply: authenticationProductCommitDidApply,
-                authenticationHandleDidBind: authenticationHandleDidBind,
+                authenticationOperationDidBind: authenticationOperationDidBind,
                 accountRegistryLoadDidBegin: accountRegistryLoadDidBegin,
                 finalRuntimeRetirementDidClaim: finalRuntimeRetirementDidClaim,
                 finalShutdownDidRequest: finalShutdownDidRequest,
@@ -308,7 +308,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     private let mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker
     private let appServerRuntimeFactory: AppServerRuntimeFactory
     private let appServerCloser: CodexReviewAppServerCloser
-    private let authenticationHandleDidBind: CodexReviewAuthenticationHandleDidBind?
+    private let authenticationOperationDidBind: CodexReviewAuthenticationOperationDidBind?
     private let finalRuntimeRetirementDidClaim: CodexReviewFinalRuntimeRetirementDidClaim?
     private let reconciliationDebtDidClear: CodexReviewReconciliationDebtDidClear?
     private let accountRegistry: AccountRegistryStore
@@ -361,7 +361,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         authenticationMutationDidBegin: CodexReviewAuthenticationMutationDidBegin? = nil,
         authenticationCancellationDidRequest: CodexReviewAuthenticationCancellationDidRequest? = nil,
         authenticationProductCommitDidApply: CodexReviewAuthenticationProductCommitDidApply? = nil,
-        authenticationHandleDidBind: CodexReviewAuthenticationHandleDidBind? = nil,
+        authenticationOperationDidBind: CodexReviewAuthenticationOperationDidBind? = nil,
         accountRegistryLoadDidBegin: CodexReviewAccountRegistryLoadDidBegin? = nil,
         finalRuntimeRetirementDidClaim: CodexReviewFinalRuntimeRetirementDidClaim? = nil,
         finalShutdownDidRequest: CodexReviewFinalShutdownDidRequest? = nil,
@@ -397,7 +397,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         self.mcpHTTPServerBindChecker = mcpHTTPServerBindChecker ?? Self.defaultMCPHTTPServerBindChecker
         self.appServerLifecycleHandler = appServerLifecycleHandler
         self.appServerCloser = appServerCloser
-        self.authenticationHandleDidBind = authenticationHandleDidBind
+        self.authenticationOperationDidBind = authenticationOperationDidBind
         self.finalRuntimeRetirementDidClaim = finalRuntimeRetirementDidClaim
         self.reconciliationDebtDidClear = reconciliationDebtDidClear
         self.appServerRuntimeFactory = appServerRuntimeFactory ?? Self.makeAppServerRuntimeFactory(
@@ -1438,12 +1438,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         )
     }
 
-    func signIn(auth: CodexReviewAuthModel) async throws {
-        try await beginStockLogin(auth: auth, request: .signIn)
-    }
-
-    func addAccount(auth: CodexReviewAuthModel) async throws {
-        try await beginStockLogin(auth: auth, request: .addAccount)
+    func authenticate(
+        auth: CodexReviewAuthModel,
+        request: CodexReviewAuthenticationRequest
+    ) async throws {
+        try await beginAuthentication(auth: auth, request: request)
     }
 
     func cancelAuthentication(auth _: CodexReviewAuthModel) async {
@@ -1473,10 +1472,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 _ = try await accountRegistry.abortPreparedMutation(prepared)
                 throw CodexReviewAuthenticationFailure.accountMutationBlockedByAuthentication
             }
-            mutation.expectRecovery(.account(accountKey))
+            mutation.expectRecovery(prepared.expectedAccount)
             let persisted = try await commitPreparedAccountMutation(
                 prepared,
-                expectedAccount: .account(accountKey),
                 transition: transition
             )
             accountRuntimeTransitionCoordinator.recordRegistryCommit(transition)
@@ -1511,14 +1509,13 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             )
         }
         await stop(store: attachedStore, purpose: .accountTransitionPreservingRuns)
-        mutation.expectRecovery(.account(accountKey))
+        mutation.expectRecovery(prepared.expectedAccount)
         let persisted = try await commitPreparedAccountMutation(
             prepared,
-            expectedAccount: .account(accountKey),
             transition: transition
         )
         try await finishCommittedAccountTransition(
-            expectedAccount: .account(accountKey),
+            expectedAccount: prepared.expectedAccount,
             persisted: persisted,
             transition: transition,
             auth: auth,
@@ -1619,7 +1616,6 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             } else {
                 persisted = try await commitPreparedAccountMutation(
                     prepared,
-                    expectedAccount: .signedOut,
                     transition: transition
                 )
             }
@@ -1764,7 +1760,6 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         } else {
             persisted = try await commitPreparedAccountMutation(
                 prepared,
-                expectedAccount: .signedOut,
                 transition: transition
             )
         }
@@ -1903,7 +1898,6 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     private func commitPreparedAccountMutation(
         _ mutation: AccountRegistryStore.PreparedMutation,
-        expectedAccount: ExpectedRuntimeAccount,
         transition: AccountRuntimeTransitionCoordinator.AccountTransition
     ) async throws -> AccountRegistryStore.Snapshot {
         do {
@@ -1913,7 +1907,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 + error.localizedDescription
             do {
                 try await accountRegistry.recordReconciliationDebt(
-                    expectedAccount: expectedAccount,
+                    expectedAccount: mutation.expectedAccount,
                     message: message
                 )
             } catch {
@@ -1992,9 +1986,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         }
     }
 
-    private func beginStockLogin(
+    private func beginAuthentication(
         auth: CodexReviewAuthModel,
-        request: LoginRequest
+        request: CodexReviewAuthenticationRequest
     ) async throws {
         guard loginSession == nil else {
             throw CodexReviewAuthenticationFailure.alreadyInProgress
@@ -2025,6 +2019,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             throw CodexReviewAuthenticationFailure.accountMutationBlockedByAuthentication
         }
         let purpose = authenticationMutation.purpose
+        let provider = LoginProvider(request.method)
         let generationID = UUID()
         let runtimeProvider: @MainActor @Sendable (LoginPurpose) async throws -> LoginRuntime = {
             [weak self] purpose in
@@ -2039,6 +2034,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         let session = LoginSession(
             generationID: generationID,
             purpose: purpose,
+            provider: provider,
             previousActiveAccountKey: authenticationMutation.previousActiveAccountKey,
             mutationLease: mutationLease,
             cancellationTimeout: .seconds(5),
@@ -2059,7 +2055,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                     let failureDisposition = await operationState.claimPreCommitFailure()
                     if case .cancel = failureDisposition {
                         await startCompletion.resolve(.success(()))
-                        return finish(.outcome(.cancelled))
+                        return finish(.cancelled)
                     } else {
                         await startCompletion.resolve(.failure(failure))
                         return finish(.failure(failure))
@@ -2067,96 +2063,143 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 }
                 guard case .proceed = await operationState.bind(runtime: runtime) else {
                     await startCompletion.resolve(.success(()))
-                    return finish(.outcome(.cancelled))
+                    return finish(.cancelled)
                 }
 
-                let handle: CodexLoginHandle
-                do {
-                    handle = try await runtime.appServer.loginChatGPT(
-                        accountReadinessTimeout: .seconds(5)
-                    )
-                } catch {
-                    let failure = (error as? CodexReviewAuthenticationFailure)
-                        ?? .runtime(message: error.localizedDescription)
-                    let failureDisposition = await operationState.claimPreCommitFailure()
-                    if case .cancel = failureDisposition {
-                        await startCompletion.resolve(.success(()))
-                        return finish(.outcome(.cancelled))
-                    } else {
-                        await startCompletion.resolve(.failure(failure))
-                        return finish(.failure(failure))
-                    }
-                }
-
-                let handleDisposition = await operationState.bind(
-                    handle: handle,
-                    runtime: runtime
-                )
-                if case .cancel = handleDisposition {
-                    await startCompletion.resolve(.success(()))
+                switch request.method {
+                case .chatGPT:
+                    let handle: CodexLoginHandle
                     do {
-                        return finish(.outcome(try await handle.cancel(
-                            acknowledgementTimeout: .seconds(5)
-                        )))
-                    } catch is CancellationError {
-                        return finish(.waiterCancelled(message: nil))
+                        handle = try await runtime.appServer.loginChatGPT(
+                            accountReadinessTimeout: .seconds(5)
+                        )
                     } catch {
-                        return finish(.waiterCancelled(message: error.localizedDescription))
-                    }
-                }
-
-                await self?.authenticationHandleDidBind?()
-                if case .cancel = await operationState.claimURLPresentation(handle: handle) {
-                    await startCompletion.resolve(.success(()))
-                    do {
-                        return finish(.outcome(try await handle.result()))
-                    } catch is CancellationError {
-                        return finish(.waiterCancelled(message: nil))
-                    } catch {
-                        return finish(.waiterCancelled(message: error.localizedDescription))
-                    }
-                }
-
-                auth?.updatePhase(.signingIn(.init(
-                    title: "Sign in to Codex",
-                    detail: "Continue signing in with your browser.",
-                    browserURL: handle.authenticationURL.absoluteString,
-                    userCode: nil
-                )))
-
-                do {
-                    try urlOpener(handle.authenticationURL)
-                    await startCompletion.resolve(.success(()))
-                } catch {
-                    let failure = CodexReviewAuthenticationFailure.urlOpen(handle.authenticationURL)
-                    do {
-                        switch try await handle.cancel(acknowledgementTimeout: .seconds(5)) {
-                        case .succeeded,
-                             .authenticationCommittedNeedsConnectionReconciliation:
+                        let failure = (error as? CodexReviewAuthenticationFailure)
+                            ?? .runtime(message: error.localizedDescription)
+                        let failureDisposition = await operationState.claimPreCommitFailure()
+                        if case .cancel = failureDisposition {
                             await startCompletion.resolve(.success(()))
-                            return finish(.outcome(try await handle.result()))
-                        case .failed(let message):
-                            let loginFailure = CodexReviewAuthenticationFailure.login(
-                                message: message ?? "Authentication failed."
-                            )
-                            await startCompletion.resolve(.failure(loginFailure))
-                            return finish(.outcome(.failed(message: message)))
-                        case .cancelled:
+                            return finish(.cancelled)
+                        } else {
                             await startCompletion.resolve(.failure(failure))
                             return finish(.failure(failure))
                         }
+                    }
+
+                    let handleDisposition = await operationState.bind(
+                        handle: handle,
+                        runtime: runtime
+                    )
+                    if case .cancel = handleDisposition {
+                        await startCompletion.resolve(.success(()))
+                        do {
+                            return finish(.chatGPTOutcome(try await handle.cancel(
+                                acknowledgementTimeout: .seconds(5)
+                            )))
+                        } catch is CancellationError {
+                            return finish(.waiterCancelled(message: nil))
+                        } catch {
+                            return finish(.waiterCancelled(message: error.localizedDescription))
+                        }
+                    }
+
+                    await self?.authenticationOperationDidBind?()
+                    if case .cancel = await operationState.claimURLPresentation(handle: handle) {
+                        await startCompletion.resolve(.success(()))
+                        do {
+                            return finish(.chatGPTOutcome(try await handle.result()))
+                        } catch is CancellationError {
+                            return finish(.waiterCancelled(message: nil))
+                        } catch {
+                            return finish(.waiterCancelled(message: error.localizedDescription))
+                        }
+                    }
+
+                    auth?.updatePhase(.signingIn(.init(
+                        title: "Sign in to Codex",
+                        detail: "Continue signing in with your browser.",
+                        browserURL: handle.authenticationURL.absoluteString,
+                        userCode: nil
+                    )))
+
+                    do {
+                        try urlOpener(handle.authenticationURL)
+                        await startCompletion.resolve(.success(()))
                     } catch {
+                        let failure = CodexReviewAuthenticationFailure.urlOpen(handle.authenticationURL)
+                        do {
+                            switch try await handle.cancel(acknowledgementTimeout: .seconds(5)) {
+                            case .succeeded,
+                                 .authenticationCommittedNeedsConnectionReconciliation:
+                                await startCompletion.resolve(.success(()))
+                                return finish(.chatGPTOutcome(try await handle.result()))
+                            case .failed(let message):
+                                let loginFailure = CodexReviewAuthenticationFailure.login(
+                                    message: message ?? "Authentication failed."
+                                )
+                                await startCompletion.resolve(.failure(loginFailure))
+                                return finish(.chatGPTOutcome(.failed(message: message)))
+                            case .cancelled:
+                                await startCompletion.resolve(.failure(failure))
+                                return finish(.failure(failure))
+                            }
+                        } catch {
+                            await startCompletion.resolve(.failure(failure))
+                            return finish(.failure(failure))
+                        }
+                    }
+
+                    do {
+                        return finish(.chatGPTOutcome(try await handle.result()))
+                    } catch is CancellationError {
+                        return finish(.waiterCancelled(message: nil))
+                    } catch {
+                        return finish(.failure(.runtime(message: error.localizedDescription)))
+                    }
+                case .apiKey(let apiKey):
+                    guard case .proceed = await operationState.bindAPIKey(runtime: runtime) else {
+                        await startCompletion.resolve(.success(()))
+                        return finish(.cancelled)
+                    }
+                    await self?.authenticationOperationDidBind?()
+                    auth?.updatePhase(.signingIn(.init(
+                        title: "Sign in to Codex",
+                        detail: "Authenticating with API key."
+                    )))
+                    do {
+                        try await apiKey.withValue { rawValue in
+                            try await runtime.appServer.login(apiKey: rawValue)
+                        }
+                        await startCompletion.resolve(.success(()))
+                        return finish(.apiKeySucceeded)
+                    } catch is CancellationError {
+                        await startCompletion.resolve(.success(()))
+                        return finish(.cancelled)
+                    } catch CodexAppServerError.authenticationOutcomeUnknown(_) {
+                        let failure = CodexReviewAuthenticationFailure.login(
+                            message: "The API-key authentication outcome could not be confirmed."
+                        )
+                        if case .addAccountPreservingActive = purpose {
+                            await startCompletion.resolve(.failure(failure))
+                        } else {
+                            await startCompletion.resolve(.success(()))
+                        }
+                        return finish(.apiKeyOutcomeUnknown)
+                    } catch let appServerError as CodexAppServerError {
+                        await operationState.claimKnownAPIKeyFailure()
+                        let failure = CodexReviewAuthenticationFailure.login(
+                            message: appServerError.localizedDescription
+                        )
+                        await startCompletion.resolve(.failure(failure))
+                        return finish(.failure(failure))
+                    } catch {
+                        await operationState.claimKnownAPIKeyFailure()
+                        let failure = CodexReviewAuthenticationFailure.runtime(
+                            message: "API-key authentication failed."
+                        )
                         await startCompletion.resolve(.failure(failure))
                         return finish(.failure(failure))
                     }
-                }
-
-                do {
-                    return finish(.outcome(try await handle.result()))
-                } catch is CancellationError {
-                    return finish(.waiterCancelled(message: nil))
-                } catch {
-                    return finish(.failure(.runtime(message: error.localizedDescription)))
                 }
             },
             terminationHandler: { @MainActor [weak self, weak auth] session, reason, observation in
@@ -2188,6 +2231,16 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 throw terminalFailure
             }
             _ = failure
+        } else if provider == .apiKey {
+            let terminal = await session.terminate(reason: .rootOutcome)
+            switch terminal {
+            case .failed(let failure):
+                throw failure
+            case .primaryRuntimeReconciliation:
+                _ = await session.waitForPrimaryAuthenticationFinalResult()
+            case .succeeded, .cancelled, .stopped, .committedNeedsRuntimeReconciliation:
+                break
+            }
         }
     }
 
@@ -2210,13 +2263,36 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     ) async -> LoginSessionTerminal {
         let terminal: LoginSessionTerminal
         switch observation {
-        case .outcome(let outcome):
+        case .chatGPTOutcome(let outcome):
             terminal = await finishLoginOutcome(
                 outcome,
                 session: session,
                 reason: reason,
                 auth: auth
             )
+        case .apiKeySucceeded:
+            terminal = await finishSuccessfulLogin(session: session, auth: auth)
+        case .apiKeyOutcomeUnknown:
+            guard session.provider == .apiKey else {
+                preconditionFailure("Only an API-key login can report an unknown immediate authentication outcome.")
+            }
+            if case .signIn = session.purpose {
+                terminal = .primaryRuntimeReconciliation(
+                    session.takePrimaryAuthenticationReconciliationHandoff(
+                        cause: .apiKeyOutcomeUnknown(
+                            previousActiveAccountKey: session.previousActiveAccountKey
+                        )
+                    )
+                )
+            } else {
+                let failure = CodexReviewAuthenticationFailure.login(
+                    message: "The isolated API-key authentication outcome could not be confirmed."
+                )
+                auth.updatePhase(.failed(failure))
+                terminal = .failed(failure)
+            }
+        case .cancelled:
+            terminal = finishCancelledLoginOutcome(reason: reason, auth: auth)
         case .failure(let failure):
             auth.updatePhase(.failed(failure))
             terminal = .failed(failure)
@@ -2369,6 +2445,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         reason terminationReason: LoginTerminationReason,
         auth: CodexReviewAuthModel
     ) async -> LoginSessionTerminal {
+        precondition(session.provider == .chatGPT)
         switch outcome {
         case .succeeded:
             return await finishSuccessfulLogin(session: session, auth: auth)
@@ -2393,7 +2470,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 }
                 return .primaryRuntimeReconciliation(
                     session.takePrimaryAuthenticationReconciliationHandoff(
-                        cause: .cancelOutcomeUnknown(
+                        cause: .chatGPTCancelOutcomeUnknown(
                             previousActiveAccountKey: session.previousActiveAccountKey
                         )
                     )
@@ -2408,7 +2485,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             }
             return .primaryRuntimeReconciliation(
                 session.takePrimaryAuthenticationReconciliationHandoff(
-                    cause: .committed(reconciliationReason)
+                    cause: .chatGPTCommitted(reconciliationReason)
                 )
             )
         }
@@ -2426,7 +2503,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             return .failed(failure)
         }
         var stagingURLRequiringRemoval: URL?
-        var deferredPrimaryExpectation: ExpectedRuntimeAccount = .anyChatGPT
+        var deferredPrimaryExpectation = session.provider.successfulLoginExpectation
         var primaryObservationPublication: (
             session: HostRuntimeSession,
             observation: RuntimeAccountObservation,
@@ -2469,11 +2546,12 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                     }
                     let account = try successfulLoginAccount(
                         from: snapshot,
+                        provider: session.provider,
                         previousActiveAccountKey: session.previousActiveAccountKey
                     )
                     deferredPrimaryExpectation = .observedAccount(
                         accountKey: account.accountKey,
-                        provider: .chatGPT
+                        provider: session.provider.expectedProvider
                     )
                     let candidate: (
                         persisted: AccountRegistryStore.Snapshot,
@@ -2506,7 +2584,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                     }
                     primaryObservationPublication = (
                         primaryRuntimeSession,
-                        .account(accountKey: account.accountKey, provider: .chatGPT),
+                        .account(
+                            accountKey: account.accountKey,
+                            provider: session.provider.expectedProvider
+                        ),
                         revision
                     )
                     reconciliation = candidate
@@ -2516,9 +2597,14 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 let snapshot = try await loginRuntime.backend.readAuth()
                 _ = try successfulLoginAccount(
                     from: snapshot,
+                    provider: session.provider,
                     previousActiveAccountKey: session.previousActiveAccountKey
                 )
-                let isolatedRateLimits = try? await loginRuntime.backend.readRateLimits()
+                let isolatedRateLimits: CodexRateLimits? = if session.provider == .chatGPT {
+                    try? await loginRuntime.backend.readRateLimits()
+                } else {
+                    nil
+                }
                 guard let runtime = await session.takeOwnedRuntimeForClose() else {
                     preconditionFailure("An isolated login runtime can be closed only once.")
                 }
@@ -2585,16 +2671,31 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     private func successfulLoginAccount(
         from snapshot: CodexReviewBackendModel.Auth.Snapshot,
+        provider: LoginProvider,
         previousActiveAccountKey: String?
     ) throws -> CodexReviewAccount {
         guard let activeAccountID = snapshot.activeAccountID,
               let backendAccount = snapshot.accounts.first(where: { $0.id == activeAccountID }),
-              let account = Self.monitorAccount(from: backendAccount),
-              account.kind == .chatGPT,
-              account.accountKey != previousActiveAccountKey else {
+              let account = Self.monitorAccount(from: backendAccount) else {
             throw CodexReviewAuthenticationFailure.protocolViolation(
-                message: "A successful login must expose a new active ChatGPT account."
+                message: "A successful login must expose an active authenticated account."
             )
+        }
+        switch provider {
+        case .chatGPT:
+            guard account.kind == .chatGPT,
+                  account.accountKey != previousActiveAccountKey else {
+                throw CodexReviewAuthenticationFailure.protocolViolation(
+                    message: "A successful login must expose a new active ChatGPT account."
+                )
+            }
+        case .apiKey:
+            guard account.kind == .apiKey,
+                  account.accountKey == "api-key" else {
+                throw CodexReviewAuthenticationFailure.protocolViolation(
+                    message: "A successful API-key login must expose the API-key account."
+                )
+            }
         }
         return account
     }
@@ -2698,10 +2799,18 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     ) async {
         let finalResult: PrimaryAuthenticationReconciliationResult
         let expectedAccount: ExpectedRuntimeAccount = switch handoff.cause {
-        case .committed:
+        case .chatGPTCommitted:
             .anyChatGPT
-        case .cancelOutcomeUnknown(let previousActiveAccountKey):
+        case .chatGPTCancelOutcomeUnknown(let previousActiveAccountKey):
             .cancelOutcomeUnknown(previousActiveAccountKey: previousActiveAccountKey)
+        case .apiKeyOutcomeUnknown:
+            .reconcileCurrentRuntime
+        }
+        if case .apiKeyOutcomeUnknown(let previousActiveAccountKey) = handoff.cause {
+            precondition(
+                previousActiveAccountKey.map(CodexReviewAccount.normalizedEmail) != "api-key",
+                "API-key authentication admission must reject an existing fixed API-key identity."
+            )
         }
         do {
             guard let store = attachedStore else {
@@ -2732,21 +2841,32 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 )
             }
             switch (handoff.cause, accountObservation) {
-            case (.committed, .account(let accountKey, .chatGPT)):
+            case (.chatGPTCommitted, .account(let accountKey, .chatGPT)):
                 finalResult = .authenticated(accountKey: accountKey)
-            case (.cancelOutcomeUnknown(let previousActiveAccountKey), .account(let accountKey, .chatGPT))
+            case (.chatGPTCancelOutcomeUnknown(let previousActiveAccountKey), .account(let accountKey, .chatGPT))
                 where accountKey != previousActiveAccountKey:
                 finalResult = .authenticated(accountKey: accountKey)
-            case (.cancelOutcomeUnknown, .signedOut):
+            case (.chatGPTCancelOutcomeUnknown, .signedOut):
                 finalResult = .cancelled
-            case (.cancelOutcomeUnknown(let previousActiveAccountKey), .account(let accountKey, .chatGPT))
+            case (.chatGPTCancelOutcomeUnknown(let previousActiveAccountKey), .account(let accountKey, .chatGPT))
                 where accountKey == previousActiveAccountKey:
                 finalResult = .cancelled
-            case (.committed, .signedOut),
+            case (.apiKeyOutcomeUnknown, .account(let accountKey, .apiKey))
+                where accountKey == "api-key":
+                finalResult = .authenticated(accountKey: accountKey)
+            case (.apiKeyOutcomeUnknown, .signedOut):
+                finalResult = .cancelled
+            case (.apiKeyOutcomeUnknown(let previousActiveAccountKey), .account(let accountKey, _))
+                where accountKey == previousActiveAccountKey:
+                finalResult = .cancelled
+            case (.chatGPTCommitted, .signedOut),
                  (_, .invalid),
-                 (_, .account(_, .apiKey)),
                  (_, .account(_, .amazonBedrock)),
-                 (.cancelOutcomeUnknown, .account(_, .chatGPT)):
+                 (.chatGPTCommitted, .account(_, .apiKey)),
+                 (.chatGPTCancelOutcomeUnknown, .account(_, .apiKey)),
+                 (.chatGPTCancelOutcomeUnknown, .account(_, .chatGPT)),
+                 (.apiKeyOutcomeUnknown, .account(_, .chatGPT)),
+                 (.apiKeyOutcomeUnknown, .account(_, .apiKey)):
                 throw CodexReviewAuthenticationFailure.protocolViolation(
                     message: "Authentication reconciliation produced an invalid account observation."
                 )
@@ -3025,7 +3145,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         }
         let accountPayload = savedAccountPayload(from: account)
         let persisted: AccountRegistryStore.Snapshot
-        if accountPayload.kind == .chatGPT {
+        switch accountPayload.kind {
+        case .chatGPT, .apiKey:
             persisted = try await accountRegistry.commitAuthenticatedAccount(
                 accountPayload,
                 activation: activation,
@@ -3034,7 +3155,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 runtimeAuthorization: runtimeAuthorization,
                 isolatedProductCommitAuthorization: isolatedProductCommitAuthorization
             )
-        } else {
+        case .amazonBedrock:
             persisted = try await accountRegistry.upsertAccount(
                 accountPayload,
                 activation: activation,
