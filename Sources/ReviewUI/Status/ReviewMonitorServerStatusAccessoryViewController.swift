@@ -174,7 +174,7 @@ struct StatusView: View {
         let currentAccount = store.auth.selectedAccount
         VStack{
             Menu {
-                Section(currentAccount?.email ?? "") {
+                Section(currentAccount?.reviewMonitorDisplayName ?? "") {
                     AccountRateLimitsSectionView(account: currentAccount)
                 }
                 if let showSettings {

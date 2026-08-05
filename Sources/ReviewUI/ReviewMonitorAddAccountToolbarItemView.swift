@@ -22,6 +22,7 @@ final class AddAccountToolbarItemView: NSView {
     private let rootStackView = NSStackView()
     private let addButton = NSButton()
     private let progressButton = AddAccountToolbarProgressButton()
+    var didDetachFromWindow: (@MainActor () -> Void)?
 
 #if DEBUG
     private var stableModeWaitersForTesting: [UUID: StableModeWaiterForTesting] = [:]
@@ -40,6 +41,13 @@ final class AddAccountToolbarItemView: NSView {
 
     override var intrinsicContentSize: NSSize {
         rootStackView.fittingSize
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            didDetachFromWindow?()
+        }
     }
 
     private func configureHierarchy() {
@@ -77,6 +85,14 @@ final class AddAccountToolbarItemView: NSView {
         addButton.action = addAction
         progressButton.target = target
         progressButton.action = cancelAction
+    }
+
+    func presentProviderMenu(_ menu: NSMenu) {
+        menu.popUp(
+            positioning: nil,
+            at: NSPoint(x: bounds.minX, y: bounds.minY),
+            in: self
+        )
     }
 
     func applyPresentation(

@@ -191,6 +191,117 @@ struct ReviewUITests {
         #expect(viewController.addAccountToolbarMenuTitleForTesting == "Cancel Sign-In")
     }
 
+    @Test func addAccountToolbarItemOffersBothAuthenticationProviders() async throws {
+        let store = CodexReviewStore.makePreviewStore()
+        let activeAccount = CodexReviewAccount(email: "first@example.com", planType: "pro")
+        store.loadForTesting(
+            serverState: .running,
+            authPhase: .signedOut,
+            account: activeAccount,
+            persistedAccounts: [activeAccount]
+        )
+
+        let uiState = ReviewMonitorUIState(auth: store.auth)
+        uiState.sidebarSelection = .account
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        viewController.attach(to: window)
+        window.layoutIfNeeded()
+        try await waitForAddAccountToolbarItemHidden(viewController, false)
+
+        #expect(viewController.addAccountProviderMenuItemTitlesForTesting == ["ChatGPT", "API Key"])
+        #expect(viewController.addAccountAPIKeyProviderIsEnabledForTesting)
+    }
+
+    @Test func addAccountToolbarItemDisablesDuplicateAPIKeyProvider() async throws {
+        let apiKeyAccount = CodexReviewAccount(
+            accountKey: "api-key",
+            email: "api-key",
+            kind: .apiKey
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            authPhase: .signedOut,
+            account: apiKeyAccount,
+            persistedAccounts: [apiKeyAccount]
+        )
+
+        let uiState = ReviewMonitorUIState(auth: store.auth)
+        uiState.sidebarSelection = .account
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        viewController.attach(to: window)
+        window.layoutIfNeeded()
+        try await waitForAddAccountToolbarItemHidden(viewController, false)
+
+        #expect(viewController.addAccountAPIKeyProviderIsEnabledForTesting == false)
+        viewController.selectAddAccountProviderForTesting(.apiKey)
+        #expect(viewController.isPresentingAddAccountAPIKeyPromptForTesting == false)
+    }
+
+    @Test func addAccountAPIKeyPromptClearsSecretOnCancellation() async throws {
+        let activeAccount = CodexReviewAccount(email: "first@example.com", planType: "pro")
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            authPhase: .signedOut,
+            account: activeAccount,
+            persistedAccounts: [activeAccount]
+        )
+
+        let uiState = ReviewMonitorUIState(auth: store.auth)
+        uiState.sidebarSelection = .account
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        viewController.attach(to: window)
+        window.layoutIfNeeded()
+        try await waitForAddAccountToolbarItemHidden(viewController, false)
+
+        viewController.selectAddAccountProviderForTesting(.apiKey)
+        #expect(viewController.isPresentingAddAccountAPIKeyPromptForTesting)
+        viewController.setAddAccountAPIKeyPromptValueForTesting("sk-ui-test-secret")
+        #expect(viewController.addAccountAPIKeyPromptContainsTextForTesting)
+
+        viewController.completeAddAccountAPIKeyPromptForTesting(submit: false)
+
+        #expect(viewController.isPresentingAddAccountAPIKeyPromptForTesting == false)
+        #expect(viewController.addAccountAPIKeyPromptContainsTextForTesting == false)
+        #expect(store.auth.accountActionAlert == nil)
+    }
+
+    @Test func addAccountAPIKeyPromptClearsSecretBeforeSubmissionFailure() async throws {
+        let activeAccount = CodexReviewAccount(email: "first@example.com", planType: "pro")
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            authPhase: .signedOut,
+            account: activeAccount,
+            persistedAccounts: [activeAccount]
+        )
+
+        let uiState = ReviewMonitorUIState(auth: store.auth)
+        uiState.sidebarSelection = .account
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        viewController.attach(to: window)
+        window.layoutIfNeeded()
+        try await waitForAddAccountToolbarItemHidden(viewController, false)
+
+        viewController.selectAddAccountProviderForTesting(.apiKey)
+        viewController.setAddAccountAPIKeyPromptValueForTesting("   ")
+        viewController.completeAddAccountAPIKeyPromptForTesting(submit: true)
+
+        #expect(viewController.isPresentingAddAccountAPIKeyPromptForTesting == false)
+        #expect(viewController.addAccountAPIKeyPromptContainsTextForTesting == false)
+        let alert = try #require(store.auth.accountActionAlert)
+        #expect(alert.message == "Enter a valid OpenAI API key.")
+    }
+
     @Test func addAccountToolbarItemStaysVisibleDuringAuthenticationOutsideAccountSidebar() async throws {
         let store = CodexReviewStore.makePreviewStore()
         let activeAccount = CodexReviewAccount(email: "first@example.com", planType: "pro")
