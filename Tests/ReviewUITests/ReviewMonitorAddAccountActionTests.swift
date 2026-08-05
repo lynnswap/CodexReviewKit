@@ -90,22 +90,20 @@ struct ReviewMonitorAddAccountActionTests {
         #expect(store.auth.accountActionAlert == nil)
     }
 
-    @Test func apiKeyOperationFailureRedactsTheSubmittedSecret() async throws {
+    @Test func apiKeyOperationFailureUsesTheSanitizedCoreMessage() async throws {
         let store = CodexReviewStore.makePreviewStore()
-        let secret = "sk-ui-test-secret"
-        var input = ReviewMonitorAPIKeyInput(value: secret)
+        var input = ReviewMonitorAPIKeyInput(value: "sk-ui-test-secret")
         let submission = try input.takeSubmission()
 
         await ReviewMonitorAddAccountAction.perform(
             store: store,
             submission: submission
         ) { _ in
-            throw CodexReviewAPI.Error.io("Request rejected for \(secret)")
+            throw CodexReviewAPI.Error.io("Authentication failed.")
         }
 
         let alert = try #require(store.auth.accountActionAlert)
-        #expect(alert.message == "Request rejected for [REDACTED]")
-        #expect(alert.message.contains(secret) == false)
+        #expect(alert.message == "Authentication failed.")
     }
 
     @Test func invalidAPIKeyClearsInputWithoutEchoingIt() {

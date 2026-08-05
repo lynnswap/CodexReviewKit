@@ -23,7 +23,7 @@ enum ReviewMonitorAddAccountAction {
         } catch {
             store.auth.presentAccountActionAlert(
                 title: "Failed to Add Account",
-                message: submission.failureMessage(for: error)
+                message: error.localizedDescription
             )
         }
     }

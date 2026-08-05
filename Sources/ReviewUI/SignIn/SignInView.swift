@@ -3,25 +3,9 @@ import CodexReviewKit
 
 struct ReviewMonitorAuthenticationSubmission {
     let method: CodexReviewAuthenticationMethod
-    private let sensitiveValue: String?
 
     static var chatGPT: Self {
-        .init(method: .chatGPT, sensitiveValue: nil)
-    }
-
-    init(method: CodexReviewAuthenticationMethod, sensitiveValue: String?) {
-        self.method = method
-        self.sensitiveValue = sensitiveValue
-    }
-
-    func failureMessage(for error: any Error) -> String {
-        let message = error.localizedDescription
-        guard let sensitiveValue,
-              sensitiveValue.isEmpty == false
-        else {
-            return message
-        }
-        return message.replacingOccurrences(of: sensitiveValue, with: "[REDACTED]")
+        .init(method: .chatGPT)
     }
 }
 
@@ -39,8 +23,7 @@ struct ReviewMonitorAPIKeyInput {
         do {
             let apiKey = try CodexReviewAPIKey(validating: submittedValue)
             return ReviewMonitorAuthenticationSubmission(
-                method: .apiKey(apiKey),
-                sensitiveValue: submittedValue
+                method: .apiKey(apiKey)
             )
         } catch {
             throw ReviewMonitorAPIKeyValidationFailure()
@@ -196,7 +179,7 @@ struct SignInView: View {
             do {
                 try await store.performPrimaryAuthenticationAction(using: submission.method)
             } catch {
-                authenticationFailureMessage = submission.failureMessage(for: error)
+                authenticationFailureMessage = error.localizedDescription
             }
         }
     }
