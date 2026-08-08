@@ -1942,6 +1942,7 @@ struct CodexReviewHostTests {
         try await transport.enqueueAccount(newAccount, requiresOpenAIAuth: false)
         try await transport.enqueueAccount(newAccount, requiresOpenAIAuth: false)
         try await transport.enqueueAccount(newAccount, requiresOpenAIAuth: false)
+        try await transport.enqueueAccount(newAccount, requiresOpenAIAuth: false)
         try await transport.enqueueRateLimits(try makeHostRateLimits(
             planType: nil,
             windowDurationMinutes: 300,
@@ -1987,21 +1988,13 @@ struct CodexReviewHostTests {
             authMode: .chatGPT,
             planType: .plus
         ))
-        #expect(await waitUntil(timeout: .seconds(1)) {
+        try #require(await waitUntil(timeout: .seconds(2)) {
             store.auth.selectedAccount?.accountKey == "new@example.com"
+                && store.auth.selectedAccount?.rateLimits.first?.usedPercent == 20
         })
-        await transport.waitForRequestCount(9)
-        #expect(await transport.recordedRequests().map(\.request.operation) == [
-            .initialize,
-            .accountRead,
-            .configurationRead,
-            .modelList,
-            .accountLoginStart,
-            .accountRead,
-            .accountRead,
-            .accountRateLimitsRead,
-            .accountRead,
-        ])
+        #expect(isPrimaryLoginCompletionRequestSequence(
+            await transport.recordedRequests().map(\.request.operation)
+        ))
         await store.stop()
     }
 
@@ -3971,6 +3964,7 @@ struct CodexReviewHostTests {
         try await transport.enqueueAccount(newAccount, requiresOpenAIAuth: false)
         try await transport.enqueueAccount(newAccount, requiresOpenAIAuth: false)
         try await transport.enqueueAccount(newAccount, requiresOpenAIAuth: false)
+        try await transport.enqueueAccount(newAccount, requiresOpenAIAuth: false)
         try await transport.enqueueRateLimits(try makeHostRateLimits(
             planType: nil,
             windowDurationMinutes: 300,
@@ -4008,7 +4002,6 @@ struct CodexReviewHostTests {
             authMode: .chatGPT,
             planType: .plus
         ))
-        await transport.waitForRequestCount(9)
         try #require(await waitUntil(timeout: .seconds(2)) {
             store.auth.selectedAccount?.accountKey == "new@example.com"
                 && store.auth.selectedAccount?.rateLimits.first?.usedPercent == 20
@@ -4020,17 +4013,9 @@ struct CodexReviewHostTests {
             "new@example.com",
             "existing@example.com",
         ])
-        #expect(await transport.recordedRequests().map(\.request.operation) == [
-            .initialize,
-            .accountRead,
-            .configurationRead,
-            .modelList,
-            .accountLoginStart,
-            .accountRead,
-            .accountRead,
-            .accountRateLimitsRead,
-            .accountRead,
-        ])
+        #expect(isPrimaryLoginCompletionRequestSequence(
+            await transport.recordedRequests().map(\.request.operation)
+        ))
     }
 
     @Test func liveStoreAddAccountCancelsLoginWhenOpeningURLFails() async throws {
@@ -6348,6 +6333,28 @@ private extension CodexAppServerTestTransport {
         )
         try enqueueReviewStart(turn, reviewThreadID: reviewThreadID)
     }
+}
+
+private func isPrimaryLoginCompletionRequestSequence(
+    _ operations: [CodexAppServerTestOperation]
+) -> Bool {
+    let prefix: [CodexAppServerTestOperation] = [
+        .initialize,
+        .accountRead,
+        .configurationRead,
+        .modelList,
+        .accountLoginStart,
+        .accountRead,
+    ]
+    let rateLimitRefresh: [CodexAppServerTestOperation] = [
+        .accountRead,
+        .accountRateLimitsRead,
+        .accountRead,
+    ]
+    // Login completion and account invalidation have independent consumers. If
+    // invalidation lands during the first read, the revision owner retries once.
+    return operations == prefix + rateLimitRefresh
+        || operations == prefix + [.accountRead] + rateLimitRefresh
 }
 
 private func makeHostConfigurationReadResult(
