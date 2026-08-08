@@ -1,6 +1,28 @@
 import CodexReviewKit
 import SwiftUI
 
+extension CodexReviewAccount {
+    var reviewMonitorDisplayName: String {
+        switch kind {
+        case .chatGPT:
+            maskedEmail
+        case .apiKey:
+            "API Key"
+        case .amazonBedrock:
+            "Amazon Bedrock"
+        }
+    }
+
+    var reviewMonitorIdentityName: String {
+        switch kind {
+        case .chatGPT:
+            email
+        case .apiKey, .amazonBedrock:
+            reviewMonitorDisplayName
+        }
+    }
+}
+
 struct ReviewMonitorAccountRowView: View {
     let store: CodexReviewStore
     var account: CodexReviewAccount?
@@ -25,7 +47,7 @@ struct ReviewMonitorAccountRowView: View {
                     .menuStyle(.button)
                     .buttonStyle(.plain)
                 }label:{
-                    Text(account.maskedEmail)
+                    Text(account.reviewMonitorDisplayName)
                 }
             } icon: {
                 let isSelected :Bool = store.auth.selectedAccount == account

@@ -541,7 +541,13 @@ extension AccountRegistryStore {
                 mayApplyIrreversibleLogout: false
             )
             try writeJournal(journal, codexHomeURL: codexHomeURL)
-            return .init(id: id)
+            return .init(
+                id: id,
+                expectedAccount: .observedAccount(
+                    accountKey: targetAccountKey,
+                    provider: .init(entry.kind.accountKind)
+                )
+            )
         }
 
         static func prepareIrreversibleRemoval(
@@ -581,7 +587,7 @@ extension AccountRegistryStore {
                 ),
                 codexHomeURL: codexHomeURL
             )
-            return .init(id: id)
+            return .init(id: id, expectedAccount: .signedOut)
         }
 
         static func commitPreparedMutation(

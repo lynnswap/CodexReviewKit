@@ -194,6 +194,21 @@ CodexChat projections; it does not store transcript text on the run.
 preview, and test backends all implement that boundary; product state remains in
 the store.
 
+Authentication provider choice enters this boundary as a typed request. API-key
+text is transient input: it is validated before dispatch, retained only along
+the active authentication request, and is never copied into observable auth
+state, progress, diagnostics, registry metadata, or reconciliation debt. The
+app-server file-backed credential store remains the credential source of truth.
+
+`LoginSession`, `AccountRegistryStore`, and
+`AccountRuntimeTransitionCoordinator` jointly own authentication mutation,
+cancellation, and runtime reconciliation. Successful ChatGPT and API-key
+credentials are committed to immutable account revisions before account
+switching can use them. ReviewMonitor supports one fixed `api-key` identity;
+rotation removes that account before adding a replacement. Amazon Bedrock
+accounts remain metadata-only because ReviewMonitor does not export credentials
+for that provider.
+
 ## App-Server Gateway
 
 `CodexAppServerKit` treats raw JSON-RPC as the only live I/O boundary.

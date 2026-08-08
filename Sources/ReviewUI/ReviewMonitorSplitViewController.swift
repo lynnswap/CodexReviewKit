@@ -538,6 +538,11 @@ extension ReviewMonitorSplitViewController {
         case progress
     }
 
+    enum AddAccountProviderForTesting: Equatable {
+        case chatGPT
+        case apiKey
+    }
+
     enum SidebarPresentationForTesting: Sendable, Equatable {
         case chatList
         case accountList
@@ -705,6 +710,48 @@ extension ReviewMonitorSplitViewController {
 
     var addAccountToolbarMenuTitleForTesting: String? {
         addAccountToolbarItem?.menuTitleForTesting
+    }
+
+    var addAccountProviderMenuItemTitlesForTesting: [String] {
+        addAccountToolbarItem?.providerMenuItemTitlesForTesting ?? []
+    }
+
+    var addAccountAPIKeyProviderIsEnabledForTesting: Bool {
+        addAccountToolbarItem?.apiKeyProviderIsEnabledForTesting ?? false
+    }
+
+    var isPresentingAddAccountAPIKeyPromptForTesting: Bool {
+        addAccountToolbarItem?.isPresentingAPIKeyPromptForTesting ?? false
+    }
+
+    var addAccountAPIKeyPromptContainsTextForTesting: Bool {
+        addAccountToolbarItem?.apiKeyPromptContainsTextForTesting ?? false
+    }
+
+    func selectAddAccountProviderForTesting(_ provider: AddAccountProviderForTesting) {
+        guard let addAccountToolbarItem else {
+            fatalError("Add Account toolbar item is not configured yet.")
+        }
+        switch provider {
+        case .chatGPT:
+            addAccountToolbarItem.selectProviderForTesting(.chatGPT)
+        case .apiKey:
+            addAccountToolbarItem.selectProviderForTesting(.apiKey)
+        }
+    }
+
+    func setAddAccountAPIKeyPromptValueForTesting(_ value: String) {
+        guard let addAccountToolbarItem else {
+            fatalError("Add Account toolbar item is not configured yet.")
+        }
+        addAccountToolbarItem.setAPIKeyPromptValueForTesting(value)
+    }
+
+    func completeAddAccountAPIKeyPromptForTesting(submit: Bool) {
+        guard let addAccountToolbarItem else {
+            fatalError("Add Account toolbar item is not configured yet.")
+        }
+        addAccountToolbarItem.completeAPIKeyPromptForTesting(submit: submit)
     }
 
     func waitForAddAccountToolbarItemModeForTesting(

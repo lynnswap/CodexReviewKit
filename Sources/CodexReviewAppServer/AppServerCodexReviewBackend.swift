@@ -666,7 +666,8 @@ enum AppServerReviewTerminalMapper {
             return .protocolViolation(
                 message: "Unexpected terminal collection deadline for turn \(turnID.rawValue): \(duration)"
             )
-        case .launch, .request, .reviewRestartUnavailable, .loginAlreadyInProgress:
+        case .launch, .request, .reviewRestartUnavailable, .loginAlreadyInProgress,
+             .invalidAPIKey, .authenticationOutcomeUnknown:
             return .protocolViolation(
                 message: "Unexpected terminal collection failure: \(appServerError.localizedDescription)"
             )
@@ -747,9 +748,9 @@ private enum AppServerReviewOperationFailureMapper {
             reason = .malformedNotification(method: malformed.method)
         case .reviewRestartUnavailable:
             reason = .reviewRestartUnavailable
-        case .loginAlreadyInProgress:
+        case .loginAlreadyInProgress, .invalidAPIKey, .authenticationOutcomeUnknown:
             return .protocolViolation(
-                message: "A review operation unexpectedly reported an authentication conflict."
+                message: "A review operation unexpectedly reported an authentication failure."
             )
         }
         return .operation(.init(

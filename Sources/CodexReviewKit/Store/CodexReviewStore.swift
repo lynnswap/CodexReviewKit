@@ -206,19 +206,25 @@ public final class CodexReviewStore {
         await backend.refreshAuth(auth: auth)
     }
 
-    package func signIn() async throws {
-        try await backend.signIn(auth: auth)
+    package func signIn(
+        using method: CodexReviewAuthenticationMethod = .chatGPT
+    ) async throws {
+        try await backend.authenticate(auth: auth, request: .signIn(using: method))
     }
 
-    package func addAccount() async throws {
-        try await backend.addAccount(auth: auth)
+    package func addAccount(
+        using method: CodexReviewAuthenticationMethod = .chatGPT
+    ) async throws {
+        try await backend.authenticate(auth: auth, request: .addAccount(using: method))
     }
 
     package func cancelAuthentication() async {
         await backend.cancelAuthentication(auth: auth)
     }
 
-    package func performPrimaryAuthenticationAction() async throws {
+    package func performPrimaryAuthenticationAction(
+        using method: CodexReviewAuthenticationMethod = .chatGPT
+    ) async throws {
         if auth.isAuthenticating {
             await cancelAuthentication()
             return
@@ -234,7 +240,7 @@ public final class CodexReviewStore {
         else {
             return
         }
-        try await signIn()
+        try await signIn(using: method)
     }
 
     package func logout() async {

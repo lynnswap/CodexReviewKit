@@ -614,6 +614,12 @@ extension ReviewMonitorAccountsViewController {
         }
     }
 
+    var displayedAccountNamesForTesting: [String] {
+        (0..<outlineView.numberOfRows).compactMap { row in
+            account(atRow: row)?.reviewMonitorDisplayName
+        }
+    }
+
     var accountListUsesOutlineViewForTesting: Bool {
         scrollView.documentView === outlineView
     }
@@ -1009,7 +1015,7 @@ private final class ReviewMonitorAccountCellView: NSTableCellView {
 
     func configure(account: CodexReviewAccount) {
         objectValue = account
-        toolTip = account.email
+        toolTip = account.reviewMonitorIdentityName
         hostingView.rootView.account = account
     }
 

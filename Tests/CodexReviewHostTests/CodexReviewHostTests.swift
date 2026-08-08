@@ -26,7 +26,7 @@ private extension CodexReviewStore {
         authenticationMutationDidBegin: CodexReviewAuthenticationMutationDidBegin? = nil,
         authenticationCancellationDidRequest: CodexReviewAuthenticationCancellationDidRequest? = nil,
         authenticationProductCommitDidApply: CodexReviewAuthenticationProductCommitDidApply? = nil,
-        authenticationHandleDidBind: CodexReviewAuthenticationHandleDidBind? = nil,
+        authenticationOperationDidBind: CodexReviewAuthenticationOperationDidBind? = nil,
         accountRegistryLoadDidBegin: CodexReviewAccountRegistryLoadDidBegin? = nil,
         finalRuntimeRetirementDidClaim: CodexReviewFinalRuntimeRetirementDidClaim? = nil,
         finalShutdownDidRequest: CodexReviewFinalShutdownDidRequest? = nil,
@@ -47,7 +47,7 @@ private extension CodexReviewStore {
             authenticationMutationDidBegin: authenticationMutationDidBegin,
             authenticationCancellationDidRequest: authenticationCancellationDidRequest,
             authenticationProductCommitDidApply: authenticationProductCommitDidApply,
-            authenticationHandleDidBind: authenticationHandleDidBind,
+            authenticationOperationDidBind: authenticationOperationDidBind,
             accountRegistryLoadDidBegin: accountRegistryLoadDidBegin,
             finalRuntimeRetirementDidClaim: finalRuntimeRetirementDidClaim,
             finalShutdownDidRequest: finalShutdownDidRequest,
@@ -85,7 +85,7 @@ private extension CodexReviewStore {
         authenticationMutationDidBegin: CodexReviewAuthenticationMutationDidBegin? = nil,
         authenticationCancellationDidRequest: CodexReviewAuthenticationCancellationDidRequest? = nil,
         authenticationProductCommitDidApply: CodexReviewAuthenticationProductCommitDidApply? = nil,
-        authenticationHandleDidBind: CodexReviewAuthenticationHandleDidBind? = nil,
+        authenticationOperationDidBind: CodexReviewAuthenticationOperationDidBind? = nil,
         accountRegistryLoadDidBegin: CodexReviewAccountRegistryLoadDidBegin? = nil,
         finalRuntimeRetirementDidClaim: CodexReviewFinalRuntimeRetirementDidClaim? = nil,
         finalShutdownDidRequest: CodexReviewFinalShutdownDidRequest? = nil,
@@ -107,7 +107,7 @@ private extension CodexReviewStore {
             authenticationMutationDidBegin: authenticationMutationDidBegin,
             authenticationCancellationDidRequest: authenticationCancellationDidRequest,
             authenticationProductCommitDidApply: authenticationProductCommitDidApply,
-            authenticationHandleDidBind: authenticationHandleDidBind,
+            authenticationOperationDidBind: authenticationOperationDidBind,
             accountRegistryLoadDidBegin: accountRegistryLoadDidBegin,
             finalRuntimeRetirementDidClaim: finalRuntimeRetirementDidClaim,
             finalShutdownDidRequest: finalShutdownDidRequest,
@@ -847,6 +847,38 @@ struct CodexReviewHostTests {
         #expect(providerAccount.capabilities.supportsRateLimitRefresh == false)
     }
 
+    @Test func preparedAPIKeyActivationCarriesExactProviderFromCredentialRevision() async throws {
+        let homeURL = try temporaryHome()
+        let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try FileManager.default.createDirectory(at: codexHomeURL, withIntermediateDirectories: true)
+        let sentinel = "test-secret-prepared-activation"
+        try Data("{\"OPENAI_API_KEY\":\"\(sentinel)\"}".utf8)
+            .write(to: codexHomeURL.appendingPathComponent("auth.json"))
+        let registry = AccountRegistryStore(codexHomeURL: codexHomeURL)
+        _ = try await registry.commitAuthenticatedAccount(
+            .init(
+                accountKey: "api-key",
+                email: "API Key",
+                kind: .apiKey,
+                planType: nil,
+                capabilities: .noCodexRateLimits,
+                rateLimits: [],
+                lastRateLimitFetchAt: nil,
+                lastRateLimitError: nil
+            ),
+            activation: .activateAuthenticatedAccount,
+            authSourceCodexHomeURL: codexHomeURL,
+            authorization: nil
+        )
+
+        let prepared = try await registry.prepareAccountActivation("api-key")
+
+        #expect(prepared.expectedAccount == .observedAccount(accountKey: "api-key", provider: .apiKey))
+        _ = try await registry.abortPreparedMutation(prepared)
+        let registryDescription = String(data: try Data(contentsOf: accountRegistryURL(homeURL: homeURL)), encoding: .utf8)
+        #expect(registryDescription?.contains(sentinel) == false)
+    }
+
     @Test func liveStoreBuildsSwitchPlanFromDiskWhenAuthModelIsStale() async throws {
         let homeURL = try temporaryHome()
         try writeRegistry(
@@ -925,6 +957,556 @@ struct CodexReviewHostTests {
         await isolatedTransport.waitForRequest(.accountLoginStart)
         #expect(await mainTransport.recordedRequests(for: .accountLoginStart).isEmpty)
         await store.cancelAuthentication()
+        await store.stop()
+    }
+
+    @Test func liveStoreRejectsDuplicateAPIKeyBeforeCreatingAnIsolatedRuntime() async throws {
+        let homeURL = try temporaryHome()
+        let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try FileManager.default.createDirectory(at: codexHomeURL, withIntermediateDirectories: true)
+        let registry = AccountRegistryStore(codexHomeURL: codexHomeURL)
+        let sharedAuthURL = codexHomeURL.appendingPathComponent("auth.json")
+        try Data(#"{"OPENAI_API_KEY":"existing-key"}"#.utf8).write(to: sharedAuthURL)
+        _ = try await registry.commitAuthenticatedAccount(
+            .init(
+                accountKey: "api-key",
+                email: "API Key",
+                kind: .apiKey,
+                planType: nil,
+                capabilities: .noCodexRateLimits,
+                rateLimits: [],
+                lastRateLimitFetchAt: nil,
+                lastRateLimitError: nil
+            ),
+            activation: .activateAuthenticatedAccount,
+            authSourceCodexHomeURL: codexHomeURL,
+            authorization: nil
+        )
+        try Data(#"{"tokens":{"id_token":"active@example.com"}}"#.utf8).write(to: sharedAuthURL)
+        _ = try await registry.commitAuthenticatedAccount(
+            .init(
+                accountKey: "active@example.com",
+                email: "active@example.com",
+                planType: "pro",
+                rateLimits: [],
+                lastRateLimitFetchAt: nil,
+                lastRateLimitError: nil
+            ),
+            activation: .activateAuthenticatedAccount,
+            authSourceCodexHomeURL: codexHomeURL,
+            authorization: nil
+        )
+        let mainTransport = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(on: mainTransport, email: "active@example.com")
+        var isolatedRuntimeCount = 0
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            transportFactory: { runtimeHomeURL in
+                if runtimeHomeURL == codexHomeURL {
+                    return mainTransport
+                }
+                isolatedRuntimeCount += 1
+                return FakeCodexAppServerTransport()
+            }
+        )
+        await store.start(forceRestartIfNeeded: true)
+
+        await #expect(throws: CodexReviewAuthenticationFailure.apiKeyAccountAlreadyExists) {
+            try await store.addAccount(using: .apiKey(try CodexReviewAPIKey(validating: "replacement-key")))
+        }
+
+        #expect(isolatedRuntimeCount == 0)
+        #expect(try activeAccountKey(homeURL: homeURL) == "active@example.com")
+        await store.stop()
+    }
+
+    @Test func liveStoreRejectsAPIKeySignInWhenFixedIdentityIsAlreadyPersisted() async throws {
+        let homeURL = try temporaryHome()
+        let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try FileManager.default.createDirectory(at: codexHomeURL, withIntermediateDirectories: true)
+        try writeAPIKeyAuth(Data(#"{"OPENAI_API_KEY":"existing-key"}"#.utf8), to: codexHomeURL)
+        let registry = AccountRegistryStore(codexHomeURL: codexHomeURL)
+        _ = try await registry.commitAuthenticatedAccount(
+            .init(
+                accountKey: "api-key",
+                email: "API Key",
+                kind: .apiKey,
+                planType: nil,
+                capabilities: .noCodexRateLimits,
+                rateLimits: [],
+                lastRateLimitFetchAt: nil,
+                lastRateLimitError: nil
+            ),
+            activation: .preserveActiveAccount,
+            authSourceCodexHomeURL: codexHomeURL,
+            authorization: nil
+        )
+        let transport = FakeCodexAppServerTransport()
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            transport: transport
+        )
+        await store.start(forceRestartIfNeeded: true)
+
+        await #expect(throws: CodexReviewAuthenticationFailure.apiKeyAccountAlreadyExists) {
+            try await store.signIn(using: .apiKey(
+                try CodexReviewAPIKey(validating: "replacement-key")
+            ))
+        }
+
+        #expect(await transport.recordedRequests(for: .accountLoginStart).isEmpty)
+        #expect(try activeAccountKey(homeURL: homeURL) == nil)
+        #expect(store.auth.persistedAccounts.map(\.accountKey) == ["api-key"])
+        await store.stop()
+    }
+
+    @Test func liveStoreSignsInWithAPIKeyWithoutBrowserOrRateLimitRequest() async throws {
+        let homeURL = try temporaryHome()
+        let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let transport = FakeCodexAppServerTransport()
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        try await transport.enqueueAPIKeyLogin()
+        try await transport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .apiKey),
+            requiresOpenAIAuth: false
+        )
+        let externalURLOpener = FakeExternalURLOpener()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            externalURLOpener: externalURLOpener.open,
+            transport: transport
+        )
+        await store.start(forceRestartIfNeeded: true)
+        let sentinel = "test-secret-primary-api-key"
+        let authData = Data("{\"OPENAI_API_KEY\":\"\(sentinel)\"}".utf8)
+        try writeAPIKeyAuth(authData, to: codexHomeURL)
+
+        try await store.signIn(using: .apiKey(try CodexReviewAPIKey(validating: sentinel)))
+
+        #expect(externalURLOpener.openedURLs.isEmpty)
+        #expect(store.auth.selectedAccount?.accountKey == "api-key")
+        #expect(store.auth.selectedAccount?.kind == .apiKey)
+        #expect(store.auth.selectedAccount?.capabilities.supportsRateLimitRefresh == false)
+        #expect(try activeAccountKey(homeURL: homeURL) == "api-key")
+        #expect(await transport.recordedRequests(for: .accountRateLimitsRead).isEmpty)
+        let registryData = try Data(contentsOf: accountRegistryURL(homeURL: homeURL))
+        #expect(String(data: registryData, encoding: .utf8)?.contains(sentinel) == false)
+        #expect(FileManager.default.fileExists(
+            atPath: accountReconciliationDebtURL(homeURL: homeURL).path
+        ) == false)
+        let immutableAuthURL = try immutableAccountAuthURL(homeURL: homeURL, accountKey: "api-key")
+        #expect(try Data(contentsOf: immutableAuthURL) == authData)
+        let permissions = try #require(
+            FileManager.default.attributesOfItem(atPath: immutableAuthURL.path)[.posixPermissions]
+                as? NSNumber
+        )
+        #expect(permissions.intValue == 0o600)
+
+        await store.stop()
+    }
+
+    @Test func liveStoreCancelsAPIKeyLoginBeforeRequestWrite() async throws {
+        let homeURL = try temporaryHome()
+        let transport = FakeCodexAppServerTransport()
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        try await transport.enqueueAPIKeyLogin()
+        let operationGate = CodexAppServerTestGate()
+        let cancellationRequested = OneShotSignal()
+        let externalURLOpener = FakeExternalURLOpener()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            externalURLOpener: externalURLOpener.open,
+            authenticationCancellationDidRequest: {
+                await cancellationRequested.signal()
+            },
+            authenticationOperationDidBind: {
+                await operationGate.waitIgnoringCancellation()
+            },
+            transport: transport
+        )
+        await store.start(forceRestartIfNeeded: true)
+        let login = Task { @MainActor in
+            try await store.signIn(using: .apiKey(
+                try CodexReviewAPIKey(validating: "test-secret-pre-write")
+            ))
+        }
+        await operationGate.waitUntilBlocked()
+
+        let cancellation = Task { @MainActor in
+            await store.cancelAuthentication()
+        }
+        await cancellationRequested.wait()
+        await operationGate.open()
+        try await login.value
+        await cancellation.value
+
+        #expect(await transport.recordedRequests(for: .accountLoginStart).isEmpty)
+        #expect(externalURLOpener.openedURLs.isEmpty)
+        #expect(store.auth.selectedAccount == nil)
+        #expect(FileManager.default.fileExists(atPath: accountRegistryURL(homeURL: homeURL).path) == false)
+        await store.stop()
+    }
+
+    @Test func liveStoreCompletesCommittedAPIKeyLoginAfterPostWriteCancellation() async throws {
+        let homeURL = try temporaryHome()
+        let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let transport = FakeCodexAppServerTransport()
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        try await transport.enqueueAPIKeyLogin()
+        try await transport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .apiKey),
+            requiresOpenAIAuth: false
+        )
+        let responseGate = CodexAppServerTestGate()
+        await transport.holdNextIgnoringCancellation(.accountLoginStart, gate: responseGate)
+        let cancellationRequested = OneShotSignal()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            authenticationCancellationDidRequest: {
+                await cancellationRequested.signal()
+            },
+            transport: transport
+        )
+        await store.start(forceRestartIfNeeded: true)
+        let sentinel = "test-secret-post-write"
+        try writeAPIKeyAuth(
+            Data("{\"OPENAI_API_KEY\":\"\(sentinel)\"}".utf8),
+            to: codexHomeURL
+        )
+        let login = Task { @MainActor in
+            try await store.signIn(using: .apiKey(try CodexReviewAPIKey(validating: sentinel)))
+        }
+        await transport.waitForRequest(.accountLoginStart)
+
+        let cancellation = Task { @MainActor in
+            await store.cancelAuthentication()
+        }
+        await cancellationRequested.wait()
+        await responseGate.open()
+        try await login.value
+        await cancellation.value
+
+        #expect(await transport.recordedRequests(for: .accountLoginStart).count == 1)
+        #expect(await transport.recordedRequests(for: .accountLoginCancel).isEmpty)
+        #expect(store.auth.selectedAccount?.accountKey == "api-key")
+        #expect(try activeAccountKey(homeURL: homeURL) == "api-key")
+        #expect(FileManager.default.fileExists(
+            atPath: accountReconciliationDebtURL(homeURL: homeURL).path
+        ) == false)
+        await store.stop()
+    }
+
+    @Test func liveStoreCommitsIsolatedAPIKeyAfterPostWriteCancellation() async throws {
+        let homeURL = try temporaryHome()
+        let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let activeChatGPTAccountKey = "active@example.com"
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: activeChatGPTAccountKey,
+            accounts: [activeChatGPTAccountKey]
+        )
+        try writeSavedAccountAuth(homeURL: homeURL, accountKey: activeChatGPTAccountKey)
+        let mainTransport = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(on: mainTransport, email: activeChatGPTAccountKey)
+        let isolatedTransport = FakeCodexAppServerTransport()
+        try await isolatedTransport.enqueueAPIKeyLogin()
+        try await isolatedTransport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .apiKey),
+            requiresOpenAIAuth: false
+        )
+        let responseGate = CodexAppServerTestGate()
+        await isolatedTransport.holdNextIgnoringCancellation(
+            .accountLoginStart,
+            gate: responseGate
+        )
+        let cancellationRequested = OneShotSignal()
+        let sentinel = "test-secret-isolated-post-write"
+        let authData = Data("{\"OPENAI_API_KEY\":\"\(sentinel)\"}".utf8)
+        var isolatedCodexHomeURL: URL?
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            authenticationCancellationDidRequest: {
+                await cancellationRequested.signal()
+            },
+            transportFactory: { runtimeHomeURL in
+                guard runtimeHomeURL != codexHomeURL else {
+                    return mainTransport
+                }
+                isolatedCodexHomeURL = runtimeHomeURL
+                try writeAPIKeyAuth(authData, to: runtimeHomeURL)
+                return isolatedTransport
+            }
+        )
+        await store.start(forceRestartIfNeeded: true)
+        let add = Task { @MainActor in
+            try await store.addAccount(using: .apiKey(
+                try CodexReviewAPIKey(validating: sentinel)
+            ))
+        }
+        await isolatedTransport.waitForRequest(.accountLoginStart)
+
+        let cancellation = Task { @MainActor in
+            await store.cancelAuthentication()
+        }
+        await cancellationRequested.wait()
+        await responseGate.open()
+        try await add.value
+        await cancellation.value
+        let isolatedURL = try #require(isolatedCodexHomeURL)
+
+        #expect(store.auth.selectedAccount?.accountKey == activeChatGPTAccountKey)
+        #expect(Set(store.auth.persistedAccounts.map(\.accountKey)) == Set([activeChatGPTAccountKey, "api-key"]))
+        #expect(try activeAccountKey(homeURL: homeURL) == activeChatGPTAccountKey)
+        #expect(try savedAccountAuth(homeURL: homeURL, accountKey: "api-key") == authData)
+        #expect(await isolatedTransport.recordedRequests(for: .accountLoginCancel).isEmpty)
+        #expect(FileManager.default.fileExists(atPath: isolatedURL.path) == false)
+        await store.stop()
+    }
+
+    @Test func liveStorePreservesKnownAPIKeyFailureAfterPostWriteCancellation() async throws {
+        let homeURL = try temporaryHome()
+        let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let activeChatGPTAccountKey = "active@example.com"
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: activeChatGPTAccountKey,
+            accounts: [activeChatGPTAccountKey]
+        )
+        try writeSavedAccountAuth(homeURL: homeURL, accountKey: activeChatGPTAccountKey)
+        let mainTransport = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(on: mainTransport, email: activeChatGPTAccountKey)
+        let isolatedTransport = FakeCodexAppServerTransport()
+        let sentinel = "test-secret-isolated-rejection"
+        try await isolatedTransport.enqueueFailure(
+            .response(code: -32_000, message: "rejected \(sentinel)"),
+            for: .accountLoginStart
+        )
+        let responseGate = CodexAppServerTestGate()
+        await isolatedTransport.holdNextIgnoringCancellation(
+            .accountLoginStart,
+            gate: responseGate
+        )
+        let cancellationRequested = OneShotSignal()
+        var isolatedCodexHomeURL: URL?
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            authenticationCancellationDidRequest: {
+                await cancellationRequested.signal()
+            },
+            transportFactory: { runtimeHomeURL in
+                guard runtimeHomeURL != codexHomeURL else {
+                    return mainTransport
+                }
+                isolatedCodexHomeURL = runtimeHomeURL
+                return isolatedTransport
+            }
+        )
+        await store.start(forceRestartIfNeeded: true)
+        let add = Task { @MainActor in
+            try await store.addAccount(using: .apiKey(
+                try CodexReviewAPIKey(validating: sentinel)
+            ))
+        }
+        await isolatedTransport.waitForRequest(.accountLoginStart)
+
+        let cancellation = Task { @MainActor in
+            await store.cancelAuthentication()
+        }
+        await cancellationRequested.wait()
+        await responseGate.open()
+        let failure: CodexReviewAuthenticationFailure
+        do {
+            try await add.value
+            Issue.record("Expected the known API-key rejection to remain a failure.")
+            await cancellation.value
+            await store.stop()
+            return
+        } catch let caughtFailure as CodexReviewAuthenticationFailure {
+            failure = caughtFailure
+        }
+        await cancellation.value
+        let isolatedURL = try #require(isolatedCodexHomeURL)
+
+        guard case .login(let message) = failure else {
+            Issue.record("Expected a login failure, got \(failure).")
+            await store.stop()
+            return
+        }
+        #expect((message ?? "").isEmpty == false)
+        #expect((message ?? "").contains(sentinel) == false)
+        #expect((store.auth.errorMessage ?? "").contains(sentinel) == false)
+        #expect(store.auth.selectedAccount?.accountKey == activeChatGPTAccountKey)
+        #expect(store.auth.persistedAccounts.map(\.accountKey) == [activeChatGPTAccountKey])
+        #expect(try activeAccountKey(homeURL: homeURL) == activeChatGPTAccountKey)
+        #expect(FileManager.default.fileExists(atPath: isolatedURL.path) == false)
+        await store.stop()
+    }
+
+    @Test func liveStoreDefersAPIKeyCommitWhenSuccessfulResponseIsFollowedBySignedOutAccount() async throws {
+        try await assertAPIKeyLoginReconciliationDebt(observedAccount: nil)
+    }
+
+    @Test func liveStoreDefersAPIKeyCommitWhenSuccessfulResponseIsFollowedByWrongProvider() async throws {
+        try await assertAPIKeyLoginReconciliationDebt(observedAccount: try CodexAppServerTestAccount(
+            kind: .chatGPT(email: "wrong@example.com", planType: .pro)
+        ))
+    }
+
+    @Test func liveStoreReconcilesUnknownAPIKeyOutcomeToAuthenticatedAccount() async throws {
+        try await assertUnknownAPIKeyLoginOutcome(committed: true)
+    }
+
+    @Test func liveStoreReconcilesUnknownAPIKeyOutcomeToNoCommit() async throws {
+        try await assertUnknownAPIKeyLoginOutcome(committed: false)
+    }
+
+    @Test func liveStoreDiscardsIsolatedRuntimeWhenAPIKeyOutcomeIsUnknown() async throws {
+        let homeURL = try temporaryHome()
+        let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let chatGPTAccountKey = "active@example.com"
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: chatGPTAccountKey,
+            accounts: [chatGPTAccountKey]
+        )
+        try writeSavedAccountAuth(homeURL: homeURL, accountKey: chatGPTAccountKey)
+        let mainTransport = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(on: mainTransport, email: chatGPTAccountKey)
+        let isolatedTransport = FakeCodexAppServerTransport()
+        try await isolatedTransport.enqueueChatGPTLogin(
+            loginID: "unexpected-isolated-api-key-response",
+            authenticationURL: testAuthenticationURL
+        )
+        var isolatedCodexHomeURL: URL?
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            transportFactory: { runtimeHomeURL in
+                if runtimeHomeURL == codexHomeURL {
+                    return mainTransport
+                }
+                isolatedCodexHomeURL = runtimeHomeURL
+                try FileManager.default.createDirectory(at: runtimeHomeURL, withIntermediateDirectories: true)
+                #expect(FileManager.default.createFile(
+                    atPath: runtimeHomeURL.appendingPathComponent("auth.json").path,
+                    contents: Data(#"{"OPENAI_API_KEY":"isolated-secret"}"#.utf8),
+                    attributes: [.posixPermissions: 0o600]
+                ))
+                return isolatedTransport
+            }
+        )
+        await store.start(forceRestartIfNeeded: true)
+
+        await #expect(throws: CodexReviewAuthenticationFailure.self) {
+            try await store.addAccount(using: .apiKey(
+                try CodexReviewAPIKey(validating: "isolated-secret")
+            ))
+        }
+
+        let isolatedURL = try #require(isolatedCodexHomeURL)
+        #expect(FileManager.default.fileExists(atPath: isolatedURL.path) == false)
+        #expect(store.auth.selectedAccount?.accountKey == chatGPTAccountKey)
+        #expect(store.auth.persistedAccounts.map(\.accountKey) == [chatGPTAccountKey])
+        #expect(try activeAccountKey(homeURL: homeURL) == chatGPTAccountKey)
+        #expect(FileManager.default.fileExists(
+            atPath: accountReconciliationDebtURL(homeURL: homeURL).path
+        ) == false)
+        #expect(store.auth.errorMessage?.contains("isolated-secret") == false)
+        await store.stop()
+    }
+
+    @Test func liveStoreAddsAPIKeyInIsolationThenSwitchesAndRestartsWithExactProvider() async throws {
+        let homeURL = try temporaryHome()
+        let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let chatGPTAccountKey = "active@example.com"
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: chatGPTAccountKey,
+            accounts: [chatGPTAccountKey]
+        )
+        try writeSavedAccountAuth(homeURL: homeURL, accountKey: chatGPTAccountKey)
+        let chatGPTAuthData = try Data(contentsOf: codexHomeURL.appendingPathComponent("auth.json"))
+
+        let initialChatGPTTransport = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(on: initialChatGPTTransport, email: chatGPTAccountKey)
+        let switchedAPIKeyTransport = FakeCodexAppServerTransport()
+        try await enqueueAPIKeyAccountBootstrap(on: switchedAPIKeyTransport)
+        let restartedAPIKeyTransport = FakeCodexAppServerTransport()
+        try await enqueueAPIKeyAccountBootstrap(on: restartedAPIKeyTransport)
+        let switchedChatGPTTransport = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(on: switchedChatGPTTransport, email: chatGPTAccountKey)
+        var mainTransports = [
+            initialChatGPTTransport,
+            switchedAPIKeyTransport,
+            restartedAPIKeyTransport,
+            switchedChatGPTTransport,
+        ]
+        let isolatedTransport = FakeCodexAppServerTransport()
+        try await isolatedTransport.enqueueAPIKeyLogin()
+        try await isolatedTransport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .apiKey),
+            requiresOpenAIAuth: false
+        )
+        let apiKeySentinel = "test-secret-isolated-api-key"
+        let apiKeyAuthData = Data("{\"OPENAI_API_KEY\":\"\(apiKeySentinel)\"}".utf8)
+        var isolatedCodexHomeURL: URL?
+        let externalURLOpener = FakeExternalURLOpener()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            externalURLOpener: externalURLOpener.open,
+            transportFactory: { runtimeHomeURL in
+                if runtimeHomeURL == codexHomeURL {
+                    return mainTransports.removeFirst()
+                }
+                isolatedCodexHomeURL = runtimeHomeURL
+                try FileManager.default.createDirectory(at: runtimeHomeURL, withIntermediateDirectories: true)
+                #expect(FileManager.default.createFile(
+                    atPath: runtimeHomeURL.appendingPathComponent("auth.json").path,
+                    contents: apiKeyAuthData,
+                    attributes: [.posixPermissions: 0o600]
+                ))
+                return isolatedTransport
+            }
+        )
+        await store.start(forceRestartIfNeeded: true)
+
+        try await store.addAccount(using: .apiKey(try CodexReviewAPIKey(validating: apiKeySentinel)))
+
+        let isolatedURL = try #require(isolatedCodexHomeURL)
+        #expect(FileManager.default.fileExists(atPath: isolatedURL.path) == false)
+        #expect(externalURLOpener.openedURLs.isEmpty)
+        #expect(store.auth.selectedAccount?.accountKey == chatGPTAccountKey)
+        #expect(Set(store.auth.persistedAccounts.map(\.accountKey)) == Set([chatGPTAccountKey, "api-key"]))
+        #expect(try Data(contentsOf: codexHomeURL.appendingPathComponent("auth.json")) == chatGPTAuthData)
+        #expect(await isolatedTransport.recordedRequests(for: .accountRateLimitsRead).isEmpty)
+
+        let apiKeyAccount = try #require(store.auth.persistedAccounts.first { $0.accountKey == "api-key" })
+        try await store.switchAccount(apiKeyAccount)
+        #expect(store.auth.selectedAccount?.kind == .apiKey)
+        #expect(try Data(contentsOf: codexHomeURL.appendingPathComponent("auth.json")) == apiKeyAuthData)
+        #expect(await switchedAPIKeyTransport.recordedRequests(for: .accountRateLimitsRead).isEmpty)
+
+        await store.restart()
+        #expect(store.serverState == .running)
+        #expect(store.auth.selectedAccount?.kind == .apiKey)
+        #expect(await restartedAPIKeyTransport.recordedRequests(for: .accountRateLimitsRead).isEmpty)
+
+        let chatGPTAccount = try #require(store.auth.persistedAccounts.first {
+            $0.accountKey == chatGPTAccountKey
+        })
+        try await store.switchAccount(chatGPTAccount)
+        #expect(store.auth.selectedAccount?.kind == .chatGPT)
+        #expect(try Data(contentsOf: codexHomeURL.appendingPathComponent("auth.json")) == chatGPTAuthData)
+        #expect(mainTransports.isEmpty)
+
         await store.stop()
     }
 
@@ -1313,6 +1895,12 @@ struct CodexReviewHostTests {
     }
 
     @Test func liveStoreSkipsRateLimitRefreshForUnsupportedActiveAccount() async throws {
+        let homeURL = try temporaryHome()
+        let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try writeAPIKeyAuth(
+            Data(#"{"OPENAI_API_KEY":"test-key"}"#.utf8),
+            to: codexHomeURL
+        )
         let transport = FakeCodexAppServerTransport()
         try await transport.enqueueAccount(
             try CodexAppServerTestAccount(kind: .apiKey),
@@ -1321,7 +1909,7 @@ struct CodexReviewHostTests {
         try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
         try await transport.enqueueModels(.init(models: []))
         let store = CodexReviewStore.makeLiveStoreForTesting(
-            environment: ["HOME": try temporaryHome().path],
+            environment: ["HOME": homeURL.path],
             transport: transport
         )
         await store.start(forceRestartIfNeeded: true)
@@ -1336,6 +1924,7 @@ struct CodexReviewHostTests {
             .configurationRead,
             .modelList,
         ])
+        await store.stop()
     }
 
     @Test func liveStoreCompletesStockLoginAfterAccountReadiness() async throws {
@@ -1509,7 +2098,7 @@ struct CodexReviewHostTests {
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             externalURLOpener: externalURLOpener.open,
-            authenticationHandleDidBind: {
+            authenticationOperationDidBind: {
                 await presentationClaimGate.waitIgnoringCancellation()
             },
             transport: transport
@@ -5824,6 +6413,120 @@ private func enqueueActiveAccountBootstrap(
     ))
 }
 
+private func enqueueAPIKeyAccountBootstrap(
+    on transport: FakeCodexAppServerTransport
+) async throws {
+    try await transport.enqueueAccount(
+        try CodexAppServerTestAccount(kind: .apiKey),
+        requiresOpenAIAuth: false
+    )
+    try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+    try await transport.enqueueModels(.init(models: []))
+}
+
+private func writeAPIKeyAuth(_ data: Data, to codexHomeURL: URL) throws {
+    try FileManager.default.createDirectory(
+        at: codexHomeURL,
+        withIntermediateDirectories: true
+    )
+    let authURL = codexHomeURL.appendingPathComponent("auth.json")
+    try data.write(to: authURL, options: .atomic)
+    try FileManager.default.setAttributes(
+        [.posixPermissions: 0o600],
+        ofItemAtPath: authURL.path
+    )
+}
+
+@MainActor
+private func assertAPIKeyLoginReconciliationDebt(
+    observedAccount: CodexAppServerTestAccount?
+) async throws {
+    let homeURL = try temporaryHome()
+    let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+    let transport = FakeCodexAppServerTransport()
+    try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+    try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+    try await transport.enqueueModels(.init(models: []))
+    try await transport.enqueueAPIKeyLogin()
+    try await transport.enqueueAccount(observedAccount, requiresOpenAIAuth: false)
+    let store = CodexReviewStore.makeLiveStoreForTesting(
+        environment: ["HOME": homeURL.path],
+        transport: transport
+    )
+    await store.start(forceRestartIfNeeded: true)
+    let sentinel = "test-secret-invalid-api-key-observation"
+    try writeAPIKeyAuth(
+        Data("{\"OPENAI_API_KEY\":\"\(sentinel)\"}".utf8),
+        to: codexHomeURL
+    )
+
+    try await store.signIn(using: .apiKey(try CodexReviewAPIKey(validating: sentinel)))
+
+    let debtURL = accountReconciliationDebtURL(homeURL: homeURL)
+    let debtData = try Data(contentsOf: debtURL)
+    let debtDescription = try #require(String(data: debtData, encoding: .utf8))
+    #expect(debtDescription.contains("observedAccount"))
+    #expect(debtDescription.contains("api-key"))
+    #expect(debtDescription.contains("apiKey"))
+    #expect(debtDescription.contains(sentinel) == false)
+    #expect((store.auth.errorMessage ?? "").contains(sentinel) == false)
+    #expect(store.auth.selectedAccount == nil)
+    await store.stop()
+}
+
+@MainActor
+private func assertUnknownAPIKeyLoginOutcome(committed: Bool) async throws {
+    let homeURL = try temporaryHome()
+    let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+    let initialTransport = FakeCodexAppServerTransport()
+    try await initialTransport.enqueueAccount(nil, requiresOpenAIAuth: false)
+    try await initialTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+    try await initialTransport.enqueueModels(.init(models: []))
+    try await initialTransport.enqueueChatGPTLogin(
+        loginID: "unexpected-api-key-response",
+        authenticationURL: testAuthenticationURL
+    )
+    let reconciliationTransport = FakeCodexAppServerTransport()
+    if committed {
+        try await enqueueAPIKeyAccountBootstrap(on: reconciliationTransport)
+    } else {
+        try await reconciliationTransport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await reconciliationTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await reconciliationTransport.enqueueModels(.init(models: []))
+    }
+    var transports = [initialTransport, reconciliationTransport]
+    let externalURLOpener = FakeExternalURLOpener()
+    let store = CodexReviewStore.makeLiveStoreForTesting(
+        environment: ["HOME": homeURL.path],
+        externalURLOpener: externalURLOpener.open,
+        transportFactory: { runtimeHomeURL in
+            #expect(runtimeHomeURL == codexHomeURL)
+            return transports.removeFirst()
+        }
+    )
+    await store.start(forceRestartIfNeeded: true)
+    let sentinel = "test-secret-unknown-api-key-outcome"
+    try writeAPIKeyAuth(
+        Data("{\"OPENAI_API_KEY\":\"\(sentinel)\"}".utf8),
+        to: codexHomeURL
+    )
+
+    try await store.signIn(using: .apiKey(try CodexReviewAPIKey(validating: sentinel)))
+
+    #expect(externalURLOpener.openedURLs.isEmpty)
+    #expect(transports.isEmpty)
+    #expect(store.auth.selectedAccount?.accountKey == (committed ? "api-key" : nil))
+    let persistedActiveAccountKey = FileManager.default.fileExists(
+        atPath: accountRegistryURL(homeURL: homeURL).path
+    ) ? try activeAccountKey(homeURL: homeURL) : nil
+    #expect(persistedActiveAccountKey == (committed ? "api-key" : nil))
+    #expect(FileManager.default.fileExists(
+        atPath: accountReconciliationDebtURL(homeURL: homeURL).path
+    ) == false)
+    #expect((store.auth.errorMessage ?? "").contains(sentinel) == false)
+    await store.stop()
+}
+
 private func makeHostStoredThread(
     id: CodexThreadID,
     model: String = "gpt-5",
@@ -6004,6 +6707,10 @@ private func writeSavedAccountAuth(homeURL: URL, accountKey: String) throws {
 }
 
 private func savedAccountAuth(homeURL: URL, accountKey: String) throws -> Data {
+    try Data(contentsOf: immutableAccountAuthURL(homeURL: homeURL, accountKey: accountKey))
+}
+
+private func immutableAccountAuthURL(homeURL: URL, accountKey: String) throws -> URL {
     let accountDirectoryURL = homeURL
         .appendingPathComponent(".codex_review", isDirectory: true)
         .appendingPathComponent("accounts", isDirectory: true)
@@ -6020,11 +6727,11 @@ private func savedAccountAuth(homeURL: URL, accountKey: String) throws -> Data {
         (record["accountKey"] as? String)?.lowercased() == normalizedAccountKey
     })
     if let revision = record["immutableRevision"] as? String {
-        return try Data(contentsOf: accountDirectoryURL
+        return accountDirectoryURL
             .appendingPathComponent("revisions", isDirectory: true)
-            .appendingPathComponent("\(revision).json"))
+            .appendingPathComponent("\(revision).json")
     }
-    return try Data(contentsOf: accountDirectoryURL.appendingPathComponent("auth.json"))
+    return accountDirectoryURL.appendingPathComponent("auth.json")
 }
 
 private func activeAccountKey(homeURL: URL) throws -> String? {
