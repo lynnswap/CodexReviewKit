@@ -214,6 +214,7 @@ private struct APIKeySignInView: View {
 
                     SecureField("sk-…", text: apiKeyBinding)
                         .textFieldStyle(.roundedBorder)
+                        .disabled(controlState.providerInputsAreDisabled)
                         .accessibilityLabel("OpenAI API key")
                         .accessibilityIdentifier(SignInView.AccessibilityIdentifier.apiKeyField)
                         .onSubmit {
