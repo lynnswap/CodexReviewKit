@@ -8,8 +8,16 @@ import Testing
 struct ReviewMonitorAddAccountActionTests {
     @Test func signedOutSignInControlsExposeStableProviderIdentifiers() {
         #expect(SignInView.AccessibilityIdentifier.chatGPTButton == "review-monitor.sign-in-button")
+        #expect(
+            SignInView.AccessibilityIdentifier.alternateSignInButton
+                == "review-monitor.alternate-sign-in-button"
+        )
         #expect(SignInView.AccessibilityIdentifier.apiKeyField == "review-monitor.api-key-field")
         #expect(SignInView.AccessibilityIdentifier.apiKeyButton == "review-monitor.api-key-sign-in-button")
+        #expect(
+            SignInView.AccessibilityIdentifier.apiKeyCancelButton
+                == "review-monitor.api-key-cancel-button"
+        )
     }
 
     @Test func signInControlStateKeepsOnlyCancellationAvailableDuringAuthentication() {
