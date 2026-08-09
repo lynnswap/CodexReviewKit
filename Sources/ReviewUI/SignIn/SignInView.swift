@@ -58,8 +58,11 @@ final class ReviewMonitorSignInSession {
     private(set) var screen = Screen.options
     var failureMessage: String?
 
-    @ObservationIgnored
     private var operation: Operation?
+
+    var hasPendingOperation: Bool {
+        operation != nil
+    }
 
     isolated deinit {
         operation?.task.cancel()
@@ -77,7 +80,9 @@ final class ReviewMonitorSignInSession {
         _ submission: ReviewMonitorAuthenticationSubmission,
         store: CodexReviewStore
     ) {
-        precondition(operation == nil, "A sign-in session can perform one operation at a time.")
+        guard operation == nil else {
+            return
+        }
         failureMessage = nil
 
         let operationID = UUID()
@@ -154,11 +159,14 @@ struct SignInView: View {
         init(
             apiKeyIsEmpty: Bool,
             isAuthenticating: Bool,
-            canPerformAuthentication: Bool
+            canPerformAuthentication: Bool,
+            hasPendingOperation: Bool
         ) {
-            providerInputsAreDisabled = isAuthenticating || canPerformAuthentication == false
+            providerInputsAreDisabled = isAuthenticating
+                || canPerformAuthentication == false
+                || hasPendingOperation
             apiKeySubmitIsDisabled = providerInputsAreDisabled || apiKeyIsEmpty
-            showsCancelAction = isAuthenticating
+            showsCancelAction = isAuthenticating || hasPendingOperation
         }
     }
 
@@ -215,7 +223,8 @@ struct SignInView: View {
         let controlState = ControlState(
             apiKeyIsEmpty: true,
             isAuthenticating: store.auth.isAuthenticating,
-            canPerformAuthentication: store.canPerformPrimaryAuthenticationAction
+            canPerformAuthentication: store.canPerformPrimaryAuthenticationAction,
+            hasPendingOperation: session.hasPendingOperation
         )
 
         return ContentUnavailableView {
@@ -300,7 +309,8 @@ private struct APIKeySignInView: View {
         let controlState = SignInView.ControlState(
             apiKeyIsEmpty: apiKeyInput.isEmpty,
             isAuthenticating: store.auth.isAuthenticating,
-            canPerformAuthentication: store.canPerformPrimaryAuthenticationAction
+            canPerformAuthentication: store.canPerformPrimaryAuthenticationAction,
+            hasPendingOperation: session.hasPendingOperation
         )
 
         ContentUnavailableView {
