@@ -2342,10 +2342,18 @@ struct CodexAppServerKitTests {
         var eventIterator = review.events.makeAsyncIterator()
         let initialEvent = try #require(try await eventIterator.next())
         #expect(initialEvent == .snapshot(review.initialTurn))
+        let completedItemsObserved = CodexAppServerTestGate()
         let eventsTask = Task {
             var events = [initialEvent]
+            var completedItemIDs: Set<String> = []
             while let event = try await eventIterator.next() {
                 events.append(event)
+                if case .itemCompleted(let item, _) = event {
+                    completedItemIDs.insert(item.id)
+                    if completedItemIDs == ["command-1", "reasoning-1", "tool-1", "file-1"] {
+                        await completedItemsObserved.open()
+                    }
+                }
             }
             return events
         }
@@ -2410,6 +2418,9 @@ struct CodexAppServerKitTests {
                 )
             )
         )
+        try await withTimeout {
+            try await completedItemsObserved.wait()
+        }
         try await transport.emitServerNotification(
             method: "turn/completed",
             params: TurnCompletedParams(
