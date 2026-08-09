@@ -24,6 +24,7 @@ private extension CodexReviewStore {
         networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
         appServerLifecycleHandler: CodexReviewAppServerLifecycleHandler? = nil,
         authenticationMutationDidBegin: CodexReviewAuthenticationMutationDidBegin? = nil,
+        authenticationOwnershipWillRelease: CodexReviewAuthenticationOwnershipWillRelease? = nil,
         authenticationCancellationDidRequest: CodexReviewAuthenticationCancellationDidRequest? = nil,
         authenticationProductCommitDidApply: CodexReviewAuthenticationProductCommitDidApply? = nil,
         authenticationOperationDidBind: CodexReviewAuthenticationOperationDidBind? = nil,
@@ -45,6 +46,7 @@ private extension CodexReviewStore {
             networkRecoveryPolicy: networkRecoveryPolicy,
             appServerLifecycleHandler: appServerLifecycleHandler,
             authenticationMutationDidBegin: authenticationMutationDidBegin,
+            authenticationOwnershipWillRelease: authenticationOwnershipWillRelease,
             authenticationCancellationDidRequest: authenticationCancellationDidRequest,
             authenticationProductCommitDidApply: authenticationProductCommitDidApply,
             authenticationOperationDidBind: authenticationOperationDidBind,
@@ -83,6 +85,7 @@ private extension CodexReviewStore {
         networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
         appServerLifecycleHandler: CodexReviewAppServerLifecycleHandler? = nil,
         authenticationMutationDidBegin: CodexReviewAuthenticationMutationDidBegin? = nil,
+        authenticationOwnershipWillRelease: CodexReviewAuthenticationOwnershipWillRelease? = nil,
         authenticationCancellationDidRequest: CodexReviewAuthenticationCancellationDidRequest? = nil,
         authenticationProductCommitDidApply: CodexReviewAuthenticationProductCommitDidApply? = nil,
         authenticationOperationDidBind: CodexReviewAuthenticationOperationDidBind? = nil,
@@ -105,6 +108,7 @@ private extension CodexReviewStore {
             networkRecoveryPolicy: networkRecoveryPolicy,
             appServerLifecycleHandler: appServerLifecycleHandler,
             authenticationMutationDidBegin: authenticationMutationDidBegin,
+            authenticationOwnershipWillRelease: authenticationOwnershipWillRelease,
             authenticationCancellationDidRequest: authenticationCancellationDidRequest,
             authenticationProductCommitDidApply: authenticationProductCommitDidApply,
             authenticationOperationDidBind: authenticationOperationDidBind,
@@ -148,6 +152,7 @@ struct CodexReviewHostTests {
         let coordinator = AccountRuntimeTransitionCoordinator()
         var admittedLogin: AccountRuntimeTransitionCoordinator.LoginAdmission?
         var didAdmitLogin = false
+        var didRunFinishAction = false
         coordinator.installDidBecomeIdle {
             guard didAdmitLogin == false else { return }
             didAdmitLogin = true
@@ -155,13 +160,19 @@ struct CodexReviewHostTests {
         }
         let reconciliationCompleted = CompletionFlag()
         let reconciliation = Task { @MainActor in
-            await coordinator.performStoppedPrimaryReconciliation { _ in }
+            await coordinator.performStoppedPrimaryReconciliation { _ in
+                return {
+                    #expect(didAdmitLogin == false)
+                    didRunFinishAction = true
+                }
+            }
             await reconciliationCompleted.complete()
         }
 
         try #require(await waitUntil(timeout: .seconds(2)) {
             await reconciliationCompleted.isCompleted()
         })
+        #expect(didRunFinishAction)
         #expect(coordinator.hasActiveLoginTransition)
 
         coordinator.finishLoginAdmission(try #require(admittedLogin))
@@ -1424,6 +1435,67 @@ struct CodexReviewHostTests {
 
     @Test func liveStoreReconcilesUnknownAPIKeyOutcomeToNoCommit() async throws {
         try await assertUnknownAPIKeyLoginOutcome(committed: false)
+    }
+
+    @Test func liveStoreFinalShutdownSupersedesPrimaryReconciliationFailureAtOwnershipRelease() async throws {
+        let homeURL = try temporaryHome()
+        let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let initialTransport = FakeCodexAppServerTransport()
+        try await initialTransport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await initialTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await initialTransport.enqueueModels(.init(models: []))
+        try await initialTransport.enqueueChatGPTLogin(
+            loginID: "final-shutdown-unknown-api-key-response",
+            authenticationURL: testAuthenticationURL
+        )
+        let authenticationOwnershipReleaseGate = CodexAppServerTestGate()
+        let finalShutdownRequested = OneShotSignal()
+        var runtimeFactoryCallCount = 0
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            authenticationOwnershipWillRelease: {
+                await authenticationOwnershipReleaseGate.waitIgnoringCancellation()
+            },
+            finalShutdownDidRequest: {
+                await finalShutdownRequested.signal()
+            },
+            transportFactory: { runtimeHomeURL in
+                #expect(runtimeHomeURL == codexHomeURL)
+                runtimeFactoryCallCount += 1
+                guard runtimeFactoryCallCount == 1 else {
+                    throw CodexReviewAPI.Error.io("replacement validation runtime unavailable")
+                }
+                return initialTransport
+            }
+        )
+        await store.start(forceRestartIfNeeded: true)
+        let sentinel = "test-secret-final-shutdown-api-key-outcome"
+        try writeAPIKeyAuth(
+            Data("{\"OPENAI_API_KEY\":\"\(sentinel)\"}".utf8),
+            to: codexHomeURL
+        )
+
+        let login = Task { @MainActor in
+            try await store.signIn(using: .apiKey(try CodexReviewAPIKey(validating: sentinel)))
+        }
+        await authenticationOwnershipReleaseGate.waitUntilBlocked()
+        #expect(store.auth.isAuthenticating)
+
+        let stop = Task { @MainActor in
+            await store.stop()
+        }
+        await finalShutdownRequested.wait()
+        await authenticationOwnershipReleaseGate.open()
+        try await login.value
+        await stop.value
+
+        #expect(store.auth.isAuthenticating == false)
+        #expect(store.auth.errorMessage == nil)
+        #expect(store.serverState == .stopped)
+        #expect(runtimeFactoryCallCount == 2)
+        #expect(FileManager.default.fileExists(
+            atPath: accountReconciliationDebtURL(homeURL: homeURL).path
+        ))
     }
 
     @Test func liveStoreDiscardsIsolatedRuntimeWhenAPIKeyOutcomeIsUnknown() async throws {
@@ -3854,10 +3926,14 @@ struct CodexReviewHostTests {
         var nonPrimaryTransports = [authTransport, refreshTransport]
         var nonPrimaryRuntimeIndex = 0
         var refreshCodexHomeURL: URL?
+        let authenticationOwnershipReleaseGate = CodexAppServerTestGate()
         let externalURLOpener = FakeExternalURLOpener()
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             externalURLOpener: externalURLOpener.open,
+            authenticationOwnershipWillRelease: {
+                await authenticationOwnershipReleaseGate.waitIgnoringCancellation()
+            },
             transportFactory: { codexHomeURL in
                 if codexHomeURL == mainCodexHomeURL {
                     return mainTransport
@@ -3894,6 +3970,9 @@ struct CodexReviewHostTests {
             authMode: .chatGPT,
             planType: .plus
         ))
+        await authenticationOwnershipReleaseGate.waitUntilBlocked()
+        #expect(store.auth.isAuthenticating)
+        await authenticationOwnershipReleaseGate.open()
         #expect(await waitUntil(timeout: .seconds(1)) {
             store.auth.persistedAccounts.contains { $0.accountKey == "new@example.com" }
                 && store.auth.persistedAccounts.first { $0.accountKey == "new@example.com" }?.rateLimits.first?.usedPercent == 25
@@ -6617,10 +6696,14 @@ private func assertUnknownAPIKeyLoginOutcome(committed: Bool) async throws {
         try await reconciliationTransport.enqueueModels(.init(models: []))
     }
     var transports = [initialTransport, reconciliationTransport]
+    let authenticationOwnershipReleaseGate = CodexAppServerTestGate()
     let externalURLOpener = FakeExternalURLOpener()
     let store = CodexReviewStore.makeLiveStoreForTesting(
         environment: ["HOME": homeURL.path],
         externalURLOpener: externalURLOpener.open,
+        authenticationOwnershipWillRelease: {
+            await authenticationOwnershipReleaseGate.waitIgnoringCancellation()
+        },
         transportFactory: { runtimeHomeURL in
             #expect(runtimeHomeURL == codexHomeURL)
             return transports.removeFirst()
@@ -6633,7 +6716,14 @@ private func assertUnknownAPIKeyLoginOutcome(committed: Bool) async throws {
         to: codexHomeURL
     )
 
-    try await store.signIn(using: .apiKey(try CodexReviewAPIKey(validating: sentinel)))
+    let login = Task { @MainActor in
+        try await store.signIn(using: .apiKey(try CodexReviewAPIKey(validating: sentinel)))
+    }
+    await authenticationOwnershipReleaseGate.waitUntilBlocked()
+    #expect(store.auth.isAuthenticating)
+    await authenticationOwnershipReleaseGate.open()
+    try await login.value
+    #expect(store.auth.isAuthenticating == false)
 
     #expect(externalURLOpener.openedURLs.isEmpty)
     #expect(transports.isEmpty)
