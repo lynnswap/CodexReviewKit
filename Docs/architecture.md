@@ -2,8 +2,12 @@
 
 CodexReviewKit provides ReviewMonitor, a native macOS app for running and
 observing Codex review. The package is organized around one invariant:
-generic Codex data comes from CodexKit, while ReviewMonitor owns only review
-product behavior.
+generic Codex capabilities are owned by lower-level targets in the same Swift
+package, while ReviewMonitor targets own only review product behavior.
+
+The approved package topology is defined only in
+[CodexKit Integration](codexkit-integration.md). The target graph below is its
+runtime-oriented ownership view; it must remain consistent with that design.
 
 Review content and log content flow in one direction:
 
@@ -39,13 +43,16 @@ This table describes intended ownership.
 | Target | Responsibility |
 | --- | --- |
 | `CodexAppServerKit` | App-server SDK: local `codex app-server` process transport, JSON-RPC client, typed request DTOs, app-server notification schema, and Swift domain APIs for threads, turns, prompts, review sessions, models, accounts, and login. Raw DTOs are not its public boundary. It has no Review, UI, or MCP dependencies |
-| `CodexDataKit` | Reusable observable Codex model owners for generic app-server concepts: `CodexModelContainer`, `CodexModelContext`, `CodexFetchRequest`, `CodexFetchedResults`, `CodexWorkspaceGroup`, `CodexWorkspace`, `CodexChat`, chat snapshots, and chat change streams. It lives in the separate CodexKit repository |
+| `CodexAppServerKitTesting` | Public deterministic in-memory app-server runtime and typed fixtures for external consumer tests. It depends on `CodexAppServerKit` and has no Review, UI, or MCP dependencies |
+| `CodexDataKit` | Reusable observable Codex model owners for generic app-server concepts: `CodexModelContainer`, `CodexModelContext`, `CodexFetchRequest`, `CodexFetchedResults`, `CodexWorkspaceGroup`, `CodexWorkspace`, `CodexChat`, chat snapshots, and chat change streams. It depends on `CodexAppServerKit`, not on Review targets |
 | `CodexReviewKit` | Review product core: run identity, lifecycle, cancellation, restart/recovery, auth/settings/runtime state, store commands, MCP command state, and ReviewMonitor-specific policies. It has no app-server wire, UI, or MCP dependencies |
 | `CodexReviewAppServer` | Adapter from `CodexAppServerKit` high-level review sessions into `CodexReviewKit` lifecycle events and cleanup/recovery operations |
 | `CodexReviewMCPServer` | MCP server and projections over the review store contract plus CodexChat log projections. It owns MCP protocol request/response conversion and the Streamable HTTP endpoint. It has no UI or app-server backend dependency |
 | `CodexReviewHost` | Runtime composition for ReviewMonitor |
 | `ReviewUI` | Concrete ReviewMonitor UI: AppKit views/controllers, existing hosted SwiftUI views, sidebar selection/filter/DnD presentation, context menus, and log rendering state |
-| `CodexReviewTesting` | Deterministic fake backend, fake JSON-RPC transport, gates, manual clock |
+| `ReviewChatLogUI` | Selected-chat log rendering over `CodexDataKit` snapshots and changes |
+| `ReviewUIPreviewSupport` | Preview fixtures composed from the public testing runtime and production UI data flow |
+| `CodexReviewTesting` | Review-product fake backend, gates, and manual clock; generic app-server test behavior remains in `CodexAppServerKitTesting` |
 | `TextTransitions` | UI text transition view support |
 
 ReviewMonitor is the product entry point. The host target wires the concrete
@@ -88,73 +95,63 @@ CodexDataKit model APIs; UI code does not parse app-server wire data.
 
 ```mermaid
 flowchart TB
-    subgraph AppServerKit["CodexAppServerKit"]
-        Server["CodexAppServer"]
-        ReviewSession["CodexReviewSession"]
-        Client["JSON-RPC client"]
-        Process["codex app-server"]
+    App["CodexReviewMonitor app"]
+
+    subgraph Package["CodexReviewKit package"]
+        Host["CodexReviewHost"]
+        UI["ReviewUI"]
+        Preview["ReviewUIPreviewSupport"]
+        ChatUI["ReviewChatLogUI"]
+        MCP["CodexReviewMCPServer"]
+        ReviewAdapter["CodexReviewAppServer"]
+        ReviewCore["CodexReviewKit"]
+        ReviewTesting["CodexReviewTesting"]
+        DataKit["CodexDataKit"]
+        AppServerTesting["CodexAppServerKitTesting"]
+        AppServerKit["CodexAppServerKit"]
+        TextTransitions["TextTransitions"]
     end
 
-    subgraph DataKit["CodexDataKit"]
-        Context["CodexModelContext"]
-        Fetch["CodexFetchedResults<CodexChat>"]
-        Chat["CodexChat"]
-    end
-
-    subgraph ReviewCore["CodexReviewKit"]
-        Store["CodexReviewStore"]
-        Run["ReviewRunRecord"]
-        Awaiter["ReviewObservationAwaiter"]
-    end
-
-    subgraph AppServerAdapter["CodexReviewAppServer"]
-        Adapter["Review lifecycle adapter"]
-    end
-
-    subgraph MCP["CodexReviewMCPServer"]
-        MCPServer["MCP tools"]
-        MCPProjection["CodexChat log projection"]
-    end
-
-    subgraph UI["ReviewUI"]
-        Sidebar["CodexChat sidebar"]
-        Detail["CodexChat detail log"]
-        Presentation["Selection, filters, DnD, context menus"]
-    end
-
-    subgraph Host["CodexReviewHost"]
-        Composition["Composition root"]
-    end
-
-    Server --> Client
-    ReviewSession --> Client
-    Client --> Process
-    Server --> Context
-    Context --> Fetch
-    Context --> Chat
-    ReviewSession --> Adapter
-    Adapter --> Store
-    Store --> Run
-    Store --> Awaiter
-    Fetch --> Sidebar
-    Chat --> Detail
-    Run --> Sidebar
-    Run --> MCPServer
-    Chat --> MCPProjection
-    MCPProjection --> MCPServer
-    Store --> MCPServer
-    Presentation --> Store
-    Presentation --> Chat
-    Composition --> Server
-    Composition --> Context
-    Composition --> Store
-    Composition --> MCPServer
-    Composition --> Sidebar
+    App --> Host
+    App --> UI
+    App --> Preview
+    App --> ReviewCore
+    Host --> MCP
+    Host --> ReviewAdapter
+    Host --> ReviewCore
+    Host --> DataKit
+    Host --> AppServerKit
+    Preview --> UI
+    Preview --> ReviewCore
+    Preview --> DataKit
+    Preview --> AppServerTesting
+    Preview --> AppServerKit
+    UI --> ChatUI
+    UI --> ReviewCore
+    UI --> DataKit
+    UI --> AppServerKit
+    ChatUI --> TextTransitions
+    ChatUI --> DataKit
+    ChatUI --> AppServerKit
+    MCP --> ReviewCore
+    MCP --> DataKit
+    MCP --> AppServerKit
+    ReviewAdapter --> ReviewCore
+    ReviewAdapter --> DataKit
+    ReviewAdapter --> AppServerKit
+    ReviewTesting --> ReviewCore
+    ReviewTesting --> AppServerTesting
+    ReviewTesting --> AppServerKit
+    DataKit --> AppServerKit
+    AppServerTesting --> AppServerKit
 ```
 
-The diagram describes ownership direction, not every SwiftPM dependency. New
-code should not move generic Codex model ownership, UI rendering, or MCP
-projection responsibilities back into review lifecycle owners.
+An arrow means the source target depends on the destination target. External
+package dependencies and test targets are omitted. Dependencies point from app
+composition and review-specific targets toward lower-level generic targets;
+lower-level targets never import Review targets. New code should not move
+generic Codex model ownership, UI rendering, or MCP projection responsibilities
+back into review lifecycle owners.
 
 ## Observation Ownership
 
@@ -314,11 +311,16 @@ Default tests are deterministic and do not start a live `codex app-server`.
 | Test area | Uses | Verifies |
 | --- | --- | --- |
 | `CodexAppServerKitTests` | Fake JSON-RPC transport | Generic app-server handshake, request serialization, retry, notification routing, domain result aggregation, and high-level review stream behavior |
+| `CodexDataKitTests` | `CodexAppServerKitTesting` and observable model owners | Query planning, model identity, membership/order, snapshot/change streams, mutations, and context ownership |
 | `CodexReviewKitTests` | Fake `CodexReviewStoreBackend`, review lifecycle records, and ObservationBridge awaiters | Use-case observation behavior, review/auth/settings state machines, cancellation, restart/recovery, and lifecycle retention |
 | `CodexReviewAppServerTests` | Fake app-server review sessions or transport as needed | Adapter behavior from high-level review sessions into lifecycle events, cleanup, and recovery |
 | `CodexReviewMCPServerTests` | Fake review store and CodexChat projections | MCP protocol conversion, response shape, lifecycle projection, and CodexChat log/review projection snapshots |
 | `CodexReviewHostTests` | Fake runtime dependencies | Composition, startup, shutdown |
 | `ReviewUITests` | Preview/test monitor backend and CodexChat fixtures | Native UI behavior, CodexChat rendering, context menus, DnD/filter presentation, and user-intent forwarding |
+
+`CodexAppServerKitTests` and `CodexDataKitTests` have dedicated package-test CI
+shards. `Fixtures/CodexReviewKitProductConsumer` is a separate package that
+imports, links, and runs all three public Codex products without `@testable`.
 
 Forbidden test patterns:
 

@@ -1,10 +1,47 @@
 # CodexReviewKit
 
-CodexReviewKit is the native macOS companion app for Codex review.
+CodexReviewKit is the native macOS companion app for Codex review. The same
+Swift package also distributes reusable app-server, observable model, and test
+runtime libraries for macOS apps and tools that work with Codex.
 
 Launch `CodexReviewMonitor.app`, register its MCP endpoint with Codex, then run
 reviews through the `codex_review` tools while the app keeps the review state
 visible.
+
+## Requirements
+
+- macOS 26 or later.
+- Swift 6.3 or later.
+- A local `codex` executable when using ReviewMonitor or a real app-server
+  process. `CodexAppServerKitTesting` does not launch one.
+
+## Add The Package
+
+Add CodexReviewKit as a Swift package dependency:
+
+```swift
+dependencies: [
+    .package(
+        url: "https://github.com/lynnswap/CodexReviewKit.git",
+        branch: "main"
+    ),
+]
+```
+
+Then select the library products your target needs:
+
+```swift
+.product(name: "CodexAppServerKit", package: "CodexReviewKit"),
+.product(name: "CodexDataKit", package: "CodexReviewKit"),
+.product(name: "CodexAppServerKitTesting", package: "CodexReviewKit"),
+```
+
+- `CodexAppServerKit` provides domain APIs for app-server connections, threads,
+  responses, reviews, models, accounts, and login.
+- `CodexDataKit` provides observable app-server-backed model objects and fetch
+  APIs on top of `CodexAppServerKit`.
+- `CodexAppServerKitTesting` provides a deterministic in-memory app-server test
+  runtime without launching a real process.
 
 ## Quick Start
 
@@ -63,10 +100,13 @@ await appServer.close()
 only ReviewMonitor-specific `review/start` orchestration and review event
 conversion.
 
-See [CodexAppServerKit README][codex-app-server-kit-readme] for the
+See the [CodexAppServerKit README](Sources/CodexAppServerKit/README.md) for the
 standalone SDK surface, including thread-level streams for messages,
 transcripts, log entries, and in-flight response controls such as steer, queue,
-and interrupt.
+and interrupt. The [CodexDataKit README](Sources/CodexDataKit/README.md) covers
+model containers, fetch requests, sectioning, SwiftUI queries, and ownership.
+The [`CodexReviewKitProductConsumer`](Fixtures/CodexReviewKitProductConsumer)
+fixture builds, links, and runs all three products without `@testable import`.
 
 ## Timeout Setup
 
@@ -100,32 +140,13 @@ This Claude Code setting is process-wide. It is not scoped to the
 `codex_review` MCP server, so the same idle timeout applies to all MCP tools
 used by that Claude Code session.
 
-## Local CodexKit Development
-
-`Package.swift` uses a local `dependencies/CodexKit` checkout when that
-directory contains a `Package.swift`. If the local checkout is absent, SwiftPM
-resolves `CodexKit` from the pinned fallback revision in `Package.swift`.
-Update that revision to a reviewed CodexKit `main` commit whenever
-CodexReviewKit adopts new CodexKit APIs.
-
-```bash
-mkdir -p dependencies
-git clone git@github.com:lynnswap/CodexKit.git dependencies/CodexKit
-swift test --build-system swiftbuild --no-parallel
-```
-
-After creating or removing `dependencies/CodexKit`, run SwiftPM with manifest
-caching disabled once if resolution still points at the previous dependency
-kind:
-
-```bash
-swift package --manifest-cache none resolve
-```
-
 ## More Detail
 
 - [Architecture](Docs/architecture.md): package boundaries, runtime flow, and
   test responsibilities.
+- [CodexKit integration design](Docs/codexkit-integration.md): the canonical
+  target topology, compatibility contract, deletion scope, and migration test
+  plan.
 - [MCP reference](Docs/mcp.md): tool schemas, discovery resources, session
   behavior, and runtime files.
 
@@ -156,5 +177,3 @@ The release verification workflow also requires the repository variable
 Developer ID Application certificate used by `--signing-identity`. The workflow
 will not publish the draft release unless the uploaded DMG and contained app are
 signed and notarized for that Team ID.
-
-[codex-app-server-kit-readme]: https://github.com/lynnswap/CodexKit/blob/main/Sources/CodexAppServerKit/README.md
