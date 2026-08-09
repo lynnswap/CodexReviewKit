@@ -504,7 +504,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
     ) async {
         await Task { [appServer] in
             do {
-                _ = try await session.cancel()
+                _ = try await Self.interruptAndAwaitTerminal(session)
             } catch {
                 appServerBackendLogger.error(
                     "Failed to cancel a review with invalid identity before cleanup: \(error.localizedDescription, privacy: .public)"
@@ -599,7 +599,71 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
                 message: "Interrupt requires the active SDK review session for its attempt."
             )
         }
-        return try await activeReview.session.cancel()
+        return try await Self.interruptAndAwaitTerminal(activeReview.session)
+    }
+
+    private nonisolated static func interruptAndAwaitTerminal(
+        _ session: CodexReviewSession
+    ) async throws -> CodexTurnCancellation {
+        try await interruptAndAwaitTerminal(
+            interrupt: { try await session.cancel() },
+            awaitTerminal: { _ = try await session.collect() },
+            terminalMayStillArriveAfterInterruptFailure: { error in
+                Self.terminalMayStillArrive(afterInterruptFailure: error)
+            }
+        )
+    }
+
+    nonisolated static func interruptAndAwaitTerminal<Cancellation: Sendable>(
+        interrupt: @escaping @Sendable () async throws -> Cancellation,
+        awaitTerminal: @escaping @Sendable () async throws -> Void,
+        terminalMayStillArriveAfterInterruptFailure:
+            @escaping @Sendable (any Error) -> Bool
+    ) async throws -> Cancellation {
+        // Cleanup callers may themselves be cancelled while tearing down a run.
+        // Keep terminal ownership only when a live connection can still deliver
+        // the accepted interrupt's terminal after its acknowledgement failed.
+        let interruption = Task {
+            let cancellation: Cancellation
+            do {
+                cancellation = try await interrupt()
+            } catch {
+                let interruptError = error
+                if terminalMayStillArriveAfterInterruptFailure(interruptError) {
+                    // The barrier owns lifecycle completion, not error selection:
+                    // the interrupt request failure remains the operation result.
+                    _ = try? await awaitTerminal()
+                }
+                throw interruptError
+            }
+            try await awaitTerminal()
+            return cancellation
+        }
+        return try await interruption.value
+    }
+
+    private nonisolated static func terminalMayStillArrive(
+        afterInterruptFailure error: any Error
+    ) -> Bool {
+        guard case .request(let failure) = error as? CodexAppServerError else {
+            return false
+        }
+        return terminalMayStillArrive(afterInterruptRequestFailure: failure.kind)
+    }
+
+    nonisolated static func terminalMayStillArrive(
+        afterInterruptRequestFailure failure: CodexRequestFailure.Kind
+    ) -> Bool {
+        switch failure {
+        case .invalidResponse:
+            return true
+        case .encode, .server, .overloadRetryExhausted:
+            return false
+        case .write, .transport, .deadlineExceeded:
+            // CodexKit terminates the connection before surfacing a post-write
+            // failure in these paths; their pre-write forms were never accepted.
+            return false
+        }
     }
 
     private func cleanupAppServerReview(

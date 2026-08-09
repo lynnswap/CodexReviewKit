@@ -681,7 +681,22 @@ struct AppServerClientTests {
         let backend = await makeBackend(appServer: runtime.server)
         let attempt = try await backend.startReview(makeReviewStart())
 
-        try await backend.interruptReview(attempt.attempt, reason: .init(message: "Stop"))
+        let interruptTask = Task {
+            try await backend.interruptReview(attempt.attempt, reason: .init(message: "Stop"))
+        }
+        defer {
+            interruptTask.cancel()
+        }
+        await runtime.transport.waitForRequest(.turnInterrupt)
+        try await emitTurn(
+            on: runtime,
+            threadID: "thread-1",
+            turnID: "turn-1",
+            state: .interrupted
+        )
+        try await withTimeout {
+            try await interruptTask.value
+        }
 
         let requests = await runtime.transport.recordedRequests()
         #expect(requests.map(\.request.operation) == [
@@ -700,6 +715,34 @@ struct AppServerClientTests {
         }.first)
         #expect(interrupt.0 == "thread-1")
         #expect(interrupt.1 == "turn-1")
+    }
+
+    @Test func interruptReviewCompletesTerminalWaitAfterCallerCancellation() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
+        try await runtime.transport.enqueueReviewStart(
+            turnID: "turn-1",
+            reviewThreadID: "thread-1"
+        )
+        try await runtime.transport.handleTurnInterrupt { _ in }
+        let backend = await makeBackend(appServer: runtime.server)
+        let attempt = try await backend.startReview(makeReviewStart())
+
+        let interruptTask = Task {
+            try await backend.interruptReview(attempt.attempt, reason: .init(message: "Stop"))
+        }
+        await runtime.transport.waitForRequest(.turnInterrupt)
+        interruptTask.cancel()
+        try await emitTurn(
+            on: runtime,
+            threadID: "thread-1",
+            turnID: "turn-1",
+            state: .interrupted
+        )
+
+        try await withTimeout {
+            try await interruptTask.value
+        }
     }
 
     @Test func startReviewMapsRequestFailureToTypedOperation() async throws {
@@ -754,6 +797,84 @@ struct AppServerClientTests {
         #expect(await runtime.transport.recordedRequests(for: .threadResume).isEmpty)
     }
 
+    @Test func interruptFailureClassificationWaitsOnlyForLiveInvalidResponse() {
+        #expect(AppServerCodexReviewBackend.terminalMayStillArrive(
+            afterInterruptRequestFailure: .invalidResponse(
+                expectedType: "EmptyResponse",
+                message: "Malformed response",
+                rawData: nil
+            )
+        ))
+        #expect(!AppServerCodexReviewBackend.terminalMayStillArrive(
+            afterInterruptRequestFailure: .encode(message: "Encoding failed")
+        ))
+        #expect(!AppServerCodexReviewBackend.terminalMayStillArrive(
+            afterInterruptRequestFailure: .write(.closed)
+        ))
+        #expect(!AppServerCodexReviewBackend.terminalMayStillArrive(
+            afterInterruptRequestFailure: .transport(.closed)
+        ))
+        #expect(!AppServerCodexReviewBackend.terminalMayStillArrive(
+            afterInterruptRequestFailure: .server(.init(code: -32_011, message: "Rejected"))
+        ))
+        #expect(!AppServerCodexReviewBackend.terminalMayStillArrive(
+            afterInterruptRequestFailure: .deadlineExceeded(.seconds(1))
+        ))
+        #expect(!AppServerCodexReviewBackend.terminalMayStillArrive(
+            afterInterruptRequestFailure: .overloadRetryExhausted(
+                last: .init(code: -32_001, message: "Overloaded"),
+                attempts: 3
+            )
+        ))
+    }
+
+    @Test func definitiveInterruptFailureSkipsTerminalBarrier() async {
+        do {
+            try await AppServerCodexReviewBackend.interruptAndAwaitTerminal(
+                interrupt: { () async throws -> Void in
+                    throw AppServerClientTestInterruptionError.rejected
+                },
+                awaitTerminal: {
+                    Issue.record("A definitive interrupt failure must not enter the terminal barrier.")
+                },
+                terminalMayStillArriveAfterInterruptFailure: { _ in
+                    false
+                }
+            )
+            Issue.record("Expected the definitive interrupt failure.")
+        } catch {
+            #expect(error as? AppServerClientTestInterruptionError == .rejected)
+        }
+    }
+
+    @Test func ambiguousInterruptFailureRetainsTerminalBarrierAndOriginalError() async throws {
+        let terminalGate = CodexAppServerTestGate()
+        let interruption = Task<Void, any Error> {
+            try await AppServerCodexReviewBackend.interruptAndAwaitTerminal(
+                interrupt: { () async throws -> Void in
+                    throw AppServerClientTestInterruptionError.rejected
+                },
+                awaitTerminal: {
+                    await terminalGate.waitIgnoringCancellation()
+                    throw AppServerClientTestInterruptionError.terminalFailed
+                },
+                terminalMayStillArriveAfterInterruptFailure: { _ in
+                    true
+                }
+            )
+        }
+
+        await terminalGate.waitUntilBlocked()
+        await terminalGate.open()
+
+        do {
+            try await interruption.value
+            Issue.record("Expected the interrupt failure after the terminal barrier opened.")
+        } catch {
+            #expect(error as? AppServerClientTestInterruptionError == .rejected)
+        }
+    }
+
     @Test func prepareRestartMapsRequestFailureToTypedOperation() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
@@ -779,6 +900,12 @@ struct AppServerClientTests {
                 code: -32_002
             )
         }
+
+        let runID = try ReviewRunID(validating: "run-1")
+        let retained = await backend.discardAllPreparedReviewRestarts(
+            ownedAttemptsByRunID: [runID: attempt.attempt]
+        )
+        #expect(retained == [runID: [attempt.attempt]])
     }
 
     @Test func restartReviewMapsUnavailableTokenToTypedOperation() async throws {
@@ -844,8 +971,19 @@ struct AppServerClientTests {
         await runtime.transport.waitForRequest(.turnInterrupt, count: 2)
         try await emitTurn(
             on: runtime,
-            threadID: "thread-1",
+            threadID: "thread-review-child",
             turnID: "turn-new",
+            state: .interrupted
+        )
+        try await runtime.notificationEmitter.emitItemCompleted(
+            threadID: "thread-1",
+            turnID: "turn-old",
+            item: .agentMessage(id: "review-output", text: "Review interrupted")
+        )
+        try await emitTurn(
+            on: runtime,
+            threadID: "thread-1",
+            turnID: "turn-old",
             state: .interrupted
         )
         let token = try await withTimeout {
@@ -1074,6 +1212,11 @@ private func makeThreadID(_ rawValue: String) throws -> ReviewThreadID {
 
 private enum AppServerClientTestTimeout: Error {
     case timedOut
+}
+
+private enum AppServerClientTestInterruptionError: Error, Equatable {
+    case rejected
+    case terminalFailed
 }
 
 private extension ReviewBackendFailure {

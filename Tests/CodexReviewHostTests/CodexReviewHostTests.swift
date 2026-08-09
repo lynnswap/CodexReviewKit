@@ -5173,7 +5173,18 @@ struct CodexReviewHostTests {
             store.reviewRuns.first?.core.attempt?.turnID.rawValue == "turn-first"
         })
 
-        try await store.switchAccount(CodexReviewKit.CodexReviewAccount(email: "second@example.com"))
+        let switchTask = Task { @MainActor in
+            try await store.switchAccount(
+                CodexReviewKit.CodexReviewAccount(email: "second@example.com")
+            )
+        }
+        await firstTransport.waitForRequest(.turnInterrupt)
+        try await emitInterruptedTurn(
+            on: firstTransport,
+            threadID: "thread-first",
+            turnID: "turn-first"
+        )
+        try await switchTask.value
         let result = try await reviewRead
         await secondTransport.waitForRequestCount(2)
         await firstTransport.waitForRequestCount(7)
@@ -5238,7 +5249,16 @@ struct CodexReviewHostTests {
             store.reviewRuns.first?.core.attempt?.turnID.rawValue == "turn-active"
         })
 
-        await store.logout()
+        let logoutTask = Task { @MainActor in
+            await store.logout()
+        }
+        await firstTransport.waitForRequest(.turnInterrupt)
+        try await emitInterruptedTurn(
+            on: firstTransport,
+            threadID: "thread-active",
+            turnID: "turn-active"
+        )
+        await logoutTask.value
         let result = try await reviewRead
         await secondTransport.waitForRequestCount(2)
 
@@ -5390,6 +5410,11 @@ struct CodexReviewHostTests {
         }
         let methodsBeforeInterruptCompletes = await transport.recordedRequests().map(\.request.operation)
         await interruptGate.open()
+        try await emitInterruptedTurn(
+            on: transport,
+            threadID: "thread-1",
+            turnID: "turn-1"
+        )
         await stopTask.value
         let result = try await reviewRead
 
@@ -5442,6 +5467,11 @@ struct CodexReviewHostTests {
         })
         #expect(await stopFinished.isCompleted() == false)
         await interruptGate.open()
+        try await emitInterruptedTurn(
+            on: transport,
+            threadID: "thread-1",
+            turnID: "turn-1"
+        )
         await stopTask.value
         let result = try await reviewRead.value
 
@@ -5492,6 +5522,20 @@ struct CodexReviewHostTests {
         networkMonitor.yield(.init(status: .unsatisfied))
         try #require(await waitUntil(timeout: .seconds(2)) {
             await transport.recordedRequests().map(\.request.operation).contains(.turnInterrupt)
+        })
+        try await emitInterruptedTurn(
+            on: transport,
+            threadID: "thread-1",
+            turnID: "turn-1"
+        )
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            guard let run = store.reviewRuns.first else {
+                return false
+            }
+            if case .waitingForNetwork = run.presentation.lifecycle {
+                return true
+            }
+            return false
         })
 
         let stopFinished = CompletionFlag()
@@ -6211,6 +6255,20 @@ struct CodexReviewHostTests {
         #expect(FileManager.default.fileExists(atPath: dotDirectoryURL.path) == false)
         #expect(FileManager.default.fileExists(atPath: dotDotDirectoryURL.path) == false)
     }
+}
+
+private func emitInterruptedTurn(
+    on transport: FakeCodexAppServerTransport,
+    threadID: CodexThreadID,
+    turnID: CodexTurnID
+) async throws {
+    try await transport.notificationEmitter.emitTurnCompleted(
+        threadID: threadID,
+        turn: try CodexAppServerTestTurn(
+            snapshot: .init(id: turnID, state: .interrupted),
+            items: []
+        )
+    )
 }
 
 @MainActor
