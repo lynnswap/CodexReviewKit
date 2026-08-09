@@ -605,12 +605,29 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
     private nonisolated static func interruptAndAwaitTerminal(
         _ session: CodexReviewSession
     ) async throws -> CodexTurnCancellation {
+        try await interruptAndAwaitTerminal(
+            interrupt: { try await session.cancel() },
+            awaitTerminal: { _ = try await session.collect() }
+        )
+    }
+
+    nonisolated static func interruptAndAwaitTerminal<Cancellation: Sendable>(
+        interrupt: @escaping @Sendable () async throws -> Cancellation,
+        awaitTerminal: @escaping @Sendable () async throws -> Void
+    ) async throws -> Cancellation {
         // Cleanup callers may themselves be cancelled while tearing down a run.
-        // Once interruption starts, keep ownership until the outer review turn
-        // reaches terminal so no later cleanup can race its final events.
+        // The terminal barrier remains authoritative even when interrupt
+        // acknowledgement fails because cleanup callers may discard that error.
         let interruption = Task {
-            let cancellation = try await session.cancel()
-            _ = try await session.collect()
+            let cancellation: Cancellation
+            do {
+                cancellation = try await interrupt()
+            } catch {
+                let interruptError = error
+                try await awaitTerminal()
+                throw interruptError
+            }
+            try await awaitTerminal()
             return cancellation
         }
         return try await interruption.value

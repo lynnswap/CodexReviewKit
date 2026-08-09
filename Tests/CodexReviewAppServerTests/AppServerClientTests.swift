@@ -780,11 +780,22 @@ struct AppServerClientTests {
             for: .turnInterrupt
         )
 
-        do {
+        let interruptTask = Task {
             try await backend.interruptReview(
                 attempt.attempt,
                 reason: .init(message: "Stop")
             )
+        }
+        await runtime.transport.waitForRequest(.turnInterrupt)
+        try await emitTurn(
+            on: runtime,
+            threadID: "thread-1",
+            turnID: "turn-1",
+            state: .interrupted
+        )
+
+        do {
+            try await interruptTask.value
             Issue.record("Expected interruptReview to preserve its typed operation failure.")
         } catch {
             try expectServerRequestFailure(
@@ -795,6 +806,30 @@ struct AppServerClientTests {
             )
         }
         #expect(await runtime.transport.recordedRequests(for: .threadResume).isEmpty)
+    }
+
+    @Test func interruptFailureRetainsTerminalBarrier() async throws {
+        let terminalGate = CodexAppServerTestGate()
+        let interruption = Task<Void, any Error> {
+            try await AppServerCodexReviewBackend.interruptAndAwaitTerminal(
+                interrupt: { () async throws -> Void in
+                    throw AppServerClientTestInterruptionError.rejected
+                },
+                awaitTerminal: {
+                    await terminalGate.waitIgnoringCancellation()
+                }
+            )
+        }
+
+        await terminalGate.waitUntilBlocked()
+        await terminalGate.open()
+
+        do {
+            try await interruption.value
+            Issue.record("Expected the interrupt failure after the terminal barrier opened.")
+        } catch {
+            #expect(error as? AppServerClientTestInterruptionError == .rejected)
+        }
     }
 
     @Test func prepareRestartMapsRequestFailureToTypedOperation() async throws {
@@ -1134,6 +1169,10 @@ private func makeThreadID(_ rawValue: String) throws -> ReviewThreadID {
 
 private enum AppServerClientTestTimeout: Error {
     case timedOut
+}
+
+private enum AppServerClientTestInterruptionError: Error, Equatable {
+    case rejected
 }
 
 private extension ReviewBackendFailure {
