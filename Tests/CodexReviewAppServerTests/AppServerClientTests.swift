@@ -780,22 +780,11 @@ struct AppServerClientTests {
             for: .turnInterrupt
         )
 
-        let interruptTask = Task {
+        do {
             try await backend.interruptReview(
                 attempt.attempt,
                 reason: .init(message: "Stop")
             )
-        }
-        await runtime.transport.waitForRequest(.turnInterrupt)
-        try await emitTurn(
-            on: runtime,
-            threadID: "thread-1",
-            turnID: "turn-1",
-            state: .interrupted
-        )
-
-        do {
-            try await interruptTask.value
             Issue.record("Expected interruptReview to preserve its typed operation failure.")
         } catch {
             try expectServerRequestFailure(
@@ -808,7 +797,57 @@ struct AppServerClientTests {
         #expect(await runtime.transport.recordedRequests(for: .threadResume).isEmpty)
     }
 
-    @Test func interruptFailureRetainsTerminalBarrier() async throws {
+    @Test func interruptFailureClassificationWaitsOnlyForLiveInvalidResponse() {
+        #expect(AppServerCodexReviewBackend.terminalMayStillArrive(
+            afterInterruptRequestFailure: .invalidResponse(
+                expectedType: "EmptyResponse",
+                message: "Malformed response",
+                rawData: nil
+            )
+        ))
+        #expect(!AppServerCodexReviewBackend.terminalMayStillArrive(
+            afterInterruptRequestFailure: .encode(message: "Encoding failed")
+        ))
+        #expect(!AppServerCodexReviewBackend.terminalMayStillArrive(
+            afterInterruptRequestFailure: .write(.closed)
+        ))
+        #expect(!AppServerCodexReviewBackend.terminalMayStillArrive(
+            afterInterruptRequestFailure: .transport(.closed)
+        ))
+        #expect(!AppServerCodexReviewBackend.terminalMayStillArrive(
+            afterInterruptRequestFailure: .server(.init(code: -32_011, message: "Rejected"))
+        ))
+        #expect(!AppServerCodexReviewBackend.terminalMayStillArrive(
+            afterInterruptRequestFailure: .deadlineExceeded(.seconds(1))
+        ))
+        #expect(!AppServerCodexReviewBackend.terminalMayStillArrive(
+            afterInterruptRequestFailure: .overloadRetryExhausted(
+                last: .init(code: -32_001, message: "Overloaded"),
+                attempts: 3
+            )
+        ))
+    }
+
+    @Test func definitiveInterruptFailureSkipsTerminalBarrier() async {
+        do {
+            try await AppServerCodexReviewBackend.interruptAndAwaitTerminal(
+                interrupt: { () async throws -> Void in
+                    throw AppServerClientTestInterruptionError.rejected
+                },
+                awaitTerminal: {
+                    Issue.record("A definitive interrupt failure must not enter the terminal barrier.")
+                },
+                terminalMayStillArriveAfterInterruptFailure: { _ in
+                    false
+                }
+            )
+            Issue.record("Expected the definitive interrupt failure.")
+        } catch {
+            #expect(error as? AppServerClientTestInterruptionError == .rejected)
+        }
+    }
+
+    @Test func ambiguousInterruptFailureRetainsTerminalBarrier() async throws {
         let terminalGate = CodexAppServerTestGate()
         let interruption = Task<Void, any Error> {
             try await AppServerCodexReviewBackend.interruptAndAwaitTerminal(
@@ -817,6 +856,9 @@ struct AppServerClientTests {
                 },
                 awaitTerminal: {
                     await terminalGate.waitIgnoringCancellation()
+                },
+                terminalMayStillArriveAfterInterruptFailure: { _ in
+                    true
                 }
             )
         }
