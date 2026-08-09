@@ -504,7 +504,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
     ) async {
         await Task { [appServer] in
             do {
-                _ = try await session.cancel()
+                _ = try await Self.interruptAndAwaitTerminal(session)
             } catch {
                 appServerBackendLogger.error(
                     "Failed to cancel a review with invalid identity before cleanup: \(error.localizedDescription, privacy: .public)"
@@ -599,7 +599,21 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
                 message: "Interrupt requires the active SDK review session for its attempt."
             )
         }
-        return try await activeReview.session.cancel()
+        return try await Self.interruptAndAwaitTerminal(activeReview.session)
+    }
+
+    private nonisolated static func interruptAndAwaitTerminal(
+        _ session: CodexReviewSession
+    ) async throws -> CodexTurnCancellation {
+        // Cleanup callers may themselves be cancelled while tearing down a run.
+        // Once interruption starts, keep ownership until the outer review turn
+        // reaches terminal so no later cleanup can race its final events.
+        let interruption = Task {
+            let cancellation = try await session.cancel()
+            _ = try await session.collect()
+            return cancellation
+        }
+        return try await interruption.value
     }
 
     private func cleanupAppServerReview(

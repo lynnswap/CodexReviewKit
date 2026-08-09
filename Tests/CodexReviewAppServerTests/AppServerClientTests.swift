@@ -681,7 +681,22 @@ struct AppServerClientTests {
         let backend = await makeBackend(appServer: runtime.server)
         let attempt = try await backend.startReview(makeReviewStart())
 
-        try await backend.interruptReview(attempt.attempt, reason: .init(message: "Stop"))
+        let interruptTask = Task {
+            try await backend.interruptReview(attempt.attempt, reason: .init(message: "Stop"))
+        }
+        defer {
+            interruptTask.cancel()
+        }
+        await runtime.transport.waitForRequest(.turnInterrupt)
+        try await emitTurn(
+            on: runtime,
+            threadID: "thread-1",
+            turnID: "turn-1",
+            state: .interrupted
+        )
+        try await withTimeout {
+            try await interruptTask.value
+        }
 
         let requests = await runtime.transport.recordedRequests()
         #expect(requests.map(\.request.operation) == [
@@ -700,6 +715,34 @@ struct AppServerClientTests {
         }.first)
         #expect(interrupt.0 == "thread-1")
         #expect(interrupt.1 == "turn-1")
+    }
+
+    @Test func interruptReviewCompletesTerminalWaitAfterCallerCancellation() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
+        try await runtime.transport.enqueueReviewStart(
+            turnID: "turn-1",
+            reviewThreadID: "thread-1"
+        )
+        try await runtime.transport.handleTurnInterrupt { _ in }
+        let backend = await makeBackend(appServer: runtime.server)
+        let attempt = try await backend.startReview(makeReviewStart())
+
+        let interruptTask = Task {
+            try await backend.interruptReview(attempt.attempt, reason: .init(message: "Stop"))
+        }
+        await runtime.transport.waitForRequest(.turnInterrupt)
+        interruptTask.cancel()
+        try await emitTurn(
+            on: runtime,
+            threadID: "thread-1",
+            turnID: "turn-1",
+            state: .interrupted
+        )
+
+        try await withTimeout {
+            try await interruptTask.value
+        }
     }
 
     @Test func startReviewMapsRequestFailureToTypedOperation() async throws {
@@ -779,6 +822,12 @@ struct AppServerClientTests {
                 code: -32_002
             )
         }
+
+        let runID = try ReviewRunID(validating: "run-1")
+        let retained = await backend.discardAllPreparedReviewRestarts(
+            ownedAttemptsByRunID: [runID: attempt.attempt]
+        )
+        #expect(retained == [runID: [attempt.attempt]])
     }
 
     @Test func restartReviewMapsUnavailableTokenToTypedOperation() async throws {
@@ -844,8 +893,19 @@ struct AppServerClientTests {
         await runtime.transport.waitForRequest(.turnInterrupt, count: 2)
         try await emitTurn(
             on: runtime,
-            threadID: "thread-1",
+            threadID: "thread-review-child",
             turnID: "turn-new",
+            state: .interrupted
+        )
+        try await runtime.notificationEmitter.emitItemCompleted(
+            threadID: "thread-1",
+            turnID: "turn-old",
+            item: .agentMessage(id: "review-output", text: "Review interrupted")
+        )
+        try await emitTurn(
+            on: runtime,
+            threadID: "thread-1",
+            turnID: "turn-old",
             state: .interrupted
         )
         let token = try await withTimeout {
