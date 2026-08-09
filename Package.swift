@@ -49,6 +49,7 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.97.1"),
         .package(url: "https://github.com/lynnswap/ObservationBridge.git", .upToNextMinor(from: "0.12.0")),
         .package(url: "https://github.com/apple/swift-async-algorithms", from: "1.1.0"),
+        .package(url: "https://github.com/swiftlang/swift-docc-plugin", from: "1.5.0"),
     ],
     targets: [
         .target(

@@ -14,7 +14,7 @@ let package = Package(
         ),
     ],
     dependencies: [
-        .package(path: "../.."),
+        .package(name: "CodexReviewKit", path: "../.."),
     ],
     targets: [
         .executableTarget(

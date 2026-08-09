@@ -142,6 +142,8 @@ used by that Claude Code session.
 
 ## More Detail
 
+- [API documentation](https://lynnswap.github.io/CodexReviewKit/): generated
+  DocC for every public library product.
 - [Architecture](Docs/architecture.md): package boundaries, runtime flow, and
   test responsibilities.
 - [CodexKit integration design](Docs/codexkit-integration.md): the canonical

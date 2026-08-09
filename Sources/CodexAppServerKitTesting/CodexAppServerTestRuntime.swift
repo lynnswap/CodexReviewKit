@@ -637,7 +637,7 @@ public final class CodexAppServerTestDeadlineClock: Sendable {
 ///
 /// This type does not launch `codex` or any external process. Tests enqueue
 /// responses and emit notifications through ``transport`` while exercising the
-/// same public ``CodexAppServer`` API that production code uses.
+/// same public `CodexAppServer` API that production code uses.
 public struct CodexAppServerTestRuntime: Sendable {
     /// The app-server domain container under test.
     public let server: CodexAppServer
@@ -678,7 +678,7 @@ public struct CodexAppServerTestRuntime: Sendable {
     /// Creates a test runtime without launching a real app-server process.
     ///
     /// The runtime automatically enqueues the `initialize` response required by
-    /// ``CodexAppServer`` startup.
+    /// `CodexAppServer` startup.
     ///
     /// - Parameters:
     ///   - transport: The in-memory transport to use.
@@ -721,7 +721,7 @@ public struct CodexAppServerTestRuntime: Sendable {
 
     /// Creates a test runtime whose app-server thread APIs are backed by a mutable store.
     ///
-    /// The returned runtime still exercises the public ``CodexAppServer`` API,
+    /// The returned runtime still exercises the public `CodexAppServer` API,
     /// while callers can mutate `threadStore` after startup:
     ///
     /// ```swift
@@ -751,7 +751,7 @@ public struct CodexAppServerTestRuntime: Sendable {
 
     /// Creates a test runtime whose thread APIs are backed by validated opaque fixtures.
     ///
-    /// The returned runtime still exercises the public ``CodexAppServer`` API.
+    /// The returned runtime still exercises the public `CodexAppServer` API.
     /// Higher-level code can build its normal data container from ``server``:
     ///
     /// ```swift

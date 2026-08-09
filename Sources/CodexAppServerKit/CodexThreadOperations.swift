@@ -48,6 +48,8 @@ extension CodexThread {
     /// - Parameters:
     ///   - prompt: The structured prompt to send.
     ///   - options: Per-turn generation options.
+    ///   - timeout: The maximum duration to wait for a terminal outcome, or
+    ///     `nil` to wait without a deadline.
     /// - Returns: The completed response collected from app-server events.
     public func respond(
         to prompt: CodexPrompt,
