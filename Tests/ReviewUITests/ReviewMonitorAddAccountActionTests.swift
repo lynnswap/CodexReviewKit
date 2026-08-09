@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import CodexReviewKit
+import CodexReviewTesting
 @testable import ReviewUI
 
 @Suite("ReviewMonitor add account action")
@@ -8,15 +9,24 @@ import Testing
 struct ReviewMonitorAddAccountActionTests {
     @Test func signedOutSignInControlsExposeStableProviderIdentifiers() {
         #expect(SignInView.AccessibilityIdentifier.chatGPTButton == "review-monitor.sign-in-button")
+        #expect(
+            SignInView.AccessibilityIdentifier.alternateSignInButton
+                == "review-monitor.alternate-sign-in-button"
+        )
         #expect(SignInView.AccessibilityIdentifier.apiKeyField == "review-monitor.api-key-field")
         #expect(SignInView.AccessibilityIdentifier.apiKeyButton == "review-monitor.api-key-sign-in-button")
+        #expect(
+            SignInView.AccessibilityIdentifier.apiKeyCancelButton
+                == "review-monitor.api-key-cancel-button"
+        )
     }
 
     @Test func signInControlStateKeepsOnlyCancellationAvailableDuringAuthentication() {
         let signedOut = SignInView.ControlState(
             apiKeyIsEmpty: true,
             isAuthenticating: false,
-            canPerformAuthentication: true
+            canPerformAuthentication: true,
+            hasPendingOperation: false
         )
         #expect(signedOut.providerInputsAreDisabled == false)
         #expect(signedOut.apiKeySubmitIsDisabled)
@@ -25,18 +35,30 @@ struct ReviewMonitorAddAccountActionTests {
         let populated = SignInView.ControlState(
             apiKeyIsEmpty: false,
             isAuthenticating: false,
-            canPerformAuthentication: true
+            canPerformAuthentication: true,
+            hasPendingOperation: false
         )
         #expect(populated.apiKeySubmitIsDisabled == false)
 
         let authenticating = SignInView.ControlState(
             apiKeyIsEmpty: false,
             isAuthenticating: true,
-            canPerformAuthentication: true
+            canPerformAuthentication: true,
+            hasPendingOperation: false
         )
         #expect(authenticating.providerInputsAreDisabled)
         #expect(authenticating.apiKeySubmitIsDisabled)
         #expect(authenticating.showsCancelAction)
+
+        let pending = SignInView.ControlState(
+            apiKeyIsEmpty: false,
+            isAuthenticating: false,
+            canPerformAuthentication: true,
+            hasPendingOperation: true
+        )
+        #expect(pending.providerInputsAreDisabled)
+        #expect(pending.apiKeySubmitIsDisabled)
+        #expect(pending.showsCancelAction)
     }
 
     @Test func nonChatGPTAccountsUseProviderNamesInsteadOfEmailMasking() {
@@ -131,5 +153,80 @@ struct ReviewMonitorAddAccountActionTests {
             #expect(error.localizedDescription.contains(invalidValue) == false)
             #expect(error.localizedDescription == "Enter a valid OpenAI API key.")
         }
+    }
+
+    @Test func cancellingAPIKeySignInWhileRuntimeStartsPreventsAuthentication() async throws {
+        let startGate = AsyncGate()
+        let backend = BlockingSignInStartBackend(startGate: startGate)
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        let session = ReviewMonitorSignInSession()
+        let apiKey = try CodexReviewAPIKey(validating: "sk-ui-test-secret")
+        store.loadForTesting(serverState: .failed("Runtime failed."), authPhase: .signedOut)
+
+        session.showAPIKeySignIn()
+        session.authenticate(.init(method: .apiKey(apiKey)), store: store)
+        await startGate.waitUntilBlocked()
+        session.cancelAuthentication(store: store, returnsToOptions: true)
+        await startGate.open()
+        await session.waitUntilIdleForTesting()
+
+        #expect(backend.authenticationRequests.isEmpty)
+        #expect(session.screen == .options)
+    }
+
+    @Test func repeatedSubmissionWhileRuntimeStartsRunsOneAuthentication() async throws {
+        let startGate = AsyncGate()
+        let backend = BlockingSignInStartBackend(startGate: startGate)
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        let session = ReviewMonitorSignInSession()
+        let apiKey = try CodexReviewAPIKey(validating: "sk-ui-test-secret")
+        let submission = ReviewMonitorAuthenticationSubmission(method: .apiKey(apiKey))
+        store.loadForTesting(serverState: .failed("Runtime failed."), authPhase: .signedOut)
+
+        session.authenticate(submission, store: store)
+        session.authenticate(submission, store: store)
+        await startGate.waitUntilBlocked()
+        await startGate.open()
+        await session.waitUntilIdleForTesting()
+
+        #expect(backend.authenticationRequests.count == 1)
+    }
+
+    @Test func closingSignInSessionRestoresPrimaryOptions() async {
+        let store = CodexReviewStore.makePreviewStore()
+        let session = ReviewMonitorSignInSession()
+        session.showAPIKeySignIn()
+
+        session.close(store: store)
+        await session.waitUntilIdleForTesting()
+
+        #expect(session.screen == .options)
+    }
+}
+
+@MainActor
+private final class BlockingSignInStartBackend: PreviewCodexReviewStoreBackend {
+    let startGate: AsyncGate
+    private(set) var authenticationRequests: [CodexReviewAuthenticationRequest] = []
+
+    init(startGate: AsyncGate) {
+        self.startGate = startGate
+        super.init()
+    }
+
+    override func start(
+        store: CodexReviewStore,
+        forceRestartIfNeeded _: Bool
+    ) async {
+        await startGate.waitIgnoringCancellation()
+        isActive = true
+        store.transitionToRunning(serverURL: nil)
+    }
+
+    override func authenticate(
+        auth _: CodexReviewAuthModel,
+        request: CodexReviewAuthenticationRequest
+    ) async throws {
+        authenticationRequests.append(request)
     }
 }

@@ -191,6 +191,7 @@ actor LoginOperationState {
         case runtimeBound(LoginRuntime)
         case loginPending(LoginRuntime, CodexLoginHandle)
         case apiKeyPending(LoginRuntime)
+        case apiKeyRequestClaimed(LoginRuntime)
         case resourcesTaken
     }
 
@@ -214,7 +215,7 @@ actor LoginOperationState {
         switch phase {
         case .loginPending(_, let handle):
             action = .chatGPT(handle)
-        case .apiKeyPending:
+        case .apiKeyPending, .apiKeyRequestClaimed:
             action = .apiKeyRootTask
         case .acquiringRuntime, .runtimeBound, .resourcesTaken:
             return nil
@@ -282,6 +283,18 @@ actor LoginOperationState {
         return .cancel
     }
 
+    func claimAPIKeyRequest() -> BindDisposition {
+        guard case .apiKeyPending(let runtime) = phase else {
+            preconditionFailure("An API-key request can be claimed only once after binding its runtime.")
+        }
+        guard cancellationRequested == false else {
+            cancellationClaimed = true
+            return .cancel
+        }
+        phase = .apiKeyRequestClaimed(runtime)
+        return .proceed
+    }
+
     func claimURLPresentation(handle: CodexLoginHandle) -> BindDisposition {
         guard case .loginPending(_, let boundHandle) = phase,
               boundHandle == handle else {
@@ -299,7 +312,8 @@ actor LoginOperationState {
         switch phase {
         case .acquiringRuntime, .resourcesTaken:
             return nil
-        case .runtimeBound(let runtime), .loginPending(let runtime, _), .apiKeyPending(let runtime):
+        case .runtimeBound(let runtime), .loginPending(let runtime, _),
+             .apiKeyPending(let runtime), .apiKeyRequestClaimed(let runtime):
             return runtime
         }
     }
@@ -313,7 +327,8 @@ actor LoginOperationState {
 
     func takeOwnedRuntime() -> LoginRuntime? {
         switch phase {
-        case .runtimeBound(let runtime), .loginPending(let runtime, _), .apiKeyPending(let runtime):
+        case .runtimeBound(let runtime), .loginPending(let runtime, _),
+             .apiKeyPending(let runtime), .apiKeyRequestClaimed(let runtime):
             guard runtime.usesPrimaryRuntime == false else {
                 return nil
             }

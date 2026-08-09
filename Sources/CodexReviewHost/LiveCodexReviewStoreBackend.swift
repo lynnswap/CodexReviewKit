@@ -1447,6 +1447,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     func cancelAuthentication(auth _: CodexReviewAuthModel) async {
         guard let session = loginSession else {
+            if let admission = accountRuntimeTransitionCoordinator
+                .requestLoginAdmissionCancellation() {
+                await accountRuntimeTransitionCoordinator.waitForLoginAdmissionCompletion(admission)
+                return
+            }
             if let activePrimaryAuthenticationReconciliation {
                 _ = await activePrimaryAuthenticationReconciliation.finalResult.wait()
             }
@@ -2002,6 +2007,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         do {
             try await attachedStore?.requireReviewThreadRetentionAcceptance()
             guard accountRuntimeTransitionCoordinator.canCommitLoginAdmission(loginAdmission) else {
+                if accountRuntimeTransitionCoordinator
+                    .isLoginAdmissionCancellationRequested(loginAdmission) {
+                    accountRuntimeTransitionCoordinator.finishLoginAdmission(loginAdmission)
+                    return
+                }
                 throw CodexReviewAuthenticationFailure.accountMutationBlockedByAuthentication
             }
             authenticationMutation = try await accountRegistry.beginAuthenticationMutation(
@@ -2012,10 +2022,18 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             throw error
         }
         let mutationLease = authenticationMutation.lease
+        let cancellationRequested = accountRuntimeTransitionCoordinator
+            .isLoginAdmissionCancellationRequested(loginAdmission)
         guard accountRuntimeTransitionCoordinator.canCommitLoginAdmission(loginAdmission),
               loginSession == nil else {
+            if cancellationRequested {
+                await accountRegistry.requestAuthenticationCancellation(mutationLease)
+            }
             await accountRegistry.finishMutation(mutationLease)
             accountRuntimeTransitionCoordinator.finishLoginAdmission(loginAdmission)
+            if cancellationRequested {
+                return
+            }
             throw CodexReviewAuthenticationFailure.accountMutationBlockedByAuthentication
         }
         let purpose = authenticationMutation.purpose
@@ -2162,6 +2180,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                         return finish(.cancelled)
                     }
                     await self?.authenticationOperationDidBind?()
+                    guard case .proceed = await operationState.claimAPIKeyRequest() else {
+                        await startCompletion.resolve(.success(()))
+                        return finish(.cancelled)
+                    }
                     auth?.updatePhase(.signingIn(.init(
                         title: "Sign in to Codex",
                         detail: "Authenticating with API key."

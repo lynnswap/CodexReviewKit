@@ -131,6 +131,19 @@ private extension CodexReviewStore {
 @Suite("host composition")
 @MainActor
 struct CodexReviewHostTests {
+    @Test func loginAdmissionCancellationPreventsSessionCommit() async throws {
+        let coordinator = AccountRuntimeTransitionCoordinator()
+        let admission = try coordinator.reserveLoginAdmission()
+
+        let cancellation = try #require(coordinator.requestLoginAdmissionCancellation())
+
+        #expect(coordinator.isLoginAdmissionCancellationRequested(admission))
+        #expect(coordinator.canCommitLoginAdmission(admission) == false)
+        coordinator.finishLoginAdmission(cancellation)
+        await coordinator.waitForLoginAdmissionCompletion(admission)
+        #expect(coordinator.hasActiveLoginTransition == false)
+    }
+
     @Test func stoppedPrimaryReconciliationWaitsOnlyForItsReservedTransition() async throws {
         let coordinator = AccountRuntimeTransitionCoordinator()
         var admittedLogin: AccountRuntimeTransitionCoordinator.LoginAdmission?
@@ -1149,6 +1162,50 @@ struct CodexReviewHostTests {
 
         #expect(await transport.recordedRequests(for: .accountLoginStart).isEmpty)
         #expect(externalURLOpener.openedURLs.isEmpty)
+        #expect(store.auth.selectedAccount == nil)
+        #expect(FileManager.default.fileExists(atPath: accountRegistryURL(homeURL: homeURL).path) == false)
+        await store.stop()
+    }
+
+    @Test func liveStoreCancelsAPIKeyLoginWhileMutationIsAdmitting() async throws {
+        let homeURL = try temporaryHome()
+        let transport = FakeCodexAppServerTransport()
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        try await transport.enqueueAPIKeyLogin()
+        let mutationGate = CodexAppServerTestGate()
+        let cancellationStarted = MainActorOneShotSignal()
+        let cancellationRequested = OneShotSignal()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            authenticationMutationDidBegin: {
+                await mutationGate.waitIgnoringCancellation()
+            },
+            authenticationCancellationDidRequest: {
+                await cancellationRequested.signal()
+            },
+            transport: transport
+        )
+        await store.start(forceRestartIfNeeded: true)
+        let login = Task { @MainActor in
+            try await store.signIn(using: .apiKey(
+                try CodexReviewAPIKey(validating: "test-secret-admission")
+            ))
+        }
+        await mutationGate.waitUntilBlocked()
+
+        let cancellation = Task { @MainActor in
+            cancellationStarted.signal()
+            await store.cancelAuthentication()
+        }
+        await cancellationStarted.wait()
+        await mutationGate.open()
+        await cancellationRequested.wait()
+        try await login.value
+        await cancellation.value
+
+        #expect(await transport.recordedRequests(for: .accountLoginStart).isEmpty)
         #expect(store.auth.selectedAccount == nil)
         #expect(FileManager.default.fileExists(atPath: accountRegistryURL(homeURL: homeURL).path) == false)
         await store.stop()
@@ -6683,6 +6740,33 @@ private actor OneShotSignal {
 
     func snapshot() -> Bool {
         isSignaled
+    }
+}
+
+@MainActor
+private final class MainActorOneShotSignal {
+    private var isSignaled = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func signal() {
+        guard isSignaled == false else {
+            return
+        }
+        isSignaled = true
+        let waiters = waiters
+        self.waiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+
+    func wait() async {
+        guard isSignaled == false else {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
     }
 }
 
