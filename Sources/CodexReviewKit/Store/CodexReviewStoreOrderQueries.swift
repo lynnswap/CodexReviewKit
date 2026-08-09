@@ -80,6 +80,12 @@ extension CodexReviewStore {
         }
     }
 
+    package func reviewRun(forReviewChatID chatID: String) -> ReviewRunRecord? {
+        orderedReviewRuns.first { runRecord in
+            runRecord.matchesReviewChatID(chatID)
+        }
+    }
+
     package func cancellableReviewRun(forChatID chatID: String) -> ReviewRunRecord? {
         orderedReviewRuns.first { runRecord in
             guard isCancellableReviewRun(runRecord) else {
@@ -92,6 +98,10 @@ extension CodexReviewStore {
 }
 
 private extension ReviewRunRecord {
+    func matchesReviewChatID(_ chatID: String) -> Bool {
+        core.attempt?.threadIdentity.activeTurnThreadID.rawValue == chatID
+    }
+
     func matchesChatID(_ chatID: String) -> Bool {
         guard let identity = core.attempt?.threadIdentity else {
             return false

@@ -279,7 +279,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     static var defaultCodexSidebarDescriptor: CodexFetchDescriptor<CodexChat> {
         CodexFetchDescriptor<CodexChat>(
             predicate: #Predicate<CodexChat> { $0.isArchived == false },
-            sortBy: [CodexSortDescriptor(\.recencyAt, order: .reverse)]
+            sortBy: [CodexSortDescriptor(\.recencyAt, order: .reverse)],
+            fetchLimit: 25
         )
     }
 
@@ -1330,7 +1331,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             else {
                 return false
             }
-            cellView.configure(with: chat)
+            cellView.configure(with: chat, store: store)
             return true
         case .section:
             guard let cellView = cellView as? ReviewMonitorWorkspaceGroupCellView else {
@@ -2218,6 +2219,7 @@ private final class ReviewMonitorReviewChatTableRowView: NSTableRowView {
 private final class ReviewMonitorReviewChatCellView: NSTableCellView {
     private var hostingView: NSHostingView<ReviewMonitorChatRowView>?
     private weak var boundChat: CodexChat?
+    private weak var boundStore: CodexReviewStore?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -2229,30 +2231,33 @@ private final class ReviewMonitorReviewChatCellView: NSTableCellView {
         nil
     }
 
-    func configure(with chat: CodexChat) {
-        guard boundChat !== chat else {
+    func configure(with chat: CodexChat, store: CodexReviewStore) {
+        guard boundChat !== chat || boundStore !== store else {
             return
         }
         objectValue = chat
         boundChat = chat
-        render(chat)
+        boundStore = store
+        render(chat, store: store)
     }
 
     private func configureHierarchy() {
         translatesAutoresizingMaskIntoConstraints = false
     }
 
-    private func render(_ chat: CodexChat) {
-        toolTip = chat.workspace?.url.path ?? chat.preview ?? chat.title
+    private func render(_ chat: CodexChat, store: CodexReviewStore) {
         if let hostingView {
             if hostingView.rootView.chat !== chat {
                 hostingView.rootView.chat = chat
+            }
+            if hostingView.rootView.store !== store {
+                hostingView.rootView.store = store
             }
             return
         }
 
         let hostingView = NSHostingView(
-            rootView: ReviewMonitorChatRowView(chat: chat)
+            rootView: ReviewMonitorChatRowView(chat: chat, store: store)
         )
         hostingView.sizingOptions = []
         hostingView.translatesAutoresizingMaskIntoConstraints = false
@@ -2281,22 +2286,24 @@ private final class ReviewMonitorReviewChatCellView: NSTableCellView {
 #if DEBUG
     @MainActor
     func makeReviewMonitorReviewChatCellViewForTesting(
-        chat: CodexChat
+        chat: CodexChat,
+        store: CodexReviewStore
     ) -> NSTableCellView {
         let cellView = ReviewMonitorReviewChatCellView()
-        cellView.configure(with: chat)
+        cellView.configure(with: chat, store: store)
         return cellView
     }
 
     @MainActor
     func configureReviewMonitorReviewChatCellViewForTesting(
         _ cellView: NSTableCellView,
-        chat: CodexChat
+        chat: CodexChat,
+        store: CodexReviewStore
     ) {
         guard let cellView = cellView as? ReviewMonitorReviewChatCellView else {
             fatalError("Expected ReviewMonitorReviewChatCellView.")
         }
-        cellView.configure(with: chat)
+        cellView.configure(with: chat, store: store)
     }
 #endif
 
