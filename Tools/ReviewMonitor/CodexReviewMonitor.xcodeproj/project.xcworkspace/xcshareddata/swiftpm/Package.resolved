@@ -2,14 +2,6 @@
   "originHash" : "c6b46fe80620b9641d4c656454fd12dacf29e40336aaa6becfca5411a05280d3",
   "pins" : [
     {
-      "identity" : "codexkit",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/lynnswap/CodexKit.git",
-      "state" : {
-        "revision" : "ab025ed970d30c7679913951bdb9fff20a9b77b1"
-      }
-    },
-    {
       "identity" : "eventsource",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/mattt/eventsource.git",
