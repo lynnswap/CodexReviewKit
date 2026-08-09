@@ -1,4 +1,5 @@
 import SwiftUI
+import Observation
 import CodexReviewKit
 
 struct ReviewMonitorAuthenticationSubmission {
@@ -41,6 +42,109 @@ private struct ReviewMonitorAPIKeyValidationFailure: LocalizedError {
     }
 }
 
+@MainActor
+@Observable
+final class ReviewMonitorSignInSession {
+    enum Screen: Equatable {
+        case options
+        case apiKey
+    }
+
+    private struct Operation {
+        let id: UUID
+        let task: Task<Void, Never>
+    }
+
+    private(set) var screen = Screen.options
+    var failureMessage: String?
+
+    @ObservationIgnored
+    private var operation: Operation?
+
+    isolated deinit {
+        operation?.task.cancel()
+    }
+
+    func showAPIKeySignIn() {
+        screen = .apiKey
+    }
+
+    func present(_ error: any Error) {
+        failureMessage = error.localizedDescription
+    }
+
+    func authenticate(
+        _ submission: ReviewMonitorAuthenticationSubmission,
+        store: CodexReviewStore
+    ) {
+        precondition(operation == nil, "A sign-in session can perform one operation at a time.")
+        failureMessage = nil
+
+        let operationID = UUID()
+        let task = Task { @MainActor [weak self] in
+            let failureMessage: String?
+            do {
+                try await store.performPrimaryAuthenticationAction(using: submission.method)
+                failureMessage = nil
+            } catch is CancellationError {
+                failureMessage = nil
+            } catch {
+                failureMessage = error.localizedDescription
+            }
+            self?.finish(operationID, failureMessage: failureMessage)
+        }
+        operation = Operation(id: operationID, task: task)
+    }
+
+    func cancelAuthentication(
+        store: CodexReviewStore,
+        returnsToOptions: Bool = false
+    ) {
+        let authentication = operation
+        operation = nil
+        authentication?.task.cancel()
+        failureMessage = nil
+
+        let operationID = UUID()
+        let task = Task { @MainActor [weak self] in
+            await store.cancelAuthentication()
+            await authentication?.task.value
+            guard Task.isCancelled == false else {
+                self?.finish(operationID, failureMessage: nil)
+                return
+            }
+            if returnsToOptions {
+                self?.screen = .options
+            }
+            self?.finish(operationID, failureMessage: nil)
+        }
+        operation = Operation(id: operationID, task: task)
+    }
+
+    func close(store: CodexReviewStore) {
+        screen = .options
+        cancelAuthentication(store: store)
+    }
+
+    private func finish(_ operationID: UUID, failureMessage: String?) {
+        guard operation?.id == operationID else {
+            return
+        }
+        operation = nil
+        if let failureMessage {
+            self.failureMessage = failureMessage
+        }
+    }
+
+#if DEBUG
+    func waitUntilIdleForTesting() async {
+        while let operation {
+            await operation.task.value
+        }
+    }
+#endif
+}
+
 struct SignInView: View {
     struct ControlState: Equatable {
         let providerInputsAreDisabled: Bool
@@ -68,20 +172,43 @@ struct SignInView: View {
     }
 
     let store: CodexReviewStore
-    @State private var showsAPIKeySignIn = false
-    @State private var authenticationFailureMessage: String?
+    @State private var session = ReviewMonitorSignInSession()
 
     var body: some View {
-        ZStack{
-            if showsAPIKeySignIn {
-                APIKeySignInView(store: store) {
-                    showsAPIKeySignIn = false
-                }
+        ZStack {
+            if session.screen == .apiKey {
+                APIKeySignInView(
+                    store: store,
+                    session: session,
+                    onSubmit: performAuthentication,
+                    onCancel: {
+                        session.cancelAuthentication(
+                            store: store,
+                            returnsToOptions: true
+                        )
+                    }
+                )
             } else {
                 signInOptions
             }
         }
-        .animation(.easeInOut(duration: 0.22), value: showsAPIKeySignIn)
+        .animation(.easeInOut(duration: 0.22), value: session.screen)
+        .onDisappear {
+            session.close(store: store)
+        }
+        .alert(
+            "Authentication Request Failed",
+            isPresented: Binding(
+                get: { session.failureMessage != nil },
+                set: { if $0 == false { session.failureMessage = nil } }
+            )
+        ) {
+            Button("OK") {
+                session.failureMessage = nil
+            }
+        } message: {
+            Text(session.failureMessage ?? "Authentication request failed.")
+        }
     }
 
     private var signInOptions: some View {
@@ -110,7 +237,7 @@ struct SignInView: View {
                 .accessibilityIdentifier(AccessibilityIdentifier.chatGPTButton)
 
                 Button("Sign in another way") {
-                    showsAPIKeySignIn = true
+                    session.showAPIKeySignIn()
                 }
                 .buttonSizing(.flexible)
                 .buttonBorderShape(.capsule)
@@ -119,7 +246,7 @@ struct SignInView: View {
 
                 if controlState.showsCancelAction {
                     Button(role: .cancel) {
-                        cancelAuthentication()
+                        session.cancelAuthentication(store: store)
                     } label: {
                         LabeledContent {
                             ProgressView()
@@ -143,35 +270,10 @@ struct SignInView: View {
             }
         }
         .scenePadding()
-        .alert(
-            "Authentication Request Failed",
-            isPresented: Binding(
-                get: { authenticationFailureMessage != nil },
-                set: { if $0 == false { authenticationFailureMessage = nil } }
-            )
-        ) {
-            Button("OK") {
-                authenticationFailureMessage = nil
-            }
-        } message: {
-            Text(authenticationFailureMessage ?? "Authentication request failed.")
-        }
     }
 
     private func performAuthentication(_ submission: ReviewMonitorAuthenticationSubmission) {
-        Task { @MainActor in
-            do {
-                try await store.performPrimaryAuthenticationAction(using: submission.method)
-            } catch {
-                authenticationFailureMessage = error.localizedDescription
-            }
-        }
-    }
-
-    private func cancelAuthentication() {
-        Task { @MainActor in
-            await store.cancelAuthentication()
-        }
+        session.authenticate(submission, store: store)
     }
 
     private var descriptionText: String? {
@@ -189,9 +291,10 @@ struct SignInView: View {
 
 private struct APIKeySignInView: View {
     let store: CodexReviewStore
+    let session: ReviewMonitorSignInSession
+    let onSubmit: (ReviewMonitorAuthenticationSubmission) -> Void
     let onCancel: () -> Void
     @State private var apiKeyInput = ReviewMonitorAPIKeyInput()
-    @State private var authenticationFailureMessage: String?
 
     var body: some View {
         let controlState = SignInView.ControlState(
@@ -259,19 +362,6 @@ private struct APIKeySignInView: View {
         .onDisappear {
             apiKeyInput.clear()
         }
-        .alert(
-            "Authentication Request Failed",
-            isPresented: Binding(
-                get: { authenticationFailureMessage != nil },
-                set: { if $0 == false { authenticationFailureMessage = nil } }
-            )
-        ) {
-            Button("OK") {
-                authenticationFailureMessage = nil
-            }
-        } message: {
-            Text(authenticationFailureMessage ?? "Authentication request failed.")
-        }
     }
 
     private var apiKeyBinding: Binding<String> {
@@ -284,28 +374,15 @@ private struct APIKeySignInView: View {
     private func submitAPIKey() {
         do {
             let submission = try apiKeyInput.takeSubmission()
-            Task { @MainActor in
-                do {
-                    try await store.performPrimaryAuthenticationAction(using: submission.method)
-                } catch {
-                    authenticationFailureMessage = error.localizedDescription
-                }
-            }
+            onSubmit(submission)
         } catch {
-            authenticationFailureMessage = error.localizedDescription
+            session.present(error)
         }
     }
 
     private func cancel() {
         apiKeyInput.clear()
-        guard store.auth.isAuthenticating else {
-            onCancel()
-            return
-        }
-        Task { @MainActor in
-            await store.cancelAuthentication()
-            onCancel()
-        }
+        onCancel()
     }
 
     private var descriptionText: String? {
@@ -329,6 +406,8 @@ private struct APIKeySignInView: View {
 #Preview("API Key Sign In") {
     APIKeySignInView(
         store: CodexReviewStore.makePreviewStore(),
+        session: ReviewMonitorSignInSession(),
+        onSubmit: { _ in },
         onCancel: {}
     )
 }

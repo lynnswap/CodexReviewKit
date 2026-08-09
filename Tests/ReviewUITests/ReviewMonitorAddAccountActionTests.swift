@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import CodexReviewKit
+import CodexReviewTesting
 @testable import ReviewUI
 
 @Suite("ReviewMonitor add account action")
@@ -139,5 +140,62 @@ struct ReviewMonitorAddAccountActionTests {
             #expect(error.localizedDescription.contains(invalidValue) == false)
             #expect(error.localizedDescription == "Enter a valid OpenAI API key.")
         }
+    }
+
+    @Test func cancellingAPIKeySignInWhileRuntimeStartsPreventsAuthentication() async throws {
+        let startGate = AsyncGate()
+        let backend = BlockingSignInStartBackend(startGate: startGate)
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        let session = ReviewMonitorSignInSession()
+        let apiKey = try CodexReviewAPIKey(validating: "sk-ui-test-secret")
+        store.loadForTesting(serverState: .failed("Runtime failed."), authPhase: .signedOut)
+
+        session.showAPIKeySignIn()
+        session.authenticate(.init(method: .apiKey(apiKey)), store: store)
+        await startGate.waitUntilBlocked()
+        session.cancelAuthentication(store: store, returnsToOptions: true)
+        await startGate.open()
+        await session.waitUntilIdleForTesting()
+
+        #expect(backend.authenticationRequests.isEmpty)
+        #expect(session.screen == .options)
+    }
+
+    @Test func closingSignInSessionRestoresPrimaryOptions() async {
+        let store = CodexReviewStore.makePreviewStore()
+        let session = ReviewMonitorSignInSession()
+        session.showAPIKeySignIn()
+
+        session.close(store: store)
+        await session.waitUntilIdleForTesting()
+
+        #expect(session.screen == .options)
+    }
+}
+
+@MainActor
+private final class BlockingSignInStartBackend: PreviewCodexReviewStoreBackend {
+    let startGate: AsyncGate
+    private(set) var authenticationRequests: [CodexReviewAuthenticationRequest] = []
+
+    init(startGate: AsyncGate) {
+        self.startGate = startGate
+        super.init()
+    }
+
+    override func start(
+        store: CodexReviewStore,
+        forceRestartIfNeeded _: Bool
+    ) async {
+        await startGate.waitIgnoringCancellation()
+        isActive = true
+        store.transitionToRunning(serverURL: nil)
+    }
+
+    override func authenticate(
+        auth _: CodexReviewAuthModel,
+        request: CodexReviewAuthenticationRequest
+    ) async throws {
+        authenticationRequests.append(request)
     }
 }
