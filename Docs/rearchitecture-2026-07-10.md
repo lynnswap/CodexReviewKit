@@ -1,5 +1,13 @@
 # CodexKit / CodexReviewKit / MCP dependency rearchitecture design（2026-07-10）
 
+> [!NOTE]
+> This document is a historical design baseline. Its separate-repository and
+> package-topology decisions are superseded by the approved
+> [CodexKit Integration Design](codexkit-integration.md), which is the only
+> source of truth for the integrated repository/package topology. The evidence
+> and runtime/API decisions recorded here remain historical context unless the
+> newer design explicitly supersedes them.
+
 | 項目 | 内容 |
 |---|---|
 | Status | **Approved — design gate 承認済み（2026-07-10）** |

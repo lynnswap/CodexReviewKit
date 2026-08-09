@@ -45,6 +45,9 @@ jobs:
       - name: Verify TextTransitions public API
         run: scripts/verify-text-transitions-api.sh
 
+      - name: Run integrated product consumer
+        run: swift run --package-path Fixtures/CodexReviewKitProductConsumer
+
   package-build:
     name: Package Test Build (macOS)
     runs-on: macos-26
@@ -82,6 +85,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - shard: CodexAppServerKitTests
+            filter: CodexAppServerKitTests
+            skip: ''
+          - shard: CodexDataKitTests
+            filter: CodexDataKitTests
+            skip: ''
           - shard: CodexReviewKitTests
             filter: CodexReviewKitTests
             skip: ''
@@ -108,7 +117,7 @@ jobs:
             skip: ''
           - shard: remaining
             filter: ''
-            skip: 'CodexReviewKitTests|CodexReviewAppServerTests|CodexReviewMCPServerTests|CodexReviewHostTests|ReviewUITests'
+            skip: 'CodexAppServerKitTests|CodexDataKitTests|CodexReviewKitTests|CodexReviewAppServerTests|CodexReviewMCPServerTests|CodexReviewHostTests|ReviewUITests'
     steps:
       - name: Check out repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
