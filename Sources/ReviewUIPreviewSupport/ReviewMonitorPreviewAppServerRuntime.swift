@@ -675,7 +675,7 @@ private func makePreviewStoredThread(
             name: title,
             preview: preview,
             modelProvider: modelProvider,
-            sourceKind: .appServer,
+            sourceKind: .subAgentReview,
             createdAt: createdAt.previewWholeSecondDate,
             updatedAt: updatedAt.previewWholeSecondDate,
             recencyAt: recencyAt?.previewWholeSecondDate,
@@ -687,7 +687,7 @@ private func makePreviewStoredThread(
         metadata: .init(
             sessionID: "preview-session-\(chatID.rawValue)",
             cliVersion: "codex-preview",
-            source: .appServer
+            source: .subAgentReview
         ),
         runtimeMetadata: .init(
             model: model,

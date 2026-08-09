@@ -17,7 +17,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
         let app = try makeDirectory("App", in: repo)
         let tools = try makeDirectory("Tools", in: repo)
 
-        try await runtime.transport.enqueueThreadList(
+        try await runtime.transport.enqueueDefaultUserVisibleThreadListComposite(
             .init(
                 threads: [
                     .init(
@@ -86,7 +86,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
         let runningThreadID = CodexThreadID(rawValue: "thread-running")
         let idleThreadID = CodexThreadID(rawValue: "thread-idle")
 
-        try await runtime.transport.enqueueThreadList(
+        try await runtime.transport.enqueueDefaultUserVisibleThreadListComposite(
             .init(
                 threads: [
                     .init(
@@ -136,7 +136,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
         let context = CodexModelContainer(appServer: runtime.server).mainContext
         let repo = try makeGitRepository()
 
-        try await runtime.transport.enqueueThreadList(
+        try await runtime.transport.enqueueDefaultUserVisibleThreadListComposite(
             .init(
                 threads: [
                     .init(
@@ -156,22 +156,40 @@ struct ReviewMonitorCodexSidebarResultsTests {
         #expect(results.sections.filtered(by: .running).isEmpty)
     }
 
-    @Test func defaultCodexSidebarDescriptorUsesDedicatedHomeWithoutSourceFiltering() async throws {
+    @Test func defaultCodexSidebarDescriptorUsesDedicatedHomeAndUserVisibleSources() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let context = CodexModelContainer(appServer: runtime.server).mainContext
 
-        try await runtime.transport.enqueueThreadList(.init(threads: []))
+        try await runtime.transport.enqueueDefaultUserVisibleThreadListComposite(.init(threads: []))
 
         let results = makeCodexSidebarFetchedResults(context: context)
         try await results.performFetch()
 
-        let request = try #require(await runtime.transport.recordedRequests(for: .threadList).first)
-        guard case .threadList(let query) = request.request else {
-            Issue.record("Expected a thread-list request.")
+        let requests = await runtime.transport.recordedRequests(for: .threadList)
+        #expect(requests.count == 2)
+        let interactiveRequest = try #require(requests.first)
+        let noninteractiveRequest = try #require(requests.dropFirst().first)
+        guard case .threadList(let interactiveQuery) = interactiveRequest.request,
+            case .threadList(let noninteractiveQuery) = noninteractiveRequest.request
+        else {
+            Issue.record("Expected two thread-list requests.")
             return
         }
-        #expect(query.archived == false)
-        #expect(query.sourceKinds == nil)
+        #expect(interactiveQuery.archived == false)
+        #expect(interactiveQuery.sourceKinds == nil)
+        #expect(interactiveQuery.limit == 25)
+        #expect(noninteractiveQuery.archived == false)
+        #expect(
+            noninteractiveQuery.sourceKinds == [
+                .exec,
+                .appServer,
+                .subAgentReview,
+                .subAgentCompact,
+                .subAgentThreadSpawn,
+                .subAgentOther,
+                .unknown,
+            ])
+        #expect(noninteractiveQuery.limit == 25)
     }
 
     @Test func sidebarIncludesCanonicalWorkspaceChatsWithStableRowIDs() async throws {
@@ -179,7 +197,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
         let context = CodexModelContainer(appServer: runtime.server).mainContext
         let repo = try makeGitRepository()
 
-        try await runtime.transport.enqueueThreadList(
+        try await runtime.transport.enqueueDefaultUserVisibleThreadListComposite(
             .init(
                 threads: [
                     .init(
@@ -230,7 +248,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
         let repo = try makeGitRepository()
         let threadID = CodexThreadID(rawValue: "thread-app")
 
-        try await runtime.transport.enqueueThreadList(
+        try await runtime.transport.enqueueDefaultUserVisibleThreadListComposite(
             .init(
                 threads: [
                     .init(
@@ -276,7 +294,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
         let runningThreadID = CodexThreadID(rawValue: "thread-running")
         let idleThreadID = CodexThreadID(rawValue: "thread-idle")
 
-        try await runtime.transport.enqueueThreadList(
+        try await runtime.transport.enqueueDefaultUserVisibleThreadListComposite(
             .init(
                 threads: [
                     .init(
@@ -311,7 +329,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
         let repo = try makeGitRepository()
         let threadID = CodexThreadID(rawValue: "thread-app")
 
-        try await runtime.transport.enqueueThreadList(
+        try await runtime.transport.enqueueDefaultUserVisibleThreadListComposite(
             .init(
                 threads: [
                     .init(
@@ -364,7 +382,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
         let visibleThreadID = CodexThreadID(rawValue: "thread-app")
         let hiddenRunThreadID = CodexThreadID(rawValue: "run-backed-review-thread")
 
-        try await runtime.transport.enqueueThreadList(
+        try await runtime.transport.enqueueDefaultUserVisibleThreadListComposite(
             .init(
                 threads: [
                     .init(
@@ -422,7 +440,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
         let repo = try makeGitRepository()
         let threadID = CodexThreadID(rawValue: "thread-app")
 
-        try await runtime.transport.enqueueThreadList(.init(threads: []))
+        try await runtime.transport.enqueueDefaultUserVisibleThreadListComposite(.init(threads: []))
 
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running)
@@ -438,7 +456,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
             sidebar.isShowingEmptyStateForTesting
         }
 
-        try await runtime.transport.enqueueThreadList(
+        try await runtime.transport.enqueueDefaultUserVisibleThreadListComposite(
             .init(
                 threads: [
                     .init(
@@ -463,7 +481,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
         let selectedThreadID = CodexThreadID(rawValue: "thread-selected")
         let remainingThreadID = CodexThreadID(rawValue: "thread-remaining")
 
-        try await runtime.transport.enqueueThreadList(
+        try await runtime.transport.enqueueDefaultUserVisibleThreadListComposite(
             .init(
                 threads: [
                     .init(
@@ -514,7 +532,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
                 && transport.renderedStateForTesting.snapshot.isShowingEmptyState == false
         }
 
-        try await runtime.transport.enqueueThreadList(
+        try await runtime.transport.enqueueDefaultUserVisibleThreadListComposite(
             .init(
                 threads: [
                     .init(
@@ -545,7 +563,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
         let context = CodexModelContainer(appServer: runtime.server).mainContext
         let repo = try makeGitRepository()
 
-        try await runtime.transport.enqueueThreadList(
+        try await runtime.transport.enqueueDefaultUserVisibleThreadListComposite(
             .init(
                 threads: [
                     .init(
@@ -581,7 +599,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
         let repo = try makeGitRepository()
         let threadID = CodexThreadID(rawValue: "thread-app")
 
-        try await runtime.transport.enqueueThreadList(
+        try await runtime.transport.enqueueDefaultUserVisibleThreadListComposite(
             .init(
                 threads: [
                     .init(
@@ -663,7 +681,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
         let firstRepo = try makeGitRepository()
         let secondRepo = try makeGitRepository()
 
-        try await runtime.transport.enqueueThreadList(
+        try await runtime.transport.enqueueDefaultUserVisibleThreadListComposite(
             .init(
                 threads: [
                     .init(
@@ -729,7 +747,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
         let firstRepo = try makeGitRepository()
         let secondRepo = try makeGitRepository()
 
-        try await runtime.transport.enqueueThreadList(
+        try await runtime.transport.enqueueDefaultUserVisibleThreadListComposite(
             .init(
                 threads: [
                     .init(
@@ -823,7 +841,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
         let firstRepo = try makeGitRepository()
         let secondRepo = try makeGitRepository()
 
-        try await runtime.transport.enqueueThreadList(
+        try await runtime.transport.enqueueDefaultUserVisibleThreadListComposite(
             .init(
                 threads: [
                     .init(
@@ -902,7 +920,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
         let firstThreadID = CodexThreadID(rawValue: "thread-first")
         let secondThreadID = CodexThreadID(rawValue: "thread-second")
 
-        try await runtime.transport.enqueueThreadList(
+        try await runtime.transport.enqueueDefaultUserVisibleThreadListComposite(
             .init(
                 threads: [
                     .init(
@@ -954,7 +972,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
         let firstThreadID = CodexThreadID(rawValue: "thread-first")
         let secondThreadID = CodexThreadID(rawValue: "thread-second")
 
-        try await runtime.transport.enqueueThreadList(
+        try await runtime.transport.enqueueDefaultUserVisibleThreadListComposite(
             .init(
                 threads: [
                     .init(
@@ -1007,7 +1025,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
         let activeThreadID = CodexThreadID(rawValue: "thread-active")
         let previousThreadID = CodexThreadID(rawValue: "thread-previous")
 
-        try await runtime.transport.enqueueThreadList(
+        try await runtime.transport.enqueueDefaultUserVisibleThreadListComposite(
             .init(
                 threads: [
                     .init(
@@ -1072,7 +1090,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
         let firstRecencyAt = Date(timeIntervalSince1970: 5_000)
         let secondRecencyAt = Date(timeIntervalSince1970: 4_000)
 
-        try await runtime.transport.enqueueThreadList(
+        try await runtime.transport.enqueueDefaultUserVisibleThreadListComposite(
             .init(
                 threads: [
                     .init(
@@ -1173,6 +1191,25 @@ private func makeGitRepository() throws -> URL {
         withIntermediateDirectories: true
     )
     return repo
+}
+
+extension CodexAppServerTestTransport {
+    func enqueueDefaultUserVisibleThreadListComposite(
+        _ noninteractivePage: CodexAppServerTestThreadPage
+    ) throws {
+        // Sidebar fixtures in this file are app-server threads. The default interactive
+        // partition must terminate before CodexDataKit requests the noninteractive sources.
+        try enqueueThreadList(.init(threads: []))
+        try enqueueThreadList(noninteractivePage)
+    }
+
+    func enqueueDefaultUserVisibleThreadListComposite(
+        interactivePage: CodexAppServerTestThreadPage,
+        noninteractivePage: CodexAppServerTestThreadPage = .init(threads: [])
+    ) throws {
+        try enqueueThreadList(interactivePage)
+        try enqueueThreadList(noninteractivePage)
+    }
 }
 
 private extension CodexAppServerTestStoredThread {

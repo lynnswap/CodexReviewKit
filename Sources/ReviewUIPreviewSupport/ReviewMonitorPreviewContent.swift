@@ -150,6 +150,11 @@ public enum ReviewMonitorPreviewContent {
         let chatItems: [PreviewChatLogItemTemplate]
     }
 
+    private struct PreviewContentFixture {
+        let chatLog: ReviewMonitorPreviewChatLogFixture
+        let terminalReviewRun: ReviewRunRecord?
+    }
+
     private enum PreviewReasoningStyle {
         case raw
         case summary
@@ -242,7 +247,8 @@ public enum ReviewMonitorPreviewContent {
     }
 
     private static func makeStore(
-        runtimeLifetime: PreviewRuntimeLifetime?
+        runtimeLifetime: PreviewRuntimeLifetime?,
+        reviewRuns: [ReviewRunRecord] = []
     ) -> CodexReviewStore {
         let store = CodexReviewStore.makePreviewStore(
             seed: .init(initialSettingsSnapshot: makePreviewSettingsSnapshot()),
@@ -253,18 +259,22 @@ public enum ReviewMonitorPreviewContent {
             serverState: .running,
             account: accounts.first,
             persistedAccounts: accounts,
-            serverURL: URL(string: "http://localhost:9417/mcp")
+            serverURL: URL(string: "http://localhost:9417/mcp"),
+            reviewRuns: reviewRuns
         )
         return store
     }
 
     public static func makeContentSource() -> ReviewMonitorPreviewContentSource {
-        let chatLogFixtures = makeChatLogFixtures()
+        let fixtures = makeContentFixtures()
         let lifetime = PreviewRuntimeLifetime(
-            fixtures: chatLogFixtures
+            fixtures: fixtures.map(\.chatLog)
         )
         return ReviewMonitorPreviewContentSource(
-            store: makeStore(runtimeLifetime: lifetime),
+            store: makeStore(
+                runtimeLifetime: lifetime,
+                reviewRuns: fixtures.compactMap(\.terminalReviewRun)
+            ),
             lifetime: lifetime
         )
     }
@@ -722,7 +732,7 @@ public enum ReviewMonitorPreviewContent {
         ]
     }
 
-    private static func makeChatLogFixtures() -> [ReviewMonitorPreviewChatLogFixture] {
+    private static func makeContentFixtures() -> [PreviewContentFixture] {
         let now = Date()
         let workspacePaths = [
             "/path/to/workspace-alpha",
@@ -730,7 +740,7 @@ public enum ReviewMonitorPreviewContent {
             "/path/to/workspace-gamma",
         ]
 
-        var chatLogFixtures: [ReviewMonitorPreviewChatLogFixture] = []
+        var fixtures: [PreviewContentFixture] = []
         for (workspaceIndex, cwd) in workspacePaths.enumerated() {
             let workspaceName = URL(fileURLWithPath: cwd).lastPathComponent
             for (chatIndex, definition) in makeChatDefinitions(for: workspaceName).enumerated() {
@@ -755,14 +765,58 @@ public enum ReviewMonitorPreviewContent {
                     endedAt: definition.endedOffset.map { now.addingTimeInterval($0) },
                     chatItems: chatItems
                 )
-                chatLogFixtures.append(
-                    makeChatLogFixture(
+                fixtures.append(PreviewContentFixture(
+                    chatLog: makeChatLogFixture(
                         for: chatFixture,
                         referenceDate: now
-                    ))
+                    ),
+                    terminalReviewRun: makeTerminalReviewRun(for: chatFixture)
+                ))
             }
         }
-        return chatLogFixtures
+        return fixtures
+    }
+
+    private static func makeTerminalReviewRun(
+        for fixture: PreviewChatFixture
+    ) -> ReviewRunRecord? {
+        let status: ReviewRunState
+        let failure: ReviewBackendFailure?
+        let cancellation: ReviewCancellation?
+        switch fixture.lifecycle {
+        case .queued, .running:
+            return nil
+        case .succeeded:
+            status = .succeeded
+            failure = nil
+            cancellation = nil
+        case .failed:
+            status = .failed
+            failure = .turnFailed(.init(message: fixture.summary, code: .other))
+            cancellation = nil
+        case .cancelled:
+            status = .cancelled
+            failure = nil
+            cancellation = .userInterface(message: fixture.summary)
+        }
+
+        return ReviewRunRecord.makeForTesting(
+            id: "\(fixture.id)-run",
+            sessionID: "preview-session-\(fixture.id)",
+            cwd: fixture.cwd,
+            targetSummary: fixture.targetSummary,
+            model: fixture.model,
+            attemptID: "\(fixture.id)-attempt",
+            threadID: fixture.chatID.rawValue,
+            reviewThreadID: fixture.chatID.rawValue,
+            turnID: fixture.turnID.rawValue,
+            status: status,
+            cancellation: cancellation,
+            startedAt: fixture.startedAt,
+            endedAt: fixture.endedAt,
+            summary: fixture.summary,
+            failure: failure
+        )
     }
 
     private static func makeChatLogFixture(

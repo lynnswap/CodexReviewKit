@@ -95,6 +95,35 @@ extension ReviewUITests {
 
         #expect(sidebar.isShowingEmptyStateForTesting == false)
         #expect(sidebar.sidebarKindForTesting == .chatList)
+        let activeReviewChat = try #require(
+            sidebar.codexSidebarSectionsForTesting
+                .flatMap(\.items)
+                .first { $0.id == "preview-thread-0-0" }
+        )
+        let presentation = ReviewMonitorChatRowPresentation(
+            chat: activeReviewChat,
+            reviewRun: nil
+        )
+        #expect(activeReviewChat.source == .subAgent(.review))
+        #expect(presentation.statusText == "Reviewing")
+        #expect(presentation.symbol == .progress)
+    }
+
+    @Test func previewContentSeedsOnlyTerminalReviewRunPresentations() throws {
+        let store = ReviewMonitorPreviewContent.makeContentSource().store
+
+        #expect(store.orderedReviewRuns.count == 12)
+        #expect(store.reviewRun(forReviewChatID: "preview-thread-0-3")?.presentation.status == .succeeded)
+        #expect(store.reviewRun(forReviewChatID: "preview-thread-0-4")?.presentation.status == .failed)
+        #expect(store.reviewRun(forReviewChatID: "preview-thread-0-5")?.presentation.status == .cancelled)
+        #expect(store.reviewRun(forReviewChatID: "preview-thread-0-6")?.presentation.status == .succeeded)
+        #expect(store.reviewRun(forReviewChatID: "preview-thread-0-0") == nil)
+        #expect(store.reviewRun(forReviewChatID: "preview-thread-0-1") == nil)
+        #expect(store.reviewRun(forReviewChatID: "preview-thread-0-2") == nil)
+        #expect(store.chatCancellationCapability(
+            forChatID: "preview-thread-0-0",
+            isChatActive: true
+        ).action == .directChat)
     }
 
     @Test func previewChatContextMenuCancelInterruptsActiveFakeAppServerChat() async throws {
@@ -228,7 +257,7 @@ extension ReviewUITests {
         let repo = try makeShellTestGitRepository()
         let chatID = CodexThreadID(rawValue: "inactive-chat-to-archive")
 
-        try await runtime.transport.enqueueThreadList(
+        try await runtime.transport.enqueueDefaultUserVisibleThreadListComposite(
             .init(
                 threads: [
                     .init(
@@ -288,7 +317,7 @@ extension ReviewUITests {
         let repo = try makeShellTestGitRepository()
         let chatID = CodexThreadID(rawValue: "active-chat-archive-rejected")
 
-        try await runtime.transport.enqueueThreadList(
+        try await runtime.transport.enqueueDefaultUserVisibleThreadListComposite(
             .init(
                 threads: [
                     .init(
@@ -346,7 +375,7 @@ extension ReviewUITests {
         let repo = try makeShellTestGitRepository()
         let chatID = CodexThreadID(rawValue: "active-chat-archive-approved")
 
-        try await runtime.transport.enqueueThreadList(
+        try await runtime.transport.enqueueDefaultUserVisibleThreadListComposite(
             .init(
                 threads: [
                     .init(
@@ -480,7 +509,7 @@ extension ReviewUITests {
         let chatID = CodexThreadID(rawValue: "active-chat-with-terminal-run")
         let turnID = CodexTurnID(rawValue: "active-turn")
 
-        try await runtime.transport.enqueueThreadList(
+        try await runtime.transport.enqueueDefaultUserVisibleThreadListComposite(
             .init(
                 threads: [
                     .init(
@@ -571,7 +600,7 @@ extension ReviewUITests {
         let chatID = CodexThreadID(rawValue: "active-chat-with-pending-run-cancel")
         let turnID = CodexTurnID(rawValue: "pending-turn")
 
-        try await runtime.transport.enqueueThreadList(
+        try await runtime.transport.enqueueDefaultUserVisibleThreadListComposite(
             .init(
                 threads: [
                     .init(

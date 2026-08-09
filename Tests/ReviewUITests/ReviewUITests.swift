@@ -30,6 +30,8 @@ private extension CodexAppServerTestStoredThread {
         workspace: URL? = nil,
         name: String? = nil,
         preview: String? = nil,
+        source: CodexAppServerTestSessionSource = .appServer,
+        gitInfo: CodexThreadGitInfo? = nil,
         updatedAt: Date = Date(timeIntervalSince1970: 0),
         recencyAt: Date? = nil,
         status: CodexThreadStatus = .idle
@@ -45,7 +47,8 @@ private extension CodexAppServerTestStoredThread {
                 name: name,
                 preview: preview ?? name ?? id.rawValue,
                 modelProvider: "openai",
-                sourceKind: .appServer,
+                sourceKind: source.sourceKind,
+                gitInfo: gitInfo,
                 createdAt: updatedAt,
                 updatedAt: updatedAt,
                 recencyAt: recencyAt ?? updatedAt,
@@ -57,7 +60,8 @@ private extension CodexAppServerTestStoredThread {
             metadata: .init(
                 sessionID: "session-\(id.rawValue)",
                 cliVersion: "codex-cli-test",
-                source: .appServer
+                source: source,
+                gitInfo: gitInfo
             ),
             runtimeMetadata: .init(
                 model: "gpt-5",
@@ -514,6 +518,7 @@ struct ReviewUITests {
     }
 
     @Test func reviewChatCellViewUpdatesNativeOwnerStateWhenConfiguredWithNewChat() async throws {
+        let store = CodexReviewStore.makePreviewStore()
         let placeholderChat = try await reviewChatCellTestChat(
             id: "chat-placeholder",
             title: "Queued review",
@@ -525,17 +530,134 @@ struct ReviewUITests {
             workspaceCWD: "/tmp/loaded"
         )
 
-        let cellView = makeReviewMonitorReviewChatCellViewForTesting(chat: placeholderChat)
+        let cellView = makeReviewMonitorReviewChatCellViewForTesting(chat: placeholderChat, store: store)
         let initialObjectChat = try #require(cellView.objectValue as? CodexChat)
 
         #expect(initialObjectChat.id == placeholderChat.id)
-        #expect(cellView.toolTip == (placeholderChat.workspace?.url.path ?? placeholderChat.preview ?? placeholderChat.title))
 
-        configureReviewMonitorReviewChatCellViewForTesting(cellView, chat: loadedChat)
+        configureReviewMonitorReviewChatCellViewForTesting(cellView, chat: loadedChat, store: store)
 
         let objectChat = try #require(cellView.objectValue as? CodexChat)
         #expect(objectChat.id == loadedChat.id)
-        #expect(cellView.toolTip == (loadedChat.workspace?.url.path ?? loadedChat.preview ?? loadedChat.title))
+    }
+
+    @Test func reviewChatRowPresentationUsesReviewRunTargetAndResult() async throws {
+        let chat = try await reviewChatCellTestChat(
+            id: "reviewer-chat",
+            title: "Review the code changes against the base branch",
+            workspaceCWD: "/tmp/reviewer-chat"
+        )
+        let startedAt = Date(timeIntervalSince1970: 100)
+        let endedAt = Date(timeIntervalSince1970: 200)
+        let reviewRun = ReviewRunRecord.makeForTesting(
+            id: "review-run",
+            targetSummary: "Base branch: main",
+            attemptID: "review-attempt",
+            threadID: "source-chat",
+            reviewThreadID: chat.id.rawValue,
+            turnID: "review-turn",
+            status: .succeeded,
+            startedAt: startedAt,
+            endedAt: endedAt,
+            summary: "Review completed."
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadReviewCancellationStateForTesting(
+            serverState: .running,
+            reviewRuns: [reviewRun]
+        )
+
+        let presentation = ReviewMonitorChatRowPresentation(
+            chat: chat,
+            reviewRun: store.reviewRun(forReviewChatID: chat.id.rawValue)
+        )
+
+        #expect(presentation.title == "Base branch: main")
+        #expect(presentation.statusText == "Review complete")
+        #expect(presentation.timing == .relative(to: endedAt))
+        #expect(presentation.symbol == .succeeded)
+    }
+
+    @Test func reviewChatRowPresentationDoesNotApplyReviewLifecycleToSourceChat() async throws {
+        let sourceChat = try await reviewChatCellTestChat(
+            id: "source-chat",
+            title: "Implement sidebar metadata",
+            workspaceCWD: "/tmp/source-chat"
+        )
+        let reviewRun = ReviewRunRecord.makeForTesting(
+            id: "review-run",
+            targetSummary: "Base branch: main",
+            attemptID: "review-attempt",
+            threadID: sourceChat.id.rawValue,
+            reviewThreadID: "review-chat",
+            turnID: "review-turn",
+            status: .succeeded,
+            startedAt: Date(timeIntervalSince1970: 100),
+            endedAt: Date(timeIntervalSince1970: 200),
+            summary: "Review completed."
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadReviewCancellationStateForTesting(
+            serverState: .running,
+            reviewRuns: [reviewRun]
+        )
+
+        let presentation = ReviewMonitorChatRowPresentation(
+            chat: sourceChat,
+            reviewRun: store.reviewRun(forReviewChatID: sourceChat.id.rawValue)
+        )
+
+        #expect(presentation.title == sourceChat.title)
+        #expect(presentation.statusText == "Codex")
+        #expect(presentation.symbol == .none)
+    }
+
+    @Test func reviewChatRowPresentationKeepsPersistedReviewWithoutLiveRun() async throws {
+        let gitInfo = CodexThreadGitInfo(
+            sha: "1234567890abcdef",
+            branch: "feature/sidebar"
+        )
+        let reviewChat = try await reviewChatCellTestChat(
+            id: "persisted-reviewer-chat",
+            title: "Persisted review",
+            workspaceCWD: "/tmp/persisted-reviewer-chat",
+            source: .subAgentReview,
+            gitInfo: gitInfo
+        )
+        let vscodeChat = try await reviewChatCellTestChat(
+            id: "persisted-vscode-chat",
+            title: "Persisted review",
+            workspaceCWD: "/tmp/persisted-vscode-chat",
+            source: .vscode,
+            gitInfo: gitInfo
+        )
+
+        let reviewPresentation = ReviewMonitorChatRowPresentation(chat: reviewChat, reviewRun: nil)
+        let vscodePresentation = ReviewMonitorChatRowPresentation(chat: vscodeChat, reviewRun: nil)
+
+        #expect(reviewPresentation.title == "feature/sidebar · 12345678")
+        #expect(vscodePresentation.title == reviewPresentation.title)
+        #expect(reviewPresentation.statusText == "Review")
+        #expect(vscodePresentation.statusText == "VS Code")
+        #expect(reviewPresentation.timing == .relative(to: Date(timeIntervalSince1970: 200)))
+        #expect(reviewPresentation.symbol == .none)
+    }
+
+    @Test func reviewChatRowPresentationCanonicalizesKnownCustomSourceLabels() async throws {
+        let atlasChat = try await reviewChatCellTestChat(
+            id: "atlas-chat",
+            title: "Atlas task",
+            workspaceCWD: "/tmp/atlas-chat",
+            source: .custom("atlas")
+        )
+        let chatGPTChat = try await reviewChatCellTestChat(
+            id: "chatgpt-chat",
+            title: "ChatGPT task",
+            workspaceCWD: "/tmp/chatgpt-chat",
+            source: .custom("chatgpt")
+        )
+        #expect(ReviewMonitorChatRowPresentation(chat: atlasChat, reviewRun: nil).statusText == "Atlas")
+        #expect(ReviewMonitorChatRowPresentation(chat: chatGPTChat, reviewRun: nil).statusText == "ChatGPT")
     }
 
     @Test func accountContextMenuPresentationRestoresResponderStateAfterClosing() throws {
@@ -2289,7 +2411,7 @@ struct ReviewUITests {
         let activeThreadID = CodexThreadID(rawValue: "thread-active")
         let recentThreadID = CodexThreadID(rawValue: "thread-recent")
 
-        try await runtime.transport.enqueueThreadList(
+        try await runtime.transport.enqueueDefaultUserVisibleThreadListComposite(
             .init(threads: [
                 .init(
                     id: activeThreadID,
@@ -5844,7 +5966,9 @@ func makeReviewChatFixtureForTesting(
 func reviewChatCellTestChat(
     id: String,
     title: String,
-    workspaceCWD: String
+    workspaceCWD: String,
+    source: CodexAppServerTestSessionSource = .appServer,
+    gitInfo: CodexThreadGitInfo? = nil
 ) async throws -> CodexChat {
     let chatID = CodexThreadID(rawValue: id)
     let workspaceURL = URL(fileURLWithPath: workspaceCWD, isDirectory: true)
@@ -5855,19 +5979,37 @@ func reviewChatCellTestChat(
     )
     let runtime = try await CodexAppServerTestRuntime.start()
     let context = CodexModelContainer(appServer: runtime.server).mainContext
-    try await runtime.transport.enqueueThreadList(
-        .init(
-            threads: [
-                .init(
-                    id: chatID,
-                    workspace: workspaceURL,
-                    name: title,
-                    updatedAt: Date(timeIntervalSince1970: 200),
-                    status: .idle
-                )
-            ]
+    let page = CodexAppServerTestThreadPage(
+        threads: [
+            try .init(
+                id: chatID,
+                workspace: workspaceURL,
+                name: title,
+                source: source,
+                gitInfo: gitInfo,
+                updatedAt: Date(timeIntervalSince1970: 200),
+                status: .idle
+            )
+        ]
+    )
+    if source.filterSourceKind == nil {
+        try await runtime.transport.enqueueDefaultUserVisibleThreadListComposite(
+            interactivePage: page
+        )
+    } else {
+        try await runtime.transport.enqueueThreadList(page)
+    }
+    let results: CodexFetchedResults<CodexChat>
+    if let sourceKind = source.filterSourceKind {
+        let optionalSourceKind: CodexThreadSourceKind? = sourceKind
+        results = context.fetchedResults(for: CodexFetchDescriptor<CodexChat>(
+            predicate: #Predicate<CodexChat> { chat in
+                chat.isArchived == false && chat.sourceKind == optionalSourceKind
+            }
         ))
-    let results = context.fetchedResults(for: CodexFetchDescriptor<CodexChat>())
+    } else {
+        results = context.fetchedResults(for: CodexFetchDescriptor<CodexChat>())
+    }
     try await results.performFetch()
     guard let chat = results.items.first else {
         throw TestFailure("Expected test CodexChat for \(id).")
