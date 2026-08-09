@@ -4,20 +4,10 @@ on:
   push:
     branches:
       - main
-  pull_request:
-    paths:
-      - .github/workflows/documentation.yml
-      - Docs/DocCSite/**
-      - Package.swift
-      - Package.resolved
-      - README.md
-      - Sources/**
-      - scripts/generate-docc-site.sh
-  workflow_dispatch:
 
 concurrency:
   group: documentation-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 
 env:
   DEVELOPER_DIR: /Applications/Xcode_26.6.0.app/Contents/Developer
@@ -45,21 +35,18 @@ jobs:
         run: scripts/verify-ci-xcode.sh
 
       - name: Configure GitHub Pages
-        if: github.event_name == 'push'
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
 
       - name: Build documentation
         run: scripts/generate-docc-site.sh "$RUNNER_TEMP/codexreviewkit-docc" CodexReviewKit
 
       - name: Upload GitHub Pages artifact
-        if: github.event_name == 'push'
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: ${{ runner.temp }}/codexreviewkit-docc
 
   deploy:
     name: Deploy GitHub Pages
-    if: github.event_name == 'push'
     needs: build
     runs-on: ubuntu-24.04
     permissions:
