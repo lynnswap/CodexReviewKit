@@ -331,10 +331,11 @@ let cancellation = try await restored.cancel()
 noteActiveTurnThread(cancellation.threadID)
 ```
 
-`CodexReviewIdentity` is a `Codable` Swift value containing only CodexKit
-identity: source thread, review turn, optional detached review thread, and
-active review thread model when known. It is intended for persisted app-server
-review runs and does not depend on any higher-level review domain model.
+`CodexReviewIdentity` is a `Codable` Swift value containing only app-server
+review identity fields: source thread, review turn, optional detached review
+thread, and active review thread model when known. It is intended for persisted
+app-server review runs and does not depend on any higher-level review domain
+model.
 
 `CodexAppServer` also owns app-server review restart and cleanup lifecycle
 state. A host that needs to interrupt and restart a review can prepare a

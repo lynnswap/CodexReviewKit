@@ -2,7 +2,7 @@
 
 CodexDataKit provides SwiftData-style `@Observable` app-server backed models on top of `CodexAppServerKit`.
 
-Use this package when app or UI code needs workspace group, workspace, and chat models without rendering directly from JSON-RPC payloads.
+Use this product when app or UI code needs workspace group, workspace, and chat models without rendering directly from JSON-RPC payloads.
 
 ## Main Types
 
