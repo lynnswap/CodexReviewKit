@@ -847,7 +847,7 @@ struct AppServerClientTests {
         }
     }
 
-    @Test func ambiguousInterruptFailureRetainsTerminalBarrier() async throws {
+    @Test func ambiguousInterruptFailureRetainsTerminalBarrierAndOriginalError() async throws {
         let terminalGate = CodexAppServerTestGate()
         let interruption = Task<Void, any Error> {
             try await AppServerCodexReviewBackend.interruptAndAwaitTerminal(
@@ -856,6 +856,7 @@ struct AppServerClientTests {
                 },
                 awaitTerminal: {
                     await terminalGate.waitIgnoringCancellation()
+                    throw AppServerClientTestInterruptionError.terminalFailed
                 },
                 terminalMayStillArriveAfterInterruptFailure: { _ in
                     true
@@ -1215,6 +1216,7 @@ private enum AppServerClientTestTimeout: Error {
 
 private enum AppServerClientTestInterruptionError: Error, Equatable {
     case rejected
+    case terminalFailed
 }
 
 private extension ReviewBackendFailure {

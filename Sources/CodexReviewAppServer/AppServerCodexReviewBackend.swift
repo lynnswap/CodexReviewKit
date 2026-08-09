@@ -630,7 +630,9 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
             } catch {
                 let interruptError = error
                 if terminalMayStillArriveAfterInterruptFailure(interruptError) {
-                    try await awaitTerminal()
+                    // The barrier owns lifecycle completion, not error selection:
+                    // the interrupt request failure remains the operation result.
+                    _ = try? await awaitTerminal()
                 }
                 throw interruptError
             }
