@@ -141,7 +141,7 @@ final class AccountRuntimeTransitionCoordinator {
             generation: UInt64,
             phase: RuntimeAuthPhase
         )
-        case loginAdmission(id: UUID)
+        case loginAdmission(id: UUID, cancellationRequested: Bool)
         case primaryLogin(id: UUID)
 
         var id: UUID {
@@ -150,7 +150,7 @@ final class AccountRuntimeTransitionCoordinator {
                  .primaryReconciliation(let id, _),
                  .explicitRuntimeStart(let id, _, _),
                  .runtimeAuthReconciliation(let id, _, _),
-                 .loginAdmission(let id),
+                 .loginAdmission(let id, _),
                  .primaryLogin(let id):
                 return id
             }
@@ -210,20 +210,44 @@ final class AccountRuntimeTransitionCoordinator {
             throw CodexReviewAuthenticationFailure.accountMutationBlockedByAuthentication
         }
         let id = UUID()
-        activeTransition = .loginAdmission(id: id)
+        activeTransition = .loginAdmission(id: id, cancellationRequested: false)
         return .init(id: id)
     }
 
     func canCommitLoginAdmission(_ admission: LoginAdmission) -> Bool {
-        guard case .loginAdmission(let id) = activeTransition,
-              id == admission.id else {
+        guard case .loginAdmission(let id, let cancellationRequested) = activeTransition,
+              id == admission.id,
+              cancellationRequested == false else {
             return false
         }
         return canPublish
     }
 
+    func requestLoginAdmissionCancellation() -> LoginAdmission? {
+        guard case .loginAdmission(let id, cancellationRequested: false) = activeTransition else {
+            return nil
+        }
+        activeTransition = .loginAdmission(id: id, cancellationRequested: true)
+        return .init(id: id)
+    }
+
+    func isLoginAdmissionCancellationRequested(_ admission: LoginAdmission) -> Bool {
+        guard case .loginAdmission(let id, let cancellationRequested) = activeTransition,
+              id == admission.id else {
+            return false
+        }
+        return cancellationRequested
+    }
+
+    func waitForLoginAdmissionCompletion(_ admission: LoginAdmission) async {
+        guard activeTransition?.id == admission.id else {
+            return
+        }
+        await waitForTransitionCompletion()
+    }
+
     func finishLoginAdmission(_ admission: LoginAdmission) {
-        guard case .loginAdmission(let id) = activeTransition,
+        guard case .loginAdmission(let id, _) = activeTransition,
               id == admission.id else {
             preconditionFailure("Only the active login admission can finish.")
         }
@@ -231,7 +255,7 @@ final class AccountRuntimeTransitionCoordinator {
     }
 
     func retainPrimaryLoginAdmission(_ admission: LoginAdmission) {
-        guard case .loginAdmission(let id) = activeTransition,
+        guard case .loginAdmission(let id, cancellationRequested: false) = activeTransition,
               id == admission.id else {
             preconditionFailure("Only the active login admission can retain primary runtime ownership.")
         }
