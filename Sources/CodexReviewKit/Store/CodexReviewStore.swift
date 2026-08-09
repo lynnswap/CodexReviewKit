@@ -240,6 +240,7 @@ public final class CodexReviewStore {
         else {
             return
         }
+        try Task.checkCancellation()
         try await signIn(using: method)
     }
 
