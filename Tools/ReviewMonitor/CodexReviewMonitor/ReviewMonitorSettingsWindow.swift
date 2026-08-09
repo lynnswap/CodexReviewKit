@@ -377,7 +377,7 @@ struct ReviewMonitorRuntimeSettingsForm: View {
             TextField(
                 "Codex executable",
                 text: $state.codexExecutablePath,
-                prompt: Text("Default: env or PATH")
+                prompt: Text("Default: auto-detected")
             )
 
             Button("Restore Defaults") {
