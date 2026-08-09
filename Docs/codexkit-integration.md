@@ -24,8 +24,9 @@ contract consumer for all three products; it is not evidence that every unknown
 external consumer can accept the new platform floor.
 
 The integration changes ownership of distribution, versioning, and CI. It does
-not redesign runtime behavior, public API, access control, data ownership, or
-variant handling.
+not redesign runtime behavior, public API, data ownership, or variant handling.
+Implementation visibility can change only under the collision rule in
+"Access Control" below.
 
 ## Target Graph And Owners
 
@@ -135,13 +136,21 @@ umbrella module or re-export one module through another.
 
 ## Access Control
 
-All `public`, `package`, and `internal` declarations retain the visibility they
-have at the imported CodexKit commit. Ordinarily a topology design inventories
-and minimizes public declarations. This migration deliberately does not shrink
-them because the old repository is already consumable and its complete external
-consumer population is unknown. Combining a repository move with a visibility
-reduction would make failures impossible to attribute to one compatibility
-change.
+Product names, module names, and public API visibility remain unchanged from the
+imported CodexKit commit. The migration deliberately does not shrink that
+surface because the old repository is already consumable and its complete
+external consumer population is unknown. Combining a repository move with a
+public visibility reduction would make failures impossible to attribute to one
+compatibility change.
+
+`package` and `internal` implementation declarations may be reduced or renamed
+only when the single-package integration reveals a same-package collision,
+repo-wide search proves the declaration has zero consumers, and owner tests
+preserve behavior. This permits deleting the unused package-only
+`enqueueAccount(CodexAccount?)` overload instead of annotating unrelated call
+sites to select the public test-fixture overload. It does not permit Review
+targets to begin consuming APIs that were package-only inside CodexKit; the
+repository merge must not weaken the existing target-owner boundary.
 
 `Fixtures/CodexReviewKitProductConsumer` proves that the documented public path
 can import, link, and run all three products without `@testable import`. Any
@@ -164,8 +173,9 @@ CodexKit repository while they plan a migration.
 ## Variation Axes
 
 Repository placement is not a runtime variation axis. The imported source stays
-mechanically identical, so adding a variant continues to use the same owner and
-registration point as before integration.
+behaviorally identical at its public boundary; only the evidence-backed
+package/internal collision cleanup defined above may differ. Adding a variant
+continues to use the same owner and registration point as before integration.
 
 | Axis | Existing absorber | Integration effect |
 | --- | --- | --- |
@@ -234,6 +244,7 @@ or require network/auth credentials.
 | --- | --- | --- |
 | CodexReviewKit can silently drift between a local CodexKit checkout and a reviewed remote revision | One repository commit owns both the generic modules and their consumers; the conditional dependency path is deleted | Root manifest contains no CodexKit dependency or local override; product consumer uses the root package |
 | Switching dependency kind and advancing CodexKit causes `Package.resolved` churn in both SwiftPM and Xcode contexts | Remove the CodexKit pin from both resolved files; remaining dependencies resolve once for the single package graph | Root and workspace resolved files contain no `CodexKit` location/identity |
+| Same-package lookup can expose dead package-only overloads that were isolated by the old package boundary | Delete or rename only the colliding declaration after repo-wide zero-use evidence; do not annotate consumer call sites or let Review targets adopt old package-only APIs | Zero-use search plus owner and full-package tests |
 | CodexKit suites would otherwise land accidentally in the large `remaining` CI shard | Give `CodexAppServerKitTests` and `CodexDataKitTests` dedicated matrix entries and exclusions; run the external consumer in the API-contract job | Workflow structure check plus explicit shard/skip assertions |
 | Archiving the old repository too early or destructively could break existing SHA-pinned consumers | Archive only after integration verification and preferably an integrated release; preserve the public repository, source, `Package.swift`, `LICENSE`, commits, tags, and branches | Resolve the old exact SHA from a clean consumer before and after archival |
 | The package platform floor rises from macOS 15.4 to macOS 26 | State the break in installation requirements and keep the archived exact-SHA path available; do not add a compatibility topology | README requirement, macOS 26 external fixture, package/Xcode gates |
