@@ -1,0 +1,61 @@
+name: Documentation
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: documentation-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.6.0.app/Contents/Developer
+  EXPECTED_XCODE_VERSION_LINE: Xcode 26.6
+  EXPECTED_XCODE_BUILD_LINE: Build version 17F113
+
+jobs:
+  build:
+    name: Build DocC
+    runs-on: macos-26
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pages: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify GitHub Actions pinning
+        run: ruby scripts/verify-github-actions-pinning.rb
+
+      - name: Verify pinned Xcode
+        run: scripts/verify-ci-xcode.sh
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      - name: Build documentation
+        run: scripts/generate-docc-site.sh "$RUNNER_TEMP/codexreviewkit-docc" CodexReviewKit
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: ${{ runner.temp }}/codexreviewkit-docc
+
+  deploy:
+    name: Deploy GitHub Pages
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

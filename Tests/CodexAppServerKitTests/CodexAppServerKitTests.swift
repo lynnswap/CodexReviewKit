@@ -2342,10 +2342,18 @@ struct CodexAppServerKitTests {
         var eventIterator = review.events.makeAsyncIterator()
         let initialEvent = try #require(try await eventIterator.next())
         #expect(initialEvent == .snapshot(review.initialTurn))
+        let completedItemsObserved = CodexAppServerTestGate()
         let eventsTask = Task {
             var events = [initialEvent]
+            var completedItemIDs: Set<String> = []
             while let event = try await eventIterator.next() {
                 events.append(event)
+                if case .itemCompleted(let item, _) = event {
+                    completedItemIDs.insert(item.id)
+                    if completedItemIDs == ["command-1", "reasoning-1", "tool-1", "file-1"] {
+                        await completedItemsObserved.open()
+                    }
+                }
             }
             return events
         }
@@ -2410,6 +2418,9 @@ struct CodexAppServerKitTests {
                 )
             )
         )
+        try await withTimeout {
+            try await completedItemsObserved.wait()
+        }
         try await transport.emitServerNotification(
             method: "turn/completed",
             params: TurnCompletedParams(
@@ -6778,9 +6789,59 @@ struct CodexAppServerKitTests {
             router: router,
             connectionLease: harness.lease
         )
-        let eventsTask = Task { try await collect(thread.events) }
-        let logsTask = Task { try await collect(thread.logEntries) }
+        let reasoningEventsObserved = CodexAppServerTestGate()
+        let reasoningLogsObserved = CodexAppServerTestGate()
+        let eventsTask = Task {
+            var events: [CodexThreadEvent] = []
+            var observedSummaryPart = false
+            var observedContentDelta = false
+            for try await event in thread.events {
+                events.append(event)
+                switch event {
+                case .reasoningSummaryPartAdded(let part, let turnID):
+                    observedSummaryPart = observedSummaryPart
+                        || (part.id == "reasoning-1:summary:0" && turnID == "turn-1")
+                case .reasoningDelta(let delta, let turnID):
+                    observedContentDelta = observedContentDelta
+                        || (delta.id == "reasoning-1:content:1"
+                            && delta.delta == "Raw trace"
+                            && turnID == "turn-1")
+                default:
+                    break
+                }
+                if observedSummaryPart && observedContentDelta {
+                    await reasoningEventsObserved.open()
+                }
+            }
+            return events
+        }
+        let logsTask = Task {
+            var logs: [CodexThreadLogEntry] = []
+            var observedSummaryStart = false
+            var observedSummaryDelta = false
+            var observedContentDelta = false
+            for try await log in thread.logEntries {
+                logs.append(log)
+                observedSummaryStart = observedSummaryStart
+                    || (log.id == "reasoning-1:summary:0" && log.phase == .started)
+                observedSummaryDelta = observedSummaryDelta
+                    || (log.reasoningDelta?.id == "reasoning-1:summary:0"
+                        && log.reasoningDelta?.delta == "Checking")
+                observedContentDelta = observedContentDelta
+                    || (log.reasoningDelta?.id == "reasoning-1:content:1"
+                        && log.reasoningDelta?.delta == "Raw trace")
+                if observedSummaryStart && observedSummaryDelta && observedContentDelta {
+                    await reasoningLogsObserved.open()
+                }
+            }
+            return logs
+        }
         let transcriptsTask = Task { try await collect(thread.transcriptUpdates) }
+        defer {
+            eventsTask.cancel()
+            logsTask.cancel()
+            transcriptsTask.cancel()
+        }
         #expect(await eventually {
             router.threadSubscriberCountForTesting(for: "thread-1") == 3
         })
@@ -6825,6 +6886,10 @@ struct CodexAppServerKitTests {
                 delta: "Raw trace"
             )
         )
+        try await withTimeout {
+            try await reasoningEventsObserved.wait()
+            try await reasoningLogsObserved.wait()
+        }
         try await transport.emitServerNotification(
             method: "item/completed",
             params: ThreadItemParams(

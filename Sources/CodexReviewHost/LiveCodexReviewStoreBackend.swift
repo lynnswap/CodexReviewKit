@@ -41,6 +41,7 @@ package typealias CodexReviewMCPHTTPServerBindChecker = @MainActor @Sendable (
 ) async throws -> Void
 
 package typealias CodexReviewAuthenticationMutationDidBegin = @Sendable () async -> Void
+package typealias CodexReviewAuthenticationOwnershipWillRelease = @MainActor @Sendable () async -> Void
 package typealias CodexReviewAuthenticationCancellationDidRequest = @Sendable () async -> Void
 package typealias CodexReviewAuthenticationProductCommitDidApply = @Sendable () async -> Void
 package typealias CodexReviewAuthenticationOperationDidBind = @Sendable () async -> Void
@@ -93,6 +94,7 @@ public extension CodexReviewStore {
         appServer: CodexAppServer,
         appServerLifecycleHandler: CodexReviewAppServerLifecycleHandler? = nil,
         authenticationMutationDidBegin: CodexReviewAuthenticationMutationDidBegin? = nil,
+        authenticationOwnershipWillRelease: CodexReviewAuthenticationOwnershipWillRelease? = nil,
         authenticationCancellationDidRequest: CodexReviewAuthenticationCancellationDidRequest? = nil,
         authenticationProductCommitDidApply: CodexReviewAuthenticationProductCommitDidApply? = nil,
         authenticationOperationDidBind: CodexReviewAuthenticationOperationDidBind? = nil,
@@ -113,6 +115,7 @@ public extension CodexReviewStore {
             networkRecoveryPolicy: networkRecoveryPolicy,
             appServerLifecycleHandler: appServerLifecycleHandler,
             authenticationMutationDidBegin: authenticationMutationDidBegin,
+            authenticationOwnershipWillRelease: authenticationOwnershipWillRelease,
             authenticationCancellationDidRequest: authenticationCancellationDidRequest,
             authenticationProductCommitDidApply: authenticationProductCommitDidApply,
             authenticationOperationDidBind: authenticationOperationDidBind,
@@ -141,6 +144,7 @@ public extension CodexReviewStore {
         networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
         appServerLifecycleHandler: CodexReviewAppServerLifecycleHandler? = nil,
         authenticationMutationDidBegin: CodexReviewAuthenticationMutationDidBegin? = nil,
+        authenticationOwnershipWillRelease: CodexReviewAuthenticationOwnershipWillRelease? = nil,
         authenticationCancellationDidRequest: CodexReviewAuthenticationCancellationDidRequest? = nil,
         authenticationProductCommitDidApply: CodexReviewAuthenticationProductCommitDidApply? = nil,
         authenticationOperationDidBind: CodexReviewAuthenticationOperationDidBind? = nil,
@@ -162,6 +166,7 @@ public extension CodexReviewStore {
                 mcpHTTPServerBindChecker: mcpHTTPServerBindChecker,
                 appServerLifecycleHandler: appServerLifecycleHandler,
                 authenticationMutationDidBegin: authenticationMutationDidBegin,
+                authenticationOwnershipWillRelease: authenticationOwnershipWillRelease,
                 authenticationCancellationDidRequest: authenticationCancellationDidRequest,
                 authenticationProductCommitDidApply: authenticationProductCommitDidApply,
                 authenticationOperationDidBind: authenticationOperationDidBind,
@@ -220,6 +225,21 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             }
             return false
         }
+
+        var publishesAuthenticationTerminalPhase: Bool {
+            guard case .published(let owner) = self else {
+                return false
+            }
+            if case .primary = owner {
+                return false
+            }
+            return true
+        }
+    }
+
+    private struct LoginSessionResolution {
+        let terminal: LoginSessionTerminal
+        let terminalPhase: CodexReviewAuthModel.Phase?
     }
 
     private enum RuntimeAuthReconciliationCause {
@@ -308,6 +328,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     private let mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker
     private let appServerRuntimeFactory: AppServerRuntimeFactory
     private let appServerCloser: CodexReviewAppServerCloser
+    private let authenticationOwnershipWillRelease: CodexReviewAuthenticationOwnershipWillRelease?
     private let authenticationOperationDidBind: CodexReviewAuthenticationOperationDidBind?
     private let finalRuntimeRetirementDidClaim: CodexReviewFinalRuntimeRetirementDidClaim?
     private let reconciliationDebtDidClear: CodexReviewReconciliationDebtDidClear?
@@ -359,6 +380,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
         appServerLifecycleHandler: CodexReviewAppServerLifecycleHandler? = nil,
         authenticationMutationDidBegin: CodexReviewAuthenticationMutationDidBegin? = nil,
+        authenticationOwnershipWillRelease: CodexReviewAuthenticationOwnershipWillRelease? = nil,
         authenticationCancellationDidRequest: CodexReviewAuthenticationCancellationDidRequest? = nil,
         authenticationProductCommitDidApply: CodexReviewAuthenticationProductCommitDidApply? = nil,
         authenticationOperationDidBind: CodexReviewAuthenticationOperationDidBind? = nil,
@@ -397,6 +419,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         self.mcpHTTPServerBindChecker = mcpHTTPServerBindChecker ?? Self.defaultMCPHTTPServerBindChecker
         self.appServerLifecycleHandler = appServerLifecycleHandler
         self.appServerCloser = appServerCloser
+        self.authenticationOwnershipWillRelease = authenticationOwnershipWillRelease
         self.authenticationOperationDidBind = authenticationOperationDidBind
         self.finalRuntimeRetirementDidClaim = finalRuntimeRetirementDidClaim
         self.reconciliationDebtDidClear = reconciliationDebtDidClear
@@ -705,7 +728,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         logger.info("Starting review runtime; forceRestartIfNeeded=\(forceRestartIfNeeded, privacy: .public)")
         if let registryLoadFailure {
             if shouldPublishRuntimeState(mode: mode) {
-                store.auth.updatePhase(.failed(registryLoadFailure))
+                if mode.publishesAuthenticationTerminalPhase {
+                    store.auth.updatePhase(.failed(registryLoadFailure))
+                }
                 store.transitionToFailed(registryLoadFailure.localizedDescription)
             }
             return false
@@ -873,7 +898,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 if shouldPublishRuntimeState(mode: mode),
                    let reconciledAccountSnapshot = authResolution.persisted {
                     applyAccountRegistrySnapshot(reconciledAccountSnapshot, to: store.auth)
-                    store.auth.updatePhase(.signedOut)
+                    if mode.publishesAuthenticationTerminalPhase {
+                        store.auth.updatePhase(.signedOut)
+                    }
                 }
                 store.transitionToRunning(serverURL: serverURL)
                 await session.mcpHTTPServer?.activate()
@@ -1225,9 +1252,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         await accountRuntimeTransitionCoordinator.performStoppedPrimaryReconciliation {
             [weak self, weak store] reservation in
             guard let self, let store else {
-                return
+                return nil
             }
-            await self.performPrimaryAuthenticationReconciliation(
+            return await self.performPrimaryAuthenticationReconciliation(
                 handoff,
                 reservation: reservation,
                 auth: store.auth,
@@ -2283,51 +2310,58 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         observation: LoginRootObservation,
         auth: CodexReviewAuthModel
     ) async -> LoginSessionTerminal {
-        let terminal: LoginSessionTerminal
+        let resolution: LoginSessionResolution
         switch observation {
         case .chatGPTOutcome(let outcome):
-            terminal = await finishLoginOutcome(
+            resolution = await finishLoginOutcome(
                 outcome,
                 session: session,
                 reason: reason,
                 auth: auth
             )
         case .apiKeySucceeded:
-            terminal = await finishSuccessfulLogin(session: session, auth: auth)
+            resolution = await finishSuccessfulLogin(session: session, auth: auth)
         case .apiKeyOutcomeUnknown:
             guard session.provider == .apiKey else {
                 preconditionFailure("Only an API-key login can report an unknown immediate authentication outcome.")
             }
             if case .signIn = session.purpose {
-                terminal = .primaryRuntimeReconciliation(
-                    session.takePrimaryAuthenticationReconciliationHandoff(
-                        cause: .apiKeyOutcomeUnknown(
-                            previousActiveAccountKey: session.previousActiveAccountKey
+                resolution = .init(
+                    terminal: .primaryRuntimeReconciliation(
+                        session.takePrimaryAuthenticationReconciliationHandoff(
+                            cause: .apiKeyOutcomeUnknown(
+                                previousActiveAccountKey: session.previousActiveAccountKey
+                            )
                         )
-                    )
+                    ),
+                    terminalPhase: nil
                 )
             } else {
                 let failure = CodexReviewAuthenticationFailure.login(
                     message: "The isolated API-key authentication outcome could not be confirmed."
                 )
-                auth.updatePhase(.failed(failure))
-                terminal = .failed(failure)
+                resolution = .init(
+                    terminal: .failed(failure),
+                    terminalPhase: .failed(failure)
+                )
             }
         case .cancelled:
-            terminal = finishCancelledLoginOutcome(reason: reason, auth: auth)
+            resolution = finishCancelledLoginOutcome(reason: reason)
         case .failure(let failure):
-            auth.updatePhase(.failed(failure))
-            terminal = .failed(failure)
+            resolution = .init(
+                terminal: .failed(failure),
+                terminalPhase: .failed(failure)
+            )
         case .waiterCancelled(let message):
-            terminal = finishCancelledLoginWaiter(
+            resolution = finishCancelledLoginWaiter(
                 session: session,
                 reason: reason,
-                message: message,
-                auth: auth
+                message: message
             )
         }
 
         await closeLoginRuntimeIfNeeded(session)
+        let terminal = resolution.terminal
         if case .primaryRuntimeReconciliation(let handoff) = terminal {
             let requiresRuntimeStopHandoff: Bool = switch reason {
             case .runtimeFailure, .storeStop:
@@ -2348,9 +2382,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 ) {
                     [weak self, weak auth] reservation in
                     guard let self, let auth else {
-                        return
+                        return nil
                     }
-                    await self.performPrimaryAuthenticationReconciliation(
+                    return await self.performPrimaryAuthenticationReconciliation(
                         handoff,
                         reservation: reservation,
                         auth: auth,
@@ -2370,9 +2404,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 }
             }
         } else {
+            await authenticationOwnershipWillRelease?()
             await releaseLoginMutationIfNeeded(session)
             clearLoginSessionIfCurrent(session)
             finishPrimaryLoginAdmissionIfCurrent(session)
+            publishAuthenticationTerminalPhase(resolution.terminalPhase, to: auth)
             await reconcilePendingRuntimeAuthInvalidation(auth: auth)
             if case .succeeded = terminal,
                case .signIn = session.purpose {
@@ -2466,7 +2502,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         session: LoginSession,
         reason terminationReason: LoginTerminationReason,
         auth: CodexReviewAuthModel
-    ) async -> LoginSessionTerminal {
+    ) async -> LoginSessionResolution {
         precondition(session.provider == .chatGPT)
         switch outcome {
         case .succeeded:
@@ -2475,40 +2511,44 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             let failure = CodexReviewAuthenticationFailure.login(
                 message: message ?? "Authentication failed."
             )
-            auth.updatePhase(.failed(failure))
-            return .failed(failure)
-        case .cancelled:
-            return finishCancelledLoginOutcome(
-                reason: terminationReason,
-                auth: auth
+            return .init(
+                terminal: .failed(failure),
+                terminalPhase: .failed(failure)
             )
+        case .cancelled:
+            return finishCancelledLoginOutcome(reason: terminationReason)
         case .authenticationCommittedNeedsConnectionReconciliation(let reconciliationReason):
             if case .cancelOutcomeUnknown = reconciliationReason {
                 guard case .signIn = session.purpose else {
-                    return finishCancelledLoginOutcome(
-                        reason: terminationReason,
-                        auth: auth
-                    )
+                    return finishCancelledLoginOutcome(reason: terminationReason)
                 }
-                return .primaryRuntimeReconciliation(
-                    session.takePrimaryAuthenticationReconciliationHandoff(
-                        cause: .chatGPTCancelOutcomeUnknown(
-                            previousActiveAccountKey: session.previousActiveAccountKey
+                return .init(
+                    terminal: .primaryRuntimeReconciliation(
+                        session.takePrimaryAuthenticationReconciliationHandoff(
+                            cause: .chatGPTCancelOutcomeUnknown(
+                                previousActiveAccountKey: session.previousActiveAccountKey
+                            )
                         )
-                    )
+                    ),
+                    terminalPhase: nil
                 )
             }
             guard case .signIn = session.purpose else {
                 let failure = CodexReviewAuthenticationFailure.protocolViolation(
                     message: "An isolated add-account login cannot hand off primary authentication reconciliation."
                 )
-                auth.updatePhase(.failed(failure))
-                return .failed(failure)
-            }
-            return .primaryRuntimeReconciliation(
-                session.takePrimaryAuthenticationReconciliationHandoff(
-                    cause: .chatGPTCommitted(reconciliationReason)
+                return .init(
+                    terminal: .failed(failure),
+                    terminalPhase: .failed(failure)
                 )
+            }
+            return .init(
+                terminal: .primaryRuntimeReconciliation(
+                    session.takePrimaryAuthenticationReconciliationHandoff(
+                        cause: .chatGPTCommitted(reconciliationReason)
+                    )
+                ),
+                terminalPhase: nil
             )
         }
     }
@@ -2516,13 +2556,15 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     private func finishSuccessfulLogin(
         session: LoginSession,
         auth: CodexReviewAuthModel
-    ) async -> LoginSessionTerminal {
+    ) async -> LoginSessionResolution {
         guard let loginRuntime = await session.runtime() else {
             let failure = CodexReviewAuthenticationFailure.protocolViolation(
                 message: "Authentication completed without a bound login runtime."
             )
-            auth.updatePhase(.failed(failure))
-            return .failed(failure)
+            return .init(
+                terminal: .failed(failure),
+                terminalPhase: .failed(failure)
+            )
         }
         var stagingURLRequiringRemoval: URL?
         var deferredPrimaryExpectation = session.provider.successfulLoginExpectation
@@ -2641,10 +2683,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                     isolatedProductCommitAuthorization: mutationLease
                 )
             }
-            if claimLoginResultPublication(
+            let publishesResult = claimLoginResultPublication(
                 for: session,
                 usesPrimaryRuntime: loginRuntime.usesPrimaryRuntime
-            ) {
+            )
+            if publishesResult {
                 if let primaryObservationPublication {
                     primaryObservationPublication.session.updateAccountObservation(
                         primaryObservationPublication.observation,
@@ -2652,41 +2695,50 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                     )
                 }
                 applyAccountRegistrySnapshot(reconciliation.persisted, to: auth)
-                auth.updatePhase(.signedOut)
             }
             if let stagingURLRequiringRemoval {
                 await accountRegistry.finishTemporaryCodexHome(stagingURLRequiringRemoval)
             }
-            return .succeeded
+            return .init(
+                terminal: .succeeded,
+                terminalPhase: publishesResult ? .signedOut : nil
+            )
         } catch {
             if let stagingURLRequiringRemoval {
                 await accountRegistry.finishTemporaryCodexHome(stagingURLRequiringRemoval)
             }
             if error is IsolatedLoginProductCommitCancelled {
-                auth.updatePhase(.signedOut)
-                return .cancelled
+                return .init(
+                    terminal: .cancelled,
+                    terminalPhase: .signedOut
+                )
             }
             if let productCommitFailure = error as? IsolatedLoginProductCommitFailure {
-                auth.updatePhase(.failed(productCommitFailure.failure))
-                return .failed(productCommitFailure.failure)
+                return .init(
+                    terminal: .failed(productCommitFailure.failure),
+                    terminalPhase: .failed(productCommitFailure.failure)
+                )
             }
             if loginRuntime.usesPrimaryRuntime {
                 return await finishPrimaryLoginWithDeferredRegistryReconciliation(
                     session: session,
                     expectedAccount: deferredPrimaryExpectation,
-                    underlyingError: error,
-                    auth: auth
+                    underlyingError: error
                 )
             }
             let failure = (error as? CodexReviewAuthenticationFailure)
                 ?? CodexReviewAuthenticationFailure.login(message: error.localizedDescription)
             switch await session.claimPreCommitFailure() {
             case .cancel:
-                auth.updatePhase(.signedOut)
-                return .cancelled
+                return .init(
+                    terminal: .cancelled,
+                    terminalPhase: .signedOut
+                )
             case .fail:
-                auth.updatePhase(.failed(failure))
-                return .failed(failure)
+                return .init(
+                    terminal: .failed(failure),
+                    terminalPhase: .failed(failure)
+                )
             }
         }
     }
@@ -2725,9 +2777,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     private func finishPrimaryLoginWithDeferredRegistryReconciliation(
         session: LoginSession,
         expectedAccount: ExpectedRuntimeAccount,
-        underlyingError: any Error,
-        auth: CodexReviewAuthModel
-    ) async -> LoginSessionTerminal {
+        underlyingError: any Error
+    ) async -> LoginSessionResolution {
         let message = "Authentication succeeded, but account registry reconciliation remains pending: "
             + underlyingError.localizedDescription
         do {
@@ -2740,12 +2791,15 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 "Committed primary authentication must durably record reconciliation debt: \(error.localizedDescription)"
             )
         }
-        if commitPrimaryLoginReconciliationFailure(for: session) {
-            auth.updatePhase(.failed(.accountCommit(message: message)))
+        let publishesFailure = commitPrimaryLoginReconciliationFailure(for: session)
+        if publishesFailure {
             attachedStore?.transitionToFailed(message)
         }
         logger.error("\(message, privacy: .public)")
-        return .committedNeedsRuntimeReconciliation(message: message)
+        return .init(
+            terminal: .committedNeedsRuntimeReconciliation(message: message),
+            terminalPhase: publishesFailure ? .failed(.accountCommit(message: message)) : nil
+        )
     }
 
     private func commitPrimaryLoginReconciliationFailure(
@@ -2761,55 +2815,65 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     private func finishCancelledLoginOutcome(
-        reason: LoginTerminationReason,
-        auth: CodexReviewAuthModel
-    ) -> LoginSessionTerminal {
+        reason: LoginTerminationReason
+    ) -> LoginSessionResolution {
         switch reason {
         case .urlOpenFailure(let failure), .runtimeFailure(let failure):
-            auth.updatePhase(.failed(failure))
-            return .failed(failure)
+            return .init(
+                terminal: .failed(failure),
+                terminalPhase: .failed(failure)
+            )
         case .storeStop:
-            auth.updatePhase(.signedOut)
-            return .stopped
+            return .init(
+                terminal: .stopped,
+                terminalPhase: .signedOut
+            )
         case .rootOutcome, .explicitCancellation:
-            auth.updatePhase(.signedOut)
-            return .cancelled
+            return .init(
+                terminal: .cancelled,
+                terminalPhase: .signedOut
+            )
         }
     }
 
     private func finishCancelledLoginWaiter(
         session _: LoginSession,
         reason: LoginTerminationReason,
-        message: String?,
-        auth: CodexReviewAuthModel
-    ) -> LoginSessionTerminal {
+        message: String?
+    ) -> LoginSessionResolution {
         finishLoginWaiterFailure(
             reason: reason,
-            message: message ?? "Authentication cancellation failed.",
-            auth: auth
+            message: message ?? "Authentication cancellation failed."
         )
     }
 
     private func finishLoginWaiterFailure(
         reason: LoginTerminationReason,
-        message: String,
-        auth: CodexReviewAuthModel
-    ) -> LoginSessionTerminal {
+        message: String
+    ) -> LoginSessionResolution {
         switch reason {
         case .rootOutcome:
             let failure = CodexReviewAuthenticationFailure.login(message: message)
-            auth.updatePhase(.failed(failure))
-            return .failed(failure)
+            return .init(
+                terminal: .failed(failure),
+                terminalPhase: .failed(failure)
+            )
         case .explicitCancellation:
             let failure = CodexReviewAuthenticationFailure.runtime(message: message)
-            auth.updatePhase(.failed(failure))
-            return .failed(failure)
+            return .init(
+                terminal: .failed(failure),
+                terminalPhase: .failed(failure)
+            )
         case .urlOpenFailure(let failure), .runtimeFailure(let failure):
-            auth.updatePhase(.failed(failure))
-            return .failed(failure)
+            return .init(
+                terminal: .failed(failure),
+                terminalPhase: .failed(failure)
+            )
         case .storeStop:
-            auth.updatePhase(.signedOut)
-            return .stopped
+            return .init(
+                terminal: .stopped,
+                terminalPhase: .signedOut
+            )
         }
     }
 
@@ -2818,8 +2882,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         reservation: AccountRuntimeTransitionCoordinator.PrimaryReconciliationReservation,
         auth: CodexReviewAuthModel,
         oldRuntimeAlreadyStopped: Bool
-    ) async {
+    ) async -> AccountRuntimeTransitionCoordinator.PrimaryReconciliationFinishAction {
         let finalResult: PrimaryAuthenticationReconciliationResult
+        var terminalPhase: CodexReviewAuthModel.Phase?
+        var publishesRuntimeState = false
         let expectedAccount: ExpectedRuntimeAccount = switch handoff.cause {
         case .chatGPTCommitted:
             .anyChatGPT
@@ -2843,11 +2909,13 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             if oldRuntimeAlreadyStopped == false {
                 await stop(store: store, purpose: .loginReconciliationPreservingRuns)
             }
+            publishesRuntimeState = accountRuntimeTransitionCoordinator
+                .primaryPublicationClaim(reservation) == .published
             guard await startRuntime(
                 store: store,
                 forceRestartIfNeeded: true,
                 expectedAccount: expectedAccount,
-                mode: accountRuntimeTransitionCoordinator.primaryPublicationClaim(reservation) == .published
+                mode: publishesRuntimeState
                     ? .published(owner: .primary(reservation))
                     : .quiescentReconciliation,
                 registryAuthorization: handoff.mutationLease,
@@ -2893,6 +2961,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                     message: "Authentication reconciliation produced an invalid account observation."
                 )
             }
+            if publishesRuntimeState {
+                terminalPhase = .signedOut
+            }
         } catch {
             let message = "Authentication was committed, but runtime reconciliation remains pending: \(error.localizedDescription)"
             do {
@@ -2907,23 +2978,39 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             }
             if accountRuntimeTransitionCoordinator.commitPrimaryReconciliationFailure(reservation) {
                 attachedStore?.transitionToFailed(message)
-                auth.updatePhase(.failed(.accountCommit(message: message)))
+                terminalPhase = .failed(.accountCommit(message: message))
             }
             logger.error(
                 "Primary authentication reconciliation deferred after \(String(describing: handoff.cause), privacy: .public): \(message, privacy: .public)"
             )
             finalResult = .committedNeedsRuntimeReconciliation(message: message)
         }
-        if accountRuntimeTransitionCoordinator.isFinalShutdownRequested {
-            auth.updatePhase(.signedOut)
-        }
+        await authenticationOwnershipWillRelease?()
         await accountRegistry.finishMutation(handoff.mutationLease)
-        let didResolve = handoff.finalResult.resolve(finalResult)
-        precondition(
-            didResolve,
-            "A primary authentication reconciliation resolver can complete only once."
-        )
-        clearActivePrimaryAuthenticationReconciliation(handoff)
+        return { @MainActor [self, weak auth] in
+            clearActivePrimaryAuthenticationReconciliation(handoff)
+            if let auth {
+                publishAuthenticationTerminalPhase(terminalPhase, to: auth)
+            }
+            let didResolve = handoff.finalResult.resolve(finalResult)
+            precondition(
+                didResolve,
+                "A primary authentication reconciliation resolver can complete only once."
+            )
+        }
+    }
+
+    private func publishAuthenticationTerminalPhase(
+        _ terminalPhase: CodexReviewAuthModel.Phase?,
+        to auth: CodexReviewAuthModel
+    ) {
+        let publishedTerminalPhase: CodexReviewAuthModel.Phase? =
+            accountRuntimeTransitionCoordinator.isFinalShutdownRequested
+                ? .signedOut
+                : terminalPhase
+        if let publishedTerminalPhase {
+            auth.updatePhase(publishedTerminalPhase)
+        }
     }
 
     private func installActivePrimaryAuthenticationReconciliation(

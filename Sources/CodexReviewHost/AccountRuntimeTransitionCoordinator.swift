@@ -127,6 +127,8 @@ final class AccountRuntimeTransitionCoordinator {
         fileprivate let id: UUID
     }
 
+    typealias PrimaryReconciliationFinishAction = @MainActor @Sendable () -> Void
+
     private enum ActiveTransition {
         enum RuntimeAuthPhase {
             case reading
@@ -171,7 +173,7 @@ final class AccountRuntimeTransitionCoordinator {
         let completion: PrimaryReconciliationCompletion
         let operation: @MainActor @Sendable (
             PrimaryReconciliationReservation
-        ) async -> Void
+        ) async -> PrimaryReconciliationFinishAction?
     }
 
     private var pendingPrimaryReconciliation: PendingPrimaryReconciliation?
@@ -300,7 +302,7 @@ final class AccountRuntimeTransitionCoordinator {
         _ admission: LoginAdmission,
         operation: @escaping @MainActor @Sendable (
             PrimaryReconciliationReservation
-        ) async -> Void
+        ) async -> PrimaryReconciliationFinishAction?
     ) -> PrimaryLoginReconciliationHandoff {
         guard case .primaryLogin(let id) = activeTransition,
               id == admission.id else {
@@ -591,7 +593,7 @@ final class AccountRuntimeTransitionCoordinator {
     func admitPrimaryReconciliation(
         _ operation: @escaping @MainActor @Sendable (
             PrimaryReconciliationReservation
-        ) async -> Void
+        ) async -> PrimaryReconciliationFinishAction?
     ) -> PrimaryReconciliationAdmission {
         if case .account = activeTransition {
             guard pendingPrimaryReconciliation == nil else {
@@ -613,7 +615,7 @@ final class AccountRuntimeTransitionCoordinator {
     func performStoppedPrimaryReconciliation(
         _ operation: @escaping @MainActor @Sendable (
             PrimaryReconciliationReservation
-        ) async -> Void
+        ) async -> PrimaryReconciliationFinishAction?
     ) async {
         let pending = makePendingPrimaryReconciliation(operation)
         if case .account = activeTransition {
@@ -802,7 +804,10 @@ final class AccountRuntimeTransitionCoordinator {
         }
     }
 
-    private func finishTransition(id: UUID) {
+    private func finishTransition(
+        id: UUID,
+        primaryReconciliationFinishAction: PrimaryReconciliationFinishAction? = nil
+    ) {
         guard activeTransition?.id == id else {
             preconditionFailure("Only the active account runtime transition can finish.")
         }
@@ -820,6 +825,7 @@ final class AccountRuntimeTransitionCoordinator {
                 nil
             }
         activeTransition = nil
+        primaryReconciliationFinishAction?()
         primaryReconciliationCompletion?.resolve()
         let waiters = transitionCompletionWaiters
         transitionCompletionWaiters.removeAll(keepingCapacity: false)
@@ -832,7 +838,7 @@ final class AccountRuntimeTransitionCoordinator {
     private func startPrimaryReconciliation(
         _ operation: @escaping @MainActor @Sendable (
             PrimaryReconciliationReservation
-        ) async -> Void
+        ) async -> PrimaryReconciliationFinishAction?
     ) {
         startPrimaryReconciliation(makePendingPrimaryReconciliation(operation))
     }
@@ -840,7 +846,7 @@ final class AccountRuntimeTransitionCoordinator {
     private func makePendingPrimaryReconciliation(
         _ operation: @escaping @MainActor @Sendable (
             PrimaryReconciliationReservation
-        ) async -> Void
+        ) async -> PrimaryReconciliationFinishAction?
     ) -> PendingPrimaryReconciliation {
         let id = UUID()
         return .init(
@@ -860,8 +866,11 @@ final class AccountRuntimeTransitionCoordinator {
             completion: pending.completion
         )
         Task { @MainActor [weak self] in
-            await pending.operation(pending.reservation)
-            self?.finishTransition(id: id)
+            let finishAction = await pending.operation(pending.reservation)
+            self?.finishTransition(
+                id: id,
+                primaryReconciliationFinishAction: finishAction
+            )
         }
     }
 }
