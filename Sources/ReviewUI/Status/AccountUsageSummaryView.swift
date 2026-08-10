@@ -1,7 +1,43 @@
 import SwiftUI
 import CodexReviewKit
 
-struct AccountRateLimitGaugesView: View {
+enum AccountUsageSummaryPresentation: Equatable {
+    case loading
+    case gauges
+    case provider(title: String, systemImage: String)
+
+    @MainActor
+    init(account: CodexReviewAccount?) {
+        guard let account else {
+            self = .loading
+            return
+        }
+        guard account.capabilities.supportsRateLimitRefresh == false else {
+            self = account.rateLimits.isEmpty ? .loading : .gauges
+            return
+        }
+
+        self = switch account.kind {
+        case .chatGPT:
+            .provider(title: "Using ChatGPT", systemImage: "person.crop.circle.fill")
+        case .apiKey:
+            .provider(title: "Using API Key", systemImage: "key.fill")
+        case .amazonBedrock:
+            .provider(title: "Using Amazon Bedrock", systemImage: "cloud.fill")
+        }
+    }
+
+    var showsRateLimitControls: Bool {
+        switch self {
+        case .loading, .gauges:
+            true
+        case .provider:
+            false
+        }
+    }
+}
+
+struct AccountUsageSummaryView: View {
     var account: CodexReviewAccount?
 
     private static let placeholderRateLimits: [CodexReviewAccount.RateLimitWindow] = [
@@ -23,12 +59,10 @@ struct AccountRateLimitGaugesView: View {
         rateLimits.isEmpty ? Self.placeholderRateLimits : rateLimits
     }
 
-    private var showsRedactedRateLimits: Bool {
-        rateLimits.isEmpty
-    }
-
     var body: some View {
-        Group {
+        let presentation = AccountUsageSummaryPresentation(account: account)
+        switch presentation {
+        case .loading, .gauges:
             VStack(spacing:0) {
                 ForEach(displayedRateLimits) { window in
                     RateLimitWindowGaugeView(window: window)
@@ -37,8 +71,16 @@ struct AccountRateLimitGaugesView: View {
                         }
                 }
             }
-            .redacted(reason: showsRedactedRateLimits ? .placeholder : [])
-            .animation(.easeInOut, value: showsRedactedRateLimits)
+            .redacted(reason: presentation == .loading ? .placeholder : [])
+            .animation(.easeInOut, value: presentation == .loading)
+        case .provider(let title, let systemImage):
+            Label {
+                Text(title)
+                    .lineLimit(1)
+            } icon: {
+                Image(systemName: systemImage)
+            }
+            .foregroundStyle(.secondary)
         }
     }
 }
@@ -95,9 +137,21 @@ extension CodexReviewAccount.RateLimitWindow {
 
 #if DEBUG
 #Preview("Account Rate Limit Gauges") {
-    AccountRateLimitGaugesView(account: makeAccountRateLimitGaugesPreviewAccount())
+    AccountUsageSummaryView(account: makeAccountRateLimitGaugesPreviewAccount())
         .padding()
         .frame(width: 320)
+}
+
+#Preview("API Key Usage") {
+    AccountUsageSummaryView(
+        account: CodexReviewAccount(
+            accountKey: "api-key",
+            email: "API Key",
+            kind: .apiKey
+        )
+    )
+    .padding()
+    .frame(width: 320)
 }
 
 @MainActor

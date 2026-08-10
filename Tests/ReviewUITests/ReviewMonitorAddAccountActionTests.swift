@@ -86,6 +86,61 @@ struct ReviewMonitorAddAccountActionTests {
         #expect(bedrockAccount.reviewMonitorIdentityName == "Amazon Bedrock")
     }
 
+    @Test func usageSummaryDistinguishesLoadingGaugesAndProviderModes() {
+        let loadingAccount = CodexReviewAccount(
+            accountKey: "chatgpt@example.com",
+            email: "chatgpt@example.com",
+            kind: .chatGPT
+        )
+        let gaugesAccount = CodexReviewAccount(
+            accountKey: "gauges@example.com",
+            email: "gauges@example.com",
+            kind: .chatGPT
+        )
+        gaugesAccount.updateRateLimits([
+            (windowDurationMinutes: 300, usedPercent: 25, resetsAt: nil),
+        ])
+        let apiKeyAccount = CodexReviewAccount(
+            accountKey: "api-key",
+            email: "API Key",
+            kind: .apiKey
+        )
+        let bedrockAccount = CodexReviewAccount(
+            accountKey: "bedrock",
+            email: "Amazon Bedrock",
+            kind: .amazonBedrock
+        )
+        let capabilityDrivenAccount = CodexReviewAccount(
+            accountKey: "chatgpt-without-limits",
+            email: "chatgpt-without-limits@example.com",
+            kind: .chatGPT,
+            capabilities: .noCodexRateLimits
+        )
+
+        #expect(AccountUsageSummaryPresentation(account: nil) == .loading)
+        #expect(AccountUsageSummaryPresentation(account: loadingAccount) == .loading)
+        #expect(AccountUsageSummaryPresentation(account: gaugesAccount) == .gauges)
+        #expect(
+            AccountUsageSummaryPresentation(account: apiKeyAccount)
+                == .provider(title: "Using API Key", systemImage: "key.fill")
+        )
+        #expect(
+            AccountUsageSummaryPresentation(account: bedrockAccount)
+                == .provider(title: "Using Amazon Bedrock", systemImage: "cloud.fill")
+        )
+        #expect(
+            AccountUsageSummaryPresentation(account: capabilityDrivenAccount)
+                == .provider(title: "Using ChatGPT", systemImage: "person.crop.circle.fill")
+        )
+        #expect(AccountUsageSummaryPresentation.loading.showsRateLimitControls)
+        #expect(AccountUsageSummaryPresentation.gauges.showsRateLimitControls)
+        #expect(
+            AccountUsageSummaryPresentation
+                .provider(title: "Using API Key", systemImage: "key.fill")
+                .showsRateLimitControls == false
+        )
+    }
+
     @Test func operationFailureUsesTheAccountActionAlertFlow() async throws {
         let store = CodexReviewStore.makePreviewStore()
 
