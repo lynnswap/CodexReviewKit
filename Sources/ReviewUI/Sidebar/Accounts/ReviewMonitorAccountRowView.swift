@@ -37,7 +37,7 @@ struct ReviewMonitorAccountRowView: View {
                             account: account
                         )
                     } label: {
-                        AccountRateLimitGaugesView(
+                        AccountUsageSummaryView(
                             account: account
                         )
                         .textScale(.secondary)

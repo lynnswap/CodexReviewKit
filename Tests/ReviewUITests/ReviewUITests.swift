@@ -714,6 +714,31 @@ struct ReviewUITests {
         #expect(accountsViewController.hasTemporaryContextMenuForTesting == false)
     }
 
+    @Test func apiKeyAccountContextMenuOmitsRateLimitActions() throws {
+        let apiKeyAccount = CodexReviewAccount(
+            accountKey: "api-key",
+            email: "API Key",
+            kind: .apiKey
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            account: apiKeyAccount,
+            persistedAccounts: [apiKeyAccount]
+        )
+        let displayedAPIKeyAccount = try #require(store.auth.persistedAccounts.first)
+
+        let menu = NSHostingMenu(
+            rootView: AccountContextMenuView(
+                store: store,
+                account: displayedAPIKeyAccount
+            )
+        )
+        let presentedTitles = menu.items.map(\.title).filter { $0.isEmpty == false }
+
+        #expect(presentedTitles == ["API Key", "Switch", "Sign Out"])
+    }
+
     @Test func accountOutlineRowsRejectUserSelection() async throws {
         let activeAccount = CodexReviewAccount(email: "active@example.com", planType: "pro")
         let otherAccount = CodexReviewAccount(email: "other@example.com", planType: "plus")
