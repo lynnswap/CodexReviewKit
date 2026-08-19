@@ -12,10 +12,11 @@ Audit branch: `codex/restore-review-stability`
 
 Recovery branch: `codex/v0-6-2-recovery`
 
-This is a resumable working ledger for the recovery. It is not yet the approved
-Phase 2 design contract. Keep evidence, decisions, checkpoints, and remaining
-work here until the recovery is complete; then either promote the durable
-contract into the architecture documentation or remove this transient ledger.
+This is a resumable working ledger for the recovery. The proposed Phase 2
+contract is [recovery-design-2026-08-20.md](recovery-design-2026-08-20.md).
+Keep evidence, decisions, checkpoints, and remaining work here until the
+recovery is complete; then either retain the durable architecture contract or
+remove this transient ledger.
 
 ## Reported failures
 
@@ -36,6 +37,22 @@ contract into the architecture documentation or remove this transient ledger.
 - Keep current `main` and its persisted user data recoverable while testing the candidate branch.
 - The bottom status accessory overlap is explicitly out of scope at the user's request.
 
+## Tracked issues
+
+- #97: API key authentication.
+- #98: Codex executable discovery.
+- #99: internal reviewer child payload leakage.
+- #100: review duration and restart/replay semantics.
+- #102: durable local review/log history.
+- #103: live log viewport stability.
+- #104: current review terminal contract.
+- #105: current notification/output normalization.
+- #106: cancellation terminal barrier.
+- #107: current ChatGPT login lifecycle.
+- #108: recoverable local-state cutover.
+- #109: current-client MCP compatibility proof.
+- #101: closed as not planned by user decision.
+
 ## Recovery decision and remaining design gate
 
 The selected architecture direction is:
@@ -54,15 +71,15 @@ Before migration implementation, the Phase 2 gate still must include:
 
 ## Evidence checklist
 
-- [ ] Classify the `v0.6.2...main` history by owner and identify regression commits where possible.
+- [x] Classify the `v0.6.2...main` history by owner and identify regression commits where possible.
 - [x] Run the repository package tests at current `main` and v0.6.2.
 - [x] Run the ReviewMonitor app tests at current `main` and v0.6.2.
 - [x] Inspect available crash/error evidence without exposing credentials or review contents.
-- [ ] Reproduce live review completion and terminal presentation.
+- [x] Reproduce live review completion and terminal presentation.
 - [ ] Reproduce selection/rebind, refresh, restart, and persisted replay.
-- [ ] Trace the approximately one-minute disappearance/recovery boundary.
+- [x] Trace the approximately one-minute disappearance/recovery boundary.
 - [x] Verify completed-row duration semantics.
-- [ ] Inventory post-v0.6.2 required features and create child issues.
+- [x] Inventory post-v0.6.2 required features and create child issues.
 - [ ] Complete Codex self-review after integration validation.
 
 ## Checkpoints
@@ -74,13 +91,15 @@ Before migration implementation, the Phase 2 gate still must include:
 | 2026-08-20 | Isolated recovery branch created | `codex/v0-6-2-recovery` starts at `v0.6.2`; validate it before changing architecture. |
 | 2026-08-20 | Regression owners confirmed | #99 tracks internal reviewer-child leakage; #100 tracks duration and restart/replay semantics. |
 | 2026-08-20 | Required features started | #97 tracks API key authentication and #98 tracks executable discovery. |
-| 2026-08-20 | Baseline tests | Both app schemes pass. Current package tests deterministically crash in the API-key prompt UI test; v0.6.2 builds and its focused UI rerun passes after one full-suite UI failure signal. |
+| 2026-08-20 | Baseline tests | Both app schemes pass. Current package tests deterministically crash in the API-key prompt UI test; v0.6.2 package UI tests reproducibly fail the multiline stream/resize bottom-pinning test (#103). |
 | 2026-08-20 | Recovery direction selected | Use v0.6.2 as the base; do not preserve the current generic-chat presentation architecture. |
 | 2026-08-20 | Scope reduced | #101 closed as not planned; bottom accessory overlap is not part of this recovery. |
+| 2026-08-20 | Live proof | Run `8C62A88B-...` confirmed one product row plus one reviewer-child row, initial list omission, human outer output, child JSON, and terminal refresh churn. |
+| 2026-08-20 | Durable owner selected | #102 and the design contract make local SQLite review history the sidebar/detail/MCP source of truth. |
+| 2026-08-20 | Feature inventory complete | #104–#109 isolate current terminal, notification, cancellation, login, cutover, and MCP contracts; unreleased DataKit/SDK architecture is excluded. |
+| 2026-08-20 | Design checkpoint | `f2e9bd5` adds the proposed Phase 2 design; Codex review run `4C58E6B5-...` reported no findings. |
 
 ## Open decisions
 
-- Whether current persisted data can be read directly by v0.6.2 or requires a one-time migration/export.
-- Which post-v0.6.2 MCP contract changes are externally depended upon.
-- Whether API key authentication belongs in the existing v0.6.2 authentication owner or requires a revised owner contract.
-- Whether any current AppServerKit improvements are prerequisites for current Codex app-server compatibility.
+- Design-gate approval for [recovery-design-2026-08-20.md](recovery-design-2026-08-20.md).
+- Live MCP probes will determine whether any unreleased `runId` aliases are required; the published v0.6.2 field names remain the default.
