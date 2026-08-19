@@ -113,7 +113,7 @@ struct CodexReviewMonitorCITests {
         let recorder = WindowControllerFactoryRecorder()
         let settingsWindowController = CountingWindowController()
         let composition = ReviewMonitorAppComposition(
-            makeDependencies: { context in
+            makeDependencies: { context, _ in
                 capturedContext = context
                 return ReviewMonitorAppDependencies(store: expectedStore)
             },
@@ -171,7 +171,7 @@ struct CodexReviewMonitorCITests {
         }
 
         let composition = ReviewMonitorAppComposition(
-            makeDependencies: { _ in
+            makeDependencies: { _, _ in
                 ReviewMonitorAppDependencies(
                     store: ReviewMonitorPreviewContent.makeContentSource().store
                 )
@@ -220,7 +220,7 @@ struct CodexReviewMonitorCITests {
     @Test func appDelegateShowsInjectedSettingsWindowController() {
         let settingsWindowController = CountingWindowController()
         let composition = ReviewMonitorAppComposition(
-            makeDependencies: { _ in
+            makeDependencies: { _, _ in
                 ReviewMonitorAppDependencies(
                     store: ReviewMonitorPreviewContent.makeContentSource().store
                 )
@@ -254,7 +254,7 @@ struct CodexReviewMonitorCITests {
         var didCallLiveStoreFactory = false
         let composition = ReviewMonitorAppComposition.live(
             runtimePreferencesStore: runtimePreferencesStore,
-            makeLiveStore: { _, _ in
+            makeLiveStore: { _, _, _ in
                 didCallLiveStoreFactory = true
                 Issue.record("Preview store creation should not build a live store.")
                 return ReviewMonitorPreviewContent.makeContentSource().store
@@ -267,7 +267,7 @@ struct CodexReviewMonitorCITests {
             arguments: [],
             launchMode: .application
         )
-        let dependencies = composition.makeDependencies(context)
+        let dependencies = composition.makeDependencies(context) { nil }
 
         #expect(dependencies.previewContent != nil)
         #expect(dependencies.previewContent?.store === dependencies.store)
@@ -280,7 +280,7 @@ struct CodexReviewMonitorCITests {
         var didCallLiveStoreFactory = false
         let composition = ReviewMonitorAppComposition.live(
             runtimePreferencesStore: runtimePreferencesStore,
-            makeLiveStore: { _, _ in
+            makeLiveStore: { _, _, _ in
                 didCallLiveStoreFactory = true
                 Issue.record("Preview window creation should not build a live store.")
                 return ReviewMonitorPreviewContent.makeContentSource().store
@@ -293,7 +293,7 @@ struct CodexReviewMonitorCITests {
             arguments: [],
             launchMode: .application
         )
-        let dependencies = composition.makeDependencies(context)
+        let dependencies = composition.makeDependencies(context) { nil }
 
         let windowController = composition.makeWindowController(dependencies) {}
         let rootViewController = try #require(
@@ -346,10 +346,12 @@ struct CodexReviewMonitorCITests {
         )
         let expectedStore = ReviewMonitorPreviewContent.makeContentSource().store
         var capturedRuntimePreferences: CodexReviewRuntime.Preferences?
+        var capturedAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration?
         let composition = ReviewMonitorAppComposition.live(
             runtimePreferencesStore: runtimePreferencesStore,
-            makeLiveStore: { runtimePreferences, _ in
+            makeLiveStore: { runtimePreferences, authenticationConfiguration, _ in
                 capturedRuntimePreferences = runtimePreferences
+                capturedAuthenticationConfiguration = authenticationConfiguration
                 return expectedStore
             }
         )
@@ -358,12 +360,23 @@ struct CodexReviewMonitorCITests {
             arguments: [],
             launchMode: .application
         )
-        let dependencies = composition.makeDependencies(context)
+        var didRequestPresentationAnchor = false
+        let dependencies = composition.makeDependencies(context) {
+            didRequestPresentationAnchor = true
+            return nil
+        }
         let store = dependencies.store
 
         #expect(store === expectedStore)
         #expect(dependencies.previewContent == nil)
         #expect(capturedRuntimePreferences == expectedRuntimePreferences)
+        #expect(capturedAuthenticationConfiguration?.callbackScheme == "lynnpd.CodexReviewMonitor.auth")
+        if case .ephemeral? = capturedAuthenticationConfiguration?.browserSessionPolicy {
+        } else {
+            Issue.record("Expected ReviewMonitor to use an ephemeral browser session.")
+        }
+        #expect(capturedAuthenticationConfiguration?.presentationAnchorProvider() == nil)
+        #expect(didRequestPresentationAnchor)
     }
 
     @Test func liveCompositionPassesAppServerLifecycleHandlerToLiveStoreFactory() {
@@ -372,7 +385,7 @@ struct CodexReviewMonitorCITests {
         var capturedLifecycleHandler: CodexReviewAppServerLifecycleHandler?
         let composition = ReviewMonitorAppComposition.live(
             runtimePreferencesStore: runtimePreferencesStore,
-            makeLiveStore: { _, appServerLifecycleHandler in
+            makeLiveStore: { _, _, appServerLifecycleHandler in
                 capturedLifecycleHandler = appServerLifecycleHandler
                 return expectedStore
             }
@@ -383,7 +396,7 @@ struct CodexReviewMonitorCITests {
             launchMode: .application
         )
 
-        let dependencies = composition.makeDependencies(context)
+        let dependencies = composition.makeDependencies(context) { nil }
         let store = dependencies.store
 
         #expect(store === expectedStore)
@@ -622,7 +635,7 @@ struct CodexReviewMonitorCITests {
         }
 
         let composition = ReviewMonitorAppComposition(
-            makeDependencies: { _ in
+            makeDependencies: { _, _ in
                 ReviewMonitorAppDependencies(
                     store: ReviewMonitorPreviewContent.makeContentSource().store
                 )

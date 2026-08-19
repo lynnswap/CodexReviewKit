@@ -75,10 +75,12 @@ extension CodexReviewMCPHTTPServer: CodexReviewMCPHTTPServing {}
 public extension CodexReviewStore {
     static func makeLiveStore(
         runtimePreferences: CodexReviewRuntime.Preferences = .defaults,
+        nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration? = nil,
         appServerLifecycleHandler: CodexReviewAppServerLifecycleHandler? = nil
     ) -> CodexReviewStore {
         CodexReviewStore(backend: LiveCodexReviewStoreBackend(
             runtimePreferences: runtimePreferences,
+            nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
             appServerLifecycleHandler: appServerLifecycleHandler
         ))
     }
@@ -87,6 +89,9 @@ public extension CodexReviewStore {
         environment: [String: String],
         runtimePreferences: CodexReviewRuntime.Preferences = .defaults,
         externalURLOpener: @escaping ExternalURLOpener = defaultExternalURLOpener,
+        nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration? = nil,
+        webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory =
+            CodexReviewAuthenticationPresenter.systemWebSessionFactory,
         mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
         mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
@@ -109,6 +114,8 @@ public extension CodexReviewStore {
             environment: environment,
             runtimePreferences: runtimePreferences,
             externalURLOpener: externalURLOpener,
+            nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
+            webAuthenticationSessionFactory: webAuthenticationSessionFactory,
             mcpPortOwnerResolver: mcpPortOwnerResolver,
             mcpHTTPServerBindChecker: mcpHTTPServerBindChecker,
             networkMonitor: networkMonitor,
@@ -133,6 +140,9 @@ public extension CodexReviewStore {
         environment: [String: String],
         runtimePreferences: CodexReviewRuntime.Preferences = .defaults,
         externalURLOpener: @escaping ExternalURLOpener = defaultExternalURLOpener,
+        nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration? = nil,
+        webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory =
+            CodexReviewAuthenticationPresenter.systemWebSessionFactory,
         mcpHTTPServerFactory: (@MainActor @Sendable (
             CodexReviewStore,
             CodexReviewMCPHTTPServer.Configuration,
@@ -161,6 +171,8 @@ public extension CodexReviewStore {
                 environment: environment,
                 runtimePreferences: runtimePreferences,
                 externalURLOpener: externalURLOpener,
+                nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
+                webAuthenticationSessionFactory: webAuthenticationSessionFactory,
                 mcpHTTPServerFactory: mcpHTTPServerFactory,
                 mcpPortOwnerResolver: mcpPortOwnerResolver,
                 mcpHTTPServerBindChecker: mcpHTTPServerBindChecker,
@@ -251,6 +263,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         case staleAccountIdentity
     }
 
+    private enum ChatGPTLoginWaitEvent: Sendable {
+        case login(LoginRootObservation)
+        case presentation(CodexReviewNativeAuthentication.PresentationEvent?)
+    }
+
     @MainActor
     private final class AccountMutationContext {
         let lease: AccountRegistryStore.MutationLease
@@ -322,7 +339,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     private var settingsSnapshot = CodexReviewSettings.Snapshot()
     private let codexHomeURL: URL
     private let mcpHTTPServerConfiguration: CodexReviewMCPHTTPServer.Configuration
-    private let externalURLOpener: ExternalURLOpener
+    private let authenticationPresenter: CodexReviewAuthenticationPresenter
     private let mcpHTTPServerFactory: MCPHTTPServerFactory?
     private let mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver
     private let mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker
@@ -367,6 +384,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         environment: [String: String] = ProcessInfo.processInfo.environment,
         runtimePreferences: CodexReviewRuntime.Preferences = .defaults,
         externalURLOpener: @escaping ExternalURLOpener = defaultExternalURLOpener,
+        nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration? = nil,
+        webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory =
+            CodexReviewAuthenticationPresenter.systemWebSessionFactory,
         mcpHTTPServerFactory: MCPHTTPServerFactory? = { store, configuration, logProjectionProvider in
             CodexReviewMCPHTTPServer(
                 adapter: CodexReviewMCPServer(
@@ -413,7 +433,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             port: runtimePreferences.mcpPort,
             endpoint: runtimePreferences.mcpPath
         )
-        self.externalURLOpener = externalURLOpener
+        authenticationPresenter = CodexReviewAuthenticationPresenter(
+            configuration: nativeAuthenticationConfiguration,
+            webSessionFactory: webAuthenticationSessionFactory,
+            externalURLOpener: externalURLOpener
+        )
         self.mcpHTTPServerFactory = mcpHTTPServerFactory
         self.mcpPortOwnerResolver = mcpPortOwnerResolver ?? Self.defaultMCPPortOwnerResolver
         self.mcpHTTPServerBindChecker = mcpHTTPServerBindChecker ?? Self.defaultMCPHTTPServerBindChecker
@@ -2075,7 +2099,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             }
             return try await self.loginRuntime(for: purpose)
         }
-        let urlOpener = externalURLOpener
+        let authenticationPresenter = authenticationPresenter
         let session = LoginSession(
             generationID: generationID,
             purpose: purpose,
@@ -2160,47 +2184,44 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                         }
                     }
 
+                    let presentation: any CodexReviewNativeAuthentication.Presentation
+                    do {
+                        presentation = try authenticationPresenter.present(handle.authenticationURL)
+                    } catch {
+                        let failure = CodexReviewAuthenticationFailure.urlOpen(handle.authenticationURL)
+                        let observation = await Self.cancelChatGPTLogin(
+                            handle,
+                            failureOnCancellation: failure
+                        )
+                        switch observation {
+                        case .failure(let failure):
+                            await startCompletion.resolve(.failure(failure))
+                        case .chatGPTOutcome(.failed(let message)):
+                            await startCompletion.resolve(.failure(.login(message: message)))
+                        case .chatGPTOutcome, .cancelled, .apiKeySucceeded,
+                             .apiKeyOutcomeUnknown, .waiterCancelled:
+                            await startCompletion.resolve(.success(()))
+                        }
+                        return finish(observation)
+                    }
+
                     auth?.updatePhase(.signingIn(.init(
                         title: "Sign in to Codex",
-                        detail: "Continue signing in with your browser.",
+                        detail: presentation.mode == .webAuthenticationSession
+                            ? "Complete sign in in the authentication window."
+                            : "Continue signing in with your browser.",
                         browserURL: handle.authenticationURL.absoluteString,
                         userCode: nil
                     )))
+                    await startCompletion.resolve(.success(()))
 
-                    do {
-                        try urlOpener(handle.authenticationURL)
-                        await startCompletion.resolve(.success(()))
-                    } catch {
-                        let failure = CodexReviewAuthenticationFailure.urlOpen(handle.authenticationURL)
-                        do {
-                            switch try await handle.cancel(acknowledgementTimeout: .seconds(5)) {
-                            case .succeeded,
-                                 .authenticationCommittedNeedsConnectionReconciliation:
-                                await startCompletion.resolve(.success(()))
-                                return finish(.chatGPTOutcome(try await handle.result()))
-                            case .failed(let message):
-                                let loginFailure = CodexReviewAuthenticationFailure.login(
-                                    message: message ?? "Authentication failed."
-                                )
-                                await startCompletion.resolve(.failure(loginFailure))
-                                return finish(.chatGPTOutcome(.failed(message: message)))
-                            case .cancelled:
-                                await startCompletion.resolve(.failure(failure))
-                                return finish(.failure(failure))
-                            }
-                        } catch {
-                            await startCompletion.resolve(.failure(failure))
-                            return finish(.failure(failure))
-                        }
+                    defer {
+                        presentation.close()
                     }
-
-                    do {
-                        return finish(.chatGPTOutcome(try await handle.result()))
-                    } catch is CancellationError {
-                        return finish(.waiterCancelled(message: nil))
-                    } catch {
-                        return finish(.failure(.runtime(message: error.localizedDescription)))
-                    }
+                    return finish(await Self.waitForChatGPTLogin(
+                        handle,
+                        presentation: presentation
+                    ))
                 case .apiKey(let apiKey):
                     guard case .proceed = await operationState.bindAPIKey(runtime: runtime) else {
                         await startCompletion.resolve(.success(()))
@@ -2290,6 +2311,85 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             case .succeeded, .cancelled, .stopped, .committedNeedsRuntimeReconciliation:
                 break
             }
+        }
+    }
+
+    private static func waitForChatGPTLogin(
+        _ handle: CodexLoginHandle,
+        presentation: any CodexReviewNativeAuthentication.Presentation
+    ) async -> LoginRootObservation {
+        guard let eventStream = presentation.eventStream else {
+            return await loginObservation(from: handle)
+        }
+
+        let winner = await withTaskGroup(of: ChatGPTLoginWaitEvent.self) { group in
+            group.addTask {
+                .login(await loginObservation(from: handle))
+            }
+            group.addTask {
+                var iterator = eventStream.makeAsyncIterator()
+                return .presentation(await iterator.next())
+            }
+            guard let winner = await group.next() else {
+                preconditionFailure("A ChatGPT login wait must have an active observation source.")
+            }
+            group.cancelAll()
+            return winner
+        }
+
+        switch winner {
+        case .login(let observation):
+            return observation
+        case .presentation(.cancelled):
+            return await cancelChatGPTLogin(handle, failureOnCancellation: nil)
+        case .presentation(.failed(let message)):
+            return await cancelChatGPTLogin(
+                handle,
+                failureOnCancellation: .login(message: message)
+            )
+        case .presentation(nil):
+            if Task.isCancelled {
+                return .waiterCancelled(message: nil)
+            }
+            return .failure(.protocolViolation(
+                message: "The native authentication presentation ended without a result."
+            ))
+        }
+    }
+
+    private nonisolated static func loginObservation(
+        from handle: CodexLoginHandle
+    ) async -> LoginRootObservation {
+        do {
+            return .chatGPTOutcome(try await handle.result())
+        } catch is CancellationError {
+            return .waiterCancelled(message: nil)
+        } catch {
+            return .failure(.runtime(message: error.localizedDescription))
+        }
+    }
+
+    private nonisolated static func cancelChatGPTLogin(
+        _ handle: CodexLoginHandle,
+        failureOnCancellation: CodexReviewAuthenticationFailure?
+    ) async -> LoginRootObservation {
+        do {
+            let outcome = try await handle.cancel(acknowledgementTimeout: .seconds(5))
+            if case .cancelled = outcome,
+               let failureOnCancellation {
+                return .failure(failureOnCancellation)
+            }
+            return .chatGPTOutcome(outcome)
+        } catch is CancellationError {
+            if let failureOnCancellation {
+                return .failure(failureOnCancellation)
+            }
+            return .waiterCancelled(message: nil)
+        } catch {
+            if let failureOnCancellation {
+                return .failure(failureOnCancellation)
+            }
+            return .waiterCancelled(message: error.localizedDescription)
         }
     }
 

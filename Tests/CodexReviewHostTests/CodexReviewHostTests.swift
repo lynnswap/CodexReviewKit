@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+@preconcurrency import AuthenticationServices
 import Testing
 import CodexAppServerKit
 import CodexAppServerKitTesting
@@ -17,6 +18,9 @@ private extension CodexReviewStore {
         environment: [String: String],
         runtimePreferences: CodexReviewRuntime.Preferences = .defaults,
         externalURLOpener: @escaping ExternalURLOpener = { _ in },
+        nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration? = nil,
+        webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory =
+            CodexReviewAuthenticationPresenter.systemWebSessionFactory,
         deadlineClock: CodexAppServerTestDeadlineClock? = nil,
         mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
         mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
@@ -40,6 +44,8 @@ private extension CodexReviewStore {
             environment: environment,
             runtimePreferences: runtimePreferences,
             externalURLOpener: externalURLOpener,
+            nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
+            webAuthenticationSessionFactory: webAuthenticationSessionFactory,
             mcpPortOwnerResolver: mcpPortOwnerResolver,
             mcpHTTPServerBindChecker: mcpHTTPServerBindChecker,
             networkMonitor: networkMonitor,
@@ -73,6 +79,9 @@ private extension CodexReviewStore {
         environment: [String: String],
         runtimePreferences: CodexReviewRuntime.Preferences = .defaults,
         externalURLOpener: @escaping ExternalURLOpener = { _ in },
+        nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration? = nil,
+        webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory =
+            CodexReviewAuthenticationPresenter.systemWebSessionFactory,
         deadlineClock: CodexAppServerTestDeadlineClock? = nil,
         mcpHTTPServerFactory: (@MainActor @Sendable (
             CodexReviewStore,
@@ -101,6 +110,8 @@ private extension CodexReviewStore {
             environment: environment,
             runtimePreferences: runtimePreferences,
             externalURLOpener: externalURLOpener,
+            nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
+            webAuthenticationSessionFactory: webAuthenticationSessionFactory,
             mcpHTTPServerFactory: mcpHTTPServerFactory,
             mcpPortOwnerResolver: mcpPortOwnerResolver,
             mcpHTTPServerBindChecker: mcpHTTPServerBindChecker,
@@ -2078,9 +2089,16 @@ struct CodexReviewHostTests {
             usedPercent: 20
         ))
         let externalURLOpener = FakeExternalURLOpener()
+        let webAuthenticationSessions = FakeSystemWebAuthenticationSessions()
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             externalURLOpener: externalURLOpener.open,
+            nativeAuthenticationConfiguration: .init(
+                callbackScheme: "lynnpd.CodexReviewMonitor.auth",
+                browserSessionPolicy: .ephemeral,
+                presentationAnchorProvider: { NSWindow() }
+            ),
+            webAuthenticationSessionFactory: webAuthenticationSessions.makeSession,
             transport: transport
         )
 
@@ -2089,7 +2107,12 @@ struct CodexReviewHostTests {
         try await store.addAccount()
         await transport.waitForRequestCount(5)
         #expect(store.auth.isAuthenticating)
-        #expect(externalURLOpener.openedURLs == [testAuthenticationURL])
+        #expect(webAuthenticationSessions.requestedURLs == [testAuthenticationURL])
+        #expect(webAuthenticationSessions.callbackSchemes == ["lynnpd.CodexReviewMonitor.auth"])
+        #expect(webAuthenticationSessions.session.startCallCount == 1)
+        #expect(webAuthenticationSessions.session.prefersEphemeralWhenStartWasCalled == true)
+        #expect(webAuthenticationSessions.session.hadPresentationContextWhenStartWasCalled == true)
+        #expect(externalURLOpener.openedURLs.isEmpty)
         do {
             try await store.addAccount()
             Issue.record("Expected an active authentication mutation to reject a second command.")
@@ -2124,6 +2147,126 @@ struct CodexReviewHostTests {
         #expect(isPrimaryLoginCompletionRequestSequence(
             await transport.recordedRequests().map(\.request.operation)
         ))
+        #expect(webAuthenticationSessions.session.cancelCallCount == 1)
+        #expect(await transport.recordedRequests(for: .accountLoginCancel).isEmpty)
+        await store.stop()
+    }
+
+    @Test(arguments: NativeAuthenticationFallback.allCases)
+    func authenticationPresenterFallsBackWhenWebAuthenticationSessionCannotStart(
+        _ fallback: NativeAuthenticationFallback
+    ) throws {
+        let externalURLOpener = FakeExternalURLOpener()
+        let webAuthenticationSessions = FakeSystemWebAuthenticationSessions(
+            canStart: fallback != .cannotStart,
+            startResult: fallback != .startReturnsFalse
+        )
+        let presenter = CodexReviewAuthenticationPresenter(
+            configuration: .init(
+                callbackScheme: "lynnpd.CodexReviewMonitor.auth",
+                browserSessionPolicy: .ephemeral,
+                presentationAnchorProvider: {
+                    fallback == .missingAnchor ? nil : NSWindow()
+                }
+            ),
+            webSessionFactory: webAuthenticationSessions.makeSession,
+            externalURLOpener: externalURLOpener.open
+        )
+
+        let presentation = try presenter.present(testAuthenticationURL)
+
+        #expect(presentation.mode == .externalBrowser)
+        #expect(externalURLOpener.openedURLs == [testAuthenticationURL])
+        switch fallback {
+        case .missingAnchor:
+            #expect(webAuthenticationSessions.requestedURLs.isEmpty)
+            #expect(webAuthenticationSessions.session.startCallCount == 0)
+        case .cannotStart:
+            #expect(webAuthenticationSessions.requestedURLs == [testAuthenticationURL])
+            #expect(webAuthenticationSessions.session.prefersEphemeralWhenCanStartWasRead == true)
+            #expect(webAuthenticationSessions.session.startCallCount == 0)
+        case .startReturnsFalse:
+            #expect(webAuthenticationSessions.requestedURLs == [testAuthenticationURL])
+            #expect(webAuthenticationSessions.session.prefersEphemeralWhenStartWasCalled == true)
+            #expect(webAuthenticationSessions.session.startCallCount == 1)
+        }
+    }
+
+    @Test func authenticationPresenterFallsBackAfterPresentationContextFailure() async throws {
+        for errorCode in [
+            ASWebAuthenticationSessionError.Code.presentationContextNotProvided,
+            .presentationContextInvalid,
+        ] {
+            let externalURLOpener = FakeExternalURLOpener()
+            let webAuthenticationSessions = FakeSystemWebAuthenticationSessions()
+            let presenter = CodexReviewAuthenticationPresenter(
+                configuration: .init(
+                    callbackScheme: "lynnpd.CodexReviewMonitor.auth",
+                    browserSessionPolicy: .ephemeral,
+                    presentationAnchorProvider: { NSWindow() }
+                ),
+                webSessionFactory: webAuthenticationSessions.makeSession,
+                externalURLOpener: externalURLOpener.open
+            )
+            let presentation = try presenter.present(testAuthenticationURL)
+            let eventStream = try #require(presentation.eventStream)
+            var eventIterator = eventStream.makeAsyncIterator()
+
+            webAuthenticationSessions.session.simulateFailure(errorCode)
+
+            try #require(await waitUntil(timeout: .seconds(2)) {
+                externalURLOpener.openedURLs == [testAuthenticationURL]
+            })
+            presentation.close()
+            #expect(await eventIterator.next() == nil)
+        }
+    }
+
+    @Test func liveStoreMapsNativeAuthenticationCancellationToLoginCancellation() async throws {
+        let transport = FakeCodexAppServerTransport()
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        try await transport.enqueueChatGPTLogin(
+            loginID: "login-native-cancel",
+            authenticationURL: testAuthenticationURL
+        )
+        try await transport.enqueueChatGPTLoginCancellation(.canceled)
+        let externalURLOpener = FakeExternalURLOpener()
+        let webAuthenticationSessions = FakeSystemWebAuthenticationSessions()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            externalURLOpener: externalURLOpener.open,
+            nativeAuthenticationConfiguration: .init(
+                callbackScheme: "lynnpd.CodexReviewMonitor.auth",
+                browserSessionPolicy: .ephemeral,
+                presentationAnchorProvider: { NSWindow() }
+            ),
+            webAuthenticationSessionFactory: webAuthenticationSessions.makeSession,
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        try await store.addAccount()
+        await transport.waitForRequest(.accountLoginStart)
+
+        webAuthenticationSessions.session.simulateUserCancellation()
+
+        await transport.waitForRequest(.accountLoginCancel)
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            store.auth.isAuthenticating == false
+        })
+        #expect(store.auth.errorMessage == nil)
+        #expect(externalURLOpener.openedURLs.isEmpty)
+        #expect(webAuthenticationSessions.session.cancelCallCount == 1)
+        #expect(await transport.recordedRequests().map(\.request.operation) == [
+            .initialize,
+            .accountRead,
+            .configurationRead,
+            .modelList,
+            .accountLoginStart,
+            .accountLoginCancel,
+        ])
         await store.stop()
     }
 
@@ -6780,6 +6923,89 @@ private func makeHostStoredThread(
         ),
         isArchived: false
     )
+}
+
+enum NativeAuthenticationFallback: CaseIterable, Sendable {
+    case missingAnchor
+    case cannotStart
+    case startReturnsFalse
+}
+
+@MainActor
+private final class FakeSystemWebAuthenticationSessions {
+    let session: FakeSystemWebAuthenticationSession
+    private(set) var requestedURLs: [URL] = []
+    private(set) var callbackSchemes: [String] = []
+
+    init(canStart: Bool = true, startResult: Bool = true) {
+        session = FakeSystemWebAuthenticationSession(
+            canStart: canStart,
+            startResult: startResult
+        )
+    }
+
+    func makeSession(
+        url: URL,
+        callbackScheme: String,
+        completionHandler: @escaping ASWebAuthenticationSession.CompletionHandler
+    ) -> any CodexReviewNativeAuthentication.SystemWebAuthenticationSession {
+        requestedURLs.append(url)
+        callbackSchemes.append(callbackScheme)
+        session.completionHandler = completionHandler
+        return session
+    }
+}
+
+@MainActor
+private final class FakeSystemWebAuthenticationSession:
+    CodexReviewNativeAuthentication.SystemWebAuthenticationSession
+{
+    var prefersEphemeralWebBrowserSession = false
+    var presentationContextProvider: (any ASWebAuthenticationPresentationContextProviding)?
+    private(set) var prefersEphemeralWhenCanStartWasRead: Bool?
+    private(set) var prefersEphemeralWhenStartWasCalled: Bool?
+    private(set) var hadPresentationContextWhenStartWasCalled: Bool?
+    private(set) var startCallCount = 0
+    private(set) var cancelCallCount = 0
+    fileprivate var completionHandler: ASWebAuthenticationSession.CompletionHandler?
+
+    private let canStartResult: Bool
+    private let startResult: Bool
+
+    init(canStart: Bool, startResult: Bool) {
+        canStartResult = canStart
+        self.startResult = startResult
+    }
+
+    var canStart: Bool {
+        prefersEphemeralWhenCanStartWasRead = prefersEphemeralWebBrowserSession
+        return canStartResult
+    }
+
+    func start() -> Bool {
+        startCallCount += 1
+        prefersEphemeralWhenStartWasCalled = prefersEphemeralWebBrowserSession
+        hadPresentationContextWhenStartWasCalled = presentationContextProvider != nil
+        return startResult
+    }
+
+    func cancel() {
+        cancelCallCount += 1
+    }
+
+    func simulateUserCancellation() {
+        simulateFailure(.canceledLogin)
+    }
+
+    func simulateFailure(_ code: ASWebAuthenticationSessionError.Code) {
+        completionHandler?(
+            nil,
+            NSError(
+                domain: ASWebAuthenticationSessionErrorDomain,
+                code: code.rawValue
+            )
+        )
+    }
 }
 
 @MainActor
