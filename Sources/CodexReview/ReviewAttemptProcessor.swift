@@ -164,6 +164,7 @@ package actor ReviewStartAdmission {
     private var cancellationResult: Result<ReviewAttemptCancellationResolution, any Error>?
     private var terminalWaiters: [UUID: CheckedContinuation<ReviewAttemptBarrierTerminal?, Never>] = [:]
     private var activeRunWaiters: [CheckedContinuation<CodexReviewBackendModel.Review.Run?, Never>] = []
+    private var cancellationAdmissionWaiters: [CheckedContinuation<ReviewCancellation?, Never>] = []
     private var cancellationWaiters: [CheckedContinuation<Result<ReviewAttemptCancellationResolution, any Error>, Never>] = []
 
     package init(closePolicy: ReviewRuntimeClosePolicy = .production) {
@@ -281,6 +282,7 @@ package actor ReviewStartAdmission {
             return .init(terminal: terminal)
         }
         requestedCancellation = cancellation
+        resumeCancellationAdmissionWaiters(returning: cancellation)
         let task = Task {
             try await self.performCancellation(
                 cancellation,
@@ -328,6 +330,24 @@ package actor ReviewStartAdmission {
 
     package func cancellationRequest() -> ReviewCancellation? {
         requestedCancellation
+    }
+
+    package func waitForCancellationAdmission() async -> ReviewCancellation? {
+        if let requestedCancellation {
+            return requestedCancellation
+        }
+        if terminal != nil {
+            return nil
+        }
+        return await withCheckedContinuation { continuation in
+            if let requestedCancellation {
+                continuation.resume(returning: requestedCancellation)
+            } else if terminal != nil {
+                continuation.resume(returning: nil)
+            } else {
+                cancellationAdmissionWaiters.append(continuation)
+            }
+        }
     }
 
     package func recordedCleanupResult(
@@ -583,6 +603,7 @@ package actor ReviewStartAdmission {
             waiter.resume(returning: terminal)
         }
         resumeActiveRunWaiters(returning: nil)
+        resumeCancellationAdmissionWaiters(returning: nil)
         resolveCancellationIfPossible()
     }
 
@@ -593,6 +614,16 @@ package actor ReviewStartAdmission {
         activeRunWaiters.removeAll(keepingCapacity: false)
         for waiter in waiters {
             waiter.resume(returning: run)
+        }
+    }
+
+    private func resumeCancellationAdmissionWaiters(
+        returning cancellation: ReviewCancellation?
+    ) {
+        let waiters = cancellationAdmissionWaiters
+        cancellationAdmissionWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume(returning: cancellation)
         }
     }
 
