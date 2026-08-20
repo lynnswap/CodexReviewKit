@@ -15,7 +15,88 @@ private func makeAppServerReviewAttemptID() -> String {
     UUID().uuidString
 }
 
+package struct AppServerRuntimeOwnerLifecycleHandle: Sendable {
+    private let closeAndWaitOperation: @Sendable () async throws -> Void
+
+    fileprivate init(
+        closeAndWaitOperation: @escaping @Sendable () async throws -> Void
+    ) {
+        self.closeAndWaitOperation = closeAndWaitOperation
+    }
+
+    package func closeAndWait() async throws {
+        try await closeAndWaitOperation()
+    }
+}
+
 package actor AppServerCodexReviewBackend: CodexReviewBackend {
+    private struct AdmittedReviewOperationID: Hashable {
+        let rawValue: Int
+    }
+
+    private struct ReviewOperationRegistry {
+        enum Admission {
+            case open
+            case closed
+        }
+
+        var admission: Admission = .open
+        var nextID = 0
+        var admitted: Set<AdmittedReviewOperationID> = []
+        var drainWaiters: [CheckedContinuation<Void, Never>] = []
+
+        mutating func register() -> AdmittedReviewOperationID? {
+            guard case .open = admission else {
+                return nil
+            }
+            let id = AdmittedReviewOperationID(rawValue: nextID)
+            nextID += 1
+            admitted.insert(id)
+            return id
+        }
+
+        mutating func closeAdmission() {
+            admission = .closed
+            resumeDrainWaitersIfNeeded()
+        }
+
+        mutating func finish(_ id: AdmittedReviewOperationID) {
+            admitted.remove(id)
+            resumeDrainWaitersIfNeeded()
+        }
+
+        func contains(_ id: AdmittedReviewOperationID) -> Bool {
+            admitted.contains(id)
+        }
+
+        mutating func appendDrainWaiter(
+            _ continuation: CheckedContinuation<Void, Never>
+        ) {
+            if admitted.isEmpty {
+                continuation.resume()
+            } else {
+                drainWaiters.append(continuation)
+            }
+        }
+
+        private mutating func resumeDrainWaitersIfNeeded() {
+            guard case .closed = admission, admitted.isEmpty else {
+                return
+            }
+            let waiters = drainWaiters
+            drainWaiters.removeAll(keepingCapacity: false)
+            for waiter in waiters {
+                waiter.resume()
+            }
+        }
+    }
+
+    private struct OwnedLifecycleSnapshot: Sendable {
+        let routerStartTask: Task<Void, Never>?
+        let routerTask: Task<Void, Never>?
+        let sessions: [AppServerReviewEventSession]
+    }
+
     private enum LifecycleState {
         case open
         case closing(Task<Void, any Error>)
@@ -39,6 +120,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     private var unmatchedReviewNotificationsByThreadID: [String: [AppServerRoutedReviewNotification]] = [:]
     private var completedReviewEventSessionMetricsByThreadID: [String: AppServerReviewEventSessionMetrics] = [:]
     private var lifecycleState: LifecycleState = .open
+    private var reviewOperationRegistry = ReviewOperationRegistry()
     private var notificationRouterStartTask: Task<Void, Never>?
     private var notificationRouterTask: Task<Void, Never>?
     private var reviewNotificationSequence = 0
@@ -55,11 +137,44 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         self.threadStartPermissionStrategy = threadStartPermissionStrategy
     }
 
-    private var admitsNewReviewSessions: Bool {
-        if case .open = lifecycleState {
-            return true
+    package nonisolated var runtimeOwnerLifecycleHandle: AppServerRuntimeOwnerLifecycleHandle {
+        AppServerRuntimeOwnerLifecycleHandle { [self] in
+            try await closeFromRuntimeOwnerAndWait()
         }
-        return false
+    }
+
+    private func admitReviewOperation() throws -> AdmittedReviewOperationID {
+        guard let id = reviewOperationRegistry.register() else {
+            throw JSONRPC.Error.closed
+        }
+        return id
+    }
+
+    private func finishReviewOperation(_ id: AdmittedReviewOperationID) {
+        reviewOperationRegistry.finish(id)
+    }
+
+    private func waitForAdmittedReviewOperations() async {
+        if reviewOperationRegistry.admitted.isEmpty {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            reviewOperationRegistry.appendDrainWaiter(continuation)
+        }
+    }
+
+    private func ownedLifecycleSnapshot() -> OwnedLifecycleSnapshot {
+        let sessions = reviewEventSessionsByAttemptID
+            .sorted {
+                reviewEventSessionRegistrationOrdinalByAttemptID[$0.key, default: .max]
+                    < reviewEventSessionRegistrationOrdinalByAttemptID[$1.key, default: .max]
+            }
+            .map(\.value)
+        return OwnedLifecycleSnapshot(
+            routerStartTask: notificationRouterStartTask,
+            routerTask: notificationRouterTask,
+            sessions: sessions
+        )
     }
 
     package func readSettings() async throws -> CodexReviewBackendModel.Settings.Snapshot {
@@ -147,19 +262,14 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         _ request: CodexReviewBackendModel.Review.Start,
         admission: ReviewStartAdmission
     ) async throws -> BackendReviewAttempt {
-        guard admitsNewReviewSessions else {
-            throw JSONRPC.Error.closed
-        }
+        let operationID = try admitReviewOperation()
+        defer { finishReviewOperation(operationID) }
+
         _ = try await client.initialize()
-        guard await ensureNotificationRouterStarted() else {
-            throw JSONRPC.Error.closed
-        }
+        await ensureNotificationRouterStarted(for: operationID)
         let control = AppServerReviewControl(client: client)
 
         let thread = try await startReviewThread(request, admission: admission)
-        guard admitsNewReviewSessions else {
-            throw JSONRPC.Error.closed
-        }
         controlsByThreadID[thread.threadID] = control
         let attemptID = makeAppServerReviewAttemptID()
         let provisionalRun = CodexReviewBackendModel.Review.Run(
@@ -375,13 +485,14 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     package func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws {
+        let operationID = try admitReviewOperation()
+        defer { finishReviewOperation(operationID) }
+
         _ = try await client.initialize()
         guard abandonedReviewAttemptIDs.contains(run.attemptID) == false else {
             return
         }
-        guard let session = await reviewEventSession(for: run) else {
-            throw JSONRPC.Error.closed
-        }
+        let session = await reviewEventSession(for: run, admittedBy: operationID)
         await session.requestCancellation(message: reason.message)
         do {
             _ = try await sendTurnInterrupt(for: run)
@@ -405,33 +516,30 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         }
     }
 
-    // Client close only terminates the transport. The router observes that
-    // terminal on its own Task, so capture every semantic owner before awaiting.
-    package func closeAndWaitForOwnedLifecycle() async throws {
+    // Only AppServerRuntimeOwnerLifecycleHandle can enter this transition. The
+    // notification router never owns that handle, so close cannot await itself.
+    private func closeFromRuntimeOwnerAndWait() async throws {
         let closeTask: Task<Void, any Error>
         switch lifecycleState {
         case .open:
-            let routerStartTask = notificationRouterStartTask
-            let routerTask = notificationRouterTask
-            let sessions = reviewEventSessionsByAttemptID
-                .sorted {
-                    reviewEventSessionRegistrationOrdinalByAttemptID[$0.key, default: .max]
-                        < reviewEventSessionRegistrationOrdinalByAttemptID[$1.key, default: .max]
-                }
-                .map(\.value)
+            reviewOperationRegistry.closeAdmission()
             let client = client
             let task = Task<Void, any Error> {
-                let clientCloseResult: Result<Void, any Error>
-                do {
-                    try await client.close()
-                    clientCloseResult = .success(())
-                } catch {
-                    clientCloseResult = .failure(error)
+                let clientCloseTask = Task<Result<Void, any Error>, Never> {
+                    do {
+                        try await client.close()
+                        return .success(())
+                    } catch {
+                        return .failure(error)
+                    }
                 }
 
-                await routerStartTask?.value
-                await routerTask?.value
-                for session in sessions {
+                await self.waitForAdmittedReviewOperations()
+                let clientCloseResult = await clientCloseTask.value
+                let ownedLifecycle = self.ownedLifecycleSnapshot()
+                await ownedLifecycle.routerStartTask?.value
+                await ownedLifecycle.routerTask?.value
+                for session in ownedLifecycle.sessions {
                     await session.finish(throwing: .ownerCancellation)
                 }
                 try clientCloseResult.get()
@@ -503,13 +611,11 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         request: CodexReviewBackendModel.Review.Start,
         admission: ReviewStartAdmission
     ) async throws -> BackendReviewAttempt {
-        guard admitsNewReviewSessions else {
-            throw JSONRPC.Error.closed
-        }
+        let operationID = try admitReviewOperation()
+        defer { finishReviewOperation(operationID) }
+
         _ = try await client.initialize()
-        guard await ensureNotificationRouterStarted() else {
-            throw JSONRPC.Error.closed
-        }
+        await ensureNotificationRouterStarted(for: operationID)
         let token = handoff.token
         let interruptedRun = token.interruptedRun
         try await admission.admitRecoveryRollbackDispatch(threadID: token.rollbackThreadID)
@@ -522,10 +628,6 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                 try await admission.recordStreamTerminal(terminal)
             }
             throw error
-        }
-
-        guard admitsNewReviewSessions else {
-            throw JSONRPC.Error.closed
         }
 
         let control = controlsByThreadID[interruptedRun.threadID] ?? AppServerReviewControl(client: client)
@@ -673,21 +775,24 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     package func reviewAttemptForTesting(_ run: CodexReviewBackendModel.Review.Run) async -> BackendReviewAttempt {
-        guard let session = await reviewEventSession(for: run) else {
+        guard let operationID = reviewOperationRegistry.register() else {
             preconditionFailure("Review event-session admission is closed.")
         }
+        defer { finishReviewOperation(operationID) }
+        let session = await reviewEventSession(for: run, admittedBy: operationID)
         return await session.attempt()
     }
 
-    private func reviewEventSession(for run: CodexReviewBackendModel.Review.Run) async -> AppServerReviewEventSession? {
+    private func reviewEventSession(
+        for run: CodexReviewBackendModel.Review.Run,
+        admittedBy operationID: AdmittedReviewOperationID
+    ) async -> AppServerReviewEventSession {
         if let session = reviewEventSessionsByAttemptID[run.attemptID] {
             await session.updateRun(run)
             registerReviewEventSession(session, for: run)
             return session
         }
-        guard await ensureNotificationRouterStarted() else {
-            return nil
-        }
+        await ensureNotificationRouterStarted(for: operationID)
         let control = controlsByThreadID[run.threadID] ?? AppServerReviewControl(client: client)
         controlsByThreadID[run.threadID] = control
         if let turnID = run.turnID {
@@ -843,12 +948,15 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         return merged
     }
 
-    private func ensureNotificationRouterStarted() async -> Bool {
+    private func ensureNotificationRouterStarted(
+        for operationID: AdmittedReviewOperationID
+    ) async {
+        precondition(
+            reviewOperationRegistry.contains(operationID),
+            "Review operation registry must own router-start admission."
+        )
         if notificationRouterTask != nil {
-            return true
-        }
-        guard admitsNewReviewSessions else {
-            return false
+            return
         }
 
         let startTask: Task<Void, Never>
@@ -858,22 +966,34 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             let client = client
             let task = Task { [client] in
                 let notifications = await client.notificationStream()
-                self.installNotificationRouter(notifications)
+                self.installNotificationRouter(
+                    notifications,
+                    admittedBy: operationID
+                )
             }
             notificationRouterStartTask = task
             startTask = task
         }
         await startTask.value
-        return admitsNewReviewSessions && notificationRouterTask != nil
+        precondition(
+            reviewOperationRegistry.contains(operationID)
+                && notificationRouterTask != nil,
+            "Review operation registry must retain admission through router start."
+        )
     }
 
     private func installNotificationRouter(
-        _ notifications: AsyncThrowingStream<JSONRPC.Notification, Error>
+        _ notifications: AsyncThrowingStream<JSONRPC.Notification, Error>,
+        admittedBy operationID: AdmittedReviewOperationID
     ) {
         notificationRouterStartTask = nil
-        guard admitsNewReviewSessions, notificationRouterTask == nil else {
+        guard notificationRouterTask == nil else {
             return
         }
+        precondition(
+            reviewOperationRegistry.contains(operationID),
+            "Review operation registry must own router installation."
+        )
         notificationRouterTask = Task { [notifications] in
             await self.consumeReviewNotifications(notifications)
         }

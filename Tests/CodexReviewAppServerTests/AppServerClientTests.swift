@@ -199,8 +199,46 @@ private func controlledReviewClosePolicy(gate: AsyncGate) -> ReviewRuntimeCloseP
     }
 }
 
+private actor RequestBarrier {
+    private let releaseGate = AsyncGate()
+    private var entered = false
+    private var entryWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func enterAndWait() async {
+        entered = true
+        let waiters = entryWaiters
+        entryWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
+        await releaseGate.waitIgnoringCancellation()
+    }
+
+    func waitUntilEntered() async {
+        if entered {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            if entered {
+                continuation.resume()
+            } else {
+                entryWaiters.append(continuation)
+            }
+        }
+    }
+
+    func open() async {
+        await releaseGate.open()
+    }
+}
+
 private actor DeferredNotificationCloseTransport: JSONRPC.Transport {
     private let closeFailure: ReviewRuntimeCloseFailure?
+    private var responses: [String: [Data]] = [:]
+    private var requestBarriersByMethod: [String: [RequestBarrier]] = [:]
+    private var notificationStreamGate: AsyncGate?
+    private var notificationStreamRequested = false
+    private var notificationStreamWaiters: [CheckedContinuation<Void, Never>] = []
     private var notificationContinuation: AsyncThrowingStream<JSONRPC.Notification, Error>.Continuation?
     private var closeCallCount = 0
     private var closeWaiters: [CheckedContinuation<Void, Never>] = []
@@ -210,15 +248,53 @@ private actor DeferredNotificationCloseTransport: JSONRPC.Transport {
         self.closeFailure = closeFailure
     }
 
-    func send(_: JSONRPC.Request) async throws -> Data {
+    func enqueue<Response: Encodable & Sendable>(
+        _ response: Response,
+        for method: String
+    ) throws {
+        responses[method, default: []].append(try JSONEncoder().encode(response))
+    }
+
+    func holdNext(method: String, barrier: RequestBarrier) {
+        requestBarriersByMethod[method, default: []].append(barrier)
+    }
+
+    func holdNotificationStream(on gate: AsyncGate) {
+        notificationStreamGate = gate
+    }
+
+    func send(_ request: JSONRPC.Request) async throws -> Data {
         sendCallCount += 1
-        return try JSONEncoder().encode(EmptyResponse())
+        if var barriers = requestBarriersByMethod[request.method],
+           barriers.isEmpty == false
+        {
+            let barrier = barriers.removeFirst()
+            requestBarriersByMethod[request.method] = barriers
+            await barrier.enterAndWait()
+        }
+        guard var methodResponses = responses[request.method],
+              methodResponses.isEmpty == false
+        else {
+            return try JSONEncoder().encode(EmptyResponse())
+        }
+        let response = methodResponses.removeFirst()
+        responses[request.method] = methodResponses
+        return response
     }
 
     func notify(_: JSONRPC.Notification) async throws {}
 
-    func notificationStream() -> AsyncThrowingStream<JSONRPC.Notification, Error> {
-        AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
+    func notificationStream() async -> AsyncThrowingStream<JSONRPC.Notification, Error> {
+        notificationStreamRequested = true
+        let waiters = notificationStreamWaiters
+        notificationStreamWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
+        if let notificationStreamGate {
+            await notificationStreamGate.waitIgnoringCancellation()
+        }
+        return AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
             notificationContinuation = continuation
         }
     }
@@ -248,6 +324,19 @@ private actor DeferredNotificationCloseTransport: JSONRPC.Transport {
         }
     }
 
+    func waitForNotificationStreamRequest() async {
+        if notificationStreamRequested {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            if notificationStreamRequested {
+                continuation.resume()
+            } else {
+                notificationStreamWaiters.append(continuation)
+            }
+        }
+    }
+
     func emitServerNotification<Params: Encodable & Sendable>(
         method: String,
         params: Params
@@ -270,6 +359,18 @@ private actor DeferredNotificationCloseTransport: JSONRPC.Transport {
 
     func recordedCloseCallCount() -> Int {
         closeCallCount
+    }
+}
+
+private actor CompletionProbe {
+    private var completed = false
+
+    func recordCompletion() {
+        completed = true
+    }
+
+    func hasCompleted() -> Bool {
+        completed
     }
 }
 
@@ -1931,6 +2032,7 @@ struct AppServerClientTests {
         let backend = AppServerCodexReviewBackend(
             client: AppServerClient(transport: transport)
         )
+        let lifecycle = backend.runtimeOwnerLifecycleHandle
         let run = CodexReviewBackendModel.Review.Run(
             attemptID: "attempt-1",
             threadID: "thread-1",
@@ -1938,14 +2040,39 @@ struct AppServerClientTests {
             reviewThreadID: "thread-1"
         )
         var iterator = await eventSequence(backend, run).makeAsyncIterator()
+        let firstCompletion = CompletionProbe()
+        let secondCompletion = CompletionProbe()
 
         let firstClose = Task {
-            try await backend.closeAndWaitForOwnedLifecycle()
+            do {
+                try await lifecycle.closeAndWait()
+                await firstCompletion.recordCompletion()
+            } catch {
+                await firstCompletion.recordCompletion()
+                throw error
+            }
         }
         let secondClose = Task {
-            try await backend.closeAndWaitForOwnedLifecycle()
+            do {
+                try await lifecycle.closeAndWait()
+                await secondCompletion.recordCompletion()
+            } catch {
+                await secondCompletion.recordCompletion()
+                throw error
+            }
         }
         await transport.waitForCloseCall()
+        #expect(await firstCompletion.hasCompleted() == false)
+        #expect(await secondCompletion.hasCompleted() == false)
+        #expect(await transport.recordedCloseCallCount() == 1)
+        await #expect(throws: JSONRPC.Error.closed) {
+            _ = try await backend.startReview(.init(
+                jobID: "job-2",
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            ))
+        }
+        #expect(await transport.recordedSendCallCount() == 0)
 
         try await transport.emitServerNotification(
             method: "item/agentMessage/delta",
@@ -1969,7 +2096,7 @@ struct AppServerClientTests {
         await transport.finishNotificationStream(throwing: JSONRPC.Error.closed)
         try await firstClose.value
         try await secondClose.value
-        try await backend.closeAndWaitForOwnedLifecycle()
+        try await lifecycle.closeAndWait()
 
         #expect(await transport.recordedCloseCallCount() == 1)
         #expect(await backend.notificationRouterIsRunningForTesting() == false)
@@ -1979,17 +2106,6 @@ struct AppServerClientTests {
             _ = try await iterator.next()
         }
 
-        await #expect(throws: JSONRPC.Error.closed) {
-            _ = try await backend.startReview(
-                .init(
-                    jobID: "job-2",
-                    sessionID: "session-1",
-                    request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
-                ),
-                admission: ReviewStartAdmission()
-            )
-        }
-        #expect(await transport.recordedSendCallCount() == 0)
     }
 
     @Test func backendLifecycleCloseJoinsOwnedTasksBeforeReplayingClientCloseFailure() async throws {
@@ -1998,6 +2114,7 @@ struct AppServerClientTests {
         let backend = AppServerCodexReviewBackend(
             client: AppServerClient(transport: transport)
         )
+        let lifecycle = backend.runtimeOwnerLifecycleHandle
         let run = CodexReviewBackendModel.Review.Run(
             attemptID: "attempt-1",
             threadID: "thread-1",
@@ -2005,20 +2122,300 @@ struct AppServerClientTests {
             reviewThreadID: "thread-1"
         )
         var iterator = await eventSequence(backend, run).makeAsyncIterator()
+        let completion = CompletionProbe()
 
         let close = Task {
-            try await backend.closeAndWaitForOwnedLifecycle()
+            do {
+                try await lifecycle.closeAndWait()
+                await completion.recordCompletion()
+            } catch {
+                await completion.recordCompletion()
+                throw error
+            }
         }
         await transport.waitForCloseCall()
+        #expect(await completion.hasCompleted() == false)
         await transport.finishNotificationStream(throwing: JSONRPC.Error.closed)
 
         await #expect(throws: closeFailure) {
             try await close.value
         }
         await #expect(throws: closeFailure) {
-            try await backend.closeAndWaitForOwnedLifecycle()
+            try await lifecycle.closeAndWait()
         }
         #expect(await transport.recordedCloseCallCount() == 1)
+        #expect(await backend.notificationRouterIsRunningForTesting() == false)
+        await #expect(throws: ReviewAttemptStreamFailure.unexpectedConnection(
+            .connection(JSONRPC.Error.closed.localizedDescription)
+        )) {
+            _ = try await iterator.next()
+        }
+    }
+
+    @Test func backendLifecycleCloseJoinsInFlightRouterStart() async throws {
+        let transport = DeferredNotificationCloseTransport()
+        let notificationStreamGate = AsyncGate()
+        await transport.holdNotificationStream(on: notificationStreamGate)
+        let backend = AppServerCodexReviewBackend(
+            client: AppServerClient(transport: transport)
+        )
+        let lifecycle = backend.runtimeOwnerLifecycleHandle
+        let run = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-1",
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "thread-1"
+        )
+        let operationCompletion = CompletionProbe()
+        let closeCompletion = CompletionProbe()
+
+        let operation = Task {
+            let attempt = await backend.reviewAttemptForTesting(run)
+            await operationCompletion.recordCompletion()
+            return attempt
+        }
+        await transport.waitForNotificationStreamRequest()
+        let close = Task {
+            do {
+                try await lifecycle.closeAndWait()
+                await closeCompletion.recordCompletion()
+            } catch {
+                await closeCompletion.recordCompletion()
+                throw error
+            }
+        }
+        await transport.waitForCloseCall()
+        #expect(await operationCompletion.hasCompleted() == false)
+        #expect(await closeCompletion.hasCompleted() == false)
+
+        await notificationStreamGate.open()
+        let attempt = await operation.value
+        #expect(await operationCompletion.hasCompleted())
+        #expect(await closeCompletion.hasCompleted() == false)
+
+        await transport.finishNotificationStream(throwing: JSONRPC.Error.closed)
+        try await close.value
+        #expect(await closeCompletion.hasCompleted())
+        #expect(await backend.notificationRouterIsRunningForTesting() == false)
+
+        var iterator = BackendReviewEventSequence(mailbox: attempt.events).makeAsyncIterator()
+        await #expect(throws: ReviewAttemptStreamFailure.unexpectedConnection(
+            .connection(JSONRPC.Error.closed.localizedDescription)
+        )) {
+            _ = try await iterator.next()
+        }
+    }
+
+    @Test func backendLifecycleCloseJoinsAdmittedThreadStartBeforeSessionSnapshot() async throws {
+        let transport = DeferredNotificationCloseTransport()
+        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(
+            AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"),
+            for: "thread/start"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Review.Start.Response(turnID: "turn-1", reviewThreadID: "thread-1"),
+            for: "review/start"
+        )
+        let threadStartBarrier = RequestBarrier()
+        await transport.holdNext(method: "thread/start", barrier: threadStartBarrier)
+        let backend = AppServerCodexReviewBackend(
+            client: AppServerClient(transport: transport)
+        )
+        let lifecycle = backend.runtimeOwnerLifecycleHandle
+        let startCompletion = CompletionProbe()
+        let closeCompletion = CompletionProbe()
+
+        let start = Task {
+            do {
+                let attempt = try await backend.startReview(
+                    .init(
+                        jobID: "job-1",
+                        sessionID: "session-1",
+                        request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+                    )
+                )
+                await startCompletion.recordCompletion()
+                return attempt
+            } catch {
+                await startCompletion.recordCompletion()
+                throw error
+            }
+        }
+        await threadStartBarrier.waitUntilEntered()
+        let close = Task {
+            do {
+                try await lifecycle.closeAndWait()
+                await closeCompletion.recordCompletion()
+            } catch {
+                await closeCompletion.recordCompletion()
+                throw error
+            }
+        }
+        await transport.waitForCloseCall()
+        #expect(await startCompletion.hasCompleted() == false)
+        #expect(await closeCompletion.hasCompleted() == false)
+
+        await threadStartBarrier.open()
+        let attempt = try await start.value
+        #expect(await startCompletion.hasCompleted())
+        #expect(await closeCompletion.hasCompleted() == false)
+
+        await transport.finishNotificationStream(throwing: JSONRPC.Error.closed)
+        try await close.value
+        #expect(await closeCompletion.hasCompleted())
+        #expect(await backend.notificationRouterIsRunningForTesting() == false)
+
+        var iterator = BackendReviewEventSequence(mailbox: attempt.events).makeAsyncIterator()
+        await #expect(throws: ReviewAttemptStreamFailure.unexpectedConnection(
+            .connection(JSONRPC.Error.closed.localizedDescription)
+        )) {
+            _ = try await iterator.next()
+        }
+    }
+
+    @Test func backendLifecycleCloseJoinsAdmittedRecoveryAcrossRollbackAndReviewStart() async throws {
+        let transport = DeferredNotificationCloseTransport()
+        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(
+            AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"),
+            for: "thread/start"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Review.Start.Response(turnID: "turn-1", reviewThreadID: "thread-1"),
+            for: "review/start"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Review.Start.Response(turnID: "turn-2", reviewThreadID: "thread-1"),
+            for: "review/start"
+        )
+        let backend = AppServerCodexReviewBackend(
+            client: AppServerClient(transport: transport)
+        )
+        let lifecycle = backend.runtimeOwnerLifecycleHandle
+        let initialAttempt = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        ))
+        let handoff = try await backend.prepareReviewRecovery(
+            initialAttempt,
+            reason: .init(message: "Restart runtime")
+        )
+        let rollbackBarrier = RequestBarrier()
+        let reviewStartBarrier = RequestBarrier()
+        await transport.holdNext(method: "thread/rollback", barrier: rollbackBarrier)
+        await transport.holdNext(method: "review/start", barrier: reviewStartBarrier)
+        let recoveryCompletion = CompletionProbe()
+        let closeCompletion = CompletionProbe()
+
+        let recovery = Task {
+            do {
+                let attempt = try await backend.resumeReviewRecovery(
+                    handoff,
+                    request: .init(
+                        jobID: "job-1",
+                        sessionID: "session-1",
+                        request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+                    )
+                )
+                await recoveryCompletion.recordCompletion()
+                return attempt
+            } catch {
+                await recoveryCompletion.recordCompletion()
+                throw error
+            }
+        }
+        await rollbackBarrier.waitUntilEntered()
+        let close = Task {
+            do {
+                try await lifecycle.closeAndWait()
+                await closeCompletion.recordCompletion()
+            } catch {
+                await closeCompletion.recordCompletion()
+                throw error
+            }
+        }
+        await transport.waitForCloseCall()
+        #expect(await recoveryCompletion.hasCompleted() == false)
+        #expect(await closeCompletion.hasCompleted() == false)
+
+        await rollbackBarrier.open()
+        await reviewStartBarrier.waitUntilEntered()
+        #expect(await recoveryCompletion.hasCompleted() == false)
+        #expect(await closeCompletion.hasCompleted() == false)
+
+        await reviewStartBarrier.open()
+        let recoveredAttempt = try await recovery.value
+        #expect(await recoveryCompletion.hasCompleted())
+        #expect(await closeCompletion.hasCompleted() == false)
+
+        await transport.finishNotificationStream(throwing: JSONRPC.Error.closed)
+        try await close.value
+        #expect(await closeCompletion.hasCompleted())
+        #expect(await backend.notificationRouterIsRunningForTesting() == false)
+
+        var iterator = BackendReviewEventSequence(mailbox: recoveredAttempt.events).makeAsyncIterator()
+        await #expect(throws: ReviewAttemptStreamFailure.unexpectedConnection(
+            .connection(JSONRPC.Error.closed.localizedDescription)
+        )) {
+            _ = try await iterator.next()
+        }
+    }
+
+    @Test func backendLifecycleCloseJoinsAdmittedInterrupt() async throws {
+        let transport = DeferredNotificationCloseTransport()
+        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        let interruptBarrier = RequestBarrier()
+        await transport.holdNext(method: "turn/interrupt", barrier: interruptBarrier)
+        let backend = AppServerCodexReviewBackend(
+            client: AppServerClient(transport: transport)
+        )
+        let lifecycle = backend.runtimeOwnerLifecycleHandle
+        let run = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-1",
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "thread-1"
+        )
+        var iterator = await eventSequence(backend, run).makeAsyncIterator()
+        let interruptCompletion = CompletionProbe()
+        let closeCompletion = CompletionProbe()
+
+        let interrupt = Task {
+            do {
+                try await backend.interruptReview(
+                    run,
+                    reason: .init(message: "Stop")
+                )
+                await interruptCompletion.recordCompletion()
+            } catch {
+                await interruptCompletion.recordCompletion()
+                throw error
+            }
+        }
+        await interruptBarrier.waitUntilEntered()
+        let close = Task {
+            do {
+                try await lifecycle.closeAndWait()
+                await closeCompletion.recordCompletion()
+            } catch {
+                await closeCompletion.recordCompletion()
+                throw error
+            }
+        }
+        await transport.waitForCloseCall()
+        #expect(await interruptCompletion.hasCompleted() == false)
+        #expect(await closeCompletion.hasCompleted() == false)
+
+        await interruptBarrier.open()
+        try await interrupt.value
+        #expect(await interruptCompletion.hasCompleted())
+        #expect(await closeCompletion.hasCompleted() == false)
+
+        await transport.finishNotificationStream(throwing: JSONRPC.Error.closed)
+        try await close.value
+        #expect(await closeCompletion.hasCompleted())
         #expect(await backend.notificationRouterIsRunningForTesting() == false)
         await #expect(throws: ReviewAttemptStreamFailure.unexpectedConnection(
             .connection(JSONRPC.Error.closed.localizedDescription)
