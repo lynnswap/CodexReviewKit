@@ -2506,6 +2506,28 @@ struct AppServerClientTests {
         }
     }
 
+    @Test func backendRuntimeReplacementClosePublishesOwnerForcedTerminal() async throws {
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let run = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-1",
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "thread-1"
+        )
+        var iterator = await eventSequence(backend, run).makeAsyncIterator()
+
+        let lifecycle = backend.runtimeOwnerLifecycleHandle
+        await lifecycle.closeAdmission()
+        try await lifecycle.closeAndWait(purpose: .recoveryReplacement)
+
+        await #expect(throws: ReviewAttemptStreamFailure.ownerForcedConnectionClose(
+            .connection("Review connection was force-closed by its runtime owner.")
+        )) {
+            _ = try await iterator.next()
+        }
+    }
+
     @Test func backendPreservesBufferedEventsBeforeNotificationStreamError() async throws {
         let transport = FakeJSONRPCTransport()
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))

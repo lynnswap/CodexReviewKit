@@ -17,11 +17,11 @@ private func makeAppServerReviewAttemptID() -> String {
 
 package struct AppServerRuntimeOwnerLifecycleHandle: Sendable {
     private let closeAdmissionOperation: @Sendable () async -> Void
-    private let closeAndWaitOperation: @Sendable () async throws -> Void
+    private let closeAndWaitOperation: @Sendable (ReviewRuntimeTransitionPurpose) async throws -> Void
 
     fileprivate init(
         closeAdmissionOperation: @escaping @Sendable () async -> Void,
-        closeAndWaitOperation: @escaping @Sendable () async throws -> Void
+        closeAndWaitOperation: @escaping @Sendable (ReviewRuntimeTransitionPurpose) async throws -> Void
     ) {
         self.closeAdmissionOperation = closeAdmissionOperation
         self.closeAndWaitOperation = closeAndWaitOperation
@@ -31,8 +31,10 @@ package struct AppServerRuntimeOwnerLifecycleHandle: Sendable {
         await closeAdmissionOperation()
     }
 
-    package func closeAndWait() async throws {
-        try await closeAndWaitOperation()
+    package func closeAndWait(
+        purpose: ReviewRuntimeTransitionPurpose = .stop
+    ) async throws {
+        try await closeAndWaitOperation(purpose)
     }
 }
 
@@ -202,8 +204,8 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             closeAdmissionOperation: { [self] in
                 await closeAdmissionFromRuntimeOwner()
             },
-            closeAndWaitOperation: { [self] in
-                try await closeFromRuntimeOwnerAndWait()
+            closeAndWaitOperation: { [self] purpose in
+                try await closeFromRuntimeOwnerAndWait(purpose: purpose)
             }
         )
     }
@@ -587,11 +589,18 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
 
     // Only AppServerRuntimeOwnerLifecycleHandle can enter this transition. The
     // notification router never owns that handle, so close cannot await itself.
-    private func closeFromRuntimeOwnerAndWait() async throws {
+    private func closeFromRuntimeOwnerAndWait(
+        purpose: ReviewRuntimeTransitionPurpose
+    ) async throws {
         lifecycleTestingObservation.recordCloseCaller()
         let closeTask: Task<Void, any Error>
         switch lifecycleState {
         case .open:
+            if purpose == .recoveryReplacement {
+                connectionStreamFailure = .ownerForcedConnectionClose(
+                    .connection("Review connection was force-closed by its runtime owner.")
+                )
+            }
             closeAdmissionFromRuntimeOwner()
             let client = client
             let task = Task<Void, any Error> {

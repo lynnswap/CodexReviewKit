@@ -1757,7 +1757,7 @@ private final class LiveRuntimeLifecycleHandle: RuntimeLifecycleHandle {
         await backend.runtimeOwnerLifecycleHandle.closeAdmission()
     }
 
-    func close(purpose _: ReviewRuntimeTransitionPurpose) async throws {
+    func close(purpose: ReviewRuntimeTransitionPurpose) async throws {
         let task: Task<Result<Void, ReviewLifecycleResourceFailureAggregate>, Never>
         if let closeTask {
             task = closeTask
@@ -1768,7 +1768,7 @@ private final class LiveRuntimeLifecycleHandle: RuntimeLifecycleHandle {
                 var failures: [ReviewLifecycleResourceFailure] = []
                 authObservationTask?.cancel()
                 do {
-                    try await appServerLifecycle.closeAndWait()
+                    try await appServerLifecycle.closeAndWait(purpose: purpose)
                 } catch {
                     if let aggregate = error as? ReviewLifecycleResourceFailureAggregate {
                         failures.append(aggregate.first)
