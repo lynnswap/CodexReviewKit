@@ -3,7 +3,7 @@
 | Item | Value |
 |---|---|
 | Integration branch | `codex/v0-6-2-recovery` |
-| Integration base | `b47d83c117e11bdf244d4dba2a6ab07ef92b3ce6` |
+| Approved design checkpoint | `b47d83c117e11bdf244d4dba2a6ab07ef92b3ce6` |
 | Design contract | `Docs/recovery-design-2026-08-20.md` |
 | Recovery ledger | `Docs/review-stability-recovery-2026-08-20.md` |
 | Phase | Approved Phase 3 migration, Wave 0/1 |
