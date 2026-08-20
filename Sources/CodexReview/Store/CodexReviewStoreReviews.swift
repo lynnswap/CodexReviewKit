@@ -16,6 +16,9 @@ extension CodexReviewStore {
         request: CodexReviewAPI.Start.Request
     ) async throws -> CodexReviewAPI.Read.Result {
         let jobID = try beginReview(sessionID: sessionID, request: request)
+        // Caller Task cancellation is not a review-cancellation command: only the
+        // attempt admission can distinguish not-sent from outcome-unknown dispatch.
+        // Session owners must use cancelReview/closeSession so the canonical barrier drains.
         _ = try await awaitReview(sessionID: sessionID, jobID: jobID)
         await reviewWorkerTasks[jobID]?.value
         return try readReview(sessionID: sessionID, jobID: jobID)
