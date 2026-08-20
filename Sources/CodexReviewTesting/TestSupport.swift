@@ -176,6 +176,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         case logout(CodexReviewBackendModel.Account.ID)
         case startReview(CodexReviewBackendModel.Review.Start)
         case interruptReview(CodexReviewBackendModel.Review.Run, CodexReviewBackendModel.CancellationReason)
+        case forceCloseReviewConnection
         case beginReviewRecovery(CodexReviewBackendModel.Review.Run, CodexReviewBackendModel.CancellationReason)
         case resumeReviewRecovery(CodexReviewBackendModel.Review.RecoveryToken, CodexReviewBackendModel.Review.Start)
         case cleanupReview(CodexReviewBackendModel.Review.Run)
@@ -188,6 +189,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     private var nextRecoveredRun: CodexReviewBackendModel.Review.Run?
     private var interruptFailureMessage: String?
     private var recoveryFailureMessage: String?
+    private var cleanupFailure: ReviewRuntimeCloseFailure?
     private var interruptReviewGate: AsyncGate?
     private var interruptReviewWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var beginReviewRecoveryWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
@@ -237,6 +239,10 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
 
     package func failRecovery(message: String) {
         recoveryFailureMessage = message
+    }
+
+    package func failCleanup(message: String) {
+        cleanupFailure = .cleanup(message)
     }
 
     package func holdInterruptReview(with gate: AsyncGate) {
@@ -447,16 +453,38 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         return auth
     }
 
-    package func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt {
+    package func startReview(
+        _ request: CodexReviewBackendModel.Review.Start,
+        admission: ReviewStartAdmission
+    ) async throws -> BackendReviewAttempt {
+        guard await admission.admitThreadStartDispatch() else {
+            throw ReviewStartCancelledBeforeDispatch(
+                cancellation: await admission.cancellationRequest() ?? .system()
+            )
+        }
         commands.append(.startReview(request))
         let waiters = Array(startReviewWaiters.values)
         startReviewWaiters.removeAll(keepingCapacity: false)
         for waiter in waiters {
             waiter.resume()
         }
+        let provisionalRun = CodexReviewBackendModel.Review.Run(
+            attemptID: nextRun.attemptID,
+            threadID: nextRun.threadID,
+            reviewThreadID: nextRun.threadID,
+            model: nextRun.model
+        )
+        await admission.recordPreparedThread(provisionalRun)
+        guard await admission.admitReviewStartDispatch(for: provisionalRun) else {
+            commands.append(.cleanupReview(provisionalRun))
+            throw ReviewStartCancelledBeforeDispatch(
+                cancellation: await admission.cancellationRequest() ?? .system()
+            )
+        }
         if let startReviewGate {
             await startReviewGate.wait()
         }
+        await admission.recordActiveRun(nextRun)
         return .init(run: nextRun, events: eventMailbox(for: nextRun))
     }
 
@@ -471,7 +499,19 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
             await interruptReviewGate.wait()
         }
         if let interruptFailureMessage {
-            throw FakeCodexReviewBackendError(message: interruptFailureMessage)
+            throw ReviewInterruptRequestFailure(
+                outcome: .rejected(code: nil, message: interruptFailureMessage)
+            )
+        }
+    }
+
+    package func forceCloseReviewConnection() async throws {
+        commands.append(.forceCloseReviewConnection)
+        await startReviewGate?.open()
+        await interruptReviewGate?.open()
+        let mailboxes = Array(eventMailboxes.values)
+        for mailbox in mailboxes {
+            await mailbox.fail(ReviewRuntimeCloseFailure.connection("Connection force-closed."))
         }
     }
 
@@ -521,8 +561,11 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         return .init(run: recoveredRun, events: eventMailbox(for: recoveredRun))
     }
 
-    package func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async {
+    package func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws {
         commands.append(.cleanupReview(run))
+        if let cleanupFailure {
+            throw cleanupFailure
+        }
     }
 
     package func yield(_ event: CodexReviewBackendModel.Review.Event, for run: CodexReviewBackendModel.Review.Run? = nil) async {
@@ -814,8 +857,11 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         false
     }
 
-    package func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt {
-        try await reviewBackend.startReview(request)
+    package func startReview(
+        _ request: CodexReviewBackendModel.Review.Start,
+        admission: ReviewStartAdmission
+    ) async throws -> BackendReviewAttempt {
+        try await reviewBackend.startReview(request, admission: admission)
     }
 
     package func interruptReview(
@@ -823,6 +869,10 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         reason: CodexReviewBackendModel.CancellationReason
     ) async throws {
         try await reviewBackend.interruptReview(run, reason: reason)
+    }
+
+    package func forceCloseReviewConnection() async throws {
+        try await reviewBackend.forceCloseReviewConnection()
     }
 
     package func beginReviewRecovery(
@@ -839,8 +889,8 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         try await reviewBackend.resumeReviewRecovery(token, request: request)
     }
 
-    package func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async {
-        await reviewBackend.cleanupReview(run)
+    package func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws {
+        try await reviewBackend.cleanupReview(run)
     }
 
     package func refreshSettings() async throws -> CodexReviewSettings.Snapshot {
@@ -913,8 +963,13 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
     private var gatesByMethod: [String: RequestGate] = [:]
     private var oneShotGatesByMethod: [String: [RequestGate]] = [:]
     private var requestCountWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+    private var requestMethodWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+    private var responseMethodWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+    private var deliveredResponseMethods: [String: Int] = [:]
     private var notificationStreamCountWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
     private var closed = false
+    private var closeFailure: ReviewRuntimeCloseFailure?
+    private var closeCallCount = 0
 
     package init(responses: [String: [Data]] = [:]) {
         self.responses = responses
@@ -948,12 +1003,17 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
         oneShotGatesByMethod[method, default: []].append(.init(gate: gate, ignoresCancellation: true))
     }
 
+    package func failClose(with failure: ReviewRuntimeCloseFailure) {
+        closeFailure = failure
+    }
+
     package func send(_ request: JSONRPC.Request) async throws -> Data {
         guard closed == false else {
             throw JSONRPC.Error.closed
         }
         requests.append(request)
         resumeRequestCountWaiters()
+        resumeRequestMethodWaiters(request.method)
         activeByMethod[request.method, default: 0] += 1
         maxActiveByMethod[request.method] = max(
             maxActiveByMethod[request.method] ?? 0,
@@ -964,6 +1024,11 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
             await gate.wait()
         }
         activeByMethod[request.method, default: 1] -= 1
+        guard closed == false else {
+            throw JSONRPC.Error.closed
+        }
+        deliveredResponseMethods[request.method, default: 0] += 1
+        resumeResponseMethodWaiters(request.method)
         if let queuedResponse {
             switch queuedResponse {
             case .success(let data):
@@ -1004,12 +1069,20 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
         }
     }
 
-    package func close() async {
+    package func close() async throws {
+        closeCallCount += 1
         closed = true
+        let gates = Array(gatesByMethod.values) + oneShotGatesByMethod.values.flatMap { $0 }
+        for gate in gates {
+            await gate.gate.open()
+        }
         for continuation in serverNotificationContinuations {
-            continuation.finish()
+            continuation.finish(throwing: JSONRPC.Error.closed)
         }
         serverNotificationContinuations.removeAll()
+        if let closeFailure {
+            throw closeFailure
+        }
     }
 
     package func finishNotificationStreams(throwing error: any Error) {
@@ -1032,6 +1105,32 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
                 continuation.resume()
             } else {
                 requestCountWaiters.append((count, continuation))
+            }
+        }
+    }
+
+    package func waitForRequest(method: String) async {
+        if requests.contains(where: { $0.method == method }) {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            if requests.contains(where: { $0.method == method }) {
+                continuation.resume()
+            } else {
+                requestMethodWaiters[method, default: []].append(continuation)
+            }
+        }
+    }
+
+    package func waitForResponseDelivery(method: String) async {
+        if deliveredResponseMethods[method, default: 0] > 0 {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            if deliveredResponseMethods[method, default: 0] > 0 {
+                continuation.resume()
+            } else {
+                responseMethodWaiters[method, default: []].append(continuation)
             }
         }
     }
@@ -1061,6 +1160,10 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
         closed
     }
 
+    package func closeCallCountForTesting() -> Int {
+        closeCallCount
+    }
+
     package func maxActiveCount(for method: String) -> Int {
         maxActiveByMethod[method] ?? 0
     }
@@ -1088,6 +1191,20 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
             }
         }
         requestCountWaiters = remaining
+    }
+
+    private func resumeRequestMethodWaiters(_ method: String) {
+        let waiters = requestMethodWaiters.removeValue(forKey: method) ?? []
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+
+    private func resumeResponseMethodWaiters(_ method: String) {
+        let waiters = responseMethodWaiters.removeValue(forKey: method) ?? []
+        for waiter in waiters {
+            waiter.resume()
+        }
     }
 
     private func resumeNotificationStreamCountWaiters() {

@@ -126,12 +126,15 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         return try await readAuth()
     }
 
-    package func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt {
+    package func startReview(
+        _ request: CodexReviewBackendModel.Review.Start,
+        admission: ReviewStartAdmission
+    ) async throws -> BackendReviewAttempt {
         _ = try await client.initialize()
         await ensureNotificationRouterStarted()
         let control = AppServerReviewControl(client: client)
 
-        let thread = try await startReviewThread(request)
+        let thread = try await startReviewThread(request, admission: admission)
         controlsByThreadID[thread.threadID] = control
         let attemptID = makeAppServerReviewAttemptID()
         let provisionalRun = CodexReviewBackendModel.Review.Run(
@@ -147,6 +150,14 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         )
         registerReviewEventSession(session, for: provisionalRun)
         control.recordThreadStarted(threadID: thread.threadID)
+        await admission.recordPreparedThread(provisionalRun)
+
+        guard await admission.admitReviewStartDispatch(for: provisionalRun) else {
+            try await cleanupReview(provisionalRun)
+            throw ReviewStartCancelledBeforeDispatch(
+                cancellation: await admission.cancellationRequest() ?? .system()
+            )
+        }
 
         let review: AppServerAPI.Review.Start.Response
         reviewStartRequestsInFlight += 1
@@ -157,7 +168,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         } catch {
             reviewStartRequestsInFlight -= 1
             discardUnmatchedReviewNotificationsIfIdle()
-            await cleanupReview(provisionalRun)
+            if let terminal = Self.connectionTerminal(for: error) {
+                await admission.recordConnectionTerminal(terminal)
+            }
+            try await cleanupReview(provisionalRun)
             throw error
         }
         let reviewThreadID = review.reviewThreadID ?? thread.threadID
@@ -173,64 +187,89 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         control.recordReviewStarted(turnThreadID: appServerTurnThreadID(for: run), turnID: review.turnID)
         await session.bufferStartupNotifications(takeUnmatchedReviewNotifications(for: run))
         await session.finalizeRun()
+        await admission.recordActiveRun(run)
         reviewStartRequestsInFlight -= 1
         discardUnmatchedReviewNotificationsIfIdle()
 
         return await session.attempt()
     }
 
-    private func startReviewThread(_ request: CodexReviewBackendModel.Review.Start) async throws -> AppServerAPI.Thread.Start.Response {
+    private func startReviewThread(
+        _ request: CodexReviewBackendModel.Review.Start,
+        admission: ReviewStartAdmission
+    ) async throws -> AppServerAPI.Thread.Start.Response {
         if threadStartPermissionStrategy == .legacySandbox {
             // Deprecated compatibility: installed Codex builds without the app-server v2
             // session-source flag can ignore permissions without failing the request.
-            return try await client.send(AppServerAPI.Thread.Start.Request(
+            return try await sendThreadStart(AppServerAPI.Thread.Start.Request(
                 params: threadStartParamsWithLegacySandbox(request)
-            ))
+            ), admission: admission)
         }
         do {
-            return try await startReviewThreadWithProfileIDPermissions(request)
+            return try await startReviewThreadWithProfileIDPermissions(request, admission: admission)
         } catch let error as JSONRPC.Error where Self.shouldRetryThreadStartWithLegacySandbox(error) {
             // Deprecated compatibility: some builds accept the permissions field shape
             // without registering the danger-full-access built-in profile.
-            return try await client.send(AppServerAPI.Thread.Start.Request(
+            return try await sendThreadStart(AppServerAPI.Thread.Start.Request(
                 params: threadStartParamsWithLegacySandbox(request)
-            ))
+            ), admission: admission)
         } catch let error as JSONRPC.Error where Self.shouldRetryThreadStartWithObjectPermissions(error) {
             // Deprecated compatibility: installed Codex builds can require object-shaped
             // permissions while the latest local app-server source accepts a profile ID string.
-            return try await startReviewThreadWithProfileSelectionPermissions(request)
+            return try await startReviewThreadWithProfileSelectionPermissions(request, admission: admission)
         }
     }
 
     private func startReviewThreadWithProfileIDPermissions(
-        _ request: CodexReviewBackendModel.Review.Start
+        _ request: CodexReviewBackendModel.Review.Start,
+        admission: ReviewStartAdmission
     ) async throws -> AppServerAPI.Thread.Start.Response {
-        try await client.send(AppServerAPI.Thread.Start.Request(
+        try await sendThreadStart(AppServerAPI.Thread.Start.Request(
             params: threadStartParams(
                 request,
                 permissions: .profileID(Self.reviewPermissionProfileID)
             )
-        ))
+        ), admission: admission)
     }
 
     private func startReviewThreadWithProfileSelectionPermissions(
-        _ request: CodexReviewBackendModel.Review.Start
+        _ request: CodexReviewBackendModel.Review.Start,
+        admission: ReviewStartAdmission
     ) async throws -> AppServerAPI.Thread.Start.Response {
         do {
-            return try await client.send(AppServerAPI.Thread.Start.Request(
+            return try await sendThreadStart(AppServerAPI.Thread.Start.Request(
                 params: threadStartParams(
                     request,
                     permissions: .profileSelection(.init(id: Self.reviewPermissionProfileID))
                 )
-            ))
+            ), admission: admission)
         } catch let error as JSONRPC.Error
             where Self.shouldRetryThreadStartWithLegacySandbox(error)
         {
             // Deprecated compatibility: installed Codex builds can know the permissions
             // object shape without registering the danger-full-access built-in profile.
-            return try await client.send(AppServerAPI.Thread.Start.Request(
+            return try await sendThreadStart(AppServerAPI.Thread.Start.Request(
                 params: threadStartParamsWithLegacySandbox(request)
-            ))
+            ), admission: admission)
+        }
+    }
+
+    private func sendThreadStart(
+        _ request: AppServerAPI.Thread.Start.Request,
+        admission: ReviewStartAdmission
+    ) async throws -> AppServerAPI.Thread.Start.Response {
+        guard await admission.admitThreadStartDispatch() else {
+            throw ReviewStartCancelledBeforeDispatch(
+                cancellation: await admission.cancellationRequest() ?? .system()
+            )
+        }
+        do {
+            return try await client.send(request)
+        } catch {
+            if let terminal = Self.connectionTerminal(for: error) {
+                await admission.recordConnectionTerminal(terminal)
+            }
+            throw error
         }
     }
 
@@ -277,6 +316,29 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             || message.contains("default_permissions refers to unknown")
     }
 
+    private nonisolated static func interruptRequestFailure(
+        for error: any Error
+    ) -> ReviewInterruptRequestFailure {
+        if case JSONRPC.Error.responseError(let code, let message) = error {
+            return .init(outcome: .rejected(code: code, message: message))
+        }
+        return .init(outcome: .outcomeUnknown(message: error.localizedDescription))
+    }
+
+    private nonisolated static func connectionTerminal(
+        for error: any Error
+    ) -> ReviewRuntimeCloseFailure? {
+        guard let jsonRPCError = error as? JSONRPC.Error else {
+            return nil
+        }
+        switch jsonRPCError {
+        case .closed, .invalidMessage:
+            return .connection(jsonRPCError.localizedDescription)
+        case .responseError:
+            return nil
+        }
+    }
+
     package func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws {
         _ = try await client.initialize()
         guard abandonedReviewAttemptIDs.contains(run.attemptID) == false else {
@@ -286,14 +348,25 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         await session.requestCancellation(message: reason.message)
         do {
             _ = try await sendTurnInterrupt(for: run)
-            await finishReviewEventStream(
-                threadID: run.threadID,
-                cancellationMessage: reason.message,
-                buffersMissingContinuation: true
-            )
+            await session.waitForTerminalBarrier()
         } catch {
-            await session.clearCancellationRequest()
-            throw error
+            let failure = Self.interruptRequestFailure(for: error)
+            if case .rejected = failure.outcome {
+                await session.clearCancellationRequest()
+                throw failure
+            }
+            await session.waitForTerminalBarrier()
+            throw failure
+        }
+    }
+
+    package func forceCloseReviewConnection() async throws {
+        do {
+            try await client.close()
+        } catch let failure as ReviewRuntimeCloseFailure {
+            throw failure
+        } catch {
+            throw ReviewRuntimeCloseFailure.connection(error.localizedDescription)
         }
     }
 
@@ -303,10 +376,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     ) async throws -> CodexReviewBackendModel.Review.RecoveryToken {
         _ = try await client.initialize()
         await ensureNotificationRouterStarted()
-        markTurnAbandoned(run.turnID)
         let interruption = try await sendTurnInterrupt(for: run) { retryInterruption in
             await self.markInterruptionTurnAbandoned(retryInterruption, canonicalThreadID: run.threadID)
         }
+        markTurnAbandoned(run.turnID)
         markAttemptAbandoned(run, interruption: interruption)
         if let session = unregisterReviewEventSession(for: run) {
             await session.abandon()
@@ -383,8 +456,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         return await session.attempt()
     }
 
-    package func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async {
-        _ = try? await client.initialize()
+    package func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws {
         controlsByThreadID.removeValue(forKey: run.threadID)
         var cleanupThreadIDs = cleanupThreadIDs(for: run)
         if let session = unregisterReviewEventSession(for: run) {
@@ -395,24 +467,40 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                 completedReviewEventSessionMetricsByThreadID[threadID] = metrics
             }
         }
-        let _: EmptyResponse? = try? await client.send(AppServerAPI.Thread.BackgroundTerminals.Clean.Request(
-            params: .init(threadID: run.threadID)
-        ))
-        let _: AppServerAPI.Thread.Unsubscribe.Response? = try? await client.send(AppServerAPI.Thread.Unsubscribe.Request(
-            params: .init(threadID: run.threadID)
-        ))
-        for threadID in cleanupThreadIDs {
-            let _: EmptyResponse? = try? await client.send(AppServerAPI.Thread.Delete.Request(
-                params: .init(threadID: threadID)
+        var firstFailure: ReviewRuntimeCloseFailure?
+        do {
+            let _: EmptyResponse = try await client.send(AppServerAPI.Thread.BackgroundTerminals.Clean.Request(
+                params: .init(threadID: run.threadID)
             ))
+        } catch {
+            firstFailure = .cleanup("thread/backgroundTerminals/clean for \(run.threadID): \(error.localizedDescription)")
+        }
+        do {
+            let _: AppServerAPI.Thread.Unsubscribe.Response = try await client.send(AppServerAPI.Thread.Unsubscribe.Request(
+                params: .init(threadID: run.threadID)
+            ))
+        } catch where firstFailure == nil {
+            firstFailure = .cleanup("thread/unsubscribe for \(run.threadID): \(error.localizedDescription)")
+        } catch {}
+        for threadID in cleanupThreadIDs {
+            do {
+                let _: EmptyResponse = try await client.send(AppServerAPI.Thread.Delete.Request(
+                    params: .init(threadID: threadID)
+                ))
+            } catch where firstFailure == nil {
+                firstFailure = .cleanup("thread/delete for \(threadID): \(error.localizedDescription)")
+            } catch {}
         }
         for threadID in cleanupThreadIDs {
             reviewEventSessionCanonicalThreadIDByThreadID.removeValue(forKey: threadID)
         }
         reviewThreadIDsForCleanupByThreadID.removeValue(forKey: run.threadID)
+        if let firstFailure {
+            throw firstFailure
+        }
     }
 
-    package func cleanupActiveReviewsForShutdown(reason: CodexReviewBackendModel.CancellationReason) async {
+    package func cleanupActiveReviewsForShutdown(reason: CodexReviewBackendModel.CancellationReason) async throws {
         let runs = await activeReviewRunsForShutdown()
         guard runs.isEmpty == false else {
             return
@@ -421,15 +509,15 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             if Task.isCancelled {
                 return
             }
-            try? await interruptReview(run, reason: reason)
+            try await interruptReview(run, reason: reason)
             if Task.isCancelled {
                 return
             }
-            await cleanupReview(run)
+            try await cleanupReview(run)
         }
     }
 
-    package func interruptActiveReviewsForShutdown(reason: CodexReviewBackendModel.CancellationReason) async {
+    package func interruptActiveReviewsForShutdown(reason: CodexReviewBackendModel.CancellationReason) async throws {
         let runs = await activeReviewRunsForShutdown()
         guard runs.isEmpty == false else {
             return
@@ -438,7 +526,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             if Task.isCancelled {
                 return
             }
-            try? await interruptReview(run, reason: reason)
+            try await interruptReview(run, reason: reason)
         }
     }
 
@@ -610,20 +698,6 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         unmatchedReviewNotificationsByThreadID.removeAll(keepingCapacity: true)
     }
 
-    private func finishReviewEventStream(
-        threadID: String,
-        cancellationMessage: String?,
-        buffersMissingContinuation: Bool = false
-    ) async {
-        guard let session = reviewEventSession(forThreadID: threadID) else {
-            return
-        }
-        await session.finish(
-            cancellationMessage: cancellationMessage,
-            buffersMissingContinuation: buffersMissingContinuation
-        )
-    }
-
     private func sendTurnInterrupt(
         for run: CodexReviewBackendModel.Review.Run,
         willInterruptActiveTurn: (@Sendable (AppServerReviewInterruption) async -> Void)? = nil
@@ -693,7 +767,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             for try await notification in notifications {
                 await routeReviewNotification(notification)
             }
-            await finishAllReviewEventSessions(throwing: nil)
+            await finishAllReviewEventSessions(throwing: JSONRPC.Error.closed)
         } catch {
             await finishAllReviewEventSessions(throwing: error)
         }
@@ -839,7 +913,13 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         appServerBackendLogger.error(
             "Closing app-server connection after review routing failure: \(error.localizedDescription, privacy: .public)"
         )
-        await client.close()
+        do {
+            try await client.close()
+        } catch {
+            appServerBackendLogger.error(
+                "App-server connection close failed during routing containment: \(error.localizedDescription, privacy: .public)"
+            )
+        }
         await finishAllReviewEventSessions(throwing: error)
     }
 
@@ -1007,6 +1087,8 @@ private actor AppServerReviewEventSession {
     private var isRunFinalized: Bool
     private var isDrainingStartupNotifications = false
     private var pendingStartupNotifications: [AppServerRoutedReviewNotification] = []
+    private var terminalBarrierResolved = false
+    private var terminalBarrierWaiters: [CheckedContinuation<Void, Never>] = []
     private var metrics = AppServerReviewEventSessionMetrics()
 
     init(
@@ -1074,6 +1156,19 @@ private actor AppServerReviewEventSession {
         cancellationRequestedMessage = nil
     }
 
+    func waitForTerminalBarrier() async {
+        if terminalBarrierResolved {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            if terminalBarrierResolved {
+                continuation.resume()
+            } else {
+                terminalBarrierWaiters.append(continuation)
+            }
+        }
+    }
+
     func receive(_ notification: AppServerRoutedReviewNotification) async {
         metrics.routed += 1
         guard finished == false else {
@@ -1114,6 +1209,7 @@ private actor AppServerReviewEventSession {
         pendingStartupNotifications.removeAll(keepingCapacity: true)
         await emitPrecedingEvents(precedingEvents)
         if let error {
+            resolveTerminalBarrier()
             await mailbox.fail(error)
         } else {
             await mailbox.finish()
@@ -1401,9 +1497,22 @@ private actor AppServerReviewEventSession {
             event = .failed(message)
         }
         noteEmission(event)
+        resolveTerminalBarrier()
         await mailbox.append(event)
         recordReviewEvent(event, controlThreadID: controlThreadID)
         await mailbox.finish()
+    }
+
+    private func resolveTerminalBarrier() {
+        guard terminalBarrierResolved == false else {
+            return
+        }
+        terminalBarrierResolved = true
+        let waiters = terminalBarrierWaiters
+        terminalBarrierWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
     }
 
     private func shouldCloseActiveCommandsBeforeEvents(

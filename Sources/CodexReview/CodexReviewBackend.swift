@@ -10,8 +10,12 @@ package protocol CodexReviewBackend: Sendable {
     func completeLogin(_ response: CodexReviewBackendModel.Login.Response) async throws -> CodexReviewBackendModel.Auth.Snapshot
     func logout(_ account: CodexReviewBackendModel.Account.ID) async throws -> CodexReviewBackendModel.Auth.Snapshot
 
-    func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt
+    func startReview(
+        _ request: CodexReviewBackendModel.Review.Start,
+        admission: ReviewStartAdmission
+    ) async throws -> BackendReviewAttempt
     func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws
+    func forceCloseReviewConnection() async throws
     func beginReviewRecovery(
         _ run: CodexReviewBackendModel.Review.Run,
         reason: CodexReviewBackendModel.CancellationReason
@@ -20,7 +24,19 @@ package protocol CodexReviewBackend: Sendable {
         _ token: CodexReviewBackendModel.Review.RecoveryToken,
         request: CodexReviewBackendModel.Review.Start
     ) async throws -> BackendReviewAttempt
-    func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async
+    func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws
+}
+
+package extension CodexReviewBackend {
+    func startReview(
+        _ request: CodexReviewBackendModel.Review.Start
+    ) async throws -> BackendReviewAttempt {
+        let admission = ReviewStartAdmission()
+        let task = await admission.start { admission in
+            try await self.startReview(request, admission: admission)
+        }
+        return try await task.value
+    }
 }
 
 package struct BackendReviewAttempt: Sendable {

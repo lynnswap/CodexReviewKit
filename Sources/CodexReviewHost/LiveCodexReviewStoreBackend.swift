@@ -438,7 +438,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             let failureMessage = await runtimeStartupFailureMessage(for: error)
             logger.error("Review runtime failed to start: \(failureMessage, privacy: .public)")
             await startedHTTPServer?.stop()
-            await startedClient?.close()
+            await closeClientAfterFailure(startedClient)
             self.client = nil
             self.appServerBackend = nil
             self.mcpHTTPServer = nil
@@ -480,7 +480,13 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         timeoutWarning: String
     ) async {
         let didInterrupt = await runRuntimeShutdownCleanup(timeout: shutdownCleanupTimeout) {
-            await appServerBackend.interruptActiveReviewsForShutdown(reason: .init(message: reason.message))
+            do {
+                try await appServerBackend.interruptActiveReviewsForShutdown(
+                    reason: .init(message: reason.message)
+                )
+            } catch {
+                logger.error("Failed to interrupt active reviews during runtime teardown: \(error.localizedDescription, privacy: .public)")
+            }
         }
         let locallyCancelledJobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
             reason: reason,
@@ -521,7 +527,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         await mcpHTTPServer?.stop()
         self.appServerBackend = nil
         await cleanupLoginRuntime(loginCleanup)
-        await client?.close()
+        await closeClientAfterFailure(client)
         logger.info("Review runtime stopped")
     }
 
@@ -1036,11 +1042,14 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         await closeIsolatedLoginRuntime(client: loginClient, codexHomeURL: loginCodexHomeURL)
     }
 
-    func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt {
+    func startReview(
+        _ request: CodexReviewBackendModel.Review.Start,
+        admission: ReviewStartAdmission
+    ) async throws -> BackendReviewAttempt {
         guard let appServerBackend else {
             throw CodexReviewAPI.Error.io("Review runtime is not running.")
         }
-        return try await appServerBackend.startReview(request)
+        return try await appServerBackend.startReview(request, admission: admission)
     }
 
     func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws {
@@ -1048,6 +1057,13 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             throw CodexReviewAPI.Error.io("Review runtime is not running.")
         }
         try await appServerBackend.interruptReview(run, reason: reason)
+    }
+
+    func forceCloseReviewConnection() async throws {
+        guard let appServerBackend else {
+            throw ReviewRuntimeCloseFailure.connection("Review runtime is not running.")
+        }
+        try await appServerBackend.forceCloseReviewConnection()
     }
 
     func beginReviewRecovery(
@@ -1070,11 +1086,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         return try await appServerBackend.resumeReviewRecovery(token, request: request)
     }
 
-    func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async {
+    func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws {
         guard let appServerBackend else {
-            return
+            throw ReviewRuntimeCloseFailure.cleanup("Review runtime is not running.")
         }
-        await appServerBackend.cleanupReview(run)
+        try await appServerBackend.cleanupReview(run)
     }
 
     @discardableResult
@@ -1194,7 +1210,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         store.transitionToFailed(message)
         await failedMCPHTTPServer?.stop()
         await cleanupLoginRuntime(loginCleanup)
-        await failedClient?.close()
+        await closeClientAfterFailure(failedClient)
     }
 
     private func handleAuthNotification(
@@ -1548,17 +1564,28 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     private func closeIsolatedLoginRuntime(client: AppServerClient?, codexHomeURL: URL?) async {
         guard let codexHomeURL else {
-            await client?.close()
+            await closeClientAfterFailure(client)
             return
         }
         guard codexHomeURL != self.codexHomeURL else {
             return
         }
-        await client?.close()
+        await closeClientAfterFailure(client)
         do {
             try await recoveryEnvironment.removeLoginStagingCodexHome(at: codexHomeURL)
         } catch {
             logger.error("Failed to remove login staging home: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func closeClientAfterFailure(_ client: AppServerClient?) async {
+        guard let client else {
+            return
+        }
+        do {
+            try await client.close()
+        } catch {
+            logger.error("Failed to close app-server client: \(error.localizedDescription, privacy: .public)")
         }
     }
 

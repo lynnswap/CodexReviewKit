@@ -25,13 +25,14 @@ public final class CodexReviewStore {
     @ObservationIgnored package let backend: any CodexReviewStoreBackend
     @ObservationIgnored package let networkMonitor: any CodexReviewNetworkMonitoring
     @ObservationIgnored package let networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy
+    @ObservationIgnored package let reviewRuntimeClosePolicy: ReviewRuntimeClosePolicy
     @ObservationIgnored package var previewSupportRetainer: AnyObject?
     @ObservationIgnored package let clock: CodexReviewClock
     @ObservationIgnored package let idGenerator: CodexReviewIDGenerator
     @ObservationIgnored package var activeRuns: [String: CodexReviewBackendModel.Review.Run] = [:]
     @ObservationIgnored package var reviewRecoveryWaitingJobIDs: Set<String> = []
-    @ObservationIgnored package var startingJobIDs: Set<String> = []
-    @ObservationIgnored package var startupCancellations: [String: ReviewCancellation] = [:]
+    @ObservationIgnored package var reviewStartAdmissions: [String: ReviewStartAdmission] = [:]
+    @ObservationIgnored package var reviewCleanupFailures: [String: ReviewRuntimeCloseFailure] = [:]
     @ObservationIgnored package var reviewWorkerTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored package var runtimeStopDetachedReviewWorkerTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored package var reviewTerminalWaiters: [String: [ReviewTerminalWaiter]] = [:]
@@ -45,11 +46,13 @@ public final class CodexReviewStore {
         clock: CodexReviewClock = .init(),
         idGenerator: CodexReviewIDGenerator = .init(),
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
-        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default
+        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
+        reviewRuntimeClosePolicy: ReviewRuntimeClosePolicy = .production
     ) {
         self.backend = backend
         self.networkMonitor = networkMonitor
         self.networkRecoveryPolicy = networkRecoveryPolicy
+        self.reviewRuntimeClosePolicy = reviewRuntimeClosePolicy
         self.diagnosticsURL = diagnosticsURL
         self.clock = clock
         self.idGenerator = idGenerator
@@ -113,7 +116,8 @@ public final class CodexReviewStore {
         clock: CodexReviewClock = .init(),
         idGenerator: CodexReviewIDGenerator = .init(),
         networkMonitor: any CodexReviewNetworkMonitoring = StaticCodexReviewNetworkMonitor(),
-        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default
+        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
+        reviewRuntimeClosePolicy: ReviewRuntimeClosePolicy = .production
     ) -> CodexReviewStore {
         CodexReviewStore(
             backend: backend,
@@ -121,7 +125,8 @@ public final class CodexReviewStore {
             clock: clock,
             idGenerator: idGenerator,
             networkMonitor: networkMonitor,
-            networkRecoveryPolicy: networkRecoveryPolicy
+            networkRecoveryPolicy: networkRecoveryPolicy,
+            reviewRuntimeClosePolicy: reviewRuntimeClosePolicy
         )
     }
 

@@ -11,7 +11,7 @@ import CodexReviewTesting
 @Suite("host composition")
 @MainActor
 struct CodexReviewHostTests {
-    @Test func hostStartsAndStopsRuntimeWithFakeBackend() async {
+    @Test func hostStartsAndStopsRuntimeWithFakeBackend() async throws {
         let backend = FakeCodexReviewBackend()
         let host = CodexReviewHost(
             backend: backend,
@@ -22,7 +22,7 @@ struct CodexReviewHostTests {
         #expect(host.store.serverState == .running)
         #expect(host.store.serverURL == URL(string: "http://localhost:9417/mcp"))
 
-        await host.stop()
+        try await host.stop()
         #expect(host.store.serverState == .stopped)
     }
 

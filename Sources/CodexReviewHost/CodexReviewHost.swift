@@ -7,7 +7,7 @@ import CodexReviewMCPServer
 package final class CodexReviewHost {
     package let store: CodexReviewStore
     package let mcpServer: CodexReviewMCPServer
-    private let shutdown: @Sendable () async -> Void
+    private let shutdown: @Sendable () async throws -> Void
     private var endpoint: URL?
 
     package init(
@@ -15,7 +15,7 @@ package final class CodexReviewHost {
         clock: CodexReviewClock = .init(),
         idGenerator: CodexReviewIDGenerator = .init(),
         endpoint: URL? = nil,
-        shutdown: @escaping @Sendable () async -> Void = {}
+        shutdown: @escaping @Sendable () async throws -> Void = {}
     ) {
         self.shutdown = shutdown
         self.endpoint = endpoint
@@ -38,7 +38,7 @@ package final class CodexReviewHost {
             backend: backend,
             endpoint: endpoint,
             shutdown: {
-                await client.close()
+                try await client.close()
             }
         )
     }
@@ -51,9 +51,9 @@ package final class CodexReviewHost {
         await store.refreshSettings()
     }
 
-    package func stop() async {
+    package func stop() async throws {
         await store.stop()
-        await shutdown()
+        try await shutdown()
     }
 }
 
@@ -233,8 +233,11 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
         false
     }
 
-    func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt {
-        try await backend.startReview(request)
+    func startReview(
+        _ request: CodexReviewBackendModel.Review.Start,
+        admission: ReviewStartAdmission
+    ) async throws -> BackendReviewAttempt {
+        try await backend.startReview(request, admission: admission)
     }
 
     func interruptReview(
@@ -242,6 +245,10 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
         reason: CodexReviewBackendModel.CancellationReason
     ) async throws {
         try await backend.interruptReview(run, reason: reason)
+    }
+
+    func forceCloseReviewConnection() async throws {
+        try await backend.forceCloseReviewConnection()
     }
 
     func beginReviewRecovery(
@@ -258,8 +265,8 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
         try await backend.resumeReviewRecovery(token, request: request)
     }
 
-    func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async {
-        await backend.cleanupReview(run)
+    func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws {
+        try await backend.cleanupReview(run)
     }
 
     private static func monitorSettings(
