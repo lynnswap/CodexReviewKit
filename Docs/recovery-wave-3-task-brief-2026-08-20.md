@@ -34,6 +34,8 @@ open until Wave 4 proves commit-before-cleanup.
   backend token creation; a product-terminal disposition cannot be tokenized.
 - Store attempt ownership is one coherent state. No suspension exposes an old
   run paired with a fresh admission.
+- Registered start Tasks are backend-inert until the Store publishes their
+  ownership state and explicitly activates the exact handle.
 - Mailbox and worker failure delivery preserve typed origin/recoverability; no
   protocol, process, or connection case is reduced to a string.
 - Review cleanup, worker removal, MCP waiter completion, runtime teardown, and
@@ -63,6 +65,8 @@ open until Wave 4 proves commit-before-cleanup.
   returns while the run map still contains the old attempt.
 - `ReviewStartAdmission.start` resets its phase to thread preparation even when
   cancellation/terminal was already recorded before the worker registered start.
+- `registerStart` returns a live Task with no activation barrier, so backend
+  dispatch may race ahead of Store publication of the registered handle.
 - mailbox failure stores only display text, erasing whether the source was a
   verified network outage, unexpected connection loss, process exit, or
   protocol violation; downstream code can therefore recover every case.
@@ -89,6 +93,8 @@ Do not add flags at call sites.
 
 ```text
 queued
+  -> registeredStart(handleID, activation: pending)
+  -> activatedStart(handleID)
   -> preparingThread(
        threadRequestDispatch: notSent | outcomeUnknown,
        threadStartTask,
@@ -540,7 +546,12 @@ package struct ReviewActiveAttempt: Sendable {
     package let admission: ReviewStartAdmission
 }
 
+package struct ReviewStartHandleID: Hashable, Sendable {
+    fileprivate let generation: UInt64
+}
+
 package struct ReviewRegisteredStart: Sendable {
+    package let id: ReviewStartHandleID
     package let admission: ReviewStartAdmission
     package let task: Task<BackendReviewAttempt, any Error>
 }
@@ -572,6 +583,8 @@ package actor ReviewStartAdmission {
             ReviewStartAdmission
         ) async throws -> BackendReviewAttempt
     ) throws -> ReviewRegisteredStart
+
+    package func activateStart(_ id: ReviewStartHandleID) throws
 
     // Existing terminal cancellation joins this operation if recovery is
     // already waiting; it never installs a second request/barrier pair.
@@ -631,18 +644,22 @@ cancellation in `recoveryDisposition` prevents preparation; cancellation in
 `preparingRecovery` joins its Task and discards the handoff; cancellation in
 `waitingForRecovery` consumes no token and prevents resume. In particular,
 `replacementStart` is installed with its registered start handle before rollback
-or `review/start`; it contains no active run. `registerStart` first records the
-Task inside the admission, then the Store makes the whole handle command-visible
-in one non-suspending turn; detached work is not used.
+or `review/start`; it contains no active run. `registerStart` records a Task that
+is suspended on admission-owned activation state. The Store makes the whole
+handle command-visible, then calls `activateStart(handle.id)`; only that exact
+transition lets the Task reach backend code. Detached work is not used.
 Success replaces the whole value with `active(ReviewActiveAttempt)` in one
 mutation.
 
 `registerStart`/start entry never assigns a preparing phase unconditionally. If
 the admission already contains a terminal or cancellation, it preserves that
 fact, returns its typed completion/cancellation, and the operation performs zero
-backend writes. This is required even though normal Store publication registers
-the handle before command visibility; Task scheduling is not completion or
-ordering proof.
+backend writes. Cancellation/terminal after registration but before activation
+resolves the pending gate and Task with the same typed outcome. Activation that
+wins first is recorded even if the Task has not reached its wait yet; a stale or
+wrong ID is a typed contract failure, and duplicate activation for the same live
+handle is idempotent. Store close/cancel resolves pending activation and awaits
+the registered Task. Task scheduling is not completion or ordering proof.
 
 The only recovery chain is
 `active(old) -> resolvingRecovery(old) -> recoveryDisposition ->
@@ -829,6 +846,7 @@ Expected tests:
 - recovery subscription/session barrier and fresh-attempt admission tests
 - recovery-disposition/token linearization and coherent attempt-ownership tests
 - typed mailbox failure round-trip and recoverability classification tests
+- initial/replacement registered-start activation-gate tests
 - Host runtime start/restart/stop reentrancy tests
 - MCP admitted-handler drain tests
 - ReviewUI close-and-await tests
@@ -867,7 +885,9 @@ prove these current failures:
 14. mailbox failure round-trip erases protocol/process/connection identity to a
     string and admits nonrecoverable failures to network recovery;
 15. cancellation/terminal recorded before start registration is overwritten by
-    unconditional transition to thread preparation.
+    unconditional transition to thread preparation;
+16. a Task returned by start registration can reach backend dispatch before its
+    handle is published in Store attempt ownership.
 
 Then commit green checkpoints:
 
@@ -916,6 +936,14 @@ Then commit green checkpoints:
 - cancel/connection terminal before initial and replacement start registration
   survives `registerStart`, performs zero `thread/start`/`review/start` writes,
   and returns the recorded typed outcome;
+- controlled activation gate proves a registered Task performs no backend write
+  before `ReviewAttemptOwnership` publication plus `activateStart(handle.id)`;
+  cancel/terminal in that window resolves both activation and Task with the same
+  typed zero-write outcome;
+- activation-before-Task-wait proceeds once, duplicate same-handle activation is
+  idempotent, and stale/wrong-handle activation is a typed contract failure;
+- close/cancel with an unactivated registered start resolves its gate and joins
+  the Task without backend writes or leaked continuation;
 - mailbox-to-Store round-trip preserves every `ReviewAttemptStreamFailure` case
   and payload; verified network/owned recoverable close may resume, while
   unexpected connection, process, protocol, and unknown failures never do;

@@ -688,15 +688,20 @@ pair and atomically changes replacement-start to active. Failure/cancellation
 cleanup receives the explicit old handoff or candidate admission from that
 state, never a run from one dictionary and an admission from another.
 
-Initial and replacement starts use one admission-owned registered start handle.
-`ReviewStartAdmission` records the start Task before the Store makes that
-admission/job command-visible; the Store then installs the whole registered
-handle in its attempt-ownership state. Independently, start entry checks the
-existing phase/terminal/cancellation and returns the recorded typed terminal or
-zero-write cancellation instead of resetting state to `preparingThread`. Thus a
-cancel/connection terminal before worker start registration cannot be
-overwritten, and this proof does not depend on when a newly created Task happens
-to run.
+Initial and replacement starts use one admission-owned registered start handle
+and explicit activation gate. `registerStart` records the Task and handle ID, but
+the Task first waits on admission state and cannot call backend code. The Store
+installs the whole handle in its attempt-ownership state, then calls
+`activateStart(handleID)`. Only that exact activation changes pending to active
+and releases the Task. Cancellation/terminal between registration, Store
+publication, and activation instead resolves the gate with the recorded typed
+outcome, so the Task returns without a backend write. Start entry also rejects a
+terminal/cancelled admission instead of resetting it to `preparingThread`.
+Wrong/stale activation IDs are typed contract failures; repeated activation of
+the same live handle is idempotent. This is an explicit state handshake, not an
+assumption about when a newly created Task happens to run. Store close/cancel
+resolves every pending activation gate and awaits its registered Task, so an
+unactivated handle cannot leak or block shutdown.
 
 Runtime transitions use this fixed product policy:
 
@@ -2560,6 +2565,9 @@ Within the recovery branch:
 - Cancellation/terminal before initial or replacement start registration is
   preserved, performs zero backend writes, and cannot be overwritten by
   `ReviewStartAdmission.start`.
+- A registered start remains backend-inert until Store publication followed by
+  exact-handle activation; cancellation/terminal before activation resolves the
+  Task with zero writes.
 - Mailbox/worker terminal round-trips retain typed network, forced-close,
   unexpected-connection, process, protocol, and owner-cancellation cases;
   process/protocol/unclassified failures never enter recovery via string
