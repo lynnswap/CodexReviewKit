@@ -30,6 +30,12 @@ open until Wave 4 proves commit-before-cleanup.
 - A successful `turn/interrupt` response records request acceptance only.
 - The matching canonical `(reviewThreadID, turnID)` `turn/completed`, or a typed
   connection/process terminal after force-close, is the completion barrier.
+- The admission installs the joined recovery/cancellation disposition before
+  backend token creation; a product-terminal disposition cannot be tokenized.
+- Store attempt ownership is one coherent state. No suspension exposes an old
+  run paired with a fresh admission.
+- Mailbox and worker failure delivery preserve typed origin/recoverability; no
+  protocol, process, or connection case is reduced to a string.
 - Review cleanup, worker removal, MCP waiter completion, runtime teardown, and
   application termination happen only after that barrier and all owned Tasks
   have actually finished.
@@ -50,6 +56,16 @@ open until Wave 4 proves commit-before-cleanup.
   recovery, removing the input that must satisfy the old attempt barrier.
 - recovery currently records a recovered run on the predecessor's admission;
   one terminal attempt owner is thereby reused for a different attempt ID.
+- a generic recovery barrier can be handed to backend token creation before the
+  admission has installed the joined explicit-cancellation disposition;
+  outcome-unknown plus connection loss can then be relabeled requested cancel.
+- replacement startup mutates the admission map before rollback/`review/start`
+  returns while the run map still contains the old attempt.
+- `ReviewStartAdmission.start` resets its phase to thread preparation even when
+  cancellation/terminal was already recorded before the worker registered start.
+- mailbox failure stores only display text, erasing whether the source was a
+  verified network outage, unexpected connection loss, process exit, or
+  protocol violation; downstream code can therefore recover every case.
 - `CodexReviewStore.cancelReview` immediately commits local cancellation and
   cancels its worker after the request returns.
 - runtime stop races worker drain against a sleep, cancels the drain Task on
@@ -91,8 +107,10 @@ queued
        graceTask,
        forceCloseTask?
      )
-  -> finishing(terminal, requestTask?, graceTask?, forceCloseTask?)
-  -> terminal(ReviewTerminalRecord)
+  -> resolving(terminal, requestOutcome, joinedPurpose)
+  -> disposition(productTerminal | replacementCandidate)
+  -> finishing(disposition, requestTask?, graceTask?, forceCloseTask?)
+  -> terminal(ReviewResolvedAttemptTerminal)
 ```
 
 The backend start operation is part of this processor rather than one opaque
@@ -132,6 +150,11 @@ The Store asks the current admission to begin a recoverable transition, and the
 admission runs the ACK-only backend operation while it waits independently for
 the canonical/connection terminal. Thus request completion and semantic
 completion have exactly one owner each and cannot wait on each other twice.
+The backend cannot accept a generic barrier or create a token at this point.
+After all independently ordered inputs and any joined explicit cancellation are
+linearized, the admission installs one `ReviewRecoveryDisposition`. Only its
+replacement candidate may pass through Store finish and then to backend recovery
+preparation/token creation.
 
 The processor accepts three independently ordered inputs:
 
@@ -159,6 +182,12 @@ Rules:
 - cancellation received while the old attempt's recovery barrier is still
   active joins that admission's one request/barrier Task, issues no second
   interrupt, and suppresses any replacement after the barrier;
+- the admission installs a product-terminal or replacement disposition before
+  any token request. A product-terminal result is not convertible to a token;
+- outcome-unknown request plus connection terminal retains the typed transport
+  terminal and original request failure. If explicit cancellation joined, it
+  suppresses replacement but the product-terminal disposition explicitly stores
+  transport failure, never fabricated `.requested`;
 - one cancellation command owns admission. Repeated callers join the same
   outcome rather than issuing a second interrupt.
 
@@ -184,12 +213,13 @@ are never substituted for the canonical turn terminal. A known-dead connection
 is a distinct typed terminal input, not an inferred successful cancellation.
 
 For recovery, a canonical `completed` or `failed` terminal is a natural product
-terminal and no token/replacement is produced. A canonical `interrupted`
+terminal and produces a product-terminal disposition. A canonical `interrupted`
 terminal, or a typed connection terminal that the trigger policy classifies as
-recoverable, closes the old attempt and yields one recovery token while the
-product remains nonterminal. A nonrecoverable connection/process/protocol
-terminal closes the product and yields no token. If explicit cancellation joined
-the recovery first, a natural completed/failed terminal still wins; otherwise
+recoverable, closes the old attempt and produces a replacement candidate with no
+token while the product remains nonterminal. A nonrecoverable connection/
+process/protocol terminal produces a product-terminal disposition. If explicit
+cancellation joined the recovery first, a natural completed/failed terminal
+still wins; otherwise
 an acknowledged recovery interrupt followed by the interrupted/connection
 barrier commits requested product cancellation and suppresses replacement. If
 the recovery request remained outcome-unknown and only connection loss
@@ -199,18 +229,37 @@ suppressed.
 
 The Store must keep the old `activeEventSubscriptionID`, mailbox consumer, and
 AppServer session registered until this classification and all owned request/
-force-close Tasks have joined. Only then may it cancel/detach the subscription,
-finish/unregister the session, and publish the recovery token. ACK alone never
-marks a turn/attempt abandoned. Recoverable teardown preserves the source thread
-and does not invoke destructive review cleanup.
+force-close Tasks have joined and the admission has installed the disposition.
+Only then may the Store cancel/detach its subscription and pass that whole value
+through its single finish owner. The replacement finish branch records the old
+attempt while keeping the product nonterminal; the product-terminal branch
+finishes both and returns no candidate. For the former only,
+`prepareReviewRecovery` then finishes/unregisters the backend session and creates
+one candidate-plus-token handoff. Neither candidate nor token is stored alone.
+ACK alone never marks a turn/attempt abandoned.
+Recoverable teardown preserves the source thread and does not invoke destructive
+review cleanup.
 
-`resumeReviewRecovery` always receives a newly constructed
-`ReviewStartAdmission` for a newly generated attempt ID and consults it before
-the replacement `review/start` write. The predecessor admission remains
-terminal and immutable; `recordActiveRun` is never called on it. Store
-publication replaces the `(attempt, admission)` pair atomically only after the
-old barrier/teardown. Cancellation before the replacement write is therefore a
-fresh `.notSent` decision, not state inherited from the old attempt.
+`resumeReviewRecovery` always receives one waiting handoff and a newly
+constructed `ReviewStartAdmission` for the candidate attempt and consults that
+admission before the replacement `review/start` write. The predecessor admission
+remains terminal and immutable; `recordActiveRun` is never called on it. Store
+attempt ownership moves to `replacementStart(handoff, registeredStart)`
+before rollback starts; that state has no active run. Only a successful response
+atomically publishes `active(run, admission)`. Cancellation before the
+replacement write routes to this fresh admission and is therefore a `.notSent`
+decision, not state inherited from or accidentally paired with the old attempt.
+
+`BackendReviewEventMailbox` and the Store input queue carry
+`ReviewAttemptStreamFailure`, never `.failed(String)` or an arbitrary `Error`
+whose only retained field is `localizedDescription`. The transport/router maps
+external failure once into verified recoverable network, owner-forced connection
+close, unexpected connection loss, process exit, protocol/routing violation, or
+owner Task cancellation. Only verified network, or owner-forced close belonging
+to the already-admitted recoverable transition, can yield a replacement
+candidate. Unexpected connection, process, protocol/routing, and unknown failure
+are typed nonrecoverable product-terminal inputs. UI/log formatting happens
+after this exhaustive Store switch.
 
 Remove the current `AppServerReviewControl` behavior that parses an active-turn
 ID from a rejection string and retries interruption against that other turn.
@@ -281,11 +330,13 @@ terminal already committed before force-close remains authoritative.
 
 Wave 4 inserts durable terminal/history stages between 3 and 4 and query/DB
 close after 7. Wave 3 must expose one insertion point rather than a second close
-sequence. Natural completion, requested interruption, connection terminal, and
-ingestion failure all call the same awaited `finish(terminal:)` owner. In Wave
-3 its body performs the in-memory mutation before projection/waiter publication;
-Wave 4 replaces that body with the durable history commit. Cleanup is invoked
-only from the returned finish result.
+sequence. Natural completion, requested interruption, connection terminal,
+ingestion failure, and recovery disposition all call the same awaited finish
+owner. The recovery entry receives the whole `ReviewRecoveryDisposition` so it
+can distinguish attempt-only replacement from product terminal without
+reconstructing policy. In Wave 3 its body performs the in-memory mutation before
+projection/waiter publication; Wave 4 replaces that body with the durable
+history commit. Cleanup is invoked only from the returned finish result.
 
 `ReviewRuntimeClosePolicy.terminalGrace` is injected; production uses 10
 seconds and tests use a controlled suspension. Grace expiry triggers transport
@@ -383,17 +434,73 @@ package enum ReviewAttemptInterruptionPurpose: Sendable {
 }
 
 package enum ReviewAttemptBarrierTerminal: Sendable {
-    case canonical(
-        run: CodexReviewBackendModel.Review.Run,
-        terminal: ReviewTerminalRecord
-    )
-    case connection(ReviewRuntimeCloseFailure)
+    case canonical(ReviewTerminalRecord)
+    case stream(ReviewAttemptStreamFailure)
     case localCancellation(ReviewCancellation)
 }
 
+package struct ReviewResolvedAttemptTerminal: Sendable {
+    package let run: CodexReviewBackendModel.Review.Run
+    package let terminal: ReviewAttemptBarrierTerminal
+    package let requestFailure: ReviewInterruptRequestFailure?
+
+    // Constructed only by ReviewStartAdmission after joined disposition.
+    fileprivate init(
+        run: CodexReviewBackendModel.Review.Run,
+        terminal: ReviewAttemptBarrierTerminal,
+        requestFailure: ReviewInterruptRequestFailure?
+    )
+}
+
+package struct ReviewRecoveryCandidate: Sendable {
+    package let resolved: ReviewResolvedAttemptTerminal
+    package let trigger: ReviewAttemptRecoveryTrigger
+
+    // Constructed only for a replacement disposition, never a generic barrier.
+    fileprivate init(
+        resolved: ReviewResolvedAttemptTerminal,
+        trigger: ReviewAttemptRecoveryTrigger
+    )
+}
+
+package struct ReviewProductTerminalDisposition: Sendable {
+    package let resolved: ReviewResolvedAttemptTerminal
+    package let productTerminal: ReviewTerminalRecord
+
+    // Constructed only by ReviewStartAdmission after joined disposition.
+    fileprivate init(
+        resolved: ReviewResolvedAttemptTerminal,
+        productTerminal: ReviewTerminalRecord
+    )
+}
+
 package enum ReviewRecoveryDisposition: Sendable {
-    case productTerminal(ReviewAttemptBarrierTerminal)
-    case replacement(CodexReviewBackendModel.Review.RecoveryToken)
+    case productTerminal(ReviewProductTerminalDisposition)
+    case replacement(ReviewRecoveryCandidate)
+}
+
+package struct ReviewRecoveryHandoff: Sendable {
+    package let candidate: ReviewRecoveryCandidate
+    package let token: CodexReviewBackendModel.Review.RecoveryToken
+
+    package init(
+        candidate: ReviewRecoveryCandidate,
+        token: CodexReviewBackendModel.Review.RecoveryToken
+    )
+}
+
+package struct ReviewAttemptContractFailure: LocalizedError, Sendable {
+    package let message: String
+}
+
+package enum ReviewAttemptStreamFailure: LocalizedError, Sendable {
+    case recoverableNetwork(ReviewRuntimeCloseFailure)
+    case ownerForcedConnectionClose(ReviewRuntimeCloseFailure)
+    case unexpectedConnection(ReviewRuntimeCloseFailure)
+    case process(ReviewRuntimeCloseFailure)
+    case protocolViolation(ReviewAttemptContractFailure)
+    case workerContract(ReviewAttemptContractFailure)
+    case ownerCancellation
 }
 
 package struct ReviewInterruptRequestFailure: LocalizedError, Sendable {
@@ -428,7 +535,44 @@ package struct ReviewCloseError: LocalizedError, Sendable {
     package let secondaryPhysicalDatabaseClose: ReviewPersistenceError?
 }
 
+package struct ReviewActiveAttempt: Sendable {
+    package let run: CodexReviewBackendModel.Review.Run
+    package let admission: ReviewStartAdmission
+}
+
+package struct ReviewRegisteredStart: Sendable {
+    package let admission: ReviewStartAdmission
+    package let task: Task<BackendReviewAttempt, any Error>
+}
+
+package enum ReviewAttemptOwnership: Sendable {
+    case initialStart(ReviewRegisteredStart)
+    case active(ReviewActiveAttempt)
+    case resolvingRecovery(ReviewActiveAttempt)
+    case recoveryDisposition(ReviewRecoveryDisposition)
+    case preparingRecovery(
+        candidate: ReviewRecoveryCandidate,
+        preparationTask: Task<ReviewRecoveryHandoff, any Error>
+    )
+    case waitingForRecovery(ReviewRecoveryHandoff)
+    case replacementStart(
+        handoff: ReviewRecoveryHandoff,
+        start: ReviewRegisteredStart
+    )
+    case terminal
+}
+
+package actor BackendReviewEventMailbox {
+    package func fail(_ failure: ReviewAttemptStreamFailure)
+}
+
 package actor ReviewStartAdmission {
+    package func registerStart(
+        _ operation: @escaping @Sendable (
+            ReviewStartAdmission
+        ) async throws -> BackendReviewAttempt
+    ) throws -> ReviewRegisteredStart
+
     // Existing terminal cancellation joins this operation if recovery is
     // already waiting; it never installs a second request/barrier pair.
     package func beginRecovery(
@@ -454,8 +598,12 @@ package protocol CodexReviewBackend: Sendable {
         reason: CodexReviewBackendModel.CancellationReason
     ) async throws
 
+    func prepareReviewRecovery(
+        _ candidate: ReviewRecoveryCandidate
+    ) async throws -> ReviewRecoveryHandoff
+
     func resumeReviewRecovery(
-        _ token: CodexReviewBackendModel.Review.RecoveryToken,
+        _ handoff: ReviewRecoveryHandoff,
         request: CodexReviewBackendModel.Review.Start,
         admission: ReviewStartAdmission
     ) async throws -> BackendReviewAttempt
@@ -473,6 +621,47 @@ public final class ReviewMonitorWindowController: NSWindowController {
     public func closeAndWait() async
 }
 ```
+
+`ReviewAttemptOwnership` is the value of the Store's sole per-review attempt
+registry. Do not retain parallel `activeRuns`, admission, recovery-token, or
+replacement-start maps. Every command switches on this enum, captures the exact
+associated values it needs before an `await`, and revalidates the same case after
+suspension. Cancellation in `resolvingRecovery` joins the old admission;
+cancellation in `recoveryDisposition` prevents preparation; cancellation in
+`preparingRecovery` joins its Task and discards the handoff; cancellation in
+`waitingForRecovery` consumes no token and prevents resume. In particular,
+`replacementStart` is installed with its registered start handle before rollback
+or `review/start`; it contains no active run. `registerStart` first records the
+Task inside the admission, then the Store makes the whole handle command-visible
+in one non-suspending turn; detached work is not used.
+Success replaces the whole value with `active(ReviewActiveAttempt)` in one
+mutation.
+
+`registerStart`/start entry never assigns a preparing phase unconditionally. If
+the admission already contains a terminal or cancellation, it preserves that
+fact, returns its typed completion/cancellation, and the operation performs zero
+backend writes. This is required even though normal Store publication registers
+the handle before command visibility; Task scheduling is not completion or
+ordering proof.
+
+The only recovery chain is
+`active(old) -> resolvingRecovery(old) -> recoveryDisposition ->
+preparingRecovery -> waitingForRecovery -> replacementStart -> active(new)`.
+Cases after `resolvingRecovery` carry the resolved old attempt as disposition or
+handoff data, never as a currently active run.
+
+Only `ReviewStartAdmission` constructs `ReviewResolvedAttemptTerminal`,
+`ReviewProductTerminalDisposition`, and `ReviewRecoveryCandidate`.
+`prepareReviewRecovery` accepts only the latter and
+is called after the Store finish owner returns it; therefore a generic barrier or
+product-terminal result cannot reach token creation. The returned handoff
+retains the candidate alongside the token through waiting and resume.
+
+`ReviewAttemptStreamFailure` is the mailbox/worker terminal payload. Production
+mailboxes expose only the typed `fail` entry point above; `fail(any Error)`,
+`.failed(String)`, and recovery decisions based on `localizedDescription` are
+removed. Mapping from external errors into this closed union belongs to the
+transport/router boundary.
 
 Wave 3 defines this final close-error shape and the single primary/secondary
 assembly owner even though it does not yet generate persistence values. Wave 4
@@ -638,6 +827,8 @@ Expected tests:
 - focused store cancellation/close state tests
 - AppServer interrupt ordering and process transport close tests
 - recovery subscription/session barrier and fresh-attempt admission tests
+- recovery-disposition/token linearization and coherent attempt-ownership tests
+- typed mailbox failure round-trip and recoverability classification tests
 - Host runtime start/restart/stop reentrancy tests
 - MCP admitted-handler drain tests
 - ReviewUI close-and-await tests
@@ -668,7 +859,15 @@ prove these current failures:
 8. stop timeout currently returns with an unfinished worker;
 9. start/restart completion publishes after close begins;
 10. concurrent close callers currently execute shutdown more than once;
-11. application termination cannot report a close failure.
+11. application termination cannot report a close failure;
+12. generic recovery barrier reaches token creation before a concurrently joined
+    explicit-cancellation disposition is installed;
+13. rollback/replacement start exposes the old active run with the fresh
+    admission in separate Store maps;
+14. mailbox failure round-trip erases protocol/process/connection identity to a
+    string and admits nonrecoverable failures to network recovery;
+15. cancellation/terminal recorded before start registration is overwritten by
+    unconditional transition to thread preparation.
 
 Then commit green checkpoints:
 
@@ -697,11 +896,29 @@ Then commit green checkpoints:
   until canonical/connection barrier completion;
 - canonical completed/failed during recovery suppresses replacement; canonical
   interrupted and policy-recoverable connection terminal create exactly one
-  token; nonrecoverable terminal creates none;
+  replacement candidate; nonrecoverable terminal creates none;
 - cancellation during recovery joins the same request/barrier with one interrupt
   and prevents replacement;
+- cancellation admitted before disposition prevents backend token creation;
+  cancellation racing outcome-unknown plus connection preserves the transport
+  attempt terminal/request diagnostic and stores an explicit transport product
+  terminal, never `.requested`;
+- cancellation after replacement disposition, during preparation, and while
+  waiting suppresses resume, joins owned preparation work, and never exposes a
+  bare token or starts a candidate attempt;
+- backend recovery preparation receives only a replacement candidate and returns
+  one candidate-plus-token handoff after the Store finish insertion point;
 - replacement uses a fresh admission/attempt ID, and cancellation before its
   `review/start` dispatch is proven `.notSent` without mutating the predecessor;
+- controlled rollback and pre-`review/start` gates observe one
+  `replacementStart` state, never old run plus fresh admission; success publishes
+  the new pair atomically and every failure cleans up from associated values;
+- cancel/connection terminal before initial and replacement start registration
+  survives `registerStart`, performs zero `thread/start`/`review/start` writes,
+  and returns the recorded typed outcome;
+- mailbox-to-Store round-trip preserves every `ReviewAttemptStreamFailure` case
+  and payload; verified network/owned recoverable close may resume, while
+  unexpected connection, process, protocol, and unknown failures never do;
 - queued, starting, active, waiting-for-connectivity, recovering, and already
   terminal review cancellation;
 - user, MCP, session-close, runtime-stop, restart, account-transition, network,

@@ -607,6 +607,20 @@ old subscription and the backend finish/unregister the old attempt session.
 Recoverable teardown preserves the source thread needed for continuation and
 does not run destructive review cleanup.
 
+The event mailbox and Store worker queue preserve a closed typed terminal union
+end to end. Verified network outage, owner-forced connection close, unexpected
+connection loss, process exit, protocol/routing violation, and owner Task
+cancellation remain distinct cases with their original typed payloads. A
+mailbox never stores `Error.localizedDescription`/`String` as its failure value,
+and the Store never treats a generic stream failure as recoverable merely
+because ambient network status is unsatisfied. Only the explicit
+recoverable-network case, or an owner-forced close correlated with an
+already-admitted recoverable transition, may enter replacement policy. Process
+exit, protocol/routing violation, and unclassified connection failure are
+nonrecoverable. Unknown
+errors are converted once at the transport/router boundary to a typed
+nonrecoverable contract failure; formatting occurs only at the UI/log edge.
+
 The recovery barrier produces one typed disposition:
 
 - canonical `completed` or `failed` is a natural product terminal and suppresses
@@ -616,6 +630,22 @@ The recovery barrier produces one typed disposition:
   permits one replacement while the product review remains nonterminal;
 - a nonrecoverable connection/process/protocol terminal closes the product with
   its typed failure and permits no replacement.
+
+The admission installs one `ReviewRecoveryDisposition` before any backend
+recovery token is created. Both cases retain the exact resolved old-attempt
+run/terminal and request rejection or outcome-unknown diagnostic. The
+product-terminal case additionally contains the exact product terminal to
+commit; the replacement case contains its trigger but no token. A cancellation
+admitted before that disposition is installed joins the same request/barrier and
+participates in this one decision; a product-terminal disposition can never be tokenized. For a
+replacement disposition, the Store first passes the whole disposition through
+the single finish owner. That branch finishes the old attempt while explicitly
+keeping the product nonterminal; a product-terminal branch finishes both. Only
+the returned replacement candidate may then ask the backend to seal the old
+session and create a token. The resulting waiting handoff contains both the
+unchanged candidate and token; neither is stored or passed alone. Wave 4 makes
+this same finish owner the atomic old-attempt/product commit before token
+creation.
 
 If explicit user/MCP/system cancellation is admitted while recovery is waiting
 on the old attempt, it joins that admission's already-recorded request/barrier
@@ -630,6 +660,11 @@ replacement is still suppressed. Once the old barrier has completed and the
 product is merely `waitingForConnectivity`, there is no live attempt to
 interrupt; cancellation commits locally and prevents recovery admission.
 
+In particular, outcome-unknown request plus connection terminal plus a joined
+explicit cancellation produces a product-terminal transport disposition with
+the original request failure as its secondary diagnostic. It does not produce
+`.requested`, a recovery token, or a replacement attempt.
+
 Each replacement has a newly allocated attempt ID and a newly constructed
 `ReviewStartAdmission`. `resumeReviewRecovery` receives that fresh admission and
 must ask it immediately before the replacement `review/start` write. The old
@@ -637,6 +672,31 @@ terminal admission is immutable and cannot be reset to active or reused for the
 new run. The Store publishes the new admission/run pair atomically only after
 the old attempt barrier and teardown completed; cancellation before replacement
 dispatch is therefore proven by the new admission as `.notSent`.
+
+The Store holds run and admission in one attempt-ownership state, not parallel
+`activeRuns` and `reviewStartAdmissions` maps. The state distinguishes initial
+start, active `(run, admission)`, resolving disposition, preparing/waiting
+handoff, replacement start `(handoff, fresh admission, owned start Task)`, and
+terminal. Cancellation before disposition joins the old admission. Cancellation
+after a replacement disposition but before/during token preparation suppresses
+replacement, joins any owned preparation Task, and never publishes its handoff;
+waiting cancellation discards the handoff and commits locally. During rollback
+and before replacement `review/start` returns, there is no published active run;
+cancellation routes to the fresh candidate admission from the replacement-start
+state. Only a successful response creates one immutable new `(run, admission)`
+pair and atomically changes replacement-start to active. Failure/cancellation
+cleanup receives the explicit old handoff or candidate admission from that
+state, never a run from one dictionary and an admission from another.
+
+Initial and replacement starts use one admission-owned registered start handle.
+`ReviewStartAdmission` records the start Task before the Store makes that
+admission/job command-visible; the Store then installs the whole registered
+handle in its attempt-ownership state. Independently, start entry checks the
+existing phase/terminal/cancellation and returns the recorded typed terminal or
+zero-write cancellation instead of resetting state to `preparingThread`. Thus a
+cancel/connection terminal before worker start registration cannot be
+overwritten, and this proof does not depend on when a newly created Task happens
+to run.
 
 Runtime transitions use this fixed product policy:
 
@@ -2491,6 +2551,19 @@ Within the recovery branch:
   request/barrier, issues no duplicate interrupt, and prevents replacement;
   after the barrier, a replacement uses a distinct attempt ID and fresh
   `ReviewStartAdmission`, including cancellation-before-dispatch proof.
+- Recovery disposition is installed before token creation; concurrent explicit
+  cancellation and outcome-unknown-plus-connection cannot fabricate requested
+  cancellation or leave a token for a product-terminal result.
+- Attempt ownership remains one coherent run/admission state through rollback
+  and replacement start; no observation can pair the old run with the fresh
+  admission.
+- Cancellation/terminal before initial or replacement start registration is
+  preserved, performs zero backend writes, and cannot be overwritten by
+  `ReviewStartAdmission.start`.
+- Mailbox/worker terminal round-trips retain typed network, forced-close,
+  unexpected-connection, process, protocol, and owner-cancellation cases;
+  process/protocol/unclassified failures never enter recovery via string
+  matching or ambient network state.
 - Application close failure preserves the last rendered error snapshot and
   requires an explicit Cancel Quit / Quit Anyway decision; post-close
   start/restart no-op and mutation rejection are deterministic.
