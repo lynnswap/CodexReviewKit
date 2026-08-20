@@ -1605,8 +1605,23 @@ struct CodexReviewHostTests {
         }
         await transport.waitForRequest(method: "review/start")
         let jobID = try #require(store.jobs.first?.id)
-        let admission = try #require(store.reviewStartAdmissions[jobID])
+        let admission: ReviewStartAdmission
+        switch store.reviewAttemptOwnerships[jobID] {
+        case .initialStart(let start):
+            admission = start.admission
+        case .active(let active):
+            admission = active.admission
+        default:
+            Issue.record("Expected initial or active attempt ownership before runtime stop.")
+            return
+        }
         let run = try #require(await admission.waitForActiveRun())
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            guard case .active(let active) = store.reviewAttemptOwnerships[jobID] else {
+                return false
+            }
+            return active.run.attemptID == run.attemptID
+        })
         #expect(run.turnID == "turn-1")
         let worker = try #require(store.reviewWorkerTasks[jobID])
 
@@ -1688,7 +1703,11 @@ struct CodexReviewHostTests {
             )
         )
         try #require(await waitUntil(timeout: .seconds(2)) {
-            store.reviewRecoveryWaitingJobIDs.contains(jobID)
+            if case .waitingForRecovery = store.reviewAttemptOwnerships[jobID] {
+                true
+            } else {
+                false
+            }
         })
 
         let stopFinished = CompletionFlag()

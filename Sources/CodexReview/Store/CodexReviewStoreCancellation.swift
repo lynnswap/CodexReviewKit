@@ -176,9 +176,6 @@ extension CodexReviewStore {
                 task.cancel()
                 runtimeStopDetachedReviewWorkerTasks[jobID] = task
             }
-            activeRuns.removeValue(forKey: jobID)
-            reviewRecoveryWaitingJobIDs.remove(jobID)
-            reviewStartAdmissions.removeValue(forKey: jobID)
         }
     }
 

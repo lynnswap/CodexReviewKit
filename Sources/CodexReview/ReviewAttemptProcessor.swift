@@ -226,6 +226,15 @@ package struct ReviewProductTerminalDisposition: Equatable, Sendable {
 package enum ReviewRecoveryDisposition: Equatable, Sendable {
     case productTerminal(ReviewProductTerminalDisposition)
     case replacement(ReviewRecoveryCandidate)
+
+    package var resolvedAttempt: ReviewResolvedAttemptTerminal {
+        switch self {
+        case .productTerminal(let disposition):
+            disposition.resolved
+        case .replacement(let candidate):
+            candidate.resolved
+        }
+    }
 }
 
 package struct ReviewRecoveryHandoff: Equatable, Sendable {
@@ -332,6 +341,7 @@ package actor ReviewStartAdmission {
     private var joinedTerminalCancellation: ReviewCancellation?
     private var interruptionPurpose: ReviewAttemptInterruptionPurpose?
     private var startTask: Task<BackendReviewAttempt, any Error>?
+    private var startDidFinish = false
     private var nextStartGeneration: UInt64 = 0
     private var registeredStartID: ReviewStartHandleID?
     private var startActivationResult: Result<Void, any Error>?
@@ -402,7 +412,17 @@ package actor ReviewStartAdmission {
             )
         }
         if let startActivationResult {
-            return try startActivationResult.get()
+            switch startActivationResult {
+            case .failure(let error):
+                throw error
+            case .success:
+                guard startDidFinish == false else {
+                    throw ReviewAttemptContractFailure(
+                        message: "Start activation handle \(id.generation) is stale."
+                    )
+                }
+                return
+            }
         }
         guard case .registeredStart(id) = phase else {
             throw ReviewAttemptContractFailure(
@@ -818,6 +838,33 @@ package actor ReviewStartAdmission {
         }
     }
 
+    package func recoveryDispositionIfInstalled() -> ReviewRecoveryDisposition? {
+        installedRecoveryDisposition
+    }
+
+    package func terminalCancellationProductTerminal(
+        for failure: ReviewAttemptStreamFailure
+    ) async -> ReviewTerminalRecord? {
+        guard case .terminalCancellation(let cancellation) = interruptionPurpose,
+              let cancellationTask
+        else {
+            return nil
+        }
+        switch await cancellationTask.result {
+        case .success(let resolution):
+            guard resolution.terminal == .stream(failure) else {
+                return nil
+            }
+            if resolution.requestFailure == nil,
+               case .ownerForcedConnectionClose = failure {
+                return .interrupted(.requested(cancellation))
+            }
+            return productTerminal(for: failure)
+        case .failure:
+            return productTerminal(for: failure)
+        }
+    }
+
     package func recordedCleanupResult(
         for run: CodexReviewBackendModel.Review.Run
     ) async -> Result<Void, any Error>? {
@@ -894,6 +941,7 @@ package actor ReviewStartAdmission {
     private func finishStart(
         with result: Result<BackendReviewAttempt, any Error>
     ) {
+        startDidFinish = true
         switch result {
         case .success(let attempt):
             registeredRun = attempt.run

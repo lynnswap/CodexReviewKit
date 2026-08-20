@@ -84,6 +84,18 @@ extension CodexReviewStore {
     }
 
     package func cancelAndDrainReviewWorkersForTesting() async {
+        for job in orderedJobs where job.isTerminal == false {
+            do {
+                _ = try await cancelReview(
+                    jobID: job.id,
+                    cancellation: .system(message: "Test cleanup requested.")
+                )
+            } catch {
+                reviewCleanupFailures[job.id] = .worker(
+                    "Test cleanup cancellation failed: \(error.localizedDescription)"
+                )
+            }
+        }
         let tasks = Array(reviewWorkerTasks.values) + Array(runtimeStopDetachedReviewWorkerTasks.values)
         for task in tasks {
             task.cancel()
@@ -94,10 +106,8 @@ extension CodexReviewStore {
 
         reviewWorkerTasks.removeAll(keepingCapacity: false)
         runtimeStopDetachedReviewWorkerTasks.removeAll(keepingCapacity: false)
-        reviewStartAdmissions.removeAll(keepingCapacity: false)
         reviewCleanupFailures.removeAll(keepingCapacity: false)
-        activeRuns.removeAll(keepingCapacity: false)
-        reviewRecoveryWaitingJobIDs.removeAll(keepingCapacity: false)
+        reviewAttemptOwnerships.removeAll(keepingCapacity: false)
 
         let waiters = reviewTerminalWaiters.values.flatMap { $0 }
         reviewTerminalWaiters.removeAll(keepingCapacity: false)
