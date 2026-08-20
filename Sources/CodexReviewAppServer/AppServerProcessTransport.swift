@@ -70,6 +70,7 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
     private var stderrReaderTask: Task<Void, Never>? = nil
     private var closed = false
     private var closeTask: Task<Void, any Error>?
+    private var terminalError: JSONRPC.Error?
 
     package init(
         configuration: Configuration = .init(),
@@ -141,11 +142,14 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
         try stdin.fileHandleForWriting.write(contentsOf: payload)
     }
 
-    package func notificationStream() -> AsyncThrowingStream<JSONRPC.Notification, Error> {
+    package func notificationStream() async -> AsyncThrowingStream<JSONRPC.Notification, Error> {
         ensureReaderTasksStarted()
+        if let closeTask {
+            _ = await closeTask.result
+        }
         return AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
             if closed {
-                continuation.finish(throwing: JSONRPC.Error.closed)
+                continuation.finish(throwing: terminalError ?? JSONRPC.Error.closed)
                 return
             }
             let id = UUID()
@@ -166,14 +170,14 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
     ) async throws {
         try await closeTransport(
             terminateProcess: terminateProcess,
-            error: JSONRPC.Error.closed,
+            error: JSONRPC.Error.transportTerminated(.ownerClose),
             readerTask: readerTask
         )
     }
 
     private func closeTransport(
         terminateProcess: Bool,
-        error: any Error,
+        error: JSONRPC.Error,
         readerTask: ReaderTask?
     ) async throws {
         let task: Task<Void, any Error>
@@ -181,6 +185,7 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
             task = closeTask
         } else {
             closed = true
+            terminalError = error
             stdoutEvents.cancel()
             stderrEvents.cancel()
             try? stdin.fileHandleForWriting.close()
@@ -201,7 +206,7 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
 
     private func performCloseTransport(
         terminateProcess: Bool,
-        error: any Error
+        error: JSONRPC.Error
     ) async throws {
         var processCloseError: (any Error)?
         if terminateProcess {
@@ -213,7 +218,16 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
                 processCloseError = error
             }
         }
-        finishAll(throwing: processCloseError ?? error)
+        if let processCloseError {
+            let typedError = JSONRPC.Error.transportTerminated(.processFailure(
+                processCloseError.localizedDescription
+            ))
+            terminalError = typedError
+            finishAll(throwing: typedError)
+        } else {
+            terminalError = error
+            finishAll(throwing: error)
+        }
         if let processCloseError {
             throw processCloseError
         }
@@ -238,7 +252,8 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
                 do {
                     try await closeTransport(
                         terminateProcess: true,
-                        error: error,
+                        error: error as? JSONRPC.Error
+                            ?? .invalidMessage(error.localizedDescription),
                         readerTask: .stdout
                     )
                 } catch {
@@ -280,7 +295,8 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
                 do {
                     try await closeTransport(
                         terminateProcess: true,
-                        error: error,
+                        error: error as? JSONRPC.Error
+                            ?? .invalidMessage(error.localizedDescription),
                         readerTask: .stdout
                     )
                 } catch {
@@ -290,7 +306,13 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
             }
         }
         do {
-            try await closeTransport(terminateProcess: true, readerTask: .stdout)
+            try await closeTransport(
+                terminateProcess: true,
+                error: .transportTerminated(.processExit(
+                    "Codex app-server process exited after stdout reached EOF."
+                )),
+                readerTask: .stdout
+            )
         } catch {
             logger.error("Failed to close codex app-server process after stdout EOF: \(error.localizedDescription, privacy: .public)")
         }
@@ -452,7 +474,7 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
 
     private func throwIfClosed() throws {
         if closed {
-            throw JSONRPC.Error.closed
+            throw terminalError ?? JSONRPC.Error.closed
         }
     }
 }

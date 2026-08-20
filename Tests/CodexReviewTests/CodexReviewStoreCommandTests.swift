@@ -861,7 +861,7 @@ struct CodexReviewStoreCommandTests {
             let attemptedRecovery = await waitUntil(timeout: .milliseconds(100)) {
                 let commands = await backend.recordedCommands()
                 return commands.contains { command in
-                    if case .beginReviewRecovery = command {
+                    if case .prepareReviewRecovery = command {
                         true
                     } else {
                         false
@@ -871,7 +871,7 @@ struct CodexReviewStoreCommandTests {
             #expect(attemptedRecovery == false)
             let commands = await backend.recordedCommands()
             #expect(commands.contains { command in
-                if case .beginReviewRecovery = command {
+                if case .prepareReviewRecovery = command {
                     true
                 } else {
                     false
@@ -934,7 +934,7 @@ struct CodexReviewStoreCommandTests {
             try await backend.waitForInterruptReview(run: run, reason: reason, timeout: .seconds(2))
 
             let commandsBeforeTerminal = await backend.recordedCommands()
-            #expect(commandsBeforeTerminal.contains { if case .beginReviewRecovery = $0 { true } else { false } } == false)
+            #expect(commandsBeforeTerminal.contains { if case .prepareReviewRecovery = $0 { true } else { false } } == false)
             #expect(store.reviewRecoveryWaitingJobIDs.contains("job-1") == false)
 
             await backend.yield(.cancelled(reason.message), for: run)
@@ -982,7 +982,7 @@ struct CodexReviewStoreCommandTests {
             await backend.yield(.cancelled(reason.message), for: run)
 
             let commandsBeforeAck = await backend.recordedCommands()
-            #expect(commandsBeforeAck.contains { if case .beginReviewRecovery = $0 { true } else { false } } == false)
+            #expect(commandsBeforeAck.contains { if case .prepareReviewRecovery = $0 { true } else { false } } == false)
             await interruptGate.open()
             try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
             let barrierPublished = await waitUntil(timeout: .seconds(2)) {
@@ -1026,7 +1026,7 @@ struct CodexReviewStoreCommandTests {
             #expect(read.core.lifecycle.status == .failed)
             #expect(read.core.lifecycle.errorMessage == "Recovery rejected")
             let commands = await backend.recordedCommands()
-            #expect(commands.contains { if case .beginReviewRecovery = $0 { true } else { false } } == false)
+            #expect(commands.contains { if case .prepareReviewRecovery = $0 { true } else { false } } == false)
             #expect(commands.contains { if case .resumeReviewRecovery = $0 { true } else { false } } == false)
         }
     }
@@ -1061,14 +1061,14 @@ struct CodexReviewStoreCommandTests {
             )
 
             let commandsBeforeAck = await backend.recordedCommands()
-            #expect(commandsBeforeAck.contains { if case .beginReviewRecovery = $0 { true } else { false } } == false)
+            #expect(commandsBeforeAck.contains { if case .prepareReviewRecovery = $0 { true } else { false } } == false)
             await interruptGate.open()
             let read = try await result
 
             #expect(read.core.lifecycle.status == .succeeded)
             #expect(read.core.output.lastAgentMessage == "natural review")
             let commands = await backend.recordedCommands()
-            #expect(commands.contains { if case .beginReviewRecovery = $0 { true } else { false } } == false)
+            #expect(commands.contains { if case .prepareReviewRecovery = $0 { true } else { false } } == false)
             #expect(commands.contains { if case .resumeReviewRecovery = $0 { true } else { false } } == false)
         }
     }
@@ -1369,8 +1369,8 @@ struct CodexReviewStoreCommandTests {
             try await completeNetworkRecoveryBarrier(backend: backend, store: store)
             let commandsAfterInterrupt = await backend.recordedCommands()
             let interruptedRuns = commandsAfterInterrupt.compactMap { command -> CodexReviewBackendModel.Review.Run? in
-                if case .beginReviewRecovery(let run, _) = command {
-                    return run
+                if case .prepareReviewRecovery(let candidate) = command {
+                    return candidate.resolved.run
                 }
                 return nil
             }
@@ -1380,8 +1380,8 @@ struct CodexReviewStoreCommandTests {
             try await backend.waitForResumeReviewRecovery(timeout: .seconds(2))
             let commandsAfterRecovery = await backend.recordedCommands()
             let recoveredFromRuns = commandsAfterRecovery.compactMap { command -> CodexReviewBackendModel.Review.Run? in
-                if case .resumeReviewRecovery(let token, _) = command {
-                    return token.interruptedRun
+                if case .resumeReviewRecovery(let handoff, _) = command {
+                    return handoff.candidate.resolved.run
                 }
                 return nil
             }
@@ -2059,7 +2059,7 @@ struct CodexReviewStoreCommandTests {
             #expect(read.core.lifecycle.status == .cancelled)
             let commands = await backend.recordedCommands()
             #expect(commands.contains { command in
-                if case .beginReviewRecovery = command {
+                if case .prepareReviewRecovery = command {
                     true
                 } else {
                     false
@@ -2218,7 +2218,9 @@ struct CodexReviewStoreCommandTests {
                 cancellation: .mcpClient(message: "Stop")
             )
             await backend.waitForInterruptReview()
-            await backend.finishEvents(throwing: StreamClosedError())
+            await backend.finishEvents(throwing: .unexpectedConnection(
+                .connection("Review event stream closed.")
+            ))
             let cancel = try await cancellation
             let read = try await result
 
@@ -2241,7 +2243,9 @@ struct CodexReviewStoreCommandTests {
             )
             try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
             await backend.yield(.message("partial review"))
-            await backend.finishEvents(throwing: StreamClosedError())
+            await backend.finishEvents(throwing: .unexpectedConnection(
+                .connection("Review event stream closed.")
+            ))
             let read = try await result
 
             #expect(read.core.lifecycle.status == .failed)
@@ -2291,7 +2295,10 @@ struct CodexReviewStoreCommandTests {
 
             networkMonitor.yield(.init(status: .unsatisfied))
             await outageSleepStarted.wait()
-            await backend.finishEvents(throwing: StreamClosedError(), for: initialRun)
+            await backend.finishEvents(
+                throwing: .unexpectedConnection(.connection("Review event stream closed.")),
+                for: initialRun
+            )
 
             let failedBeforeOutageConfirmed = await StoreSnapshotProbe(store: store)
                 .waitUntilJobStatus(.failed, jobID: "job-1", timeout: .milliseconds(100)) != nil
@@ -2326,7 +2333,7 @@ struct CodexReviewStoreCommandTests {
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
             try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
-            await backend.finishEvents(throwing: CancellationError())
+            await backend.finishEvents(throwing: .ownerCancellation)
             let read = try await result
 
             #expect(read.core.lifecycle.status == .failed)
@@ -2782,7 +2789,15 @@ private func completeNetworkRecoveryBarrier(
     try await backend.waitForInterruptReview(run: run, reason: reason, timeout: .seconds(2))
     await beforeTerminal(run)
     await backend.yield(.cancelled(reason.message), for: run)
-    try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
+    do {
+        try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
+    } catch {
+        let phase = await store.reviewStartAdmissions[jobID]?.currentPhase()
+        let commands = await backend.recordedCommands()
+        throw FakeCodexReviewBackendError(
+            message: "Recovery preparation was not admitted; phase=\(String(describing: phase)), commands=\(commands)."
+        )
+    }
     let barrierPublished = await waitUntil(timeout: .seconds(2)) {
         store.reviewRecoveryWaitingJobIDs.contains(jobID)
     }
@@ -2816,8 +2831,6 @@ private func cleanupStoreCommandTest(
     await store.cancelAndDrainReviewWorkersForTesting()
     await backend.finishEventMailboxes()
 }
-
-private struct StreamClosedError: Error {}
 
 private actor ControlledTestSleeper {
     private let gate: AsyncGate

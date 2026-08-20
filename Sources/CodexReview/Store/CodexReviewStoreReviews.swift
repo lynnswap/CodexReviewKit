@@ -124,10 +124,11 @@ extension CodexReviewStore {
         var run: CodexReviewBackendModel.Review.Run?
         do {
             let backend = self.backend
-            let startTask = await admission.start { admission in
+            let registered = try await admission.registerStart { admission in
                 try await backend.startReview(startRequest, admission: admission)
             }
-            let backendAttempt = try await startTask.value
+            try await admission.activateStart(registered.id)
+            let backendAttempt = try await registered.task.value
             let backendRun = backendAttempt.run
             run = backendRun
             applyBackendRun(backendRun, to: job)
@@ -170,7 +171,11 @@ extension CodexReviewStore {
                 let failure = ReviewRuntimeCloseFailure.worker(
                     "Review worker was cancelled before a canonical terminal."
                 )
-                await cleanupAdmission.recordConnectionTerminal(failure)
+                do {
+                    try await cleanupAdmission.recordStreamTerminal(.ownerCancellation)
+                } catch {
+                    markReviewFailed(job, message: error.localizedDescription)
+                }
                 do {
                     try await cleanupReview(cleanupRun, admission: cleanupAdmission)
                 } catch {
@@ -196,13 +201,16 @@ extension CodexReviewStore {
             activeRuns.removeValue(forKey: jobID)
             reviewRecoveryWaitingJobIDs.remove(jobID)
             if job.isTerminal == false,
-               let transportFailure = error as? ReviewWorkerInputQueueError {
-                let failure = ReviewRuntimeCloseFailure.connection(transportFailure.message)
+               let streamFailure = error as? ReviewAttemptStreamFailure {
                 let currentAdmission = reviewStartAdmissions[jobID] ?? admission
-                await currentAdmission.recordConnectionTerminal(failure)
+                do {
+                    try await currentAdmission.recordStreamTerminal(streamFailure)
+                } catch {
+                    markReviewFailed(job, message: error.localizedDescription)
+                }
                 markReviewInterrupted(
                     job,
-                    cause: .transport(message: transportFailure.message)
+                    cause: .transport(message: streamFailure.localizedDescription)
                 )
             } else if job.isTerminal == false {
                 markReviewFailed(job, message: error.localizedDescription)
@@ -623,9 +631,7 @@ extension CodexReviewStore {
         } catch {
             if error is CancellationError || Task.isCancelled {
                 let currentAdmission = reviewStartAdmissions[job.id] ?? admission
-                await currentAdmission.recordConnectionTerminal(.worker(
-                    "Review worker stopped while recovery interruption was pending."
-                ))
+                try await currentAdmission.recordStreamTerminal(.ownerCancellation)
             }
             await inputs.cancel()
             throw error
@@ -679,10 +685,10 @@ extension CodexReviewStore {
                     continue
                 }
                 if recoveryState.isInterruptingForNetworkRecovery {
-                    let failure = ReviewRuntimeCloseFailure.connection(
-                        ReviewIngestionError.streamEndedWithoutTerminal.localizedDescription
-                    )
-                    await admission.recordConnectionTerminal(failure)
+                    let failure = ReviewAttemptStreamFailure.workerContract(.init(
+                        message: ReviewIngestionError.streamEndedWithoutTerminal.localizedDescription
+                    ))
+                    try await admission.recordStreamTerminal(failure)
                     activeEventSubscriptionID = nil
                     continue
                 }
@@ -702,24 +708,19 @@ extension CodexReviewStore {
                 else {
                     continue
                 }
-                if failedRun.failure.isCancellation {
-                    throw CancellationError()
-                }
                 if recoveryState.isInterruptingForNetworkRecovery {
-                    let failure = ReviewRuntimeCloseFailure.connection(
-                        failedRun.failure.message
-                    )
-                    await admission.recordConnectionTerminal(failure)
+                    try await admission.recordStreamTerminal(failedRun.failure)
                     activeEventSubscriptionID = nil
                     continue
                 }
-                if await inputs.networkStatusTracker.currentStatus() != .satisfied {
+                if case .unexpectedConnection = failedRun.failure,
+                   await inputs.networkStatusTracker.currentStatus() != .satisfied {
                     recoveryState.recordPendingOutageStreamFailure(failedRun.failure)
                     activeEventSubscriptionID = nil
                     await inputs.cancelActiveEventSubscription()
                     continue
                 }
-                try throwReviewEventStreamFailure(failedRun.failure)
+                throw failedRun.failure
             case .recoveryBarrierResolved(let resolution):
                 guard recoveryState.isInterruptingForNetworkRecovery,
                       resolution.run.attemptID == recoveryState.currentRun.attemptID
@@ -728,26 +729,35 @@ extension CodexReviewStore {
                 }
                 switch resolution.result {
                 case .failure(let failure):
-                    if failure.underlying is ReviewRecoverySupersededByTerminal {
-                        continue
-                    }
                     throw failure.underlying
-                case .success(let ready):
-                    if job.isTerminal || completePendingCancellationIfNeeded(for: job) {
+                case .success(let disposition):
+                    if job.isTerminal {
                         return .init(run: recoveryState.currentRun, admission: admission)
                     }
+                    let candidate: ReviewRecoveryCandidate
+                    switch disposition {
+                    case .productTerminal(let product):
+                        applyRecoveryProductTerminal(product.productTerminal, to: job)
+                        return .init(run: recoveryState.currentRun, admission: admission)
+                    case .replacement(let replacement):
+                        candidate = replacement
+                    }
+                    if completePendingCancellationIfNeeded(for: job) {
+                        return .init(run: recoveryState.currentRun, admission: admission)
+                    }
+                    let handoff = try await self.backend.prepareReviewRecovery(candidate)
                     recoveryState.markWaitingForNetworkRecovery()
                     markReviewWaitingForNetworkRecovery(job)
                     recordReviewRecoveryBarrier(for: job.id)
                     activeEventSubscriptionID = nil
                     await inputs.cancelActiveEventSubscription()
-                    recoveryState.markRecoveryReady(ready)
+                    recoveryState.markRecoveryReady(handoff)
                 }
             case .networkSnapshot(let snapshot, let recoveryGeneration):
                 if let pendingFailure = recoveryState.takePendingOutageStreamFailureAfterTransientRecovery(
                     snapshot
                 ) {
-                    try throwReviewEventStreamFailure(pendingFailure)
+                    throw pendingFailure
                 }
                 switch recoveryState.networkSnapshotEffect(snapshot, recoveryGeneration: recoveryGeneration) {
                 case .none:
@@ -794,13 +804,10 @@ extension CodexReviewStore {
                 let recoveryRun = recoveryState.currentRun
                 let recoveryAdmission = admission
                 let pendingFailure = recoveryState.takePendingOutageStreamFailureForConfirmedRecovery()
-                let recoveryCancellation = ReviewCancellation.system(
-                    message: recoveryState.recoveryReason.message
-                )
                 let backend = self.backend
                 await inputs.beginRecoveryInterruption(for: recoveryRun) {
-                    let barrier = try await recoveryAdmission.interruptForRecovery(
-                        recoveryCancellation,
+                    try await recoveryAdmission.beginRecovery(
+                        trigger: .recoverableNetworkLoss,
                         interrupt: { run, reason in
                             try await backend.interruptReview(run, reason: reason)
                         },
@@ -808,14 +815,17 @@ extension CodexReviewStore {
                             try await backend.forceCloseReviewConnection()
                         }
                     )
-                    let token = try await backend.beginReviewRecovery(barrier)
-                    return .init(barrier: barrier, token: token)
                 }
                 if let pendingFailure {
-                    _ = await recoveryAdmission.waitForCancellationAdmission()
-                    await recoveryAdmission.recordConnectionTerminal(.connection(
-                        pendingFailure.message
-                    ))
+                    _ = await recoveryAdmission.waitForInterruptionAdmission()
+                    let failure: ReviewAttemptStreamFailure
+                    switch pendingFailure {
+                    case .unexpectedConnection(let closeFailure):
+                        failure = .recoverableNetwork(closeFailure)
+                    default:
+                        failure = pendingFailure
+                    }
+                    try await recoveryAdmission.recordStreamTerminal(failure)
                 }
             }
         }
@@ -824,10 +834,10 @@ extension CodexReviewStore {
             throw CancellationError()
         }
         if job.isTerminal == false {
-            let failure = ReviewRuntimeCloseFailure.connection(
-                ReviewIngestionError.streamEndedWithoutTerminal.localizedDescription
-            )
-            await admission.recordConnectionTerminal(failure)
+            let failure = ReviewAttemptStreamFailure.workerContract(.init(
+                message: ReviewIngestionError.streamEndedWithoutTerminal.localizedDescription
+            ))
+            try await admission.recordStreamTerminal(failure)
             markReviewInterrupted(job, cause: .transport(message: failure.localizedDescription))
         }
         return .init(run: recoveryState.currentRun, admission: admission)
@@ -847,21 +857,36 @@ extension CodexReviewStore {
         }
 
         if job.isTerminal == false {
-            let failure = ReviewRuntimeCloseFailure.connection(
-                ReviewIngestionError.streamEndedWithoutTerminal.localizedDescription
-            )
-            await admission.recordConnectionTerminal(failure)
+            let failure = ReviewAttemptStreamFailure.workerContract(.init(
+                message: ReviewIngestionError.streamEndedWithoutTerminal.localizedDescription
+            ))
+            do {
+                try await admission.recordStreamTerminal(failure)
+            } catch {
+                markReviewFailed(job, message: error.localizedDescription)
+                return true
+            }
             markReviewInterrupted(job, cause: .transport(message: failure.localizedDescription))
         }
         return true
     }
 
-    private func throwReviewEventStreamFailure(_ failure: ReviewWorkerEventStreamFailure) throws -> Never {
-        switch failure {
-        case .cancelled:
-            throw CancellationError()
+    private func applyRecoveryProductTerminal(
+        _ terminal: ReviewTerminalRecord,
+        to job: CodexReviewJob
+    ) {
+        switch terminal {
+        case .completed:
+            if job.isTerminal == false {
+                markReviewFailed(
+                    job,
+                    message: "Canonical completion was not reduced before recovery disposition."
+                )
+            }
         case .failed(let message):
-            throw ReviewWorkerInputQueueError(message: message)
+            markReviewFailed(job, message: message, terminal: terminal)
+        case .interrupted(let cause):
+            markReviewInterrupted(job, cause: cause)
         }
     }
 
@@ -869,7 +894,7 @@ extension CodexReviewStore {
         job: CodexReviewJob,
         startRequest: CodexReviewBackendModel.Review.Start,
         inputs: ReviewWorkerInputs,
-        recoveryReady: ReviewWorkerRecoveryReady?
+        recoveryReady: ReviewRecoveryHandoff?
     ) async throws -> NetworkRestoreRestartResult {
         if job.isTerminal || completePendingCancellationIfNeeded(for: job) {
             return .finished
@@ -890,14 +915,15 @@ extension CodexReviewStore {
         reviewStartAdmissions[job.id] = recoveredAdmission
         reviewRecoveryWaitingJobIDs.remove(job.id)
         let backend = self.backend
-        let startTask = await recoveredAdmission.start { admission in
+        let registered = try await recoveredAdmission.registerStart { admission in
             try await backend.resumeReviewRecovery(
-                recoveryReady.token,
+                recoveryReady,
                 request: startRequest,
                 admission: admission
             )
         }
-        let recoveredAttempt = try await startTask.value
+        try await recoveredAdmission.activateStart(registered.id)
+        let recoveredAttempt = try await registered.task.value
         return .recovered(recoveredAttempt, recoveredAdmission)
     }
 
@@ -1285,30 +1311,7 @@ private struct ReviewWorkerEventStreamFinished: Sendable {
 private struct ReviewWorkerEventStreamFailed: Sendable {
     var subscriptionID: Int
     var run: CodexReviewBackendModel.Review.Run
-    var failure: ReviewWorkerEventStreamFailure
-}
-
-private enum ReviewWorkerEventStreamFailure: Sendable {
-    case cancelled
-    case failed(String)
-
-    var isCancellation: Bool {
-        switch self {
-        case .cancelled:
-            true
-        case .failed:
-            false
-        }
-    }
-
-    var message: String {
-        switch self {
-        case .cancelled:
-            "Review event stream was cancelled."
-        case .failed(let message):
-            message
-        }
-    }
+    var failure: ReviewAttemptStreamFailure
 }
 
 private enum ReviewWorkerInput: Sendable {
@@ -1323,12 +1326,7 @@ private enum ReviewWorkerInput: Sendable {
 
 private struct ReviewWorkerRecoveryBarrierResolution: Sendable {
     var run: CodexReviewBackendModel.Review.Run
-    var result: Result<ReviewWorkerRecoveryReady, ReviewWorkerRecoveryFailure>
-}
-
-private struct ReviewWorkerRecoveryReady: Sendable {
-    var barrier: ReviewAttemptRecoveryBarrier
-    var token: CodexReviewBackendModel.Review.RecoveryToken
+    var result: Result<ReviewRecoveryDisposition, ReviewWorkerRecoveryFailure>
 }
 
 private struct ReviewWorkerAttemptCompletion: Sendable {
@@ -1364,10 +1362,10 @@ private enum ReviewNetworkRecoveryPhase {
 private struct ReviewNetworkRecoveryLoopState {
     var currentRun: CodexReviewBackendModel.Review.Run
     private(set) var recoveryPhase = ReviewNetworkRecoveryPhase.active
-    private(set) var recoveryReady: ReviewWorkerRecoveryReady?
+    private(set) var recoveryReady: ReviewRecoveryHandoff?
     private var isSettlingForNetworkRecovery = false
     private var recoverySettleGeneration: Int?
-    private var pendingOutageStreamFailure: ReviewWorkerEventStreamFailure?
+    private var pendingOutageStreamFailure: ReviewAttemptStreamFailure?
     let recoveryReason = CodexReviewBackendModel.CancellationReason(message: networkRecoveryUnavailableMessage)
 
     init(currentRun: CodexReviewBackendModel.Review.Run) {
@@ -1395,7 +1393,7 @@ private struct ReviewNetworkRecoveryLoopState {
         pendingOutageStreamFailure = nil
     }
 
-    mutating func markRecoveryReady(_ ready: ReviewWorkerRecoveryReady) {
+    mutating func markRecoveryReady(_ ready: ReviewRecoveryHandoff) {
         recoveryReady = ready
     }
 
@@ -1408,11 +1406,11 @@ private struct ReviewNetworkRecoveryLoopState {
         pendingOutageStreamFailure = nil
     }
 
-    mutating func recordPendingOutageStreamFailure(_ failure: ReviewWorkerEventStreamFailure) {
+    mutating func recordPendingOutageStreamFailure(_ failure: ReviewAttemptStreamFailure) {
         pendingOutageStreamFailure = failure
     }
 
-    mutating func takePendingOutageStreamFailureForConfirmedRecovery() -> ReviewWorkerEventStreamFailure? {
+    mutating func takePendingOutageStreamFailureForConfirmedRecovery() -> ReviewAttemptStreamFailure? {
         defer {
             pendingOutageStreamFailure = nil
         }
@@ -1421,7 +1419,7 @@ private struct ReviewNetworkRecoveryLoopState {
 
     mutating func takePendingOutageStreamFailureAfterTransientRecovery(
         _ snapshot: CodexReviewNetworkSnapshot
-    ) -> ReviewWorkerEventStreamFailure? {
+    ) -> ReviewAttemptStreamFailure? {
         guard snapshot.status == .satisfied,
               isWaitingForNetworkRecovery == false
         else {
@@ -1493,7 +1491,7 @@ private struct ReviewWorkerInputs {
 
     func beginRecoveryInterruption(
         for run: CodexReviewBackendModel.Review.Run,
-        operation: @escaping @Sendable () async throws -> ReviewWorkerRecoveryReady
+        operation: @escaping @Sendable () async throws -> ReviewRecoveryDisposition
     ) async {
         await recoveryInterruptionSource.start(for: run, operation: operation)
     }
@@ -1518,13 +1516,13 @@ private actor ReviewWorkerRecoveryInterruptionSource {
 
     func start(
         for run: CodexReviewBackendModel.Review.Run,
-        operation: @escaping @Sendable () async throws -> ReviewWorkerRecoveryReady
+        operation: @escaping @Sendable () async throws -> ReviewRecoveryDisposition
     ) {
         guard task == nil else {
             return
         }
         task = Task {
-            let result: Result<ReviewWorkerRecoveryReady, ReviewWorkerRecoveryFailure>
+            let result: Result<ReviewRecoveryDisposition, ReviewWorkerRecoveryFailure>
             do {
                 result = .success(try await operation())
             } catch {
@@ -1631,14 +1629,6 @@ private actor ReviewWorkerInputQueue {
     }
 }
 
-private struct ReviewWorkerInputQueueError: LocalizedError, Sendable {
-    var message: String
-
-    var errorDescription: String? {
-        message
-    }
-}
-
 private actor ReviewWorkerEventSource {
     private let queue: ReviewWorkerInputQueue
     private var eventTasks: [Int: Task<Void, Never>] = [:]
@@ -1663,10 +1653,22 @@ private actor ReviewWorkerEventSource {
                         return
                     }
                     await self.yieldReviewEvent(event, run: run, subscriptionID: subscriptionID)
+                    if event.completesReviewRun {
+                        self.finishTerminalDelivery(subscriptionID: subscriptionID)
+                        return
+                    }
                 }
                 await self.yieldEventsFinished(run: run, subscriptionID: subscriptionID)
             } catch {
-                await self.yieldEventsFailed(error, run: run, subscriptionID: subscriptionID)
+                let failure: ReviewAttemptStreamFailure
+                if let typed = error as? ReviewAttemptStreamFailure {
+                    failure = typed
+                } else if error is CancellationError {
+                    failure = .ownerCancellation
+                } else {
+                    failure = .workerContract(.init(message: error.localizedDescription))
+                }
+                await self.yieldEventsFailed(failure, run: run, subscriptionID: subscriptionID)
             }
         }
         return subscriptionID
@@ -1729,8 +1731,15 @@ private actor ReviewWorkerEventSource {
         )))
     }
 
+    private func finishTerminalDelivery(subscriptionID: Int) {
+        guard activeSubscriptionID == subscriptionID else {
+            return
+        }
+        eventTasks.removeValue(forKey: subscriptionID)
+    }
+
     private func yieldEventsFailed(
-        _ error: any Error,
+        _ failure: ReviewAttemptStreamFailure,
         run: CodexReviewBackendModel.Review.Run,
         subscriptionID: Int
     ) async {
@@ -1743,7 +1752,7 @@ private actor ReviewWorkerEventSource {
         await queue.send(.reviewEventsFailed(.init(
             subscriptionID: subscriptionID,
             run: run,
-            failure: error is CancellationError ? .cancelled : .failed(error.localizedDescription)
+            failure: failure
         )))
     }
 }
