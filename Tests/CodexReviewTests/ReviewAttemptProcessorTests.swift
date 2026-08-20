@@ -255,6 +255,53 @@ struct ReviewAttemptProcessorTests {
         }
     }
 
+    @Test func terminalFirstForceCloseFailureCancelsPendingRequestAndPreservesTerminal() async throws {
+        let graceGate = AsyncGate()
+        let (admission, run) = try await makeActiveAdmission(
+            closePolicy: controlledClosePolicy(gate: graceGate)
+        )
+        let requestStarted = InvocationProbe()
+        let requestGate = AsyncGate()
+        let requestCancelled = InvocationProbe()
+        let forceCloseStarted = InvocationProbe()
+        let forceFailure = ReviewRuntimeCloseFailure.process("Process remained alive")
+
+        let cancellation = Task {
+            try await admission.cancel(
+                .system(message: "Stop"),
+                interrupt: { _, _ in
+                    await requestStarted.record()
+                    do {
+                        await requestGate.wait()
+                        try Task.checkCancellation()
+                    } catch {
+                        if error is CancellationError {
+                            await requestCancelled.record()
+                        }
+                        throw error
+                    }
+                },
+                forceClose: {
+                    await forceCloseStarted.record()
+                    throw forceFailure
+                }
+            )
+        }
+        await requestStarted.waitForInvocation()
+        try await admission.recordCanonicalTerminal(.completed, for: run)
+        await graceGate.open()
+        await forceCloseStarted.waitForInvocation()
+
+        await #expect(throws: forceFailure) {
+            try await cancellation.value
+        }
+        #expect(await requestCancelled.invocationCount() == 1)
+        #expect(await admission.currentPhase() == .terminal(.canonical(
+            run: run,
+            terminal: .completed
+        )))
+    }
+
     @Test func duplicateCancellationCallersJoinOneRequest() async throws {
         let (admission, run) = try await makeActiveAdmission()
         let requestStarted = InvocationProbe()
