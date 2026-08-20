@@ -1459,6 +1459,7 @@ struct AppServerClientTests {
                 forceClose: { Issue.record("Pre-dispatch cancellation force-closed connection.") }
             )
         }
+        #expect(await admission.waitForCancellationAdmission() == .mcpClient(message: "Stop"))
         await initializeGate.open()
 
         #expect(try await cancellation.value.terminal == .localCancellation(
@@ -1507,6 +1508,7 @@ struct AppServerClientTests {
                 forceClose: { Issue.record("Prepared-thread cancellation force-closed connection.") }
             )
         }
+        #expect(await admission.waitForCancellationAdmission() == .mcpClient(message: "Stop"))
         await threadGate.open()
 
         #expect(try await cancellation.value.terminal == .localCancellation(
@@ -1566,6 +1568,7 @@ struct AppServerClientTests {
                 }
             )
         }
+        #expect(await admission.waitForCancellationAdmission() == .mcpClient(message: "Stop"))
         await reviewGate.open()
         let attempt = try await registeredStart.task.value
         await transport.waitForResponseDelivery(method: "turn/interrupt")
