@@ -128,7 +128,7 @@ final class ReviewMonitorRuntimeSettingsViewController: NSHostingController<Revi
 @MainActor
 @Observable
 final class ReviewMonitorRuntimeSettingsFormState {
-    private static let defaultCodexHomeDisplayPath = "~/.codex_review"
+    static let defaultCodexHomePrompt = "Default: ReviewMonitor RecoveryV1"
 
     var codexHomePath = "" {
         didSet {
@@ -264,20 +264,11 @@ final class ReviewMonitorRuntimeSettingsFormState {
         isPopulatingFields = true
         defer { isPopulatingFields = false }
 
-        codexHomePath = displayCodexHomePath(
-            preferences.codexHomePath
-        )
+        codexHomePath = displayPath(preferences.codexHomePath)
         mcpHost = preferences.mcpHost
         mcpPort = String(preferences.mcpPort)
         mcpPath = preferences.mcpPath
         codexExecutablePath = displayPath(preferences.codexExecutablePath)
-    }
-
-    private func displayCodexHomePath(_ path: String?) -> String {
-        guard let path else {
-            return Self.defaultCodexHomeDisplayPath
-        }
-        return displayPath(path)
     }
 
     private func clearStatusAfterEditing() {
@@ -357,7 +348,7 @@ struct ReviewMonitorRuntimeSettingsForm: View {
             TextField(
                 "Codex home",
                 text: $state.codexHomePath,
-                prompt: Text("~/.codex_review")
+                prompt: Text(ReviewMonitorRuntimeSettingsFormState.defaultCodexHomePrompt)
             )
             TextField(
                 "MCP host",
@@ -416,12 +407,7 @@ struct ReviewMonitorRuntimeSettingsForm: View {
 @MainActor
 private final class PreviewRuntimePreferencesStore: CodexReviewRuntime.PreferencesStore {
     func load() -> CodexReviewRuntime.Preferences {
-        CodexReviewRuntime.Preferences(
-            codexHomePath: "~/.codex_review",
-            mcpHost: "localhost",
-            mcpPort: 9417,
-            mcpPath: "/mcp"
-        )
+        .defaults
     }
 
     func save(_: CodexReviewRuntime.Preferences) throws {

@@ -410,6 +410,7 @@ struct CodexReviewMonitorCITests {
                 codexExecutablePath: "/tmp/custom-codex"
             ),
         ])
+        #expect(formState.codexHomePath.isEmpty)
         #expect(formState.statusMessage == "Saved. Restart ReviewMonitor to apply changes.")
         #expect(!formState.saveFailed)
         #expect(!formState.hasUnsavedChanges)
@@ -430,6 +431,15 @@ struct CodexReviewMonitorCITests {
         }
 
         let formState = runtimeViewController.formState
+        #expect(formState.codexHomePath.isEmpty)
+        #expect(
+            ReviewMonitorRuntimeSettingsFormState.defaultCodexHomePrompt
+                == "Default: ReviewMonitor RecoveryV1"
+        )
+        #expect(
+            ReviewMonitorRuntimeSettingsFormState.defaultCodexHomePrompt
+                .contains(".codex_review") == false
+        )
         #expect(!formState.hasUnsavedChanges)
 
         formState.mcpPath = "custom-mcp"
@@ -535,6 +545,7 @@ struct CodexReviewMonitorCITests {
         let formState = runtimeViewController.formState
         formState.restoreDefaults()
 
+        #expect(formState.codexHomePath.isEmpty)
         #expect(formState.hasUnsavedChanges)
         #expect(formState.canSavePreferences)
         #expect(!formState.canRestoreDefaults)
