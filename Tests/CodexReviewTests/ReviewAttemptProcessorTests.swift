@@ -666,6 +666,7 @@ struct ReviewAttemptProcessorTests {
                 forceClose: {}
             )
         }
+        #expect(await admission.waitForCancellationAdmission() == .mcpClient(message: "Stop"))
         let duplicateCancellation = Task {
             try await admission.cancel(
                 .system(message: "Runtime stop"),
@@ -673,7 +674,6 @@ struct ReviewAttemptProcessorTests {
                 forceClose: {}
             )
         }
-        #expect(await admission.waitForCancellationAdmission() == .mcpClient(message: "Stop"))
         try await admission.recordCanonicalTerminal(
             .interrupted(.server(message: "network recovery")),
             for: run
