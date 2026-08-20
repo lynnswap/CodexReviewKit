@@ -43,6 +43,8 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     private var currentDisplayDocument: ReviewMonitorLog.Document?
     private var logProjection = ReviewMonitorLog.Projection()
     private var liveResizeRestorationTarget: ScrollRestorationTarget?
+    private var bottomPreservationDepth = 0
+    private var viewportLayoutPreservesBottom = false
     private var isFindQueryActive = false
     private var activeFindQueryString: String?
 
@@ -78,8 +80,17 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         automaticallyAdjustsContentInsets = true
 
         documentView = logDocumentView
+        logDocumentView.onViewportLayoutWillLayout = { [weak self] in
+            guard let self else {
+                return
+            }
+            self.viewportLayoutPreservesBottom = self.shouldPreserveBottomForLayout()
+        }
+        logDocumentView.onViewportLayoutDidLayout = { [weak self] in
+            self?.viewportLayoutPreservesBottom = false
+        }
         logDocumentView.onLayoutInvalidated = { [weak self] in
-            self?.syncDocumentFrameToTextLayout()
+            self?.handleDocumentLayoutInvalidated()
         }
         logDocumentView.onUserSelectionChanged = { [weak self] in
             self?.handleUserSelectionChanged()
@@ -138,6 +149,14 @@ final class ReviewMonitorLogScrollView: NSScrollView {
 
     override func tile() {
         let shouldPreserveBottom = shouldPreserveBottomForLayout()
+        if shouldPreserveBottom {
+            bottomPreservationDepth += 1
+        }
+        defer {
+            if shouldPreserveBottom {
+                bottomPreservationDepth -= 1
+            }
+        }
         super.tile()
         invalidateDocumentLayout()
         if shouldPreserveBottom, hasScrollableVerticalRange() {
@@ -146,6 +165,15 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     }
 
     override func layout() {
+        let shouldPreserveBottom = shouldPreserveBottomForLayout()
+        if shouldPreserveBottom {
+            bottomPreservationDepth += 1
+        }
+        defer {
+            if shouldPreserveBottom {
+                bottomPreservationDepth -= 1
+            }
+        }
         super.layout()
         invalidateDocumentLayout()
     }
@@ -903,6 +931,20 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         }
     }
 
+    private func handleDocumentLayoutInvalidated() {
+        // TextKit can refine the document height across viewport-layout completions.
+        // Keep the semantic bottom anchor from before reflow; the post-change offset alone
+        // can no longer distinguish auto-follow from an explicit user scroll-away.
+        let shouldPreserveBottom = shouldPreserveBottomForLayout()
+        syncDocumentFrameToTextLayout()
+        if shouldPreserveBottom, hasScrollableVerticalRange() {
+            restoreScrollOrigin(
+                NSPoint(x: 0, y: maximumVerticalScrollOffset()),
+                hideOverlayScroller: false
+            )
+        }
+    }
+
     private var effectiveScrollContentSize: NSSize {
         let scrollContentSize = contentSize
         let contentInsets = contentView.contentInsets
@@ -961,6 +1003,10 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     }
 
     private func scrollToBottom(countAsAutoFollow: Bool, hideOverlayScroller: Bool = true) {
+        bottomPreservationDepth += 1
+        defer {
+            bottomPreservationDepth -= 1
+        }
         syncDocumentFrameToTextLayout()
         let targetOrigin = NSPoint(x: 0, y: maximumVerticalScrollOffset())
         if pointsAreNearlyEqual(contentView.bounds.origin, targetOrigin) {
@@ -976,13 +1022,6 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         }
 
         restoreScrollOrigin(targetOrigin, hideOverlayScroller: hideOverlayScroller)
-        let settledMaximumOffset = maximumVerticalScrollOffset()
-        if abs(contentView.bounds.origin.y - settledMaximumOffset) > 0.5 {
-            restoreScrollOrigin(
-                NSPoint(x: 0, y: settledMaximumOffset),
-                hideOverlayScroller: hideOverlayScroller
-            )
-        }
 #if DEBUG
         if countAsAutoFollow {
             autoFollowCount += 1
@@ -993,6 +1032,12 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     private func shouldPreserveBottomForLayout() -> Bool {
         guard displayedText.isEmpty == false else {
             return false
+        }
+        if bottomPreservationDepth > 0 {
+            return true
+        }
+        if viewportLayoutPreservesBottom {
+            return true
         }
         if liveResizeRestorationTarget == .bottom {
             return true
