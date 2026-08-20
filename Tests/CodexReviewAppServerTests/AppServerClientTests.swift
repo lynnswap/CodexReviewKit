@@ -387,6 +387,79 @@ struct AppServerClientTests {
         }
     }
 
+    @Test func concurrentProcessTransportCloseCallersJoinOneFailure() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "codex-review-concurrent-close-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let closeStarted = AsyncGate()
+        let closeGate = AsyncGate()
+        let closeCompletions = CallCounter()
+        let failure = ReviewRuntimeCloseFailure.process("Injected close failure")
+        let transport = try AppServerProcessTransport(
+            configuration: .init(
+                executable: "/bin/cat",
+                arguments: [],
+                environment: [
+                    "HOME": directory.path,
+                    "PATH": "/bin:/usr/bin",
+                ]
+            ),
+            closeCompletionForTesting: {
+                await closeCompletions.record()
+                await closeStarted.open()
+                await closeGate.waitIgnoringCancellation()
+                throw failure
+            }
+        )
+
+        let first = Task { try await transport.close() }
+        await closeStarted.wait()
+        let second = Task { try await transport.close() }
+        await closeGate.open()
+
+        await #expect(throws: failure) {
+            try await first.value
+        }
+        await #expect(throws: failure) {
+            try await second.value
+        }
+        #expect(await closeCompletions.value() == 1)
+    }
+
+    @Test func repeatedProcessTransportCloseRethrowsRecordedFailure() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "codex-review-repeated-close-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let closeCompletions = CallCounter()
+        let failure = ReviewRuntimeCloseFailure.process("Injected close failure")
+        let transport = try AppServerProcessTransport(
+            configuration: .init(
+                executable: "/bin/cat",
+                arguments: [],
+                environment: [
+                    "HOME": directory.path,
+                    "PATH": "/bin:/usr/bin",
+                ]
+            ),
+            closeCompletionForTesting: {
+                await closeCompletions.record()
+                throw failure
+            }
+        )
+
+        await #expect(throws: failure) {
+            try await transport.close()
+        }
+        await #expect(throws: failure) {
+            try await transport.close()
+        }
+        #expect(await closeCompletions.value() == 1)
+    }
+
     @Test func processTransportProcessesChunkedStdoutBeforeEOF() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appending(path: "codex-review-stdout-order-\(UUID().uuidString)")
@@ -5915,5 +5988,17 @@ private struct TestErrorNotification: Encodable, Sendable {
         try container.encodeIfPresent(turnID, forKey: .turnID)
         try container.encode(AppServerAPI.Turn.Error(message: message), forKey: .error)
         try container.encode(willRetry, forKey: .willRetry)
+    }
+}
+
+private actor CallCounter {
+    private var count = 0
+
+    func record() {
+        count += 1
+    }
+
+    func value() -> Int {
+        count
     }
 }
