@@ -1,12 +1,17 @@
 # Recovery Wave 3 task brief (2026-08-20)
 
-Status: Authorized for Wave 3A. Wave 3B/3C remain gated on the reviewed prior
-slice SHA.
+Status: **No Wave 3 landing/successor is authorized.** Historical Wave 3A
+code/test evidence exists at `202ca65ce171`, but that branch descends from the
+rejected path-owned Wave 0 ancestry. It must be replayed onto the independently
+landed/reviewed current-event HEAD and reviewed there. Wave 3B/3C remain gated
+on each reviewed predecessor landing SHA.
 
 | Item | Value |
 |---|---|
 | Integration branch | `codex/v0-6-2-recovery` |
-| Wave 3A base | `287795d587823335e160d5e682407539c28a11af` |
+| Required Wave 3 base | Independently landed and reviewed current-event (#104/#105) HEAD; record before dispatch |
+| Historical Wave 3A base | `287795d587823335e160d5e682407539c28a11af` |
+| Wave 3A evidence | `codex/recovery-wave-3a@202ca65ce171`; code/tests only, ancestry rejected, never a predecessor SHA |
 | Wave 3B base | Reviewed Wave 3A HEAD; record before dispatch |
 | Wave 3C base | Reviewed Wave 3B HEAD; record before dispatch |
 | Approved design | `Docs/recovery-design-2026-08-20.md` |
@@ -24,6 +29,15 @@ starts from reviewed 3B and connects ReviewUI/application termination to that
 close. It remains an in-memory wave: Wave 4 inserts durable commits and
 database/query close stages into the same owner. Issue #106 therefore remains
 open until Wave 4 proves commit-before-cleanup.
+
+The historical Wave 3A branch is implementation evidence only. Its base ancestry
+includes former Wave 0 (`9e5bf73`, `a58daeb`, `59caa59`) plus combined historical
+baseline commits, so even a later exact-base review of `202ca65` cannot make it a
+valid landing. After Gate C and the current-event contract independently land and
+are reviewed, create a successor task branch from that exact HEAD, reapply only
+the intended Wave 3A diff without rewriting the historical branch, run all gates,
+and complete an exact-base review. Only that successor result can precede 3B. A
+later slice or aggregate test/review never back-validates an earlier gate.
 
 ## Outcome
 
@@ -879,13 +893,38 @@ Expected tests:
 - ReviewMonitor termination decision tests
 - existing external consumer/API/MCP golden gates
 
-Do not modify GRDB/history/schema/migrations, auth provider/wire semantics, executable
-resolution, sidebar duration/paging/order, legacy import, workflows, or the MCP
-tool names/input schemas. Do not close #106 in this wave.
+Do not modify GRDB/history/schema/migrations, descriptor capability/environment
+preparation, login staging/RegistryV2/pending/debt, auth provider/wire semantics,
+executable resolution, sidebar duration/paging/order, legacy import, workflows,
+or the MCP tool names/input schemas. Do not close #106 in this wave.
 
 Account switch/removal/sign-out lifecycle ordering is in scope: the review
 barrier must finish before shared credential/runtime state changes. The login
 provider, credential format, and account wire protocol remain Wave 5 scope.
+
+## Downstream capability and lease prerequisites
+
+Wave 3 produces lifecycle authority consumed by later filesystem/auth owners;
+it does not implement those owners itself.
+
+1. Reviewed Wave 3C is the prerequisite for issue #113. The descriptor
+   capability core consumes the throwing process/runtime close contract and the
+   joined generation owner before it replaces path-owned RecoveryV1 setup.
+2. Issue #113 then produces one `PreparedRecoveryEnvironment` and opaque
+   `DirectoryCapability` values. No Wave 4 GRDB path may open before that gate is
+   independently reviewed.
+3. Wave 5 `LoginStagingLease` consumes both reviewed Wave 3 close authority and
+   reviewed #113 descriptor authority. The lease, not Wave 3 and not
+   `RecoveryEnvironmentPlan`, owns staging runtime/client/writer completion and
+   one joined close result.
+4. RegistryV2's authentication disk actor owns the versioned pending/cleanup-
+   debt manifest and startup reconciliation. Wave 3 must not add a bare staging
+   URL, cleanup manifest, log-only cleanup error, or Environment-owned removal
+   helper as a convenience for Wave 5.
+
+Any need to change Wave 3's close result so that #113 or Wave 5 can consume it is
+a Wave 3 design finding and must be resolved before its reviewed landing. Later
+gates must not wrap or bypass an inadequate close owner.
 
 ## Characterization-first checkpoints
 
@@ -1014,6 +1053,10 @@ Final gates:
 Run the applicable full gates and a branch-wide review at the end of each of
 3A, 3B, and 3C before the next stacked slice is dispatched; a later slice never
 serves as validation for an earlier one.
+
+After reviewed 3C, dispatch #113. Do not dispatch Wave 4 or Wave 5 directly from
+a Wave 3 code/test checkpoint: the reviewed descriptor-capability result is an
+additional mandatory predecessor.
 
 Each worker commits only to its task branch, leaves a clean worktree, and does
 not push, create a PR, tag, or close #106. Three failed fixes in one lifecycle

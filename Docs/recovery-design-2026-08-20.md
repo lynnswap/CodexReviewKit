@@ -2,7 +2,7 @@
 
 | Item | Value |
 |---|---|
-| Status | **Approved — Phase 3 migration in progress** |
+| Status | **Approved contract, resequenced — implementation gated by the predecessor chain** |
 | Recovery base | `v0.6.2` / `82bddbcb1310a091eff742b36ab90781a4cbee5a` |
 | Current-main evidence | `26c8f7b49e4afb356698d3c49e5107e96477b2ca` |
 | Upstream Codex contract | `3b45c29062ff0e76e71c91b6753290400e7fa8da` |
@@ -86,10 +86,20 @@ products. Do not create a proxy consumer to preserve them.
 
 ### Recovery-owned environment
 
+The path-owned former Wave 0 implementation, including the follow-up branch tip
+`c83e49960c303682ea4b4be77a8cfe0f7ff59151`, is rejected and must not merge.
+It failed the same filesystem-authority invariant across four implementation
+rounds (`864b16a`, `3b2def2`, `d3f3e20`, `c83e499`). It remains evidence for
+tests only; adding another standardized/canonical URL guard is not an authorized
+repair.
+
 No recovery build uses the current default `~/.codex_review` directory or the
 existing `codexReview.runtimePreferences` value as a writable destination.
-Production recovery defaults are versioned locations under ReviewMonitor's
-Application Support directory:
+`RecoveryEnvironmentPlan` describes the intended names and policy without
+performing I/O. The descriptor-capability gate in issue #113 prepares exactly
+one `PreparedRecoveryEnvironment` before any Process, MCP, authentication, or
+GRDB admission. Production diagnostic names remain versioned locations under
+ReviewMonitor's Application Support directory:
 
 - `RecoveryV1/CodexHome`
 - `RecoveryV1/LoginStaging/<authentication-session-id>`
@@ -97,13 +107,15 @@ Application Support directory:
 - `RecoveryV1/review-history.sqlite`
 - a `codexReview.recoveryV1.runtimePreferences` preference key
 
-Development probes additionally use an isolated preference suite and an MCP
-port override so they can coexist with the current app. The existing home and
+These URLs are display/configuration facts, not authorization tokens. Every
+managed directory/file operation is performed relative to an opaque descriptor
+capability from the prepared environment. Development probes additionally use
+an injected trusted-ancestor descriptor, isolated preference suite, and MCP port
+override so they can coexist with the current app. The existing home and
 preference value are read-only migration inputs. The #108 importer creates a
-verified copy/snapshot before reading secrets, writes only to the recovery
-destination, and records a migration manifest. App-server startup is gated on
-successful environment preparation; it cannot fall through to the legacy
-default path.
+verified copy/snapshot before reading secrets, writes only through destination
+capabilities, and records a migration manifest. App-server startup is gated on
+successful preparation; it cannot fall through to the legacy default path.
 
 ## 2. Phase 1 evidence and numbered findings
 
@@ -286,17 +298,29 @@ that ownership model rather than isolated call-site defects.
 Adopt Candidate B with GRDB 7.11.1. Do not expose GRDB types in any public or
 cross-target signature and do not use a global default database.
 The ReviewMonitor composition root injects a domain
-`ReviewHistoryConfiguration` containing the exact recovery-owned database URL;
-the `CodexReview` persistence owner opens and retains one `DatabasePool` with
+`ReviewHistoryConfiguration` containing the exact recovery-owned managed-file
+capability; the `CodexReview` persistence owner performs the #113 last-moment
+identity revalidation, then opens and retains one `DatabasePool` with
 foreign keys and WAL explicitly enabled for production and temporary-file
 integration tests. Focused
 in-memory/migration unit tests may use `DatabaseQueue`; no runtime code selects
-between them. Tests inject a temporary URL/configuration through the same seam.
+between them. Tests inject a capability prepared below a temporary trusted
+ancestor through the same seam. A raw URL-only GRDB open is not mergeable.
 The configuration may carry a package-only immutable `ReviewHistoryBootstrap`
 for preview/test content. Live configurations always set it to `nil`. Bootstrap
 is applied through normal writer transactions only after migration and startup-
 orphan recovery, and only when the opened database is brand new and empty; it
 never overwrites existing history or bypasses the query/publication path.
+
+Issue #113 does not add a library product or a file-bucket target. The
+package-only descriptor primitive lives under
+`Sources/CodexReview/RecoveryStorage/`: `CodexReview` needs it for history,
+`CodexReviewAppServer` already depends on `CodexReview` for the Process handoff,
+and `CodexReviewHost` already depends on both for composition and authentication.
+`RecoveryEnvironmentPlan` and the prepared aggregate remain in
+`CodexReviewHost`; low-level `DirectoryCapability` and managed-file values point
+only downward. If implementation cannot preserve this acyclic dependency graph,
+return to the topology gate rather than passing raw URLs across targets.
 
 ## 4. Owner map and lifecycle
 
@@ -318,6 +342,97 @@ never overwrites existing history or bypasses the query/publication path.
 | Render artifacts | Chat/document caches plus native views | Native snapshot/document diff rebuilt from history query |
 | Authentication | Current runtime transition graph | Recovery auth owner plus current login/API-key adapters |
 | Executable discovery | Current CodexKit helper | One composition-root resolver |
+| Recovery path policy | URL construction plus caller checks | `RecoveryEnvironmentPlan` (configuration only) |
+| Filesystem authority | Canonical/standardized URL checks in former Wave 0 | One descriptor-backed recovery storage actor and its opaque `DirectoryCapability` values |
+| Prepared runtime/history locations | Bare URLs passed between callers | One `PreparedRecoveryEnvironment` aggregate |
+| Auth artifacts/RegistryV2 | Helpers beside live backend | One authentication disk actor using descriptor-relative files |
+| Login staging lifecycle | Environment creates/removes a bare temporary URL | One `LoginStagingLease` per admitted authentication session |
+| Pending auth/cleanup debt | Caller state, logs, or Environment cleanup | Authentication disk actor's one versioned atomic state manifest |
+
+### Descriptor-backed RecoveryV1 authority (#113)
+
+`RecoveryEnvironmentPlan` is inert configuration. Its only mutating operation is
+to ask the package recovery storage actor to prepare and return one
+`PreparedRecoveryEnvironment`. The prepared value aggregates opaque capabilities
+for the RecoveryV1 root, primary Codex home, login-staging root, saved-account
+root, and the managed history file location. It does not expose a raw descriptor
+or treat a URL as proof of containment.
+
+Every path component below a trusted ancestor is opened separately with
+`openat(parentFD, component, O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)`. A missing
+managed component is created with `mkdirat`, then reopened with the same flags;
+the descriptor returned by creation is never inferred from the requested path.
+Components are single validated names: empty, slash-containing, `.` and `..`
+values are rejected before I/O. Each open is followed by `fstat`; the capability
+records volume/device/inode identity, file type, owner, mode, and policy
+generation. Parent-descriptor traversal establishes ancestry. Revalidation uses
+the still-owned parent descriptor plus `fstatat(..., AT_SYMLINK_NOFOLLOW)` and a
+fresh `openat`/`fstat`, and requires the recorded device/inode/type to match.
+
+The default production anchor is the already-opened user Application Support
+ancestor selected by composition. Tests inject an owner-controlled temporary
+anchor. A configured home on another volume must be introduced as its own
+explicit trusted anchor and policy; discovering a new `st_dev` while walking an
+existing managed subtree is a mount-crossing failure, never an implicit new
+root. No managed child may cross its anchor's device. Existing explicitly
+configured homes are validation-only: recovery never `chmod`s, `chown`s, or
+rewrites ACLs to make them pass.
+
+New managed directories are created as the effective user with mode `0700`.
+Existing managed directories must be directories owned by `geteuid()`, have no
+group/world permission bits, and have no extended ACL entry, including an
+inherited entry. Failure to read ownership, mode, mount identity, or ACL is an
+unknown-policy failure and closes admission. Trusted anchors have an explicit
+composition policy; a broader system ancestor is never silently promoted into a
+managed writable subtree.
+
+Creation, bounded reads, temp creation, file/directory `fsync`, same-directory
+atomic replacement, and removal use descriptor-relative operations
+(`openat`/`mkdirat`/`renameat`/`unlinkat`) only. Recursive removal walks the
+already-opened manifested directory, opens every child with no-follow semantics,
+rejects an identity/device/type/policy mismatch, and removes entries relative to
+their parent descriptor. There is no `FileManager.removeItem(at:)`, canonical-
+path prefix test, or symlink-resolved deletion fallback for managed state.
+
+The same core exposes a read-only source capability for Wave 7 without granting
+source mutation. `AbsoluteComponentPath` parses a locator string once at the
+input boundary; the actor then walks it from its already-opened trusted system
+root and enforces the declared read-only mount/owner policy. A versioned
+`ReadOnlySourceAllowlist` is the only enumeration API. It returns opaque file
+capabilities plus relative component sequences. Only after provider filtering
+has excluded API-key artifacts may the snapshotter request bounded size/SHA-256.
+Verified copy revalidates the expected source snapshot, reads that descriptor
+directly into a descriptor-owner-created managed destination, and returns
+source-before/source-after plus destination identity, byte count, and digest.
+The caller requires before == after before publishing its manifest. No API opens
+an arbitrary child URL, returns a source URL, or mutates the source.
+
+Foundation canonical/standardized URLs and `F_GETPATH` output may appear in a
+redacted diagnostic or be passed to an unavoidable path-only system/library API;
+they never grant authority. Immediately before `Process.run` or GRDB constructs
+its connection, the consuming owner asks the storage actor to reopen the full
+capability chain and compare all recorded identities. The actor then invokes the
+synchronous open/launch handoff while retaining the descriptors. A mismatch
+fails before the external call. No caller may save the resulting URL and reuse
+it for a later open.
+
+#### Threat model and residual risk
+
+The contract protects against case/Unicode/firmlink aliases, symlink components,
+reverse-ancestor overlap, unexpected mounts, shared ownership/mode/ACLs, stale
+path reuse, and replacement detected before a managed mutation or external
+handoff. The trusted-ancestor descriptor and every live child descriptor are the
+authority even if their display path is renamed.
+
+A malicious process running as the same UID is explicitly a residual threat:
+it can have enough authority to rename or replace path entries after the final
+identity check, and path-only Process/SQLite APIs cannot consume ReviewMonitor's
+directory descriptor atomically. Last-moment revalidation plus retained
+descriptors narrows and detects normal races but is not claimed to defeat that
+last-instruction race. Treating a hostile same-UID process as in scope would
+require a sandbox/broker or a downstream descriptor-relative API and a new
+design gate. Other users, accidental aliases, and non-cooperating current-main
+paths remain in scope and fail closed.
 
 ### Durable source of truth
 
@@ -469,10 +584,11 @@ diagnostic payload) has an adjacent explicit payload version/type. Unknown or
 undecodable versions fail the row/query with a typed migration/data error and
 retain the last good UI snapshot; they never decode as nil/default content.
 
-The recovery-owned history directory is owner-only and the SQLite database,
-WAL, and shared-memory files are created with owner read/write permissions.
-Diagnostics report schema/version/operation identity, never review content or
-bound SQL values by default.
+The recovery-owned history directory capability enforces the #113 owner/mode/
+ACL/mount policy. The SQLite database, WAL, and shared-memory files are created
+with owner read/write permissions only after last-moment GRDB handoff
+revalidation. Diagnostics report schema/version/operation plus redacted
+filesystem identity, never review content or bound SQL values by default.
 
 ### Commit-before-publish flow
 
@@ -859,8 +975,8 @@ derives identity from email, provider name, raw credential bytes, or the fixed
 string `"api-key"`.
 
 - The saved-account registry allocates one canonical UUID-backed
-  `SavedAccountID` before login dispatch and records it in a durable pending
-  authentication manifest. Its only valid serialized form is the lowercase
+  `SavedAccountID` before login dispatch and records it in
+  `AuthenticationDiskStateV1.reserved`. Its only valid serialized form is the lowercase
   hyphenated UUID string; generation, raw-value construction, and Codable decode
   all enforce that form. Crash replay of that operation reuses the ID, and the
   public `CodexAccount` normalization therefore preserves exactly the same key.
@@ -890,30 +1006,53 @@ string `"api-key"`.
 
 Credentials are opaque immutable artifact revisions under
 `SavedAccounts/<SavedAccountID>/revisions/<RevisionID>/auth.json`. ReviewMonitor
-validates regular-file/symlink boundaries, owner-only permissions, nonempty
-bounded size, SHA-256, and byte count, but never decodes secret/JWT/account-ID
-content. File and parent directory are fsynced before a revision can be named by
-the registry. Registry, pending manifest, activation journal, and runtime lease
-use temp write + fsync + same-directory rename + directory fsync; corruption or
-missing references fail closed rather than becoming an empty registry.
+opens them relative to the reviewed #113 saved-account capability, validates
+regular-file identity, owner-only mode/ACL policy, nonempty bounded size,
+SHA-256, and byte count, but never decodes secret/JWT/account-ID content. File
+and parent directory are fsynced before a revision can be named by the registry.
+The authentication disk actor is the sole writer for RegistryV2, immutable
+revisions, activation journal, primary runtime lease, and the versioned
+authentication state manifest. Each uses descriptor-relative temp write + fsync
++ same-directory `renameat` + directory fsync; corruption or missing references
+fail closed rather than becoming an empty registry.
 
 ```text
 RecoveryV1/SavedAccounts/registry.json
   RegistryV2(schemaVersion, generation, contentHash, activeAccountID?, accounts[])
   account = id, provider, presentation, planType?, artifactRevision(id, sha256,
             byteCount), lastActivatedAt?, cached non-secret metadata
-RecoveryV1/SavedAccounts/pending-authentication.json
-  sessionID, candidateAccountID, intent, provider, previousActiveAccountID?,
-  phase, cancellationIntent
+RecoveryV1/SavedAccounts/authentication-state.json
+  AuthenticationDiskStateV1(schemaVersion, generation, contentHash, sessionState)
+  sessionState = idle
+    | staging(
+        reserved | leased | outcomeUnknown
+        | cleanupRequired(identity + discard|candidate(pending,artifact))
+        | cleanupFailed(identity + continuation + typed kind/operation/code)
+      )
+    | candidate(ready | discardRequired | discardFailed)
 RecoveryV1/SavedAccounts/activation-journal.json
   before registry generation/hash, complete desired registry bytes/hash,
   previous shared fingerprint?, desired artifact revision/fingerprint, phase
 RecoveryV1/SavedAccounts/runtime-lease.json
-  runtime generation, activeAccountID, base artifact revision/fingerprint
+  PrimaryRuntimeLeaseV1(schemaVersion, runtime generation, activeAccountID,
+    base artifact revision/fingerprint, preallocated writeback revision ID,
+    phase: running | writebackPrepared | registryPublished)
 RecoveryV1/SavedAccounts/<SavedAccountID>/revisions/<RevisionID>/auth.json
 RecoveryV1/LoginStaging/<SessionID>/auth.json
 RecoveryV1/CodexHome/auth.json
 ```
+
+`authentication-state.json` is the only durable owner of pending authentication,
+login-staging identity, uncommitted candidate handoff, and cleanup debt. Its
+session enum makes impossible combinations unrepresentable and permits at most
+one authentication admission.
+It stores one validated relative component plus descriptor identity, never an
+arbitrary source/destination URL. `RecoveryEnvironmentPlan` and
+`PreparedRecoveryEnvironment` do not create a second pending/cleanup manifest.
+`contentHash` covers the canonical encoding with its own field omitted.
+The primary `runtime-lease.json` is deliberately distinct from
+`LoginStagingLease`: the former journals the shared Codex-home working copy;
+the latter owns one isolated authentication session's live resources.
 
 The existing unversioned saved-account registry is schema v0. Wave 5 performs
 one validated, crash-safe conversion to RegistryV2 before auth/runtime
@@ -958,8 +1097,11 @@ never reuses this in-place RecoveryV1 migration locator.
 `.addAccount` closes and awaits the staging app-server, writes one immutable
 artifact revision, and atomically adds its metadata while leaving active ID,
 shared auth bytes, and runtime generation unchanged. For `.signIn`,
-`LoginSession` durably writes only the unreferenced candidate revision and hands
-`PreparedAuthenticationCandidate` to the Wave 3 runtime transition owner; it
+`LoginSession` supplies the authoritative provider result to its lease; the
+authentication disk actor durably writes only the preallocated unreferenced
+candidate revision and hands `PreparedAuthenticationCandidate` to the Wave 5
+activation actor; that actor
+invokes the reviewed Wave 3 runtime-transition owner. `LoginSession`
 does not create an activation journal or mutate the shared home. The runtime
 owner first interrupts/commits affected reviews, closes and joins the old
 runtime, writes back its working auth revision, and durably clears the old
@@ -982,61 +1124,154 @@ journal creation is admitted only after durable lease removal. Startup that
 finds both treats it as persistence inconsistency and fails auth/runtime
 admission rather than guessing an order.
 
-One Wave 3-owned `AuthenticationActivationOperation` actor linearizes the
-transferred LoginSession cancellation intent and journal commit:
+One Wave 5-owned `AuthenticationActivationOperation` actor linearizes the
+transferred LoginSession cancellation intent and journal commit while invoking
+the reviewed Wave 3 account-transition/close owner:
 
 ```text
 prepared(candidate, cancellationIntent)
 → quiescingOldRuntime
 → readyToCommit(latestRegistry)
-→ committingJournal
-→ committed
-→ startingReplacement
-→ terminal
+  ├─ cancellation wins → restartingPrevious → discardingCandidate → terminal
+  └─ committingJournal → committed → startingReplacement → terminal
 ```
 
 It installs `committingJournal` synchronously before the first journal-write
-await. Cancellation accepted before that transition wins: no journal is
-created, the candidate remains an unreferenced cleanup item, and after old-
-runtime quiescence the owner starts exactly one replacement for the previous
-active account. If that restart fails, runtime state becomes visibly failed; it
-never activates the cancelled candidate. Cancellation after `committingJournal`
+await. Before acknowledging a cancellation that wins before that transition,
+the actor asks the authentication disk owner to set
+`candidate.ready.pending.cancellationIntent = true` durably. No journal is
+created. After old-runtime quiescence it starts exactly one replacement for the
+previous active account, moves the candidate to `candidate.discardRequired`, and
+descriptor-safely removes only that preallocated unreferenced revision. Removal
+failure becomes `candidate.discardFailed` and blocks new authentication; it does
+not activate the candidate. Startup seeing the durable cancellation intent
+never resumes activation: it restores the previous RegistryV2 runtime when
+otherwise valid and resumes candidate discard. If that runtime restart fails,
+runtime state becomes visibly failed. Cancellation after `committingJournal`
 loses to success/activation-pending and cannot rewrite the commit. LoginSession
 transfers its root/cancel ownership into this actor and cannot independently
 persist cancellation afterward.
 
-On startup, forward-completing an activation journal applies desired shared
-bytes/registry, keeps the journal, and passes the desired active ID into the one
+On startup, forward-completing an activation journal first consumes any exactly
+matching `candidate.ready` handoff, applies desired shared bytes/registry, keeps
+the journal, and passes the desired active ID into the one
 primary `PreparedRuntime` start. That runtime's authoritative account read is
 the validation; only a match publishes the runtime and removes the journal.
 Failure retains `.committedActivationPending` and the same ID/journal. It does
 not create a second isolated validation runtime or a second primary start.
 
 The shared auth file is a runtime working copy because app-server may refresh
-tokens. A durable runtime lease records active saved ID, runtime generation, and
-base artifact revision before launch. After app-server close, the verified
-working copy is written back as a new immutable revision before clearing the
-lease. Startup reconciles a leftover lease with an isolated provider read or
-fails closed; email never decides whether it is a different account. Staging is
-deleted only after every writer/runtime Task finishes. Outcome-unknown retains
-its pending manifest/staging for next-start reconciliation; an unowned orphan
-staging directory is cleaned before admission, with typed cleanup debt/failure.
+tokens. Before launch, `PrimaryRuntimeLeaseV1` records active saved ID, runtime
+generation, base artifact revision/fingerprint, and one preallocated writeback
+revision ID. After app-server close, the verified working copy is written only
+to that ID, fsynced, and marked `writebackPrepared`; RegistryV2 is then published
+to reference it, the lease is marked `registryPublished`, and only then cleared.
+Startup validates/completes each file/registry/lease boundary idempotently and
+never scans for a latest revision. A leftover running lease reconciles with an
+isolated provider read or fails closed; email never decides whether it is a
+different account.
+
+#### Login staging lease and cleanup debt
+
+One Wave 5 `LoginStagingLease` actor owns the staging directory capability,
+staging runtime/client, every registered reader/writer Task, and one joined
+close result. `LoginSession` owns provider semantics and native presentation;
+the authentication disk actor owns durable state. Neither may create a parallel
+cleanup path.
+
+The in-memory lease state is exact:
+
+```text
+preparing(sessionID)                       // no capability published
+  -> open(resources, directoryIdentity)    // new tasks may register
+  -> closing(resources, one closeTask)     // admission closed before first await
+  -> closed(Result<LoginStagingCloseOutcome, LoginStagingCloseError>)
+```
+
+Concurrent/repeated close callers join the recorded `closeTask` and receive the
+same result. `open` contains the real runtime/client and registered Task handles,
+not booleans saying that they were cancelled. Close rejects new tasks, asks the
+reviewed Wave 3 runtime handle to close, and joins the client/readers/writers.
+For a confirmed provider result, the close Task then asks the authentication
+disk actor to copy the opaque staging artifact into an immutable unreferenced
+revision at the ID preallocated in `PendingAuthentication`; this disk operation
+is one of the lease-owned writers. A crash before/after rename/fsync reopens only
+that exact ID and validates or completes it. Only after resource completion and
+the candidate write are proven may the actor commit
+`staging.cleanupRequired(.candidate(...))` and perform descriptor-relative
+removal. After successful removal, it advances to `candidate.ready`;
+discard advances to `idle`. For `.addAccount`, the disk actor publishes
+RegistryV2 first and clears `candidate.ready` only after the registry durably
+references that exact candidate; startup treats an already-matching registry as
+idempotent completion. For `.signIn`, `candidate.ready` remains durable while the
+Wave 5 activation actor quiesces the old runtime and is cleared only after a
+matching activation journal becomes the next durable owner. Startup accepts the
+temporary pair only when candidate identity matches exactly, clears the old
+state, and forward-completes the journal. A crash before either next-owner commit
+therefore resumes `candidate.ready` without the removed staging directory.
+
+An authentication result whose write/outcome is unknown produces
+`.retainedForReconciliation(sessionID)` after all live resources close. The
+durable state becomes `outcomeUnknown`; the exact manifested directory is kept
+for a same-home startup read and new authentication admission remains blocked.
+This retention is intentional, not a cleanup success or a log-only warning.
+
+`LoginStagingCloseError` requires one typed primary failure. When resources fail,
+the primary is a nonempty aggregate ordered as runtime first, then client/reader/
+writer Tasks by registration ordinal, then the close-owned candidate write; no
+joined Task failure is lost.
+Every later cleanup/debt-persistence failure is preserved in operation order, and
+the error records whether the exact durable debt state was written or that write
+itself failed. Runtime failure retains `ReviewRuntimeCloseFailure`; other work
+retains a typed task owner/operation/code rather than only display text. If
+runtime/process completion is not
+proven, removal is not attempted. A manifest write failure also prevents
+removal because no durable owner would authorize it. An identity/policy mismatch
+or descriptor-relative removal failure preserves the directory, atomically
+records `cleanupFailed` when possible, blocks authentication admission, and is
+returned to normal/application close. No error is reduced to a log message.
+
+Before creating a staging leaf, the authentication disk actor first commits
+`staging.reserved` with one generated session ID, candidate account ID,
+candidate revision ID, and relative component. It
+then creates/reopens the leaf through the login-staging root capability and
+commits `staging.leased` with its exact descriptor identity before publishing the lease.
+A crash at either boundary therefore resumes the same ID: missing reserved leaf
+can be cleared, while an identity-matching leaf is reconciled or removed through
+the manifest. A directory with no manifest, or a manifested directory whose
+identity changed, is preserved and reported as a typed persistence inconsistency;
+it is never guessed to be an orphan and recursively deleted.
+
+Startup opens RegistryV2 and `authentication-state.json` through the descriptor
+owner before auth/runtime admission. It forward-completes or reconciles
+every `staging` and `candidate` case using the same lease/removal/adoption
+primitives. A replay from `staging.leased` uses the preallocated revision ID to
+validate or finish an already-renamed candidate before moving to
+`cleanupRequired(.candidate)`. Cleanup removes only a manifested,
+identity-matching directory when `staging.cleanupRequired` is the sole durable
+authority and every live-resource/other-record reference is absent. That state
+retains any continuation needed after removal. History remains readable and new
+authentication admission remains closed on debt. A prior RegistryV2 account may
+start only when RegistryV2/runtime-lease/activation state is independently
+authoritative; staging/candidate debt never chooses or changes that account.
 
 ### ChatGPT login state machine (#107)
 
-One `LoginSession` owns an isolated recovery staging Codex home and app-server,
-the app-server login handle, presentation, completion observation Task,
-cancellation request, and close completion. Authentication never writes first
-to the active shared `RecoveryV1/CodexHome`: upstream login persists credentials
-before returning success, so doing so would let `.addAccount` replace the active
-account before product adoption.
+One `LoginSession` owns provider state, the app-server login handle, native
+presentation, completion observation, and cancellation intent. Its one
+`LoginStagingLease` owns the isolated recovery home capability, staging
+app-server/client/readers/writers, and close/removal completion. Authentication
+never writes first to the active shared `RecoveryV1/CodexHome`: upstream login
+persists credentials before returning success, so doing so would let
+`.addAccount` replace the active account before product adoption.
 
 `AuthenticationClosePolicy` injects `providerEventGrace`,
 `reconciliationGrace`, and the suspending clock (production defaults 10 seconds
 each; tests use controlled gates). A grace expiry triggers staging connection/
 process close and a fresh same-home read; it is never treated as success or as
 proof of cancellation. Reconciliation expiry records typed outcome-unknown,
-retains the pending manifest/staging debt, joins all session Tasks, and lets
+retains `AuthenticationDiskStateV1.sessionState.staging(.outcomeUnknown)` plus
+staging, joins all session Tasks, and lets
 `LoginSession.close()` finish rather than wait indefinitely.
 
 1. Current app-server login start returns typed `loginId` and `authUrl` and
@@ -1066,20 +1301,23 @@ retains the pending manifest/staging debt, joins all session Tasks, and lets
    loss is outcome-unknown and is reconciled by a fresh app-server read of that
    same staging home, never by resending login. UI callback arrival is never
    success.
-7. After authoritative success, close and await the staging app-server, then
-   adopt its opaque artifact through the revision/journal contract above.
-   `.signIn` activates only after durable adoption; `.addAccount` leaves the
+7. After authoritative success, close through `LoginStagingLease` with the typed
+   adoption disposition. Its close Task joins the app-server, writes the
+   immutable candidate, removes the manifested staging directory, and returns
+   only after the disk actor reaches and consumes `candidate.ready`. `.signIn`
+   then transfers the returned candidate to activation; `.addAccount` leaves the
    existing active ID, shared artifact, and runtime byte-for-byte unchanged.
 8. `LoginSession.close()` finishes/cancels presentation, prevents later
-   callbacks, requests SDK cancellation when required, and awaits its root Task.
-   Concurrent cancel/close callers join the same completion.
+   callbacks, requests SDK cancellation when required, awaits its provider root
+   Task, and then joins `LoginStagingLease.close()`. Concurrent cancel/close
+   callers join the same provider and lease completions.
 
 Staging runtime close uses the same typed process/connection completion
 contract as Wave 3. It awaits the real process terminal (force-closing through
 the injected policy when needed) before reporting an auth terminal or deleting
-staging. Failure records `stagingRuntimeClose` plus outcome debt; during
-application close it contributes a typed runtime close failure and can never be
-reported as a clean close or detached Task.
+staging. Failure is retained as `LoginStagingCloseError.primary` plus exact debt;
+during application close it contributes a typed runtime close failure and can
+never be reported as a clean close or detached Task.
 
 External-browser open failure, login cancellation failure, stock completion
 failure, and account-read failure remain distinct typed errors. A second login
@@ -1106,8 +1344,8 @@ Task, and lets confirmed success/read win. A known rejection is no-commit.
 Response/notification/connection loss after write is outcome-unknown and uses a
 fresh app-server read of the same staging home: `.apiKey` commits, no account is
 no-commit, another provider is protocol failure. It never resends or retains the
-raw key. If reconciliation is impossible, the durable pending manifest blocks a
-new authentication attempt until resolved. Concurrent authentication requests
+raw key. If reconciliation is impossible, the durable authentication-state
+entry blocks a new authentication attempt until resolved. Concurrent authentication requests
 are rejected while the session owns admission. After authoritative read, the
 same revision/journal rules apply: `.signIn` activates after durable adoption;
 `.addAccount` preserves the existing active artifact/runtime. Staging closes and
@@ -1126,8 +1364,11 @@ credentials.
 
 Startup order:
 
-1. Prepare the recovery-owned paths/preferences without opening the legacy
-   source and construct an inert store with `ReviewHistoryConfiguration`.
+1. Build `RecoveryEnvironmentPlan` without opening the legacy source. Through
+   the reviewed #113 storage actor, walk/create/reopen the managed components and
+   produce one `PreparedRecoveryEnvironment`; then construct an inert store with
+   a capability-backed `ReviewHistoryConfiguration`. No raw URL opens GRDB or a
+   Process.
 2. Construct the window/controllers against the inert store. The history shell
    renders `.loading`, not a successful empty list.
 3. When `ReviewHistoryConfiguration.startupPreparation` is present,
@@ -1144,10 +1385,13 @@ Startup order:
    start MCP or app-server.
 5. Resolve the Codex executable once for the app lifetime.
 6. For `.ready`/`.authenticationRequired`, before primary runtime/MCP admission,
-   recover authentication in this order:
+   have the authentication disk actor open RegistryV2 and the versioned
+   pending/debt state through the prepared capabilities, then recover in this
+   order:
    migrate RegistryV0→V2; reject the invalid simultaneous old-lease+journal
    state; reconcile a leftover runtime lease; forward-complete an activation
-   journal; reconcile pending authentication/staging; materialize exactly one
+   journal; reconcile the exact reserved/leased/outcome-unknown/cleanup-debt
+   staging state; materialize exactly one
    desired active artifact into the shared home; then start and account-read-
    validate exactly one un-published primary `PreparedRuntime` against that
    artifact. Journal completion uses this same prepared runtime and never
@@ -1155,9 +1399,11 @@ Startup order:
    `.authenticationFailed` skips this step and retains the loaded history with a
    visible auth error.
 7. Only after history and auth recovery are authoritative, atomically publish
-   that prepared runtime, open MCP admission, and begin live ingestion. There is
-   no second primary start. Auth recovery failure closes the un-published handle
-   and remains visible without replacing the already loaded history UI.
+   that prepared runtime, open MCP admission, and begin live ingestion. Process
+   launch performs the #113 last-moment executable/home capability revalidation.
+   There is no second primary start. Auth recovery failure closes the
+   un-published handle and remains visible without replacing the already loaded
+   history UI.
 
 Preview/XCTest compositions that intentionally keep the embedded runtime inert
 still execute steps 1–4 against a unique temporary database. Their synchronous
@@ -1252,6 +1498,14 @@ the owner of async shutdown.
 The importer recognizes only pinned current-main inputs and never scans content
 heuristically for something that merely looks like a review.
 
+Issue #108 consumes the reviewed #113 descriptor core for both its read-only
+source walk and every RecoveryV1 destination mutation. Locator URLs are input
+descriptions only. The snapshotter opens the selected source from an explicit
+trusted ancestor component by component, records descriptor identity in its
+manifest, and performs allowlisted reads/copies relative to those descriptors.
+The cutover coordinator receives the already prepared destination capabilities;
+it never reconstructs a writable destination from the source or a canonical URL.
+
 `CurrentMainSourceLocator` reproduces the pinned current-main root precedence in
 one versioned adapter. An absent old preference means `.defaults`; a present
 malformed preference is a typed migration refusal rather than a guessed root.
@@ -1259,9 +1513,12 @@ Use a valid nonempty normalized legacy
 `codexReview.runtimePreferences.codexHomePath`, otherwise current-main
 `CODEX_HOME`, otherwise nonempty environment `HOME/.codex_review`, otherwise
 the FileManager user Application Support `CodexReviewMonitor` directory, and
-finally `homeDirectoryForCurrentUser/.codex_review`. Every resolved custom root,
-not only the default, enters the RecoveryV1 source/destination rejection
-boundary.
+finally `homeDirectoryForCurrentUser/.codex_review`. Each candidate string is
+only a locator description: the snapshotter opens it component by component from
+its declared trusted ancestor and compares descriptor ancestry/identity against
+the prepared destination. Every custom root, not only the default, enters that
+source/destination rejection boundary. A spelling/canonicalization result never
+authorizes overlap or traversal.
 
 The snapshot allowlist is exact. Unknown `*.sqlite*` means a newer unsupported
 layout and fails closed.
@@ -1310,26 +1567,29 @@ writes is consistent.
 
 `CurrentMainSourceSnapshotter` rejects another
 `lynnpd.CodexReviewMonitor` process and uses `/usr/sbin/lsof` machine-readable
-output twice (preflight and post-copy): any open FD on a known SQLite/WAL/SHM or
-any writable FD on another allowlisted source is a typed refusal including PID
-and command. App-server ownership is proved by the actual legacy files it
-holds, not process-name matching. Old UserDefaults values are exact-compared
-before/after. The importer never opens source SQLite because even a read can
-mutate WAL shared memory.
+output twice (preflight and post-copy). The snapshotter compares lsof device/
+inode fields with the already opened manifest capabilities: any open FD matching
+a known SQLite/WAL/SHM identity or any writable FD matching another allowlisted
+source is a typed refusal including PID and command. Lsof path spelling is
+diagnostic only and cannot establish a match or exemption. App-server ownership
+is proved by actual descriptor identity, not process-name/path matching. Old
+UserDefaults values are exact-compared before/after. The importer never opens
+source SQLite because even a read can mutate WAL shared memory.
 
 For each quiescent SQLite cohort it byte-copies main/WAL/SHM into raw staging,
 verifies the complete before/after source manifest, then runs `sqlite3_backup`
 and `quick_check` on the staging copy. Direct online backup from the source is
-not an approved active-writer/read path. The canonical sorted manifest records
+not an approved active-writer/read path. The deterministically sorted manifest records
 relative path, file type/mode/size, non-secret SHA-256, sidecar existence,
 preference hashes, and adapter/importer version. Credential digests never enter
 the source fingerprint or cutover manifest; API-key artifact bytes are not
 copied, read, or hashed.
 
 - Source fingerprint: SHA-256 of a length-prefixed tuple containing
-  `"current-main-source-v1"`, lowercase installation UUID, account schema token
-  `absent|0|1`, and symlink-resolved absolute legacy root; no credential bytes
-  enter the fingerprint or manifest.
+  `"current-main-source-v2"`, lowercase installation UUID, account schema token
+  `absent|0|1`, and the opened legacy-root volume identifier + inode identity;
+  path spelling/canonical URL and credential bytes do not enter the fingerprint
+  or manifest.
 - Eligible review: `thread_source == user`, non-SubAgent/internal source, stable
   outer thread/turn identity, same-pair stable `enteredReviewMode` and
   `exitedReviewMode`, matching typed turn terminal, and one nonempty canonical
@@ -1365,7 +1625,7 @@ copied, read, or hashed.
   reauthentication case and create no ready RegistryV2 record; their sanitized
   metadata remains in the cutover manifest. `VerifiedOpaqueArtifact` can only
   be constructed by the snapshotter beside its fileprivate initializer after
-  path/permission/hash validation. Cutover crash resume asks that snapshotter to
+  descriptor identity/policy/hash validation. Cutover crash resume asks that snapshotter to
   revalidate the verified snapshot and reconstruct the in-memory value; secret
   digests are not persisted in the cutover manifest and Wave 5 has no second
   factory.
@@ -1393,10 +1653,12 @@ suppression, grouped replacement, and 256 KiB policy run once in the writer.
 Reviewer child JSON never enters the reducer.
 
 Compressed `.jsonl.zst` is required. The standard adapter creates a sanitized
-home from the verified snapshot. An original rollout path is rewritten only
-when its canonical source path is inside the legacy root and maps to the exact
-manifest-copied relative staging file; every other/outside path is rejected,
-never heuristically rebased. The adapter omits source auth/config/AGENTS,
+home from the verified snapshot. The snapshot manifest records each enumerated
+rollout's exact source-field spelling together with its descriptor-derived
+relative component sequence and copied-file capability. The adapter accepts
+only an exact manifest key and substitutes that capability; it never canonicalizes
+an arbitrary rollout path, proves containment by prefix, or heuristically
+rebases an outside path. The adapter omits source auth/config/AGENTS,
 launches the single Wave 5-resolved pinned Codex executable, and performs exact-
 ID `thread/read { threadId, includeTurns: true }` only for outer IDs enumerated
 from staging state DB—not `thread/list`. Initialize uses client name
@@ -1464,7 +1726,7 @@ auth failure; `.authenticationFailed` still permits the first history query but
 MCP/primary app-server remain closed. Recovery development data is never implicitly
 merged with legacy import.
 
-`RecoveryCutoverCoordinator` runs after RecoveryV1 path preparation but before
+`RecoveryCutoverCoordinator` runs after `PreparedRecoveryEnvironment` exists but before
 the first history query/runtime admission. It snapshots first, opens/migrates
 the history writer for import without starting observation, commits history,
 preferences, and typed auth conversion, atomically writes admission, then lets
@@ -1501,8 +1763,213 @@ package struct ReviewHistoryCommit: Sendable {
     package let logChanges: [ReviewLogChange]
 }
 
+package enum ManagedACLState: String, Sendable, Hashable, Codable {
+    case absent
+}
+
+package struct FilesystemIdentity: Sendable, Hashable, Codable {
+    package let volumeIdentifier: String
+    package let device: UInt64
+    package let inode: UInt64
+    package let fileType: UInt16
+    package let ownerUID: UInt32
+    package let mode: UInt16
+    package let acl: ManagedACLState
+    package let policyVersion: Int
+}
+
+// Opaque token. RecoveryDescriptorFileSystem retains the descriptor and parent
+// chain; consumers never receive or close the raw file descriptor.
+package struct DirectoryCapability: Sendable, Hashable {
+    fileprivate let token: UInt64
+    package let identity: FilesystemIdentity
+    package let redactedDiagnostic: String
+}
+
+package struct ManagedFileCapability: Sendable, Hashable {
+    package let parent: DirectoryCapability
+    package let component: String
+    fileprivate init(parent: DirectoryCapability, component: String)
+}
+
+package struct ReadOnlyDirectoryCapability: Sendable, Hashable {
+    fileprivate let token: UInt64
+    package let identity: FilesystemIdentity
+    package let redactedDiagnostic: String
+}
+
+package struct ReadOnlyFileCapability: Sendable, Hashable {
+    fileprivate let token: UInt64
+    package let identity: FilesystemIdentity
+    package let redactedDiagnostic: String
+}
+
+package struct AbsoluteComponentPath: Sendable {
+    package let components: [String]
+    // Parses an absolute locator at the input boundary; rejects empty, dot,
+    // dot-dot, and slash-containing components. It performs no I/O/authorization.
+    package init(validatingAbsoluteLocator: String) throws
+}
+
+package struct ReadOnlySourcePolicy: Sendable {
+    package let allowedMountIdentities: Set<String>
+    package let requiredOwnerUID: UInt32?
+}
+
+package struct ReadOnlySourceAllowlist: Sendable {
+    package let adapterVersion: Int
+    package let rules: [ReadOnlySourceRule]
+}
+
+package enum ReadOnlySourceRule: Sendable {
+    case exactFile([String])
+    case rolloutTree(root: [String], allowedSuffixes: Set<String>)
+}
+package struct ReadOnlySourceEntry: Sendable {
+    package let relativeComponents: [String]
+    package let capability: ReadOnlyFileCapability
+}
+
+package struct VerifiedSourceFileSnapshot: Sendable {
+    package let identity: FilesystemIdentity
+    package let byteCount: Int64
+    package let sha256: String
+}
+
+package struct DescriptorCopyReceipt: Sendable {
+    package let sourceBefore: VerifiedSourceFileSnapshot
+    package let sourceAfter: VerifiedSourceFileSnapshot
+    package let destinationIdentity: FilesystemIdentity
+    package let copiedByteCount: Int64
+    package let sha256: String
+}
+
+package struct ExecutableCapability: Sendable, Hashable {
+    fileprivate let token: UInt64
+    package let identity: FilesystemIdentity
+    package let redactedDiagnostic: String
+}
+
+package struct ExecutableTrustPolicy: Sendable {
+    package let allowedBundleIdentifiers: Set<String>
+    package let permitsExplicitConfiguredPath: Bool
+}
+
+package struct RecoveryEnvironmentPlan: Sendable {
+    package static func production(
+        runtimePreferences: CodexReviewRuntime.Preferences
+    ) -> Self
+    package func prepare(
+        using fileSystem: RecoveryDescriptorFileSystem
+    ) async throws -> PreparedRecoveryEnvironment
+}
+
+package struct PreparedRecoveryEnvironment: Sendable {
+    package let fileSystem: RecoveryDescriptorFileSystem
+    package let recoveryRoot: DirectoryCapability
+    package let codexHome: DirectoryCapability
+    package let loginStagingRoot: DirectoryCapability
+    package let savedAccountsRoot: DirectoryCapability
+    package let historyDatabase: ManagedFileCapability
+}
+
+package actor RecoveryDescriptorFileSystem {
+    // Starts at the actor's already-opened system root/trusted descriptor and
+    // walks every component; the locator never becomes authority.
+    package func openReadOnlyDirectory(
+        _ path: AbsoluteComponentPath,
+        policy: ReadOnlySourcePolicy
+    ) throws -> ReadOnlyDirectoryCapability
+    package func enumerateAllowlistedSource(
+        in root: ReadOnlyDirectoryCapability,
+        allowlist: ReadOnlySourceAllowlist
+    ) throws -> [ReadOnlySourceEntry]
+    package func snapshot(
+        _ source: ReadOnlyFileCapability,
+        maximumByteCount: Int64
+    ) throws -> VerifiedSourceFileSnapshot
+    package func revalidate(
+        _ source: ReadOnlyFileCapability,
+        against snapshot: VerifiedSourceFileSnapshot
+    ) throws
+    package func copyVerified(
+        _ source: ReadOnlyFileCapability,
+        expectedSource: VerifiedSourceFileSnapshot,
+        to destination: ManagedFileCapability
+    ) throws -> DescriptorCopyReceipt
+    package func managedFile(
+        named component: String,
+        in parent: DirectoryCapability
+    ) throws -> ManagedFileCapability
+    package func resolveExecutable(
+        describedBy url: URL,
+        policy: ExecutableTrustPolicy
+    ) throws -> ExecutableCapability
+    package func createDirectory(
+        named component: String,
+        in parent: DirectoryCapability
+    ) throws -> DirectoryCapability
+    package func read(
+        _ file: ManagedFileCapability,
+        maximumByteCount: Int
+    ) throws -> Data
+    package func replaceAtomically(
+        _ file: ManagedFileCapability,
+        with bytes: Data
+    ) throws
+    package func removeManifestedTree(
+        _ directory: DirectoryCapability,
+        expectedIdentity: FilesystemIdentity
+    ) throws
+    package func removeManifestedFile(
+        _ file: ManagedFileCapability,
+        expectedIdentity: FilesystemIdentity
+    ) throws
+    // Wave 4 adds this target-local adapter. Revalidation and the GRDB
+    // constructor execute inside the actor; no URL is returned to the caller.
+    package func openHistoryDatabase(
+        _ target: ManagedFileCapability,
+        configuration: ReviewHistoryDatabaseOpenConfiguration
+    ) throws -> ReviewHistoryDatabase
+    // Issue #113 supplies this generic Foundation Process adapter. It configures
+    // and calls Process.run inside the actor, returning only the owned
+    // process/pipe handle; executable/home URLs never cross the boundary.
+    package func launchProcess(
+        executable: ExecutableCapability,
+        codexHome: DirectoryCapability,
+        request: CapabilityProcessLaunchRequest
+    ) throws -> CapabilityProcess
+}
+
+package enum RecoveryPathOnlyConsumer: Sendable {
+    case grdbOpen
+    case processLaunch
+}
+
+package struct ReviewHistoryDatabaseOpenConfiguration: Sendable {
+    package let foreignKeysEnabled: Bool
+    package let writeAheadLoggingEnabled: Bool
+}
+
+package actor ReviewHistoryDatabase {
+    // Package persistence extensions expose domain transactions/observations,
+    // never the GRDB writer.
+}
+
+package struct CapabilityProcessLaunchRequest: Sendable {
+    package let arguments: [String]
+    package let environment: [String: String]
+}
+
+package actor CapabilityProcess: RuntimeLifecycleHandle {
+    // Owns Process and pipe handles needed by AppServerProcessTransport.
+    package func close(purpose: ReviewRuntimeTransitionPurpose) async throws
+    package func waitUntilClosed() async
+}
+
 package struct ReviewHistoryConfiguration: Sendable {
-    package let databaseURL: URL
+    package let fileSystem: RecoveryDescriptorFileSystem
+    package let database: ManagedFileCapability
     package let initialTerminalReviewLimit: Int
     package let bootstrap: ReviewHistoryBootstrap?
     package let startupPreparation: ReviewHistoryStartupPreparation?
@@ -1530,11 +1997,25 @@ package struct ReviewBootstrapMutation: Sendable {
 }
 
 package enum ReviewPersistenceError: LocalizedError, Sendable {
+    case capability(RecoveryFilesystemError)
     case open(String)
     case migration(String)
     case read(String)
     case write(String)
     case close(String)
+}
+
+package enum RecoveryFilesystemError: LocalizedError, Sendable {
+    case invalidComponent(String)
+    case untrustedAncestor(String)
+    case symbolicLink(String)
+    case mountBoundary(String)
+    case ownership(String)
+    case permissions(String)
+    case accessControlList(String)
+    case identityChanged(String)
+    case pathOnlyRevalidation(RecoveryPathOnlyConsumer, String)
+    case operation(String)
 }
 
 package enum ReviewClosePrimaryFailure: LocalizedError, Sendable {
@@ -1617,11 +2098,11 @@ package enum LegacyReviewImportError: LocalizedError, Sendable {
 // CodexReviewHost owns the concrete cutover implementation and injects only
 // ReviewHistoryStartupPreparation into the lower CodexReview store.
 package struct RecoveryCutoverConfiguration: Sendable {
-    package let recoveryRootURL: URL
+    package let preparedEnvironment: PreparedRecoveryEnvironment
     package let legacyPreferencesDomain: String
     package let importerVersion: Int
     package init(
-        recoveryRootURL: URL,
+        preparedEnvironment: PreparedRecoveryEnvironment,
         legacyPreferencesDomain: String,
         importerVersion: Int
     )
@@ -1833,13 +2314,15 @@ public extension CodexReviewStore {
             CodexReviewNativeAuthentication.WebSessions.system
     ) -> CodexReviewStore
 
-    // Additive composition overload; URL is required and never defaults to legacy state.
+}
+
+package extension CodexReviewStore {
+    // Composition/test seam. The environment was already descriptor-prepared.
     static func makeLiveStore(
         runtimePreferences: CodexReviewRuntime.Preferences,
-        historyDatabaseURL: URL,
-        nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration? = nil,
-        webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory =
-            CodexReviewNativeAuthentication.WebSessions.system
+        preparedEnvironment: PreparedRecoveryEnvironment,
+        nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration?,
+        webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory
     ) -> CodexReviewStore
 }
 
@@ -1927,6 +2410,253 @@ package struct AuthenticationClosePolicy: Sendable {
     )
 }
 
+package enum AuthenticationIntent: String, Sendable, Codable {
+    case signIn
+    case addAccount
+}
+
+package struct PendingAuthentication: Sendable, Codable {
+    package let sessionID: String
+    package let candidateAccountID: SavedAccountID
+    package let candidateRevisionID: String
+    package let intent: AuthenticationIntent
+    package let provider: SavedAccountProvider
+    package let previousActiveAccountID: SavedAccountID?
+    package let cancellationIntent: Bool
+}
+
+// Sanitized reservation input. The raw API key stays in LoginSession and never
+// crosses the authentication-disk actor boundary.
+package struct AuthenticationStagingRequest: Sendable {
+    package let intent: AuthenticationIntent
+    package let provider: SavedAccountProvider
+}
+
+package enum AuthenticationOutcomeUnknownReason: Sendable, Codable {
+    case providerEventGraceExpired
+    case responseLostAfterWrite
+    case connectionLostAfterWrite
+    case accountReadFailed(String)
+}
+
+package struct LoginStagingResourceSnapshot: Sendable {
+    package let sessionID: String
+    package let identity: FilesystemIdentity
+}
+
+package struct LoginStagingOwnedResources: Sendable {
+    package let snapshot: LoginStagingResourceSnapshot
+    fileprivate let directory: DirectoryCapability
+    fileprivate let runtime: (any RuntimeLifecycleHandle)?
+    fileprivate let clientTasks: [Task<Void, Error>]
+    fileprivate let readerTasks: [Task<Void, Error>]
+    fileprivate let writerTasks: [Task<Void, Error>]
+}
+
+package struct PreparedAuthenticationArtifact: Sendable, Codable {
+    package let revisionID: String
+    package let sha256: String
+    package let byteCount: Int
+    package let revisionDirectoryIdentity: FilesystemIdentity
+    package let fileIdentity: FilesystemIdentity
+    package let provider: SavedAccountProvider
+    package let presentation: SavedAccountPresentation
+}
+
+package enum LoginStagingCloseDisposition: Sendable {
+    case discard
+    case adopt(ObservedCodexAccount)
+    case outcomeUnknown(AuthenticationOutcomeUnknownReason)
+}
+
+package enum LoginStagingTaskOwner: String, Sendable {
+    case client
+    case reader
+    case writer
+    case candidateWrite
+}
+
+package struct LoginStagingOwnedTaskFailure: LocalizedError, Sendable {
+    package let owner: LoginStagingTaskOwner
+    package let operation: String
+    package let code: Int?
+    package let message: String
+}
+
+package enum AuthenticationPersistenceFailure: LocalizedError, Sendable {
+    case read(operation: String, code: Int?, message: String)
+    case write(operation: String, code: Int?, message: String)
+    case synchronization(operation: String, code: Int?, message: String)
+}
+
+package enum LoginStagingResourceCloseFailure: LocalizedError, Sendable {
+    case runtime(ReviewRuntimeCloseFailure)
+    case ownedTask(LoginStagingOwnedTaskFailure)
+}
+
+package struct LoginStagingResourceFailureAggregate: LocalizedError, Sendable {
+    package let first: LoginStagingResourceCloseFailure
+    package let additionalInRegistrationOrder: [LoginStagingResourceCloseFailure]
+}
+
+package enum LoginStagingCleanupFailure: LocalizedError, Sendable {
+    case manifest(AuthenticationPersistenceFailure)
+    case identity(RecoveryFilesystemError)
+    case removal(RecoveryFilesystemError)
+    case finalization(AuthenticationPersistenceFailure)
+}
+
+package enum AuthenticationCleanupFailureKind: String, Sendable, Codable {
+    case resourceClose
+    case candidateWrite
+    case manifest
+    case identity
+    case removal
+    case finalization
+}
+
+package struct AuthenticationCleanupFailureRecord: Sendable, Codable {
+    package let kind: AuthenticationCleanupFailureKind
+    package let operation: String
+    package let code: Int32?
+}
+
+package struct PendingAuthenticationCandidate: Sendable, Codable {
+    package let pending: PendingAuthentication
+    package let artifact: PreparedAuthenticationArtifact
+}
+
+package enum LoginStagingCleanupContinuation: Sendable, Codable {
+    case discard
+    case candidate(PendingAuthenticationCandidate)
+}
+
+package enum LoginStagingDiskState: Sendable, Codable {
+    case reserved(PendingAuthentication, component: String)
+    case leased(PendingAuthentication, component: String, identity: FilesystemIdentity)
+    case outcomeUnknown(
+        PendingAuthentication,
+        component: String,
+        identity: FilesystemIdentity,
+        reason: AuthenticationOutcomeUnknownReason
+    )
+    case cleanupRequired(
+        component: String,
+        identity: FilesystemIdentity,
+        continuation: LoginStagingCleanupContinuation
+    )
+    case cleanupFailed(
+        component: String,
+        identity: FilesystemIdentity,
+        continuation: LoginStagingCleanupContinuation,
+        failure: AuthenticationCleanupFailureRecord
+    )
+}
+
+package enum CandidateAuthenticationDiskState: Sendable, Codable {
+    case ready(PendingAuthenticationCandidate)
+    case discardRequired(PendingAuthenticationCandidate)
+    case discardFailed(
+        PendingAuthenticationCandidate,
+        failure: AuthenticationCleanupFailureRecord
+    )
+}
+
+package enum AuthenticationDiskSessionState: Sendable, Codable {
+    case idle
+    case staging(LoginStagingDiskState)
+    case candidate(CandidateAuthenticationDiskState)
+}
+
+package struct AuthenticationDiskStateV1: Sendable, Codable {
+    package let schemaVersion: Int
+    package let generation: UInt64
+    package let contentHash: String
+    package let sessionState: AuthenticationDiskSessionState
+}
+
+package enum PrimaryRuntimeLeasePhase: String, Sendable, Codable {
+    case running
+    case writebackPrepared
+    case registryPublished
+}
+
+package struct PrimaryRuntimeLeaseV1: Sendable, Codable {
+    package let schemaVersion: Int
+    package let runtimeGeneration: UInt64
+    package let activeAccountID: SavedAccountID
+    package let baseRevisionID: String
+    package let baseFingerprint: String
+    package let writebackRevisionID: String
+    package let phase: PrimaryRuntimeLeasePhase
+}
+
+package actor AuthenticationDiskStore {
+    package init(
+        fileSystem: RecoveryDescriptorFileSystem,
+        savedAccountsRoot: DirectoryCapability,
+        loginStagingRoot: DirectoryCapability,
+        codexHome: DirectoryCapability
+    )
+    // Reserves durable state, creates/reopens the child through the descriptor
+    // owner, records identity, and only then returns the published lease.
+    package func reserveAndPrepareLoginStaging(
+        request: AuthenticationStagingRequest
+    ) async throws -> LoginStagingLease
+    package func recoverPendingAuthentication() async throws
+}
+
+package actor LoginStagingLease {
+    package enum State: Sendable {
+        case preparing(sessionID: String)
+        case open(LoginStagingOwnedResources)
+        case closing(
+            LoginStagingOwnedResources,
+            Task<Result<LoginStagingCloseOutcome, LoginStagingCloseError>, Never>
+        )
+        case closed(Result<LoginStagingCloseOutcome, LoginStagingCloseError>)
+    }
+
+    package func installRuntime(_ runtime: any RuntimeLifecycleHandle) throws
+    package func registerClient(_ task: Task<Void, Error>) throws
+    package func registerReader(_ task: Task<Void, Error>) throws
+    package func registerWriter(_ task: Task<Void, Error>) throws
+    package func close(
+        disposition: LoginStagingCloseDisposition
+    ) async -> Result<LoginStagingCloseOutcome, LoginStagingCloseError>
+}
+
+package enum LoginStagingCloseOutcome: Sendable {
+    case discarded
+    case preparedForActivation(PreparedAuthenticationCandidate)
+    case added(SavedAccountID)
+    case retainedForReconciliation(sessionID: String)
+}
+
+package enum LoginStagingClosePrimaryFailure: LocalizedError, Sendable {
+    case resources(LoginStagingResourceFailureAggregate)
+    case cleanup(LoginStagingCleanupFailure)
+}
+
+package enum LoginStagingCloseSecondaryFailure: LocalizedError, Sendable {
+    case cleanup(LoginStagingCleanupFailure)
+    case debtPersistence(AuthenticationPersistenceFailure)
+}
+
+package enum LoginStagingDebtDisposition: Sendable {
+    case recorded(AuthenticationDiskSessionState)
+    case recordingFailed(
+        lastKnownState: AuthenticationDiskSessionState,
+        failure: AuthenticationPersistenceFailure
+    )
+}
+
+package struct LoginStagingCloseError: LocalizedError, Sendable {
+    package let primary: LoginStagingClosePrimaryFailure
+    package let secondary: [LoginStagingCloseSecondaryFailure]
+    package let debt: LoginStagingDebtDisposition
+}
+
 package enum CodexReviewAuthenticationFailure: LocalizedError, Sendable {
     case alreadyInProgress
     case apiKeyAccountAlreadyExists
@@ -1935,10 +2665,11 @@ package enum CodexReviewAuthenticationFailure: LocalizedError, Sendable {
     case providerCompletion(String)
     case accountRead(String)
     case protocolMismatch(String)
-    case stagingRuntimeClose(String)
     case outcomeUnknown(sessionID: String)
     case registryMigration(String)
     case persistenceInconsistent(String)
+    case loginStagingClose(LoginStagingCloseError)
+    case authenticationDebt(String)
 }
 
 package struct PreparedAuthenticationCandidate: Sendable {
@@ -1969,11 +2700,11 @@ package struct LegacyAccountMetadata: Sendable {
 }
 
 package struct VerifiedOpaqueArtifact: Sendable {
-    package let stagingURL: URL
+    package let file: ManagedFileCapability
     package let sha256: String
     package let byteCount: Int
     // Defined beside CurrentMainSourceSnapshotter; no package/public initializer.
-    fileprivate init(stagingURL: URL, sha256: String, byteCount: Int)
+    fileprivate init(file: ManagedFileCapability, sha256: String, byteCount: Int)
 }
 
 package enum CurrentMainCredentialImport: Sendable {
@@ -2006,7 +2737,7 @@ package struct CurrentMainSavedAccountImportOutcome: Sendable {
     package let authenticationRequired: Bool
 }
 
-package actor SavedAccountRegistryStore {
+package extension AuthenticationDiskStore {
     package func importCurrentMainAccounts(
         _ batch: CurrentMainSavedAccountBatchImport
     ) async throws -> CurrentMainSavedAccountImportOutcome
@@ -2057,32 +2788,32 @@ package struct CodexExecutableResolver: Sendable {
         package let fallbackExecutableDirectories: [URL]
     }
 
-    package struct FileSystem: Sendable {
-        package var canonicalURL: @Sendable (URL) throws -> URL
-        package var isExecutableRegularFile: @Sendable (URL) -> Bool
-        package var bundleIdentifier: @Sendable (URL) throws -> String?
-    }
-
-    package init(configuration: Configuration, fileSystem: FileSystem)
+    package init(
+        configuration: Configuration,
+        fileSystem: RecoveryDescriptorFileSystem,
+        trustPolicy: ExecutableTrustPolicy
+    )
     package func resolve(
         configuredPath: String?,
         environment: [String: String]
-    ) throws -> URL
+    ) async throws -> ExecutableCapability
 }
 
 package extension AppServerProcessTransport {
     package struct Configuration: Sendable {
-        package let executableURL: URL
+        package let executable: ExecutableCapability
         package let arguments: [String]
         package let environment: [String: String]
-        package let codexHomeURL: URL
+        package let codexHome: DirectoryCapability
+        package let fileSystem: RecoveryDescriptorFileSystem
 
         // There is no optional executable or discovery fallback initializer.
         package init(
-            executableURL: URL,
+            executable: ExecutableCapability,
             arguments: [String]? = nil,
             environment: [String: String],
-            codexHomeURL: URL
+            codexHome: DirectoryCapability,
+            fileSystem: RecoveryDescriptorFileSystem
         ) throws
     }
 }
@@ -2105,13 +2836,15 @@ joined caller.
 
 No public or cross-target API names GRDB or `DatabaseWriter`.
 `ReviewHistoryConfiguration` is the only composition seam; the persistence
-folder resolves it to the concrete connection and GRDB observations.
+folder resolves its managed-file capability to the concrete connection and GRDB
+observations only inside a last-moment revalidation handoff.
 
 `CodexReviewHost` keeps the existing non-throwing public `makeLiveStore`
-overload byte-for-byte at the declaration level and adds a second overload with
-a required history URL. The old overload delegates to the safe RecoveryV1
-default. Both defer database open/migration to `store.start()`, where failure
-becomes visible store state. This preserves function references/API-digester
+overload byte-for-byte at the declaration level. It delegates to the safe
+RecoveryV1 plan and defers descriptor preparation plus database open/migration
+to `store.start()`, where failure becomes visible store state. Package/test
+composition may inject a `PreparedRecoveryEnvironment`; there is no new public
+raw-history-URL overload. This preserves function references/API-digester
 identity without trapping or silently constructing an empty history.
 
 The observable `CodexReviewJob` instances are stable query projections. The
@@ -2162,6 +2895,20 @@ Row/API duration uses `ReviewDurationPresentation`, not the legacy rule
 
 ### Failure model
 
+- Recovery descriptor preparation/revalidation failure: typed filesystem error
+  with operation, policy, and redacted diagnostic identity; no Process, MCP,
+  authentication, GRDB, or destination mutation is admitted. There is no
+  canonical-URL or path-prefix fallback.
+- A partial static RecoveryV1 preparation is reopened by fixed component name
+  and descriptor identity on the next preparation attempt. In-process rollback
+  removes only leaves created and retained in that preparation receipt; rollback
+  failure is returned alongside the primary preparation failure. It never
+  creates authentication cleanup debt.
+- Login staging close/cleanup failure: the lease returns one replayable typed
+  close result and the authentication disk actor persists the exact session
+  state/debt. Unconfirmed resource completion or an unmanifested/changed
+  identity preserves the directory and blocks new auth; no Environment helper
+  deletes it and no layer reports clean close.
 - Database open/migration/commit/query failures: typed persistence error,
   fail-closed transition, visible last-good recovery UI, and no empty-history or
   in-memory fallback.
@@ -2200,11 +2947,15 @@ internal reviewer child the same status as a review.
 ### Recovery presentation
 
 ```swift
+let plan = RecoveryEnvironmentPlan.production(runtimePreferences: preferences)
+let preparedEnvironment = try await plan.prepare(using: recoveryFileSystem)
 let store = CodexReviewStore.makeLiveStore(
     runtimePreferences: preferences,
-    historyDatabaseURL: applicationSupportURL.appending(path: "review-history.sqlite")
+    preparedEnvironment: preparedEnvironment,
+    nativeAuthenticationConfiguration: nativeAuthentication,
+    webAuthenticationSessionFactory: webSessions
 )
-await store.start()  // opens/migrates/hydrates history before app-server admission
+await store.start()  // revalidates, opens/migrates/hydrates, then admits app-server
 
 sidebar.bind(to: store.orderedJobs)
 guard let job = store.job(id: selection.reviewID) else { return }
@@ -2283,7 +3034,7 @@ let request: CodexReviewAuthenticationRequest = store.auth.hasActiveSavedAccount
     : .signIn(using: method)
 try await store.performPrimaryAuthenticationAction(request)
 
-let executableURL = try executableResolver.resolve(
+let executable = try await executableResolver.resolve(
     configuredPath: preferences.codexExecutablePath,
     environment: environment
 )
@@ -2291,8 +3042,10 @@ let executableURL = try executableResolver.resolve(
 
 The UI drops its input buffer before awaiting authentication and never stores
 the secret in observable or durable state. The resolver is the only executable
-candidate/precedence owner; process transport receives one validated absolute
-executable URL and performs no second PATH/app-bundle search.
+candidate/precedence owner; process transport receives one validated
+`ExecutableCapability`, borrows its diagnostic path only inside the immediate
+#113 revalidation/`Process.run` handoff, and performs no second PATH/app-bundle
+search.
 
 Observed on 2026-08-20: `launchctl getenv PATH` was empty, while the Xcode-
 launched ReviewMonitor environment selected `/opt/homebrew/bin/codex`; the
@@ -2321,19 +3074,22 @@ Executable precedence is fixed:
 6. `/opt/homebrew/bin/codex`, `/usr/local/bin/codex`, then standard system bin
    directories.
 
-The home URL comes from `FileManager.homeDirectoryForCurrentUser` at live
-composition, not the `HOME` environment. Candidates are resolved to standardized
-absolute symlink destinations, deduplicated, and must be executable regular
-files.
+The home locator comes from `FileManager.homeDirectoryForCurrentUser` at live
+composition, not the `HOME` environment. Candidate strings are opened through
+the descriptor owner; executable regular-file policy and deduplication use
+`fstat` volume/device/inode identity. Standardized/canonical spelling is retained
+only in diagnostics and never as candidate authority.
 Bundle-resource candidates additionally require an existing `.app` directory,
 an `Info.plist` whose `CFBundleIdentifier` is `com.openai.codex`, and the exact
 `Contents/Resources/codex` layout before executable validation. Total failure
 returns one typed source-by-source search trace. Invalid implicit PATH/home/
 bundle/system candidates continue; an invalid explicit setting or the first
 present explicit environment key throws without fallback. The composition root
-resolves exactly once per app lifetime and injects the same URL into primary and
-staging runtimes. Transport requires that URL and performs no second search;
-session-source capability probing also uses only that executable.
+resolves exactly once per app lifetime and injects the same
+`ExecutableCapability` into primary and staging runtimes. Transport requires
+that capability, performs no second search, and asks the #113 descriptor owner
+to revalidate both executable and Codex-home identities immediately before each
+`Process.run`; session-source probing uses only that executable capability.
 Live composition supplies `/Applications`, the known fallback bin directories,
 and the real filesystem collaborator once. Tests inject temporary application/
 home/bin roots and metadata through `Configuration`/`FileSystem`; they never
@@ -2372,8 +3128,10 @@ cancellation.
 
 - SQLite tables, migrations, database factory, row DTOs, mutation/commit values,
   writer actor, query subscriptions, import/migration helpers.
+- `RecoveryDescriptorFileSystem`, `DirectoryCapability`, managed file/executable
+  capabilities, `RecoveryEnvironmentPlan`, and `PreparedRecoveryEnvironment`.
 - App-server wire DTOs and notification reducers.
-- Authentication provider adapters and executable candidate strategies.
+- Authentication disk/lease/provider adapters and executable candidate strategies.
 
 ### Remove or do not port
 
@@ -2404,6 +3162,9 @@ listed in this document.
 | MCP identifier alias | MCP request decoder | Add alias at decoder only; core keeps `ReviewID` |
 | Log presentation kind | `ReviewLogEntry.Kind` projection | Add kind + one renderer registration, not transport casts |
 | Manual workspace/review order | anchor-based history reorder command | Add/move a row using one stable before-ID |
+| Default / explicit / test storage root | `RecoveryEnvironmentPlan` + trusted descriptor policy | Add one trusted-anchor policy; no caller URL guard |
+| Managed file operation | `RecoveryDescriptorFileSystem` | Add one descriptor-relative operation; no `FileManager` mutation path |
+| Authentication session disk state | `AuthenticationDiskStateV1.sessionState` | Add one enum case/migration in the auth disk actor; no second manifest |
 
 ## 9. Deletion and cutover list
 
@@ -2419,6 +3180,10 @@ that is deliberately not ported:
 
 Within the recovery branch:
 
+- Retire the former Wave 0 path-owned `CodexReviewRecoveryEnvironment`
+  preparation/removal implementation and never merge `c83e499`.
+- Replace bare RecoveryV1/runtime/history/login URLs at mutation/open boundaries
+  with `PreparedRecoveryEnvironment` capabilities in issue #113.
 - Replace mutable `jobs` / `workspaces` source-of-truth storage with hydrated
   history projections.
 - Replace UI/MCP terminal-result derivation with the one terminal commit.
@@ -2442,6 +3207,11 @@ Within the recovery branch:
   `CodexReviewStoreBackend`.
 - Preview/test branches in production reducers or renderers.
 - Fallback to empty history on database or observation error.
+- Canonical/standardized/resolved path strings as containment, ancestry,
+  creation, or deletion authority.
+- A raw URL saved after preparation and later passed directly to Process or GRDB.
+- An Environment-owned login cleanup manifest or recursive URL removal beside
+  RegistryV2 authentication debt.
 
 ## 11. Test plan
 
@@ -2458,9 +3228,40 @@ Within the recovery branch:
 - Existing log truncation, append/replace, command panel, find, and scroll-tail
   behavior.
 
+### Descriptor capability contract (#113)
+
+- Component-by-component `openat` uses
+  `O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC`; missing-leaf `mkdirat` is followed by
+  reopen/`fstat`, never path inference.
+- Case-only, Unicode-normalization, firmlink, and reverse-ancestor aliases cannot
+  authorize a managed source/destination relationship; diagnostic spelling does
+  not affect identity.
+- Symlink in every component position, non-directory component, wrong UID,
+  group/world mode, unreadable/extended/inherited ACL, mount crossing, and
+  unknown metadata fail before mutation.
+- Existing explicit homes are not chmod/chown/ACL-mutated. Safe default,
+  explicit, preview, and temporary test anchors follow their declared policy.
+- Inject controlled swaps before/after creation and immediately before Process
+  and GRDB handoff. Device/inode mismatch rejects the handoff and calls neither
+  path-only consumer.
+- Descriptor-relative bounded read, temp write/fsync/renameat/directory-fsync,
+  and manifested recursive unlink preserve exact identity across injected
+  failures. No test uses a mutation-capable global path such as `/Library`.
+- Read-only absolute locator parsing performs no I/O; source open walks from the
+  retained trusted root, allowlist enumeration returns only capabilities/
+  relative components, descriptor copy cannot mutate source, and alias/mount/
+  identity swaps never fall back to locator spelling.
+- Cleanup refuses an unmanifested child, referenced pending session, identity
+  mismatch, symlink, mount boundary, and policy change; source and neighboring
+  entries remain byte-for-byte unchanged.
+- Tests record the same-UID path-only residual as an explicit threat-model
+  limitation rather than claiming it is eliminated.
+
 ### Persistence contract (#102, #108)
 
-- Fresh database, every schema migration, corrupted/incompatible database.
+- Fresh database, every schema migration, corrupted/incompatible database, and
+  proof that the first GRDB open occurs only inside last-moment capability
+  revalidation from `PreparedRecoveryEnvironment`.
 - Atomic run + log mutation, injected commit failure, process termination after
   each transaction boundary.
 - Mid-ingestion write/observation failure closes mutation admission, stops and
@@ -2531,10 +3332,19 @@ Within the recovery branch:
 - Secret-bearing API-key send has one request ID/stdin write, never retries an
   overload response, and atomically resolves cancel-before-write versus
   may-have-written at the transport boundary.
-- Immutable artifact, registry, pending manifest, activation journal, and
-  runtime-lease crash points; hash/reference corruption fails closed; add-
-  account keeps shared bytes/runtime unchanged; sign-in forward-completes one
-  activation and performs one Wave 3 account transition.
+- Immutable artifact, RegistryV2, `AuthenticationDiskStateV1`, activation
+  journal, and primary-runtime-lease crash points; hash/reference corruption
+  fails closed; add-account keeps shared bytes/runtime unchanged; sign-in
+  forward-completes one activation and performs one Wave 3 account transition.
+- Every nested staging/candidate disk-state crash point reuses one session ID,
+  candidate account/revision ID, directory identity, and immutable candidate.
+  Tests cover candidate rename/fsync before cleanup-continuation commit,
+  staging cleanup, candidate.ready next-owner transfer, cancellation discard,
+  and debt; unmanifested/mismatched staging is preserved with typed failure.
+- Repeated/concurrent `LoginStagingLease.close()` joins one result; runtime/
+  client/reader/writer failure prevents removal, manifest failure prevents
+  unowned deletion, removal/finalization failure records debt, and all failures
+  reach app close instead of becoming log-only diagnostics.
 - RegistryV0 migration-journal crash points preserve order/non-secret metadata,
   generated IDs, and Amazon Bedrock; ambiguous active key, duplicate key,
   multiple API-key entries, and missing artifact fail without changing v0.
@@ -2542,20 +3352,24 @@ Within the recovery branch:
   `.`/`..` keys reproduce the exact existing Foundation directory encoding.
 - Provider-event and reconciliation grace expiry each trigger owned close/read,
   never fabricate success/cancellation, and leave finite typed debt. Staging
-  process close failure retains and joins the real resource Task.
+  process close failure retains and joins the real resource Task and exact
+  descriptor capability.
 - Journal-committed `.committedActivationPending` rejects reauthentication and
   forward-completes the same saved ID after restart. Simultaneous old runtime
   lease + activation journal is rejected as an impossible persisted state.
 - Cancellation before activation `committingJournal` creates no journal and
-  restarts the previous account runtime exactly once after quiescence;
-  cancellation after that linearization loses to activation-pending.
+  first persists candidate cancellation intent, restarts the previous account
+  runtime exactly once after quiescence, and resumes candidate discard/debt at
+  every crash boundary; cancellation after that linearization loses to
+  activation-pending.
 - Executable precedence including installed ChatGPT.app/Codex.app bundle
   identity, classic/Safari bundle rejection, invalid explicit no-fallback,
   PATH order/empty components, injected home, symlink deduplication, total
   failure, and proof that transport performs no second discovery.
 - `AppServerProcessTransport.Configuration` cannot be constructed without the
-  validated URL; primary/staging configurations receive the identical URL and
-  session-source probing does not trigger discovery.
+  validated executable and Codex-home capabilities; primary/staging
+  configurations receive the identical executable capability, revalidate at
+  Process handoff, and session-source probing does not trigger discovery.
 - Runtime transition matrix coverage for explicit cancel, stop, same-account
   restart, account change/reconciliation, recoverable network loss,
   nonrecoverable protocol/process death, and application termination.
@@ -2643,53 +3457,99 @@ Within the recovery branch:
 | #109 | Published MCP baseline plus evidence-driven aliases |
 | #110 | Anchor-based reorder command plus durable sort transaction |
 | #111 | Bounded loaded window, paging, and explicit terminal deletion |
+| #113 | Descriptor-backed RecoveryV1 authority and last-moment path-only handoff revalidation |
 
 No numbered finding is intentionally left to the current generic-chat path.
 
 ## 13. Migration waves
 
-Each wave is a separately committed, testable slice. A slice cuts over its
-owner and removes the replaced path in the same slice.
+Every gate is a separately committed and exactly reviewed slice. A later gate's
+tests/review never validate an earlier one, and each owner cutover removes its
+replaced path in the same slice.
 
-0. **Isolation safety harness** — give every development/runtime probe a new
-   recovery-owned Codex home, preference domain, MCP port, and history database.
-   No recovery build points at the current-main home before #108 has created
-   and verified a recoverable snapshot.
-1. **Green baseline** — fix the reproducible v0.6.2 log viewport failure and
-   prove the full package/app baseline repeatedly before structural work (#103).
-   In this wave, before any public terminal addition, capture the v0.6.2
-   `swift-api-digester`/symbol baseline, add the separate-package external
-   consumer fixture, and pin the published MCP golden schema. These three gates
-   run in every later wave.
-2. **Current event contract** — port notification normalization and canonical
-   terminal result into the product-owned in-memory v0.6.2 flow (#104, #105).
-3. **Lifecycle/cancellation** — port the authoritative terminal barrier and
-   ordered runtime/app close semantics (#106). This wave proves the in-memory
-   terminal-before-cleanup barrier; #106 remains open until Wave 4 places the
-   durable terminal commit at that same boundary.
-4. **History foundation and ownership cutover** — add GRDB,
-   schema/migrations, commit/query owner, startup hydration, and replace mutable
-   `jobs`/`workspaces` membership with committed history projections; add
-   paging/deletion and anchor-based ordering (#102, #110, #111).
-   The old in-memory membership path is removed in this wave, after its event
-   and terminal semantics already match the current contract.
-5. **Authentication/runtime discovery** — current ChatGPT flow, API key, and
-   executable resolver (#97, #98, #107).
-6. **Product presentation and MCP completion** — one review row/detail, fixed
-   duration, and the published MCP contract (#99, #100, #109), with #103 kept
-   green as a regression gate.
-7. **Safe state cutover and live proof** — snapshot verification, copy/import
-   migration into the recovery-owned destination, restart/replay, and the
-   current-client/runtime matrix (#108).
+The final predecessor chain is:
 
-Before starting each wave, record its file/time budget in the recovery ledger.
-If one failure class needs three unsuccessful fixes or new guards begin to
-multiply, freeze the slice and return to this design gate.
+1. **Gate V — log viewport (#103)** was independently published from restored
+   v0.6.2 by PR #114 (`55f68c0` → merge `f4c9bb0`) as the native behavior fix.
+2. **Gate C — published compatibility** also branches from restored v0.6.2 and
+   publishes independently. It need not contain Gate V, but its reviewed API/
+   consumer/MCP baselines must precede any public terminal addition.
+3. **Wave 2 — current event contract (#104, #105)** lands on the reviewed
+   compatibility gate and ports notification normalization/canonical terminal
+   result into the product-owned in-memory flow. Record and review this exact
+   HEAD before Wave 3 starts.
+4. **Wave 3 — lifecycle/cancellation (#106)** lands as sequential 3A → reviewed
+   3A → 3B → reviewed 3B → 3C → reviewed 3C. It proves the in-memory
+   terminal-before-cleanup and throwing, joined runtime/application close owner.
+   Issue #106 remains open until Wave 4 inserts the durable commit.
+5. **Descriptor capability core (#113)** starts only from reviewed Wave 3C. It
+   retires the former Wave 0 path owner, produces one
+   `PreparedRecoveryEnvironment`, and proves descriptor-relative mutation plus
+   the last-moment Process handoff. It also fixes the nonescaping
+   `openHistoryDatabase` adapter contract, but does not add GRDB. Its reviewed
+   HEAD is a hard prerequisite for the first GRDB open and Wave 5 login staging.
+6. **Wave 4 — history foundation and ownership cutover (#102, #110, #111)** is
+   sequential 4A schema/writer → 4B atomic query → 4C Store/UI/MCP cutover →
+   4D fail-closed/orphan/close insertion, with exact review after each slice.
+   4A is the sole implementer/test owner of the GRDB adapter over the reviewed
+   revalidation core; it consumes the prepared history capability and may not
+   accept a raw URL.
+   Authentication pending/cleanup debt stays outside this database.
+7. **Wave 5 — authentication/runtime discovery (#97, #98, #107)** starts from
+   reviewed 4D and explicitly consumes reviewed Wave 3 close plus #113. It lands
+   RegistryV2/authentication disk state, provider-neutral `LoginSession`/
+   `LoginStagingLease` plus pending/debt/startup reconciliation, executable
+   capability composition, then provider flows/activation as the sequential
+   slices in its task brief.
+8. **Wave 6 — product presentation and MCP completion (#99, #100, #109)**
+   supplies one row/detail, fixed duration, and the published MCP contract, with
+   Gate V kept green.
+9. **Wave 7 — safe state cutover and live proof (#108)** consumes reviewed #113,
+   Wave 4 import, and Wave 5 RegistryV2 seams for snapshot/copy/import,
+   restart/replay, and the current-client/runtime matrix.
+
+Former Wave 0 is not a predecessor. Its path-owned change chain
+(`9e5bf73`, `a58daeb`, `59caa59` and follow-ups through `c83e499`) is evidence
+only and must not be merged. A historical descendant may contribute only its
+non-Wave0 diff replayed onto the required reviewed base. Current local/remote
+checkpoints are likewise evidence until the exact base and review are recorded.
+
+### File and time budgets
+
+| Gate / slice | Time budget | Maximum changed files | Owner |
+|---|---:|---:|---|
+| Former Wave 0 | Retired | 0 | Rejected path-owned environment |
+| Gate V | 3 hours | 2 production + 2 test | Native log viewport |
+| Gate C | 5 hours | 10 test/fixture/script | Published compatibility |
+| Wave 2 | 18 hours | 9 production + 8 test/gate | Current-event decoder/reducer |
+| Wave 3A | Within 48-hour Wave 3 total | 17 production + 10 test/gate | Attempt/AppServer barrier |
+| Wave 3B | Within 48-hour Wave 3 total | 18 production + 10 test/gate | Store/Host/MCP close |
+| Wave 3C | Within 48-hour Wave 3 total | 12 production + 7 test/gate | ReviewUI/application close |
+| Descriptor core #113 | 24 hours | 8 production + 7 test/gate | Descriptor filesystem + plan/Process handoff + GRDB adapter contract |
+| Wave 4A | 24 hours | 12 production/dependency + 4 test | Sole GRDB adapter + schema/writer |
+| Wave 4B | 24 hours | 8 production + 5 test | Atomic query/projection |
+| Wave 4C | 40 hours | 31 production + 13 test/gate | Store/UI/MCP history cutover |
+| Wave 4D | 28 hours | 13 production + 9 test/gate | Fail-closed/orphan/close insertion |
+| Wave 5A | 28 hours | 10 production + 7 test | Auth disk + RegistryV2/state migration |
+| Wave 5B | 28 hours | 10 production + 8 test | `LoginSession` foundation + `LoginStagingLease` + pending/debt recovery |
+| Wave 5C | 16 hours | 6 production + 5 test/gate | Executable capability resolver + #113 handoff composition |
+| Wave 5D | 36 hours | 14 production + 10 test/gate | ChatGPT/API-key + activation/runtime lease |
+
+Budgets are stop/escalation boundaries, not targets and not permission to touch
+every listed file. Wave 6 retains a design gate before dispatch; Wave 7 slice
+budgets remain in its committed task brief. Exceeding a budget, reaching three
+failed fixes in one failure class, or adding a repeated path/cleanup guard freezes
+the slice and returns to this design gate.
 
 ## 14. Acceptance criteria
 
 - The recovery target graph remains the v0.6.2 graph; no generic DataKit/chat
   product is reintroduced.
+- Former Wave 0/c83 path authority is absent. Every managed RecoveryV1 mutation
+  uses a reviewed descriptor capability from one prepared environment.
+- No Process or GRDB path-only open occurs without immediate full-chain identity
+  revalidation; canonical URLs remain diagnostic only and the same-UID residual
+  is documented rather than misrepresented as solved.
 - GRDB imports exist only in the persistence folder.
 - Sidebar/detail/MCP all read the same committed product review/history.
 - App-server omission, restart, or connection loss never clears committed UI.
@@ -2698,8 +3558,10 @@ multiply, freeze the slice and return to this design gate.
 - Completed duration is stable and logs survive app restart.
 - Database and task close paths are awaited and leave no callback/write after
   close.
-- Required issues #97–#100 and #102–#111 meet their acceptance criteria; #101
-  remains explicitly out of scope.
+- Login staging has one lease/close result and one RegistryV2 authentication
+  pending/debt owner; cleanup removes only a manifested identity match.
+- Required issues #97–#100, #102–#111, and #113 meet their acceptance criteria;
+  #101 remains explicitly out of scope.
 - All new public declarations are justified by consumer code; all SQLite and
   wire implementation types remain package/internal.
 - Package tests, app tests, migration tests, runtime scenarios, and Codex review
@@ -2708,5 +3570,7 @@ multiply, freeze the slice and return to this design gate.
 ## 15. Design gate decision
 
 Approval of this document authorizes migration implementation on
-`codex/v0-6-2-recovery`. It does not authorize push, PR creation, release, or
-tag creation.
+`codex/v0-6-2-recovery` only in the predecessor order above. It explicitly does
+not authorize former Wave 0/c83 integration, Wave 4 before reviewed #113, or
+Wave 5 before its reviewed Wave 3/#113/Wave 4 prerequisites. It does not
+authorize push, PR creation, release, or tag creation.

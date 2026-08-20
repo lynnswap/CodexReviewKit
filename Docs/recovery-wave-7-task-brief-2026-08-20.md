@@ -41,11 +41,15 @@ Each starts from the reviewed predecessor SHA. They are not parallel workers.
 
 Before 7A dispatch, record a reviewed Wave 6 HEAD and prove:
 
-1. Wave 4 writer stores duration-only exact milliseconds and implements atomic
+1. Issue #113 is reviewed and supplies descriptor-backed source/destination
+   capabilities. All locator URLs are diagnostic inputs; source reads and every
+   RecoveryV1 mutation are descriptor-relative, and no arbitrary destination
+   URL reaches registry/cleanup/import APIs.
+2. Wave 4 writer stores duration-only exact milliseconds and implements atomic
    batch import plus sanitized failure rows.
-2. Wave 5 RegistryV2 exposes numeric current-main schema 0/1 batch import that
+3. Wave 5 RegistryV2 exposes numeric current-main schema 0/1 batch import that
    accepts the snapshotter-produced `VerifiedOpaqueArtifact` type.
-3. A targeted disposable probe proves the pinned Codex executable can perform
+4. A targeted disposable probe proves the pinned Codex executable can perform
    auth-free sanitized exact-ID `thread/read(includeTurns:true)` for plain,
    compressed, legacy, and paginated fixtures. Failure returns to topology
    design for zstd/Rust support; it is not skipped.
@@ -65,13 +69,15 @@ Allowed production owners:
 - new `Sources/CodexReviewHost/Migration/CurrentMainSourceManifest.swift`
 - new `Sources/CodexReviewHost/Migration/CurrentMainSourceActivityProbe.swift`
 - new `Sources/CodexReviewHost/Migration/CurrentMainSourceSnapshotter.swift`
-- `Sources/CodexReviewHost/CodexReviewRecoveryEnvironment.swift`
+- reviewed #113 plan/capability APIs as consumers only; changing their owner
+  contract is an escalation
 - package-only hashing/filesystem/process collaborators as one owner file each
 
 Tests are new focused Host migration suites. Characterize custom/default root
 precedence, malformed preference refusal, unknown SQLite, process/lsof FD
-refusal, DB/WAL/SHM cohorts, copy-time mutation, UserDefaults mutation, symlink/
-path escape, provider-filtered auth, API-key open trap, and source zero-diff.
+refusal by manifest device/inode while lsof paths remain diagnostic, DB/WAL/SHM
+cohorts, copy-time mutation, UserDefaults mutation, symlink/path escape,
+provider-filtered auth, API-key open trap, and source zero-diff.
 
 Commit gates:
 
@@ -173,7 +179,8 @@ files.
 Allowed owners:
 
 - `Sources/CodexReviewHost/LiveCodexReviewStoreBackend.swift`
-- `Sources/CodexReviewHost/CodexReviewRecoveryEnvironment.swift`
+- `Sources/CodexReviewHost/` RecoveryEnvironment plan/composition call sites,
+  consuming reviewed capabilities without adding path mutation helpers
 - new Host cutover coordinator/journal files
 - ReviewMonitor composition/lifecycle only for cutover admission/rollback UI
 - corresponding Host/app integration tests, ledger, and cutover docs

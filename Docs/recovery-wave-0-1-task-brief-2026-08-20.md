@@ -1,26 +1,28 @@
-# Recovery Wave 0/1 task brief (2026-08-20)
+# Retired Recovery Wave 0 and independent baseline gates (2026-08-20)
 
 | Item | Value |
 |---|---|
 | Integration branch | `codex/v0-6-2-recovery` |
-| Approved design checkpoint | `b47d83c117e11bdf244d4dba2a6ab07ef92b3ce6` |
+| Historical design checkpoint | `b47d83c117e11bdf244d4dba2a6ab07ef92b3ce6` |
 | Design contract | `Docs/recovery-design-2026-08-20.md` |
 | Recovery ledger | `Docs/review-stability-recovery-2026-08-20.md` |
-| Phase | Approved Phase 3 migration, Wave 0/1 |
+| Wave 0 status | **Rejected and retired; `c83e499` is evidence only and must not merge** |
+| Baseline-gate status | Gate V merged in PR #114 (`f4c9bb0`); Gate C pending independent publication |
 
-This file is the committed worker contract for the first implementation slices.
-Workers may implement only their assigned charter. A required change to public
-API, the approved owner map, persistence schema, migration policy, or another
-worker's write set is an escalation to the integration owner, not a local design
-decision.
+This file preserves the rejected Wave 0 evidence and records the independently
+delivered Gate V plus still-pending Gate C from the restored v0.6.2 tree.
+It is not authorization to merge any RecoveryV1 implementation from
+`codex/recovery-wave-0-1-pr`. A required change to public API, the owner map,
+persistence schema, migration policy, or another gate's write set is an
+escalation to the integration owner, not a local design decision.
 
 ## Shared invariants
 
 - The recovery remains based on published v0.6.2. Do not copy the unreleased
   generic Codex chat/DataKit presentation architecture.
 - `~/.codex_review` and the existing
-  `codexReview.runtimePreferences` value are read-only legacy inputs. Wave 0/1
-  must not write them.
+  `codexReview.runtimePreferences` value are read-only legacy inputs. Neither
+  baseline gate may inspect or write them.
 - Product behavior remains owned by `CodexReviewJob`/`CodexReviewStore`; no
   second cache, wrapper state, or app-server thread-list source of truth.
 - Fail fast with typed errors. Do not hide a failure with a guard, fallback,
@@ -34,70 +36,49 @@ decision.
   validation, runs Codex review, and reports a clean worktree. No worker pushes,
   creates a PR, tags, or edits the integration branch.
 
-## Worker A — RecoveryV1 environment isolation (Wave 0)
+## Retired Worker A — path-owned RecoveryV1 environment (former Wave 0)
 
-### Outcome
+### Disposition
 
-Every production, preview, test, and development launch resolves its writable
-runtime paths from one RecoveryV1 environment owner. A default recovery build
-cannot write the current-main home or preference key, and app-server/MCP
-admission does not start until the recovery directories are prepared.
+The implementation ending at `c83e49960c303682ea4b4be77a8cfe0f7ff59151`
+is rejected. It remains history evidence only and must not be merged,
+cherry-picked, repaired in place, or used as a prerequisite SHA. The same
+path-ownership invariant recurred over four implementation rounds:
 
-### Owner and allowed write set
+1. `864b16a` introduced URL/path-owned RecoveryV1 preparation.
+2. `3b2def2` added missing staging/runtime-directory handling.
+3. `d3f3e20` added further path overlap, ownership, mode, symlink, and cleanup
+   checks.
+4. `c83e499` added another directory-chain, cancellation rollback, staging
+   cleanup, and test-isolation correction.
 
-The composition/runtime boundary in `CodexReviewHost` owns path resolution and
-preparation. The ReviewMonitor app consumes it; domain review/store code does
-not inspect filesystem paths.
+This crosses the program stop condition. More URL canonicalization, `lstat`
+checks, path-prefix guards, or Environment-owned cleanup would be a fifth patch
+to an ownerless contract. Issue #113 replaces the design with descriptor-backed
+authority after reviewed Wave 3 and before any Wave 4 GRDB open.
 
-Allowed files/responsibilities:
+### Rejected owner and write set
+
+`CodexReviewRecoveryEnvironment` must not remain the mutation/removal owner.
+The following historical write set identifies code to retire or replace at the
+#113 gate; it is not an allowed worker write set here:
 
 - `Sources/CodexReviewHost/CodexReviewRuntimePreferences.swift`
 - `Sources/CodexReviewHost/LiveCodexReviewStoreBackend.swift`
-- one new RecoveryV1 environment file under `Sources/CodexReviewHost/`
+- `Sources/CodexReviewHost/CodexReviewRecoveryEnvironment.swift`
 - `Tools/ReviewMonitor/CodexReviewMonitor/CodexReviewMonitorApp.swift`
 - corresponding `CodexReviewHostTests` and ReviewMonitor composition/CI tests
 
-Do not modify ReviewUI, MCP schemas, persistence implementation, authentication
-flows, executable discovery, or legacy import.
+Do not reuse the former 4-hour / 4-production + 4-test budget for #113. The
+descriptor core has a separate file/time budget in the canonical design and
+ledger. `RecoveryEnvironmentPlan` may describe configuration; it does not own
+login staging allocation, a cleanup manifest, recursive removal, RegistryV2,
+or authentication debt.
 
-### Required contract
+## Gate V — Native log viewport stability (#103)
 
-- One package-owned environment value resolves these URLs below ReviewMonitor
-  Application Support: `RecoveryV1/CodexHome`,
-  `RecoveryV1/LoginStaging`, `RecoveryV1/SavedAccounts`, and
-  `RecoveryV1/review-history.sqlite`.
-- The default preference key is
-  `codexReview.recoveryV1.runtimePreferences`; the existing key is never read as
-  an automatic fallback and never overwritten.
-- The existing public `CodexReviewStore.makeLiveStore(...)` signature remains
-  exact. Its default path resolves to RecoveryV1. An explicitly configured safe
-  `codexHomePath` remains supported; the known legacy default path must not be
-  silently selected.
-- Tests and probes inject an isolated base directory, preference suite, and MCP
-  port through owner seams. They never touch the user's Application Support,
-  UserDefaults domain, or port 9417.
-- Directory preparation is awaited before MCP bind or app-server creation,
-  creates owner-only directories, and surfaces a typed start failure. It does
-  not create/open the history database yet.
-- Preview/XCTest launch behavior remains non-live unless an existing explicit
-  integration-test override requests a server.
-
-If preserving the exact public factory requires a new public declaration or if
-the current settings UI makes the legacy home reachable in a way this contract
-cannot reject without an API change, stop and escalate with options.
-
-### Budget and validation
-
-- Budget: 4 hours; at most 4 production files and 4 test files.
-- Targeted host tests for default path, explicit path, legacy isolation,
-  directory permissions/preparation failure, preference-key separation, and
-  test/probe isolation.
-- ReviewMonitor app composition tests for live vs preview/XCTest admission.
-- `swift test --build-system swiftbuild --no-parallel --filter CodexReviewHostTests`
-- Relevant ReviewMonitor CI tests, then the full package suite if the targeted
-  gate passes.
-
-## Worker B — Native log viewport stability (#103, Wave 1)
+Status: merged to restored `main` by PR #114 at `f4c9bb02b721`; reviewed
+source commit `55f68c032134` and CI Package Tests are green.
 
 ### Outcome
 
@@ -141,7 +122,7 @@ public/test-only production branch, stop and escalate.
 - `swift test --build-system swiftbuild --no-parallel --filter ReviewUIShellTests`
 - Full package suite after the focused suite passes.
 
-## Worker C — Published compatibility gates (Wave 1)
+## Gate C — Published compatibility gates
 
 ### Outcome
 
@@ -191,12 +172,21 @@ recommended alternative. Do not invent a passing weak substitute.
 - Run the focused MCP server schema test twice.
 - Run the one aggregate compatibility command and relevant package tests.
 
-## Integration order
+## Independent delivery and successor gates
 
-1. Worker B (#103) may integrate first because it makes the v0.6.2 baseline
-   green and touches only ReviewUI.
-2. Worker A integrates next and establishes the safe execution environment.
-3. Worker C integrates last, rebases/regenerates only if the first two slices
-   make an accepted public/API change (none is expected).
-4. The integration owner runs full package and app tests, then branch-wide Codex
-   review before starting Wave 2.
+- Gate V and Gate C branch independently from restored `main`/v0.6.2. Neither
+  branch contains the rejected Wave 0 implementation, and neither branch is the
+  review/validation substitute for the other.
+- Gate V is the independently published behavior fix: PR #114 merged reviewed
+  source `55f68c0` as `f4c9bb0`. Its review/CI does not validate Gate C.
+- Gate C is a contract-test change and must be landed and reviewed before the
+  current-event wave introduces accepted public terminal additions. It does not
+  depend on Gate V unless its exact test fixture proves a real dependency.
+- Historical `03bf36e` remains local evidence superseded by Gate V's actual
+  reviewed landing. `3801200` remains compatibility evidence only; Gate C's
+  current independent candidate is `codex/add-v062-compatibility-gates-pr@94de08f`
+  and still requires its own publication/review record.
+- The current-event contract then lands and is reviewed independently. Only
+  that reviewed HEAD may become the Wave 3 base.
+- Issue #113 starts only after reviewed Wave 3C. It is the replacement for
+  former Worker A, not another part of either baseline gate.

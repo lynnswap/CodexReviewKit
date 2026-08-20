@@ -1,8 +1,15 @@
 # Recovery Wave 2 task brief (2026-08-20)
 
+Status: Historical implementation `3996456`–`51354e8` is evidence only because
+its ancestry includes rejected former Wave 0. Create the landing branch from the
+independently published/reviewed compatibility Gate C, reapply only this charter,
+and exact-review that result before Wave 3.
+
 | Item | Value |
 |---|---|
 | Integration branch | `codex/v0-6-2-recovery` |
+| Required landing base | Reviewed compatibility Gate C HEAD; record before dispatch |
+| Historical evidence | `3996456`–`51354e8`; never a predecessor SHA |
 | Approved design | `Docs/recovery-design-2026-08-20.md` |
 | Issues | #104 canonical terminal, #105 notification normalization |
 | Upstream contract | `openai/codex@3b45c29062ff0e76e71c91b6753290400e7fa8da` |
@@ -14,6 +21,10 @@ This is one worker charter because terminal and notification normalization share
 attempt reducers. The worker implements current-v2 semantics in the existing
 product-owned in-memory flow. Persistence and the cancellation terminal barrier
 remain later waves.
+
+Do not merge or inherit the path-owned RecoveryV1 changes from the historical
+branch. Wave 3 starts only from this wave's independently landed and reviewed
+successor SHA; a review of the historical descendant cannot validate that base.
 
 ## Outcome
 

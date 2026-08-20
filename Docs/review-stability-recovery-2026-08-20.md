@@ -53,6 +53,7 @@ remove this transient ledger.
 - #109: current-client MCP compatibility proof.
 - #110: anchor-based sidebar reorder and durable manual order.
 - #111: bounded history paging and explicit terminal deletion.
+- #113: descriptor-backed RecoveryV1 filesystem authority.
 - #101: closed as not planned by user decision.
 
 ## Recovery decision and remaining design gate
@@ -106,42 +107,51 @@ The proposed Phase 2 gate now includes:
 | 2026-08-20 | History interaction scope complete | #110 restores stable before-anchor reorder; #111 defines a monotonic loaded-ID window, keyset paging, and explicit terminal deletion. |
 | 2026-08-20 | Adversarial design audit | Independent persistence/recovery critics drove atomic cross-table observation, attempt isolation, awaited forced close, quiescent import, exact public/API-key/terminal/executable contracts, and per-wave compatibility gates into the design. |
 | 2026-08-20 | Phase 2 gate converged | Persistence, recovery-contract, and lifecycle/source-of-truth critics independently reported zero implementation blockers after fail-closed persistence, trigger-specific runtime semantics, typed ingestion containment, one final-result owner, bounded final output, and failed-state close were fixed. |
-| 2026-08-20 | Final self-review | Review MCP run `35CF35A6-03DF-4460-8DDF-736C7D8215E4` completed with zero findings: the docs-only recovery contracts were internally consistent and introduced no definite correctness issue. |
-| 2026-08-20 | Wave 1 / #103 integrated | `03bf36e` replaces fixed-count bottom scrolling with TextKit 2 viewport-layout completion ownership. Worker validation passed 536 package tests, 15 app tests, and Review MCP with zero findings; integration reran 57 ReviewUIShell tests successfully. |
-| 2026-08-20 | Wave 1 / compatibility gates integrated | `3801200` adds a separate four-product consumer, strict four-module `swift-api-digester` baseline, and canonical five-tool MCP golden. Integration aggregate gate passed on Xcode 27 / Swift 6.4. |
-| 2026-08-20 | Wave 0 / RecoveryV1 integrated | `9e5bf73`–`59caa59` move default runtime, login staging, saved accounts, future history URL, and preferences behind one RecoveryV1 owner; preparation is owner-only and precedes admission, legacy home is rejected, and Settings no longer advertises it. |
-| 2026-08-20 | Wave 0/1 integration green | Compatibility aggregate passed; the full package suite passed 541 tests and the ReviewMonitor app scheme passed 17 tests on the integrated branch. Working tree and both lockfiles remained clean. |
-| 2026-08-20 | Wave 0/1 branch review | Review MCP run `83224844-0A69-44C7-B703-6C12D4F74294` reviewed the complete `v0.6.2...HEAD` diff and reported zero findings. |
+| 2026-08-20 | Historical pre-#113 self-review | Review MCP run `35CF35A6-03DF-4460-8DDF-736C7D8215E4` reported zero findings for the earlier docs. The later four-round filesystem recurrence superseded that conclusion; it is not review evidence for the #113/Wave5 resequencing. |
+| 2026-08-20 | #103 independently published | PR #114 merged reviewed source `55f68c0` to restored `main` as `f4c9bb0`. Codex reported no major issue for the exact source commit and CI Package Tests passed. This gate contains neither RecoveryV1 nor compatibility work. |
+| 2026-08-20 | Compatibility local proof; independent publication required | Historical `3801200` proves the four-product consumer, strict API baseline, and five-tool MCP golden. It is a separate gate from #103 and must land/review before the current-event public additions. |
+| 2026-08-20 | Former Wave 0 superseded | The earlier `9e5bf73`–`59caa59` integrated/green claim and follow-up branch `codex/recovery-wave-0-1-pr@c83e499` are superseded by #113. The path-owned RecoveryV1 implementation is rejected, evidence only, and must not merge. |
+| 2026-08-20 | Filesystem stop condition triggered | The same path-ownership invariant recurred across four implementation rounds: `864b16a` → `3b2def2` → `d3f3e20` → `c83e499`. The earlier green test/review evidence did not prove authority against case/Unicode/firmlink identity or path mutation races. No fifth URL/path guard is allowed. |
+| 2026-08-20 | Descriptor authority selected | #113 replaces former Wave 0 with `RecoveryEnvironmentPlan` → one `PreparedRecoveryEnvironment`, component `openat`/`fstat` capabilities, descriptor-relative mutation/removal, a Process handoff, and the nonescaping GRDB-adapter contract. Reviewed Wave 3C is its prerequisite; Wave 4A alone implements/tests the adapter, and cannot open GRDB before #113 is reviewed. |
 | 2026-08-20 | Wave 2 source mapping | Upstream `3b45c290` proves review command deltas carry thread/turn/item identity while standalone command/process deltas carry only connection-scoped handles. Wave 2 excludes unregistered standalone traffic instead of porting historical string-equality correlation. |
-| 2026-08-20 | Wave 2 / #104 + #105 integrated | `3996456`–`51354e8` pin the current-v2 wire, centralize method/item schema and fault containment, fix canonical outer terminal/result ownership, preserve one visible final row, and expose typed MCP terminal data without changing tool input/schema names. Worker gates passed 604 package tests, 17 app tests, compatibility consumer/API/MCP goldens, and Review MCP run `E8453E0E-...` with zero findings. |
-| 2026-08-20 | Wave 3 design gate | `370e431` defines three sequential cancellation/close slices: AppServer barrier, Store/Host/MCP close authority, then ReviewUI/application termination. Independent semantic and API/concurrency re-gates reported zero blockers; after the integration review fix, Wave 3A is pinned to `287795d`. |
-| 2026-08-20 | Integrated recovery review fix | Branch review `93B08469-...` found repeated synthetic `.started` events caused by an ungrouped `||`; `287795d` restores the session-owned one-shot invariant and adds a multi-event regression test. The focused AppServer suite passed 161 tests. |
-| 2026-08-20 | Integrated recovery review disposition | Review `7E9107A3-...` reported only automatic import of `codexReview.runtimePreferences`. Disputed by the approved RecoveryV1/#108 contract: the legacy key/home are read-only source inputs and automatic reuse could mutate the only current-main state. The explicit quiescent copy/import wave owns validated settings migration. No code change made. |
-| 2026-08-20 | Wave 4 persistence slicing | Durable history is split sequentially into 4A schema/writer, 4B atomic query/projection, 4C Store/UI/MCP cutover, and 4D fail-closed/orphan/close insertion. The canonical design now fixes producer/worker join before query/DB close and a single optional preview bootstrap seam; independent re-gate reported zero blockers. Wave 4A remains gated on reviewed Wave 3C. |
-| 2026-08-20 | Wave 5 auth/executable design gate | Upstream and live environment evidence fixed nullable-email saved identity, a single API-key slot, crash-atomic RegistryV2/artifact/journal/runtime-lease ownership, finite ChatGPT/API-key reconciliation, Wave 3-owned activation ordering, and one deterministic executable resolver/test seam. Independent API/state-machine re-gate reported zero blockers; implementation remains gated on reviewed Wave 4D. |
-| 2026-08-20 | Wave 7 safe-cutover slicing | #108 is split into quiescent source snapshot, sanitized exact-ID source adapter, atomic Wave4 import, Wave5 auth/preferences conversion, and admission/rollback/live proof. Current-main DB/WAL/SHM/auth/UserDefaults inputs and deterministic outer-review mapping are pinned. Implementation remains gated on reviewed Wave 6 plus Wave4 import and Wave5 RegistryV2 seams. |
+| 2026-08-20 | Wave 2 / #104 + #105 local evidence | `3996456`–`51354e8` pin the current-v2 wire, decoder/containment, canonical result, and typed MCP terminal. The recorded tests/review remain evidence; an independently landed and reviewed current-event HEAD is the only valid Wave 3 base. |
+| 2026-08-20 | Wave 3 historical evidence only | `370e431` defines sequential 3A/3B/3C and `202ca65` has 3A code/tests, but its ancestry contains rejected former Wave 0. Even completing its currently blocked review would not qualify it. Replay only the intended 3A diff onto the independently landed/reviewed current-event HEAD, then exact-review that successor before 3B. |
+| 2026-08-20 | Historical integrated-branch review fix | Branch review `93B08469-...` found repeated synthetic `.started` events caused by an ungrouped `||`; `287795d` restores the session-owned one-shot invariant and adds a multi-event regression test. The focused AppServer suite passed 161 tests. This remains implementation evidence until independently landed/reviewed. |
+| 2026-08-20 | Historical integrated-branch review disposition | Review `7E9107A3-...` reported only automatic import of `codexReview.runtimePreferences`. The legacy key/home remain read-only source inputs; #108's explicit quiescent descriptor-backed copy/import owns validated settings migration. No code change was made, and the old branch review is not a publication gate. |
+| 2026-08-20 | Wave 4 persistence slicing | Durable history remains sequential 4A schema/writer, 4B atomic query/projection, 4C Store/UI/MCP cutover, and 4D fail-closed/orphan/close insertion. 4A now requires both reviewed Wave 3C and reviewed #113; a raw URL GRDB open is non-mergeable. Auth cleanup debt stays outside the history database. |
+| 2026-08-20 | Wave 5 auth/executable gate resequenced | Wave 5 remains after reviewed 4D and additionally consumes reviewed Wave 3 close and #113. RegistryV2's authentication disk actor owns one versioned pending/cleanup-debt state; one `LoginStagingLease` owns staging capability plus runtime/client/writer completion and typed close/removal. Bare URLs and log-only cleanup failure are rejected. |
+| 2026-08-20 | Wave 7 safe-cutover slicing | #108 is split into quiescent descriptor-backed source snapshot, sanitized exact-ID source adapter, atomic Wave4 import, Wave5 auth/preferences conversion, and admission/rollback/live proof. Implementation remains gated on reviewed #113 and Wave 6 plus Wave4 import and Wave5 RegistryV2 seams. |
 
 ## Remaining decisions
 
 - The user approved the Phase 2 design gate on 2026-08-20; implementation may
-  proceed on `codex/v0-6-2-recovery`.
+  proceed on `codex/v0-6-2-recovery` only in the newly recorded predecessor
+  order. Former Wave 0/c83 is explicitly excluded.
+- Gate V is recorded. Record the reviewed landing SHA for Gate C, current-event,
+  each replayed Wave 3 slice, and #113 separately. A later review never
+  back-validates an earlier gate.
 - Live MCP probes will determine whether any unreleased `runId` aliases are required; the published v0.6.2 field names remain the default.
 
 ## Active implementation slices
 
 | Wave / slice | Budget | Owner boundary | State |
 |---|---|---|---|
-| Wave 0 / RecoveryV1 environment | 4 hours; 4 production + 4 test files | `CodexReviewHost` composition/runtime paths | Integrated at `9e5bf73`–`59caa59` |
-| Wave 1 / #103 log viewport | 3 hours; 2 production + 2 test files | ReviewUI native scroll/layout | Integrated at `03bf36e` |
-| Wave 1 / compatibility gates | 5 hours; 10 files | external consumer/API/MCP contract tests | Integrated at `3801200` |
-| Wave 2 / #104 + #105 event contract | 18 hours; 10 production + 7 test/gate files | attempt-scoped current-v2 decoder/terminal reducer | Integrated at `3996456`–`51354e8` |
-| Wave 3A / #106 interrupt barrier | 17 production + 10 test/gate files maximum | attempt start/cancel + AppServer interrupt/connection terminal owner | Authorized at base `287795d` |
+| Former Wave 0 / path-owned RecoveryV1 | Retired; zero files | Rejected Environment/path owner | `c83e499` evidence only; must not merge |
+| Gate V / #103 log viewport | 3 hours; 2 production + 2 test files | ReviewUI native scroll/layout | Merged PR #114: `55f68c0` → `f4c9bb0`; exact-source Codex review + CI green |
+| Gate C / compatibility | 5 hours; 10 test/fixture/script files | external consumer/API/MCP contract tests | Candidate `codex/add-v062-compatibility-gates-pr@94de08f`; independent PR/review pending |
+| Wave 2 / #104 + #105 current event | 18 hours; 9 production + 8 test/gate files | attempt-scoped current-v2 decoder/terminal reducer | Local evidence `3996456`–`51354e8`; reviewed landing required before Wave 3 |
+| Wave 3A / #106 interrupt barrier | Within 48-hour Wave 3 total; 17 production + 10 test/gate files maximum | attempt start/cancel + AppServer interrupt/connection terminal owner | `202ca65` evidence only; mandatory replay onto reviewed current-event HEAD + exact review pending |
 | Wave 3B / #106 runtime close | 18 production + 10 test/gate files maximum | Store runtime generation + Host/MCP public close | Pending reviewed Wave 3A |
 | Wave 3C / #106 native close | 12 production + 7 test/gate files maximum | ReviewUI lifecycle + ReviewMonitor termination | Pending reviewed Wave 3B |
-| Wave 4A / #102 schema + writer | 24 hours; 12 production/dependency + 4 test files maximum | GRDB database/schema/transaction/global-revision owner | Pending reviewed Wave 3C |
+| Descriptor core / #113 | 24 hours; 8 production + 7 test/gate files maximum | descriptor filesystem, environment plan, Process handoff, GRDB adapter contract | Pending reviewed Wave 3C; blocks Wave 4A and Wave 5 |
+| Wave 4A / #102 schema + writer | 24 hours; 12 production/dependency + 4 test files maximum | sole GRDB capability adapter plus database/schema/transaction/global revision | Pending reviewed Wave 3C **and** reviewed #113 |
 | Wave 4B / #102 query | 24 hours; 8 production + 5 test files maximum | One atomic observation generation + stable projection registry | Pending reviewed Wave 4A |
 | Wave 4C / #100/#102/#110/#111 cutover | 40 hours; 31 production + 13 test/gate files maximum | Committed Store/UI/MCP history, duration, paging, reorder, delete | Pending reviewed Wave 4B |
 | Wave 4D / #102 lifecycle | 28 hours; 13 production + 9 test/gate files maximum | Fail-closed/orphan recovery + Wave 3 finish/close insertion | Pending reviewed Wave 4C |
+| Wave 5A / auth disk + RegistryV2 | 28 hours; 10 production + 7 test files maximum | immutable artifacts, RegistryV2, atomic authentication state/migration | Pending reviewed Wave 4D and #113 |
+| Wave 5B / LoginSession + LoginStagingLease | 28 hours; 10 production + 8 test files maximum | provider-neutral session owner, staging capability, joined resources/close, pending/debt/startup recovery | Pending reviewed Wave 5A |
+| Wave 5C / executable | 16 hours; 6 production + 5 test/gate files maximum | executable capability resolver + transport consumption of #113 Process handoff | Pending reviewed Wave 5B |
+| Wave 5D / provider + activation | 36 hours; 14 production + 10 test/gate files maximum | ChatGPT/API-key, activation journal, primary runtime lease | Pending reviewed Wave 5C |
 | Wave 7A / #108 snapshot | 18 hours; 7 production + 4 test files maximum | Current-main locator, lsof quiescence, manifest, DB/WAL/SHM staging | Pending reviewed Wave 6 |
 | Wave 7B1 / #108 source adapter | 28 hours; 9 production + 5 test files maximum | Sanitized exact-ID plain/zstd read + shared normalizer | Pending reviewed Wave 7A |
 | Wave 7B2 / #108 history import | 22 hours; 6 production + 5 test files maximum | Deterministic atomic Wave4 import/failure manifest | Pending reviewed Wave 7B1 |
@@ -154,5 +164,7 @@ Wave 2 uses
 [recovery-wave-2-task-brief-2026-08-20.md](recovery-wave-2-task-brief-2026-08-20.md).
 Wave 3 uses
 [recovery-wave-3-task-brief-2026-08-20.md](recovery-wave-3-task-brief-2026-08-20.md).
+Wave 5 uses
+[recovery-wave-5-task-brief-2026-08-20.md](recovery-wave-5-task-brief-2026-08-20.md).
 Wave 7 uses
 [recovery-wave-7-task-brief-2026-08-20.md](recovery-wave-7-task-brief-2026-08-20.md).
