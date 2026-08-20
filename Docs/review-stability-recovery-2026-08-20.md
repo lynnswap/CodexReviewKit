@@ -115,7 +115,8 @@ The proposed Phase 2 gate now includes:
 | 2026-08-20 | Descriptor authority selected | #113 replaces former Wave 0 with `RecoveryEnvironmentPlan` → one `PreparedRecoveryEnvironment`, component `openat`/`fstat` capabilities, descriptor-relative mutation/removal, a Process handoff, and the nonescaping GRDB-adapter contract. Reviewed Wave 3C is its prerequisite; Wave 4A alone implements/tests the adapter, and cannot open GRDB before #113 is reviewed. |
 | 2026-08-20 | Wave 2 source mapping | Upstream `3b45c290` proves review command deltas carry thread/turn/item identity while standalone command/process deltas carry only connection-scoped handles. Wave 2 excludes unregistered standalone traffic instead of porting historical string-equality correlation. |
 | 2026-08-20 | Wave 2 / #104 + #105 local evidence | `3996456`–`51354e8` pin the current-v2 wire, decoder/containment, canonical result, and typed MCP terminal. The recorded tests/review remain evidence; an independently landed and reviewed current-event HEAD is the only valid Wave 3 base. |
-| 2026-08-20 | Wave 3 historical evidence only | `370e431` defines sequential 3A/3B/3C and `202ca65` has 3A code/tests, but its ancestry contains rejected former Wave 0. Even completing its currently blocked review would not qualify it. Replay only the intended 3A diff onto the independently landed/reviewed current-event HEAD, then exact-review that successor before 3B. |
+| 2026-08-20 | Wave 3 historical evidence only | `370e431` defines sequential 3A/3B/3C and `202ca65` has 3A code/tests, but its ancestry contains rejected former Wave 0. Even completing its currently blocked review would not qualify it. Replay only the intended 3A diff onto the independently landed/reviewed current-event HEAD, then exact-review that successor as a checkpoint before 3B; 3A is not independently mergeable. |
+| 2026-08-21 | PR #117 P1 expands the Wave 3 merge gate | At `d90be363162692ca34b55cd9c2da77109ec852cf`, attempt-local force-close closes the AppServer client shared by sibling reviews, terminalizes siblings, and attempts recovery on the closed client. Wave 3B must add the Store-owned generation/prepare-activate-admission-close seam, one runtime-wide sibling recovery set, one replacement client/backend, retained MCP listener, admitted-handler drain, and public replayable Store close. Old backend is handoff/cleanup-only; new backend is resume-only. Wave 3A+B is one combined exact-base merge gate. |
 | 2026-08-20 | Historical integrated-branch review fix | Branch review `93B08469-...` found repeated synthetic `.started` events caused by an ungrouped `||`; `287795d` restores the session-owned one-shot invariant and adds a multi-event regression test. The focused AppServer suite passed 161 tests. This remains implementation evidence until independently landed/reviewed. |
 | 2026-08-20 | Historical integrated-branch review disposition | Review `7E9107A3-...` reported only automatic import of `codexReview.runtimePreferences`. The legacy key/home remain read-only source inputs; #108's explicit quiescent descriptor-backed copy/import owns validated settings migration. No code change was made, and the old branch review is not a publication gate. |
 | 2026-08-20 | Wave 4 persistence slicing | Durable history remains sequential 4A schema/writer, 4B atomic query/projection, 4C Store/UI/MCP cutover, and 4D fail-closed/orphan/close insertion. 4A now requires both reviewed Wave 3C and reviewed #113; a raw URL GRDB open is non-mergeable. Auth cleanup debt stays outside the history database. |
@@ -127,9 +128,10 @@ The proposed Phase 2 gate now includes:
 - The user approved the Phase 2 design gate on 2026-08-20; implementation may
   proceed on `codex/v0-6-2-recovery` only in the newly recorded predecessor
   order. Former Wave 0/c83 is explicitly excluded.
-- Gate V is recorded. Record the reviewed landing SHA for Gate C, current-event,
-  each replayed Wave 3 slice, and #113 separately. A later review never
-  back-validates an earlier gate.
+- Gate V is recorded. Record the reviewed landing SHA for Gate C and the
+  current-event gate, the exact 3A checkpoint SHA, the combined 3A+B merge SHA,
+  the 3C SHA, and #113 separately. A later review never back-validates an
+  earlier checkpoint.
 - Live MCP probes will determine whether any unreleased `runId` aliases are required; the published v0.6.2 field names remain the default.
 
 ## Active implementation slices
@@ -140,9 +142,9 @@ The proposed Phase 2 gate now includes:
 | Gate V / #103 log viewport | 3 hours; 2 production + 2 test files | ReviewUI native scroll/layout | Merged PR #114: `55f68c0` → `f4c9bb0`; exact-source Codex review + CI green |
 | Gate C / compatibility | 5 hours; 10 test/fixture/script files | external consumer/API/MCP contract tests | Candidate `codex/add-v062-compatibility-gates-pr@94de08f`; independent PR/review pending |
 | Wave 2 / #104 + #105 current event | 18 hours; 9 production + 8 test/gate files | attempt-scoped current-v2 decoder/terminal reducer | Local evidence `3996456`–`51354e8`; reviewed landing required before Wave 3 |
-| Wave 3A / #106 interrupt barrier | Within 48-hour Wave 3 total; 17 production + 10 test/gate files maximum | attempt start/cancel + AppServer interrupt/connection terminal owner | `202ca65` evidence only; mandatory replay onto reviewed current-event HEAD + exact review pending |
-| Wave 3B / #106 runtime close | 18 production + 10 test/gate files maximum | Store runtime generation + Host/MCP public close | Pending reviewed Wave 3A |
-| Wave 3C / #106 native close | 12 production + 7 test/gate files maximum | ReviewUI lifecycle + ReviewMonitor termination | Pending reviewed Wave 3B |
+| Wave 3A / #106 interrupt barrier | Within 48-hour Wave 3 total; 17 production + 10 test/gate files maximum | attempt start/cancel + AppServer interrupt/connection terminal owner | `202ca65` evidence only; mandatory replay onto reviewed current-event HEAD + exact checkpoint review pending; no independent merge |
+| Wave 3B / #106 runtime close | Exact 12 production + 10 test/gate allowed paths | Store generation + inert preparation/exact activation + runtime-wide sibling replacement + MCP drain + public close | Pending exact 3A checkpoint; combined 3A+B exact-base merge gate required |
+| Wave 3C / #106 native close | 12 production + 7 test/gate files maximum | ReviewUI lifecycle + ReviewMonitor termination | Pending reviewed combined Wave 3A+B HEAD |
 | Descriptor core / #113 | 24 hours; 8 production + 7 test/gate files maximum | descriptor filesystem, environment plan, Process handoff, GRDB adapter contract | Pending reviewed Wave 3C; blocks Wave 4A and Wave 5 |
 | Wave 4A / #102 schema + writer | 24 hours; 12 production/dependency + 4 test files maximum | sole GRDB capability adapter plus database/schema/transaction/global revision | Pending reviewed Wave 3C **and** reviewed #113 |
 | Wave 4B / #102 query | 24 hours; 8 production + 5 test files maximum | One atomic observation generation + stable projection registry | Pending reviewed Wave 4A |

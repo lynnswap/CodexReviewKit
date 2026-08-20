@@ -3,8 +3,10 @@
 Status: **No Wave 3 landing/successor is authorized.** Historical Wave 3A
 code/test evidence exists at `202ca65ce171`, but that branch descends from the
 rejected path-owned Wave 0 ancestry. It must be replayed onto the independently
-landed/reviewed current-event HEAD and reviewed there. Wave 3B/3C remain gated
-on each reviewed predecessor landing SHA.
+landed/reviewed current-event HEAD. Wave 3A remains an exact-base implementation
+and review checkpoint, but PR #117 demonstrated that it is not independently
+mergeable: Wave 3A and Wave 3B now form one combined merge gate. Wave 3C starts
+only from the reviewed combined Wave 3A+B HEAD.
 
 | Item | Value |
 |---|---|
@@ -12,20 +14,23 @@ on each reviewed predecessor landing SHA.
 | Required Wave 3 base | Independently landed and reviewed current-event (#104/#105) HEAD; record before dispatch |
 | Historical Wave 3A base | `287795d587823335e160d5e682407539c28a11af` |
 | Wave 3A evidence | `codex/recovery-wave-3a@202ca65ce171`; code/tests only, ancestry rejected, never a predecessor SHA |
-| Wave 3B base | Reviewed Wave 3A HEAD; record before dispatch |
-| Wave 3C base | Reviewed Wave 3B HEAD; record before dispatch |
+| Wave 3B checkpoint base | Exact-base reviewed Wave 3A checkpoint; record before dispatch, but do not merge 3A alone |
+| Wave 3A+B merge gate | Review the combined exact-base diff and land only after both 3A and 3B gates are green |
+| Wave 3C base | Reviewed combined Wave 3A+B HEAD; record before dispatch |
 | Approved design | `Docs/recovery-design-2026-08-20.md` |
 | Issue | #106 cancellation terminal barrier |
+| Motivating review evidence | PR #117 P1 at `d90be363162692ca34b55cd9c2da77109ec852cf` |
 | Upstream contract | `openai/codex@3b45c29062ff0e76e71c91b6753290400e7fa8da` |
-| Budget | 48 hours total: 3A at most 17 production + 10 test/gate files; 3B at most 18 production + 10 test/gate files; 3C at most 12 production + 7 test/gate files |
+| Budget | 48 hours total: 3A at most 17 production + 10 test/gate files; 3B only the exact 12 production + 10 test/gate paths below; 3C at most 12 production + 7 test/gate files |
 
 Wave 3 replaces acknowledgement-as-completion, timeout detachment, and
 caller-owned shutdown with one attempt cancellation processor and one
-application-lifetime close authority. It lands as three sequential, stacked
-workers with disjoint primary owners: **3A** implements attempt cancellation and
-the AppServer interrupt/transport barrier; **3B** starts from reviewed 3A and
-implements store runtime-generation, Host/MCP, and public store close; **3C**
-starts from reviewed 3B and connects ReviewUI/application termination to that
+application-lifetime close authority. Work proceeds through three sequential
+owner slices: **3A** implements attempt cancellation and the AppServer
+interrupt/transport barrier; **3B** starts from the exact-base reviewed 3A
+checkpoint and implements Store runtime-generation, Host/MCP, and public Store
+close; the combined **3A+B** diff is the only merge gate; **3C** starts from that
+reviewed combined HEAD and connects ReviewUI/application termination to the
 close. It remains an in-memory wave: Wave 4 inserts durable commits and
 database/query close stages into the same owner. Issue #106 therefore remains
 open until Wave 4 proves commit-before-cleanup.
@@ -36,8 +41,20 @@ baseline commits, so even a later exact-base review of `202ca65` cannot make it 
 valid landing. After Gate C and the current-event contract independently land and
 are reviewed, create a successor task branch from that exact HEAD, reapply only
 the intended Wave 3A diff without rewriting the historical branch, run all gates,
-and complete an exact-base review. Only that successor result can precede 3B. A
-later slice or aggregate test/review never back-validates an earlier gate.
+and complete an exact-base checkpoint review. Wave 3B starts only from that exact
+checkpoint, then the combined 3A+B diff receives its own exact-base merge review.
+A later slice or aggregate test/review never back-validates an earlier checkpoint.
+
+PR #117 supplies the concrete reason for the combined gate. Its P1 trace proves
+that an attempt-owned grace force-close calls the Store's runtime-unidentified
+`forceCloseReviewConnection()`, closes the one `AppServerClient` shared by all
+review sessions, terminalizes unrelated siblings through the notification
+router, and then attempts recovery on that already permanently closed client.
+The Host has a factory for a new client/backend, but the reviewed 3A shape has no
+runtime-generation owner to create exactly one replacement and recover all
+eligible siblings. An attempt-local guard, retry, or sibling exception cannot
+make that shared-resource transition safe; the Store/Host runtime owner defined
+by Wave 3B is required before any 3A code can merge.
 
 ## Outcome
 
@@ -58,6 +75,15 @@ later slice or aggregate test/review never back-validates an earlier gate.
 - `CodexReviewStore` has one app-lifetime state and one recorded close Task.
   Concurrent close/stop callers join it; start/restart completions from an
   invalidated generation cannot republish or reacquire runtime state.
+- Force-close of the shared AppServer connection is one runtime-generation
+  transition. The requested attempt reaches its requested terminal, every
+  otherwise healthy sibling in that generation is admitted to recovery once,
+  and one replacement backend/client resumes them; no sibling resumes on the
+  closed backend.
+- Runtime preparation is inert. Only the Store revalidates the captured
+  generation, activates the exact prepared handle, and atomically publishes its
+  snapshot. MCP network admission closes before handler drain, and every
+  already-admitted handler is owned through completion.
 - A close failure is visible and replayable. ReviewMonitor defaults to **Cancel
   Quit** and allows **Quit Anyway** only as an explicit user decision.
 
@@ -89,10 +115,20 @@ later slice or aggregate test/review never back-validates an earlier gate.
 - runtime stop races worker drain against a sleep, cancels the drain Task on
   timeout, moves workers to a detached dictionary, and reports stopped while
   work can remain alive.
+- PR #117's attempt-local force-close closes the single AppServer connection
+  shared by sibling reviews, terminalizes those siblings, and asks the same
+  permanently closed client to resume the target; no runtime-generation owner
+  creates one replacement backend/client for the whole affected generation.
 - backend cleanup deletes/unsubscribes review threads before terminal and
   reader/router/worker completion are proven.
 - `stop()` and `restart()` can interleave across `await`, allowing a stale start
   completion to publish after shutdown began.
+- Host startup can finish after Store stop/close, directly install its stale
+  client/backend, and publish `.running` because preparation, activation, and
+  publication are not split at a generation revalidation boundary.
+- MCP stop closes listener/session resources without owning and awaiting the
+  handlers already admitted from that listener; rate-limit refresh similarly
+  treats Task cancellation as completion without joining the Task.
 - application termination always replies `true` after nonthrowing `stop()`;
   there is no typed failure or explicit user decision.
 - UI observations/render Tasks rely on deinit cancellation and are not awaited
@@ -291,7 +327,13 @@ rebind the attempt or select a new interrupt target.
 `CodexReviewStore` owns this package-only state:
 
 ```text
-open(runtimeGeneration)
+open(
+  generation,
+  stopped
+    | acquiring(ownedTask)
+    | running(preparedRuntime)
+    | transitioning(purpose, ownedTask, forcedSiblingAttemptIDs)
+)
   -> closing(invalidatedGeneration, closeTask)
   -> closed(Result<Void, ReviewCloseError>)
 ```
@@ -318,35 +360,54 @@ the runtime-close stage; it never takes a one-time snapshot that a late
 completion can miss.
 
 Backend runtime startup no longer mutates `CodexReviewStore` during its own
-awaits. The lower `CodexReview` target defines only an immutable
-`RuntimePublicationSnapshot` and an opaque package lifecycle-handle protocol.
-The Host implementation owns concrete AppServer client/process, MCP server, and
-auth-observation resources behind that handle and returns
-`PreparedRuntime(snapshot:handle:)`. Only the store publishes the snapshot after
-generation revalidation and retains/joins the opaque handle. No Host/AppServer/
-MCP concrete type enters `CodexReview`, so dependency direction remains intact.
-Stale prepared runtimes enter the registered close operation and are fully
-closed there. `close()` does not call public `stop()`; both delegate to one
-internal runtime-stop stage with an explicit purpose.
+awaits. `CodexReviewStoreBackend.prepareRuntime(generation:purpose:)` is the
+single live/preview/test construction seam and returns an inert
+`PreparedRuntime(snapshot:handle:)`. The lower `CodexReview` target defines only
+the immutable generation/snapshot values and opaque package lifecycle-handle
+protocol. The Host implementation owns concrete AppServer client/process, MCP
+server, and auth-observation resources behind that handle. Only the Store may:
 
-Wave 3 normal-terminal close order is:
+1. register the acquisition Task before its first external await;
+2. revalidate the exact captured generation after preparation;
+3. call `activate()` on that exact handle;
+4. revalidate the same generation again; and
+5. atomically retain the handle and publish its server/auth/settings snapshot.
 
-1. close store mutation admission and the MCP HTTP listener/network admission;
+Neither preparation nor activation publishes Store state. If either
+revalidation fails, the Store closes admission on that exact handle, calls
+`close(purpose:)`, awaits `waitUntilClosed()`, and never publishes its snapshot.
+No Host/AppServer/MCP concrete type enters `CodexReview`, so dependency direction
+remains intact. `close()` does not call public `stop()`; both delegate to one
+internal runtime-stop stage with an explicit purpose. `restart()` is one
+recorded transition Task rather than `await stop(); await start()`.
+
+Wave 3 normal-terminal close order is exact:
+
+1. before the first suspension, install Store `closing` and synchronously close
+   Store mutation admission; the first handle operation is
+   `await closeAdmission()`, whose MCP owner linearizes listener/network
+   admission closure before awaiting any admitted handler;
 2. request active review cancellation according to the trigger policy;
 3. await canonical attempt/connection terminal;
 4. publish the in-memory terminal and finish admitted review/MCP waiters;
-5. await already-admitted MCP handlers, then dispose the stopped server;
-6. stop authentication/runtime consumers and app-server;
-7. await transport readers, notification router, event sessions, review
-   workers, process exit, and every cleanup request.
+5. await every already-admitted MCP handler, then dispose the HTTP/protocol
+   server;
+6. cancel and await authentication observation, rate-limit refresh, runtime
+   acquisition, transport reader/router, event-session, review-worker, and
+   cleanup Tasks;
+7. perform the throwing AppServer client/process close and await actual
+   termination;
+8. record and replay the one Wave 3 close result. Wave 4 inserts durable
+   terminal/query/database stages into this same Task.
 
 The forced branch has a stricter order. Grace expiry first force-closes the
 transport/process, then awaits the actual connection/process terminal and the
 complete stop of the affected ingestion/review worker. Only after that worker
 can no longer publish an upstream terminal does the close processor publish the
 forced transport interruption, finish waiters, and continue with MCP/runtime
-close. This branch cannot use the normal step-4-before-step-7 order. A matching
-terminal already committed before force-close remains authoritative.
+close. This branch cannot use the normal publish-before-physical-close order. A
+matching terminal already committed before force-close remains authoritative.
+Neither branch has a timeout-detach path.
 
 Wave 4 inserts durable terminal/history stages between 3 and 4 and query/DB
 close after 7. Wave 3 must expose one insertion point rather than a second close
@@ -369,6 +430,14 @@ process, fake, preview, and testing conformances) so force-close/process failure
 cannot be erased by a nonthrowing adapter. `AppServerClient` and Host preserve
 that typed value through `ReviewRuntimeCloseFailure`; callers never recover it
 from log text.
+
+The Store close Task is the only error assembler. It keeps the first typed
+primary failure in lifecycle order as `.interruptRequest` or `.runtime`; Wave 3
+does not generate `.persistence`, so `secondaryPhysicalDatabaseClose` is always
+`nil`. Cleanup, force-close, MCP handler-drain, and process-close failures are
+never reduced to logs. Every concurrent or later `close()` caller receives the
+same recorded `ReviewCloseError`. Wave 4 may add persistence values to this
+assembler but may not add a second assembler or close owner.
 
 ### Trigger policy
 
@@ -395,14 +464,33 @@ one resume/start consumes the token. Calling
 `start(forceRestartIfNeeded: true)` while already running is this restart path,
 not an initial-start shortcut.
 
-Force-closing a shared app-server connection for one review does not relabel
-siblings as explicitly cancelled. The target commits the requested terminal;
-each sibling receives a typed transport interruption and follows its own
-recoverable/nonrecoverable transition policy. This intentional shared
-generation loss is recoverable for every otherwise healthy sibling: one runtime
-transition owner starts exactly one replacement runtime and resumes each
-eligible sibling once. Only failure to create/validate that replacement (or an
-independently nonrecoverable sibling fault) terminalizes them.
+Force-closing a shared app-server connection for one review follows this exact
+runtime-wide sequence:
+
+1. the target attempt's grace expiry enters the Store runtime owner;
+2. before suspension, the Store changes the generation to
+   `transitioning(.recoveryReplacement, ...)`, closes new review/runtime
+   admission, and records one replacement Task;
+3. the explicit cancellation target continues toward its requested terminal,
+   while every other active attempt ID in that generation is registered in the
+   forced-sibling recovery set;
+4. the old AppServer client/process is force-closed exactly once;
+5. before recording `.ownerForcedConnectionClose` as a product terminal, each
+   sibling worker consults that set and installs `.sameAccountRestart`
+   recovery; a natural canonical terminal that linearized first still wins;
+6. the Host retains the old backend only for handoff/cleanup and creates exactly
+   one replacement client/backend pair from its factory. It does not recreate
+   the MCP listener for this intentional AppServer replacement;
+7. only after the Store activates and publishes the new generation does it
+   resume each eligible sibling exactly once, and every resume uses the new
+   backend, never the closed old backend; and
+8. only replacement creation/validation failure terminalizes all still-eligible
+   siblings with the same typed failure. The intentional force-close itself does
+   not terminalize them.
+
+If every sibling already reached a natural canonical terminal before the
+force-close transition, no replacement is created. An attempt-local guard,
+retry, or replacement client per sibling is not an alternative owner shape.
 
 ## Package API contract
 
@@ -416,8 +504,14 @@ package struct ReviewRuntimeClosePolicy: Sendable {
     package static let production: Self
 }
 
+package struct ReviewRuntimeGeneration: Hashable, Sendable {
+    package let rawValue: UInt64
+}
+
 package struct RuntimePublicationSnapshot: Sendable {
-    // Immutable server/auth/settings values needed for one atomic publication.
+    package let serverURL: URL?
+    package let authentication: CodexReviewBackendModel.Auth.Snapshot
+    package let settings: CodexReviewSettings.Snapshot
 }
 
 package enum ReviewRuntimeTransitionPurpose: Sendable {
@@ -429,6 +523,8 @@ package enum ReviewRuntimeTransitionPurpose: Sendable {
 }
 
 package protocol RuntimeLifecycleHandle: Sendable {
+    func activate() async throws
+    func closeAdmission() async
     func close(purpose: ReviewRuntimeTransitionPurpose) async throws
     func waitUntilClosed() async
 }
@@ -436,6 +532,16 @@ package protocol RuntimeLifecycleHandle: Sendable {
 package struct PreparedRuntime: Sendable {
     package let snapshot: RuntimePublicationSnapshot
     package let handle: any RuntimeLifecycleHandle
+}
+
+@MainActor
+package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend, Sendable {
+    // Existing non-runtime requirements remain unchanged. Runtime construction
+    // is replaced by this inert preparation seam; it does not mutate the Store.
+    func prepareRuntime(
+        generation: ReviewRuntimeGeneration,
+        purpose: ReviewRuntimeTransitionPurpose
+    ) async throws -> PreparedRuntime
 }
 
 package enum ReviewInterruptRequestOutcome: Sendable {
@@ -649,6 +755,30 @@ public final class ReviewMonitorWindowController: NSWindowController {
 }
 ```
 
+`ReviewRuntimeGeneration` is Store-owned and monotonically advances at every
+acquisition/transition invalidation. `activate()` is called only by the Store
+after exact-generation revalidation. `closeAdmission()` is async for actor
+isolation; once its MCP owner begins the operation, closing network admission is
+its first mutation and precedes any admitted-handler drain await. It is
+idempotent so stale-preparation and app-close paths share the same entry.
+`close(purpose:)` owns cancellation and physical teardown, while
+`waitUntilClosed()` proves that admitted MCP handlers, auth/rate-limit observers,
+readers, routers, sessions, workers, cleanup Tasks, client, and process have all
+finished. A handle must not implement `close()` as cancellation-only or return
+from `waitUntilClosed()` while any admitted handler can still execute.
+
+The MCP server owns one admission state, not untracked NIO `Task` creation:
+
+```text
+accepting(admittedHandlerRegistry)
+  -> closing(networkAdmissionClosed, finiteAdmittedHandlers)
+  -> closed
+```
+
+The owner registers a handler before dispatch, removes it only after completion,
+rejects every request that linearizes after `closing`, and awaits the finite
+registry before disposing listener/session resources.
+
 `ReviewAttemptOwnership` is the value of the Store's sole per-review attempt
 registry. Do not retain parallel `activeRuns`, admission, recovery-token, or
 replacement-start maps. Every command switches on this enum, captures the exact
@@ -698,15 +828,24 @@ Wave 3 defines this final close-error shape and the single primary/secondary
 assembly owner even though it does not yet generate persistence values. Wave 4
 adds stages and values, not another error assembler.
 
-Do not change the public `start()`, `stop()`, `restart()`, cancellation, review
-result, or MCP tool signatures. The two approved additive public surfaces in
-this wave are `@MainActor public func CodexReviewStore.close() async throws` and
-`@MainActor public func ReviewMonitorWindowController.closeAndWait() async`;
-update the accepted API
-baseline and external consumer fixture for both while preserving every released
-declaration. Neither exposes persistence implementation types. The Wave 2
-terminal fact remains `ReviewJobCore.Lifecycle.terminal`. Run the strict
-API/consumer/MCP compatibility gate at every checkpoint.
+Do not change the public `start(forceRestartIfNeeded:)`, `stop()`, `restart()`,
+`waitUntilStopped()`, cancellation, review-result, or MCP tool signatures. Wave
+3B's only public addition is
+`@MainActor public func CodexReviewStore.close() async throws`. Wave 3C later
+adds `@MainActor public func ReviewMonitorWindowController.closeAndWait() async`
+under its separate gate. Neither exposes a package lifecycle/error or
+persistence implementation type.
+
+For Wave 3B, make
+`Fixtures/CodexReviewKitProductConsumer/Sources/CodexReviewKitProductConsumer/main.swift`
+an async consumer and call `try await store.close()` through the actual public
+product. Record exactly that accepted additive declaration in
+`scripts/compatibility-baselines/v0.6.2/public-api.json`, update the baseline
+README and checksum metadata, and preserve every released declaration. The Wave
+2 terminal fact remains `ReviewJobCore.Lifecycle.terminal`. MCP `tools/list`,
+tool names, input schemas, and its five-tool byte-equivalent golden stay
+unchanged. Run the strict API/consumer/MCP compatibility gate at every
+checkpoint and at the combined Wave 3A+B merge gate.
 
 Close-policy/fake-clock injection is available only through package initializers
 and testing factories; it does not change a released public initializer or
@@ -842,16 +981,37 @@ owner; do not grow a second lifecycle around the temporary dictionary.
 
 ### Wave 3B — store runtime, Host/MCP, and public close
 
-- `Sources/CodexReview/Store/CodexReviewStore.swift`
-- `Sources/CodexReview/Store/CodexReviewStoreCancellation.swift`
-- `Sources/CodexReview/Store/CodexReviewStoreReviews.swift`
-- `Sources/CodexReview/Store/CodexReviewStoreTesting.swift`
-- `Sources/CodexReview/Store/CodexReviewStoreRateLimitAutoRefresh.swift`
-- one new package-only runtime/close state file under `Sources/CodexReview/`
-- preview/testing backend and lifecycle-handle conformances
-- `Sources/CodexReviewHost/LiveCodexReviewStoreBackend.swift`
-- `Sources/CodexReviewHost/CodexReviewHost.swift`
-- `Sources/CodexReviewMCPServer/CodexReviewMCPHTTPServer.swift`
+This is the exact allowed write set. It is a ceiling, not a requirement to edit
+every path. Any required production/test change outside it is a design blocker
+and must be reported before editing.
+
+Production — 12 paths:
+
+1. `Sources/CodexReview/ReviewRuntimeLifecycle.swift` — new
+2. `Sources/CodexReview/Store/CodexReviewStore.swift`
+3. `Sources/CodexReview/Store/CodexReviewStoreBackend.swift`
+4. `Sources/CodexReview/Store/CodexReviewStoreCancellation.swift`
+5. `Sources/CodexReview/Store/CodexReviewStoreReviews.swift`
+6. `Sources/CodexReview/Store/CodexReviewStoreTesting.swift`
+7. `Sources/CodexReview/Store/CodexReviewStoreRateLimitAutoRefresh.swift`
+8. `Sources/CodexReview/Store/PreviewCodexReviewStoreBackend.swift`
+9. `Sources/CodexReviewTesting/TestSupport.swift`
+10. `Sources/CodexReviewHost/LiveCodexReviewStoreBackend.swift`
+11. `Sources/CodexReviewHost/CodexReviewHost.swift`
+12. `Sources/CodexReviewMCPServer/CodexReviewMCPHTTPServer.swift`
+
+Test/gate — 10 paths:
+
+1. `Tests/CodexReviewTests/CodexReviewStoreLifecycleTests.swift` — new
+2. `Tests/CodexReviewTests/CodexReviewStoreCommandTests.swift`
+3. `Tests/CodexReviewTests/CodexReviewStoreRateLimitAutoRefreshTests.swift`
+4. `Tests/CodexReviewHostTests/CodexReviewHostTests.swift`
+5. `Tests/CodexReviewMCPServerTests/CodexReviewMCPHTTPServerTests.swift`
+6. `Tests/ReviewUITests/ReviewUITests.swift` — backend compile seam only
+7. `Fixtures/CodexReviewKitProductConsumer/Sources/CodexReviewKitProductConsumer/main.swift`
+8. `scripts/compatibility-baselines/README.md`
+9. `scripts/compatibility-baselines/v0.6.2/public-api.json`
+10. `scripts/compatibility-baselines/v0.6.2/metadata.json`
 
 Wave 3B consumes the reviewed 3A barrier and throwing cleanup/close contract; it
 does not redesign the attempt processor. Store-owned rate-limit refresh and
@@ -860,6 +1020,26 @@ close Task. A 3A cleanup failure retains its original operation/cause and is not
 folded into worker success or discarded after a product terminal.
 Wave 3B updates the accepted CodexReview API/consumer baseline only for public
 `CodexReviewStore.close()`.
+
+In `LiveCodexReviewStoreBackend.swift`, authentication-related edits are limited
+to replacing existing account-transition `stop`/`start` calls with the Store
+runtime command and joining the existing observation Task during close. Wave 3B
+does not change auth provider, credential, registry, login, or wire semantics.
+
+Explicitly excluded from Wave 3B are:
+
+- `Sources/CodexReviewAppServer/**` and any Wave 3A redesign of
+  `ReviewAttemptProcessor.swift`;
+- `Sources/ReviewUI/**` and `Tools/ReviewMonitor/**` Wave 3C behavior;
+- GRDB/history/schema/migration code and package dependencies;
+- descriptor/environment preparation and executable capability redesign;
+- auth provider/wire/RegistryV2/login staging behavior;
+- MCP tool names, input schemas, and golden output; and
+- workflows.
+
+The Wave 3A checkpoint remains review evidence, not a merge candidate. Only the
+combined Wave 3A+B exact-base diff may pass the merge gate; Wave 3C then starts
+from that reviewed combined HEAD.
 
 ### Wave 3C — ReviewUI and application termination
 
@@ -873,7 +1053,7 @@ Wave 3B updates the accepted CodexReview API/consumer baseline only for public
 Wave 3C adds only the accepted ReviewUI
 `ReviewMonitorWindowController.closeAndWait()` declaration to that baseline.
 
-Wave 3C does not change the reviewed 3A attempt processor or reviewed 3B runtime,
+Wave 3C does not change the combined-reviewed 3A attempt processor or 3B runtime,
 MCP, and store close implementation. If native integration exposes a missing
 lower-layer contract, it stops and returns a design finding instead of adding a
 second close owner in the app target.
@@ -954,7 +1134,17 @@ prove these current failures:
 16. a Task returned by start registration can reach backend dispatch before its
     handle is published in Store attempt ownership;
 17. runtime-stop detachment removes attempt state while the detached worker still
-    owns activation/admission/backend-write authority.
+    owns activation/admission/backend-write authority;
+18. with two concurrent reviews, one grace force-close closes both streams,
+    terminalizes the sibling, and then fails to resume on the same closed client;
+19. holding the runtime factory while stop/close wins allows the late start to
+    publish `.running` and install stale client/backend state;
+20. an admitted MCP tool handler held at a controlled gate outlives current
+    `stop()` completion;
+21. a rate-limit refresh held at a controlled gate is treated as complete after
+    cancellation without its Task being joined; and
+22. the timeout-detach cases in `CodexReviewStoreCommandTests` return while an
+    owned worker is still unfinished.
 
 Then commit green checkpoints:
 
@@ -963,8 +1153,9 @@ Then commit green checkpoints:
 3. freeze and branch-review Wave 3A;
 4. runtime generation and single close Task on reviewed 3A;
 5. awaited transport/process/router/worker/MCP cleanup;
-6. freeze and branch-review Wave 3B;
-7. ReviewUI close and application termination decision on reviewed 3B;
+6. freeze Wave 3B, then run the combined Wave 3A+B exact-base merge review;
+7. ReviewUI close and application termination decision on reviewed combined
+   Wave 3A+B;
 8. freeze and branch-review Wave 3C;
 9. review-finding fixes.
 
@@ -1023,10 +1214,26 @@ Then commit green checkpoints:
   and application-termination trigger policy;
 - terminal grace expiry triggers force-close and then awaits real completion;
 - force-close failure remains typed and workers are not detached;
+- with two concurrent reviews, target cancellation reaches the requested
+  terminal, every healthy sibling enters forced-generation recovery once, and
+  the Host factory creates exactly one replacement client/backend pair;
+- the old backend is used only for handoff/cleanup and the new backend only for
+  sibling resume; no sibling resume reaches the closed client;
+- a sibling canonical terminal that wins before force-close suppresses its
+  replacement, and if all siblings are terminal no replacement is created;
+- replacement creation/validation failure gives every still-eligible sibling
+  the same typed terminal failure without a retry loop;
 - concurrent/repeated close returns the same success/error;
-- close racing start/restart prevents stale publication and closes acquired
-  resources exactly once;
+- close/start, close/restart, stop/close, and concurrent-close interleavings all
+  join the recorded owner; a stale acquired handle is closed exactly once and
+  never published;
 - stop during close joins; start/restart after close are no-ops;
+- MCP rejects requests admitted after `closeAdmission()`, awaits every handler
+  admitted before it, and only then disposes the HTTP/protocol server;
+- rate-limit/auth/router/worker/cleanup Tasks cannot callback after close
+  completion;
+- repeated close replays the same success/error, preserving cleanup,
+  force-close, MCP-drain, and process-close origin;
 - no callback, event, process, request, or observation after close completion;
 - UI render Task is cancelled and awaited before store close;
 - Cancel Quit replies `false`; Quit Anyway replies `true`; success replies
@@ -1050,9 +1257,11 @@ Final gates:
 - `xcodebuild test -project Tools/ReviewMonitor/CodexReviewMonitor.xcodeproj -scheme CodexReviewMonitor -destination 'platform=macOS,arch=arm64' CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO`
 - branch-wide Codex review against the exact worker base.
 
-Run the applicable full gates and a branch-wide review at the end of each of
-3A, 3B, and 3C before the next stacked slice is dispatched; a later slice never
-serves as validation for an earlier one.
+Run the applicable full gates and a checkpoint review at the end of 3A. Do not
+merge it. After 3B, run all 3B gates plus a branch-wide exact-base review of the
+combined Wave 3A+B diff; that combined result is the only merge gate and the
+only valid base for 3C. Run the 3C gates and branch-wide review separately. A
+later slice never serves as validation for an earlier checkpoint.
 
 After reviewed 3C, dispatch #113. Do not dispatch Wave 4 or Wave 5 directly from
 a Wave 3 code/test checkpoint: the reviewed descriptor-capability result is an
