@@ -121,6 +121,9 @@ let package = Package(
                 "CodexReviewTesting",
                 .product(name: "NIOCore", package: "swift-nio"),
             ],
+            resources: [
+                .process("Fixtures"),
+            ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]
