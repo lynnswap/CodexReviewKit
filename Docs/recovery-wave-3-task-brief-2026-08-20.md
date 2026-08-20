@@ -283,6 +283,10 @@ satisfied the barrier, retain the typed transport outcome and original request
 failure rather than fabricating requested cancellation; replacement is still
 suppressed.
 
+Here, “replacement” means this product review's next attempt/candidate. It does
+not suppress the independent one-per-generation AppServer runtime replacement
+after a shared old-runtime close signal has actually been sent.
+
 The Store must keep the old `activeEventSubscriptionID`, mailbox consumer, and
 AppServer session registered until this classification and all owned request/
 force-close Tasks have joined and the admission has installed the disposition.
@@ -328,15 +332,38 @@ rebind the attempt or select a new interrupt target.
 
 ```text
 open(
-  generation,
-  stopped
+  appServerGeneration,
+  appServer: stopped
     | acquiring(ownedTask)
     | running(preparedRuntime)
     | transitioning(purpose, ownedTask, forcedSiblingAttemptIDs)
+    | failed(ReviewRuntimeCloseFailureAggregate, admission: closed),
+  mcpServerOwner: one stable app-lifetime owner identity
 )
-  -> closing(invalidatedGeneration, closeTask)
+  -> closing(invalidatedAppServerGeneration, closeTask)
   -> closed(Result<Void, ReviewCloseError>)
 ```
+
+The Host-owned MCP owner has its own non-mirrored state:
+
+```text
+stopped
+  -> preparing(generation, ownedTask)
+  -> running(generation, bound(oneLease) | declaredNoMCP)
+  -> stopping(ownedTask)
+  -> stopped
+
+stopped | preparing | running | stopping
+  -> closing(oneCloseTask)
+  -> closed(recordedResult)
+```
+
+One owner identity spans the Store lifetime, but each `stop()`/later `start()`
+uses a new sequential listener lease (or explicit no-MCP generation) and MCP
+generation. There is never more than one preparing/running/stopping lease. The
+Store does not mirror this state; its one runtime transition Task invokes the
+opaque owner and publishes only the
+post-activation, generation-revalidated server URL.
 
 The first `close()` installs `closing`, invalidates the runtime generation, and
 closes mutation admission before its first suspension. Concurrent/repeated
@@ -347,9 +374,9 @@ are no-ops once closing begins.
 
 Every start/restart operation captures the open generation before external
 awaits and revalidates it afterward. A late stale completion cannot publish
-server/auth/settings/observation state. Any resource it acquired is handed to
-the installed close Task and awaited there; it is never abandoned or closed by
-an unowned Task.
+an MCP server URL or AppServer auth/settings/observation state. Any resource it
+acquired is handed to the installed close Task and awaited there; it is never
+abandoned or closed by an unowned Task.
 
 The store registers each runtime acquisition operation, with its owned Task,
 before that operation's first external await. Closing first rejects new
@@ -361,56 +388,109 @@ completion can miss.
 
 Backend runtime startup no longer mutates `CodexReviewStore` during its own
 awaits. `CodexReviewStoreBackend.prepareRuntime(generation:purpose:)` is the
-single live/preview/test construction seam and returns an inert
-`PreparedRuntime(snapshot:handle:)`. The lower `CodexReview` target defines only
-the immutable generation/snapshot values and opaque package lifecycle-handle
-protocol. The Host implementation owns concrete AppServer client/process, MCP
-server, and auth-observation resources behind that handle. Only the Store may:
+single live/preview/test AppServer construction seam and returns an inert
+`PreparedRuntime(snapshot:handle:)`. `PreparedRuntime` contains only the
+replaceable AppServer generation's auth/settings snapshot and
+`RuntimeLifecycleHandle`; it never owns, retains, prepares, activates, closes,
+or republishes an MCP listener or server URL. The separate
+`CodexReviewStoreBackend.mcpServerLifecycle` is one Host-owned app-lifetime
+`MCPServerLifecycleOwner`.
+
+The ownership split is exact:
+
+- the Store close Task owns and awaits its runtime transition/acquisition Tasks,
+  review workers and admissions, the rate-limit driver and in-flight refresh,
+  and Store attempt/cleanup Tasks;
+- one replaceable `RuntimeLifecycleHandle` owns only its Host auth observation,
+  transport reader, notification router, backend event sessions, client, and
+  process; and
+- `MCPServerLifecycleOwner` owns only MCP generation/lease state, listener,
+  protocol sessions, network admission, and the admitted-handler registry.
+
+No lifecycle handle owns a Store worker/rate-limit/cleanup Task, and no
+`PreparedRuntime` or AppServer handle can reach the MCP listener.
+
+Only the Store may:
 
 1. register the acquisition Task before its first external await;
 2. revalidate the exact captured generation after preparation;
 3. call `activate()` on that exact handle;
 4. revalidate the same generation again; and
-5. atomically retain the handle and publish its server/auth/settings snapshot.
+5. atomically retain the handle and publish its auth/settings snapshot.
 
 Neither preparation nor activation publishes Store state. If either
 revalidation fails, the Store closes admission on that exact handle, calls
-`close(purpose:)`, awaits `waitUntilClosed()`, and never publishes its snapshot.
+`close(purpose:)`, records any signal error, always awaits the throwing
+`waitUntilClosed()` as an idempotent proof of that same recorded completion,
+and never publishes its snapshot. Initial `start()` and
+`start()` after `stop()` also ask the stable MCP owner to prepare one inert MCP
+generation. Only after exact generation revalidation and AppServer publication
+does the Store activate that exact MCP generation. Binding completes inside
+`activate`, which returns `MCPServerPublicationSnapshot` with the actual bound
+URL. A Live owner must return non-`nil`; an explicit no-MCP Direct/Preview/
+Testing owner returns `nil` and never fabricates a placeholder URL. The Store
+revalidates that same MCP generation after the await and only then publishes the
+returned optional value; `prepare()` has no publication snapshot, so a port-0
+configuration can never publish port 0. Stale MCP preparation/activation is
+stopped/awaited by the same owner and never published.
 No Host/AppServer/MCP concrete type enters `CodexReview`, so dependency direction
 remains intact. `close()` does not call public `stop()`; both delegate to one
-internal runtime-stop stage with an explicit purpose. `restart()` is one
-recorded transition Task rather than `await stop(); await start()`.
+internal transition owner with an explicit purpose. `restart()` is one recorded
+transition Task rather than `await stop(); await start()`.
+
+`restartSameAccount` and `recoveryReplacement` retain the running MCP generation
+and listener without closing network admission or preparing another lease.
+Runtime-disable `stop()` closes MCP network admission, drains admitted handlers,
+physically stops and awaits that lease, and leaves the app-lifetime MCP owner in
+`stopped`. A later released `start()` prepares/activates a new MCP generation
+through the same owner. Application `close()` transitions the owner to terminal
+`closed`; no later prepare/activate is permitted.
 
 Wave 3 normal-terminal close order is exact:
 
 1. before the first suspension, install Store `closing` and synchronously close
-   Store mutation admission; the first handle operation is
-   `await closeAdmission()`, whose MCP owner linearizes listener/network
-   admission closure before awaiting any admitted handler;
+   Store mutation/review/runtime admission; then close AppServer generation
+   admission and ask the MCP owner to close listener/network admission as its
+   first mutation before any handler-drain await;
 2. request active review cancellation according to the trigger policy;
 3. await canonical attempt/connection terminal;
 4. publish the in-memory terminal and finish admitted review/MCP waiters;
-5. await every already-admitted MCP handler, then dispose the HTTP/protocol
-   server;
-6. cancel and await authentication observation, rate-limit refresh, runtime
-   acquisition, transport reader/router, event-session, review-worker, and
-   cleanup Tasks;
-7. perform the throwing AppServer client/process close and await actual
-   termination;
-8. record and replay the one Wave 3 close result. Wave 4 inserts durable
+5. ask the MCP owner to drain every already-admitted handler in registration
+   order, send all listener/session close signals, and then await physical MCP
+   completion; signal/drain/wait failures are recorded without skipping a later
+   stage;
+6. the Store close Task cancels and awaits every Store-owned runtime transition/
+   acquisition, review worker/admission, rate-limit driver/in-flight refresh,
+   and Store attempt/cleanup Task;
+7. only after Store cleanup, call the throwing AppServer
+   `RuntimeLifecycleHandle.close(purpose:)`; its one recorded Task issues the
+   client/process close signal before any Host completion wait. The method may
+   then join physical client/process/reader plus Host auth/router/event-session
+   completion before returning or throwing, matching the existing AppServer
+   client/transport contract;
+8. regardless of step 7 success, call the throwing `waitUntilClosed()` to join
+   that exact recorded close Task/result and prove Host auth observation, reader,
+   router, event sessions, client, and process completion. A replayed failure
+   already recorded from step 7 is not appended twice;
+9. assemble and replay the one Wave 3 close result. Wave 4 inserts durable
    terminal/query/database stages into this same Task.
 
-The forced branch has a stricter order. Grace expiry first force-closes the
-transport/process, then awaits the actual connection/process terminal and the
-complete stop of the affected ingestion/review worker. Only after that worker
-can no longer publish an upstream terminal does the close processor publish the
-forced transport interruption, finish waiters, and continue with MCP/runtime
-close. This branch cannot use the normal publish-before-physical-close order. A
-matching terminal already committed before force-close remains authoritative.
+The forced branch has a stricter order. Grace expiry calls the exact old
+AppServer handle's throwing `close(purpose:)`; its recorded Task sends the close
+signal before its combined physical-completion wait. The Store records that
+result once, then always calls throwing `waitUntilClosed()` as an idempotent
+proof and separately awaits the affected Store-owned review workers. Only after
+Host connection/process termination and those workers can no longer publish an
+upstream terminal does the Store publish the forced transport interruption and
+finish waiters. It then
+continues with MCP drain and remaining Store-owned cleanup; normal close joins
+the already-recorded AppServer combined-close result rather than signaling twice.
+This branch cannot use normal semantic-publication-before-physical-close order.
+A matching terminal already committed before force-close remains authoritative.
 Neither branch has a timeout-detach path.
 
 Wave 4 inserts durable terminal/history stages between 3 and 4 and query/DB
-close after 7. Wave 3 must expose one insertion point rather than a second close
+close after 8. Wave 3 must expose one insertion point rather than a second close
 sequence. Natural completion, requested interruption, connection terminal,
 ingestion failure, and recovery disposition all call the same awaited finish
 owner. The recovery entry receives the whole `ReviewRecoveryDisposition` so it
@@ -422,8 +502,8 @@ history commit. Cleanup is invoked only from the returned finish result.
 `ReviewRuntimeClosePolicy.terminalGrace` is injected; production uses 10
 seconds and tests use a controlled suspension. Grace expiry triggers transport
 and process force-close. It does not prove completion. The owner then awaits
-the actual connection terminal and all worker Tasks. No second timeout detaches
-them.
+the exact handle's combined Host completion while the Store separately awaits
+all affected review-worker Tasks. No second timeout detaches them.
 
 `JSONRPC.Transport.close()` becomes a throwing package contract (with updated
 process, fake, preview, and testing conformances) so force-close/process failure
@@ -431,21 +511,28 @@ cannot be erased by a nonthrowing adapter. `AppServerClient` and Host preserve
 that typed value through `ReviewRuntimeCloseFailure`; callers never recover it
 from log text.
 
-The Store close Task is the only error assembler. It keeps the first typed
-primary failure in lifecycle order as `.interruptRequest` or `.runtime`; Wave 3
-does not generate `.persistence`, so `secondaryPhysicalDatabaseClose` is always
-`nil`. Cleanup, force-close, MCP handler-drain, and process-close failures are
-never reduced to logs. Every concurrent or later `close()` caller receives the
-same recorded `ReviewCloseError`. Wave 4 may add persistence values to this
-assembler but may not add a second assembler or close owner.
+The Store close Task is the only error assembler. It appends every typed failure
+in the selected branch's declared order—the numbered normal order above or the
+forced signal/wait-before-publication sequence; within a concurrently joined
+Store or Host stage, registration ordinal—not completion timing—defines order.
+The nonempty `ReviewCloseFailureAggregate` retains `first` plus every
+`additionalInLifecycleOrder`. No failure prevents a later close/wait stage, and
+cleanup, force-close, MCP handler-drain/listener, rate-limit, Host observation/
+reader/router/session, client, and process failures are never reduced to logs.
+Wave 3 does not generate `.persistence`, so
+`secondaryPhysicalDatabaseClose` is always `nil`. Wave 4 keeps an original
+persistence failure in the aggregate and uses the secondary field only for an
+additional physical database-close failure. Every concurrent or later
+`close()` caller receives the same recorded `ReviewCloseError`; Wave 4 may add
+values to this assembler but not another assembler or close owner.
 
 ### Trigger policy
 
 | Trigger | Product meaning |
 |---|---|
 | Explicit UI/MCP cancel | Await barrier, then requested interruption; no retry. |
-| `store.stop()` / runtime disable | Await barrier, then system-requested interruption. |
-| Same-account `restart()` | Interrupt the old attempt but keep the product review nonterminal; transition through connectivity recovery and create exactly one new attempt. |
+| `store.stop()` / runtime disable | Await barrier, then system-requested interruption; drain/stop the current MCP lease and leave its owner reusable for later `start()`. |
+| Same-account `restart()` | Interrupt the old attempt but keep the product review nonterminal; retain the MCP listener and create exactly one new AppServer attempt/runtime. |
 | Account switch/sign-out/removal | Await barrier, then terminal requested/server interruption; never continue under another credential. |
 | Recoverable network loss | Typed old-attempt transport interruption; product remains nonterminal and one recovery owner starts the next attempt. |
 | Nonrecoverable protocol/process loss | Typed failed/interrupted terminal; no retry loop. |
@@ -478,19 +565,30 @@ runtime-wide sequence:
 5. before recording `.ownerForcedConnectionClose` as a product terminal, each
    sibling worker consults that set and installs `.sameAccountRestart`
    recovery; a natural canonical terminal that linearized first still wins;
-6. the Host retains the old backend only for handoff/cleanup and creates exactly
-   one replacement client/backend pair from its factory. It does not recreate
-   the MCP listener for this intentional AppServer replacement;
-7. only after the Store activates and publishes the new generation does it
-   resume each eligible sibling exactly once, and every resume uses the new
-   backend, never the closed old backend; and
-8. only replacement creation/validation failure terminalizes all still-eligible
-   siblings with the same typed failure. The intentional force-close itself does
-   not terminalize them.
+6. if the Store remains `open`, the Host retains the old backend only for
+   handoff/cleanup and creates exactly one replacement client/backend pair from
+   its factory even when the forced-sibling set is empty. It neither closes nor
+   recreates the current MCP generation/listener;
+7. only after the Store activates and publishes the new AppServer generation
+   does it resume each eligible sibling exactly once, and every resume uses the
+   new backend, never the closed old backend. With zero eligible siblings, this
+   publication still restores runtime availability; and
+8. replacement creation/validation failure terminalizes all still-eligible
+   siblings with the same typed failure, publishes the Store's typed runtime
+   failed state, and leaves Store review/runtime admission closed. The
+   app-lifetime MCP generation remains unchanged—its bound listener stays active
+   or declared-no-MCP URL stays `nil`, with no second lease—so Live read/status
+   operations can expose the failure and mutation tools return that typed
+   runtime-unavailable failure.
 
-If every sibling already reached a natural canonical terminal before the
-force-close transition, no replacement is created. An attempt-local guard,
-retry, or replacement client per sibling is not an alternative owner shape.
+Once the old AppServer close signal is sent, an `open` Store always needs the
+one replacement; sibling count is not the condition. If a natural canonical
+terminal wins before any old-runtime close signal is sent, no runtime was lost
+and the replacement transition is cancelled. If the Store has entered `stop`
+or application `closing`, its transition purpose suppresses replacement and
+follows the corresponding MCP stop/terminal-close contract. An attempt-local
+guard, retry, or replacement client per sibling is not an alternative owner
+shape.
 
 ## Package API contract
 
@@ -509,9 +607,22 @@ package struct ReviewRuntimeGeneration: Hashable, Sendable {
 }
 
 package struct RuntimePublicationSnapshot: Sendable {
-    package let serverURL: URL?
     package let authentication: CodexReviewBackendModel.Auth.Snapshot
     package let settings: CodexReviewSettings.Snapshot
+}
+
+package struct MCPServerGeneration: Hashable, Sendable {
+    package let rawValue: UInt64
+}
+
+package struct MCPServerPublicationSnapshot: Sendable {
+    // nil is reserved for a composition that explicitly has no MCP capability.
+    // A Live owner that binds a listener must return the actual non-nil URL.
+    package let serverURL: URL?
+}
+
+package struct PreparedMCPServer: Sendable {
+    package let generation: MCPServerGeneration
 }
 
 package enum ReviewRuntimeTransitionPurpose: Sendable {
@@ -523,10 +634,17 @@ package enum ReviewRuntimeTransitionPurpose: Sendable {
 }
 
 package protocol RuntimeLifecycleHandle: Sendable {
+    // These methods govern only one replaceable AppServer generation. They
+    // cannot reach an MCP listener or any Store-owned Task.
     func activate() async throws
     func closeAdmission() async
+    // Installs one recorded Task. Its first physical operation sends the
+    // client/process close signal; it then joins all Host auth/reader/router/
+    // session/client/process completion before returning/throwing.
     func close(purpose: ReviewRuntimeTransitionPurpose) async throws
-    func waitUntilClosed() async
+    // Idempotently joins/replays that exact recorded close completion; it never
+    // initiates close or adds a second failure.
+    func waitUntilClosed() async throws
 }
 
 package struct PreparedRuntime: Sendable {
@@ -534,10 +652,39 @@ package struct PreparedRuntime: Sendable {
     package let handle: any RuntimeLifecycleHandle
 }
 
+package protocol MCPServerLifecycleOwner: Sendable {
+    // One owner identity spans the app lifetime. prepare is legal only from
+    // stopped and creates one inert listener or declared-no-MCP generation.
+    func prepare() async throws -> PreparedMCPServer
+    // Bind completes here. Live returns the actual non-nil assigned URL,
+    // including when configuration requested port 0. A declared no-MCP
+    // Direct/Preview/Testing owner returns nil without fabricating a URL.
+    func activate(
+        _ generation: MCPServerGeneration
+    ) async throws -> MCPServerPublicationSnapshot
+    // Network admission closes before this operation awaits any handler.
+    func closeAdmission() async
+    func drainAdmittedHandlers() async throws
+    // Nonterminal runtime-disable path; a later prepare is legal after wait.
+    // Attempts all listener/session close signals, then returns/throws.
+    func stop() async throws
+    // Starts only after stop signaling and awaits physical completion.
+    func waitUntilStopped() async throws
+    // Terminal application-close path; later prepare/activate is illegal.
+    // Attempts all listener/session close signals, then returns/throws.
+    func close() async throws
+    // Starts only after close signaling and awaits physical completion.
+    func waitUntilClosed() async throws
+}
+
 @MainActor
 package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend, Sendable {
     // Existing non-runtime requirements remain unchanged. Runtime construction
     // is replaced by this inert preparation seam; it does not mutate the Store.
+    // Stable identity for the entire Store lifetime; every access returns the
+    // same owner, never a newly constructed listener owner.
+    var mcpServerLifecycle: any MCPServerLifecycleOwner { get }
+
     func prepareRuntime(
         generation: ReviewRuntimeGeneration,
         purpose: ReviewRuntimeTransitionPurpose
@@ -636,10 +783,22 @@ package struct ReviewInterruptRequestFailure: LocalizedError, Sendable {
 
 package enum ReviewRuntimeCloseFailure: LocalizedError, Sendable {
     case connection(String)
+    case client(String)
     case process(String)
+    case authenticationObservation(String)
+    case reader(String)
+    case router(String)
+    case session(String)
     case worker(String)
+    case rateLimit(String)
     case cleanup(String)
     case mcpHandlerDrain(String)
+    case mcpServer(String)
+}
+
+package struct ReviewRuntimeCloseFailureAggregate: LocalizedError, Sendable {
+    package let first: ReviewRuntimeCloseFailure
+    package let additionalInLifecycleOrder: [ReviewRuntimeCloseFailure]
 }
 
 package enum ReviewPersistenceError: LocalizedError, Sendable {
@@ -656,8 +815,13 @@ package enum ReviewClosePrimaryFailure: LocalizedError, Sendable {
     case persistence(ReviewPersistenceError)
 }
 
+package struct ReviewCloseFailureAggregate: LocalizedError, Sendable {
+    package let first: ReviewClosePrimaryFailure
+    package let additionalInLifecycleOrder: [ReviewClosePrimaryFailure]
+}
+
 package struct ReviewCloseError: LocalizedError, Sendable {
-    package let primary: ReviewClosePrimaryFailure
+    package let failures: ReviewCloseFailureAggregate
     package let secondaryPhysicalDatabaseClose: ReviewPersistenceError?
 }
 
@@ -757,27 +921,50 @@ public final class ReviewMonitorWindowController: NSWindowController {
 
 `ReviewRuntimeGeneration` is Store-owned and monotonically advances at every
 acquisition/transition invalidation. `activate()` is called only by the Store
-after exact-generation revalidation. `closeAdmission()` is async for actor
-isolation; once its MCP owner begins the operation, closing network admission is
-its first mutation and precedes any admitted-handler drain await. It is
-idempotent so stale-preparation and app-close paths share the same entry.
-`close(purpose:)` owns cancellation and physical teardown, while
-`waitUntilClosed()` proves that admitted MCP handlers, auth/rate-limit observers,
-readers, routers, sessions, workers, cleanup Tasks, client, and process have all
-finished. A handle must not implement `close()` as cancellation-only or return
-from `waitUntilClosed()` while any admitted handler can still execute.
+after exact-generation revalidation. Runtime `closeAdmission()` affects only
+that AppServer generation's Host request/session admission. Runtime
+`close(purpose:)` installs one recorded Task whose first physical operation
+sends the client/process close signal before any Host completion wait. Matching
+the existing client/transport contract, it may then join physical client/
+process/reader and all Host auth/router/event-session completion before
+returning/throwing. The Store always follows it with throwing
+`waitUntilClosed()`, which idempotently joins/replays that exact result. A
+replayed aggregate is recorded only once. The handle cannot reach Store review
+workers, rate-limit work, Store cleanup, or MCP resources.
+
+`MCPServerLifecycleOwner` is the only MCP lifecycle identity. Its
+`closeAdmission()` is async for actor isolation; once the owner begins the
+operation, closing network admission is its first mutation and precedes any
+handler-drain await. `stop()`/`waitUntilStopped()` physically end the current
+lease but return the owner to reusable `stopped`; `close()`/`waitUntilClosed()`
+make it terminal. Runtime handles and `PreparedRuntime` contain neither this
+owner nor its current lease.
 
 The MCP server owns one admission state, not untracked NIO `Task` creation:
 
 ```text
-accepting(admittedHandlerRegistry)
+running(generation, bound(accepting(admittedHandlerRegistry)))
+  -> stopping(networkAdmissionClosed, finiteAdmittedHandlers)
+  -> stopped
+
+running(generation, declaredNoMCP) -> stopped
+
+running | stopped | preparing | stopping
   -> closing(networkAdmissionClosed, finiteAdmittedHandlers)
   -> closed
 ```
 
 The owner registers a handler before dispatch, removes it only after completion,
 rejects every request that linearizes after `closing`, and awaits the finite
-registry before disposing listener/session resources.
+registry before disposing listener/session resources. `restartSameAccount` and
+`recoveryReplacement` leave the `running` generation unchanged. A later
+`start()` after runtime-disable `stop()` creates a fresh generation from the
+same owner.
+
+Both lifecycle owners normalize multiple failures from one close/wait method to
+`ReviewRuntimeCloseFailureAggregate`. The Store flattens those values into
+`ReviewCloseFailureAggregate` at the method's fixed lifecycle position; it never
+keeps only the thrown `first` value.
 
 `ReviewAttemptOwnership` is the value of the Store's sole per-review attempt
 registry. Do not retain parallel `activeRuns`, admission, recovery-token, or
@@ -824,9 +1011,10 @@ mailboxes expose only the typed `fail` entry point above; `fail(any Error)`,
 removed. Mapping from external errors into this closed union belongs to the
 transport/router boundary.
 
-Wave 3 defines this final close-error shape and the single primary/secondary
-assembly owner even though it does not yet generate persistence values. Wave 4
-adds stages and values, not another error assembler.
+Wave 3 defines the nonempty first-plus-additional close-failure aggregate and
+the separate future physical-database-close secondary under one assembly owner,
+even though it does not yet generate persistence values. Wave 4 adds stages and
+values, not another error assembler.
 
 Do not change the public `start(forceRestartIfNeeded:)`, `stop()`, `restart()`,
 `waitUntilStopped()`, cancellation, review-result, or MCP tool signatures. Wave
@@ -1014,10 +1202,11 @@ Test/gate — 10 paths:
 10. `scripts/compatibility-baselines/v0.6.2/metadata.json`
 
 Wave 3B consumes the reviewed 3A barrier and throwing cleanup/close contract; it
-does not redesign the attempt processor. Store-owned rate-limit refresh and
-every other registered runtime consumer are cancelled and awaited by the same
-close Task. A 3A cleanup failure retains its original operation/cause and is not
-folded into worker success or discarded after a product terminal.
+does not redesign the attempt processor. The Store close Task directly owns and
+awaits Store acquisition/review/rate-limit/cleanup work, then orchestrates the
+separate Host AppServer handle and MCP owner that await only their own resources.
+A 3A cleanup failure retains its original operation/cause and is not folded into
+worker success or discarded after a product terminal.
 Wave 3B updates the accepted CodexReview API/consumer baseline only for public
 `CodexReviewStore.close()`.
 
@@ -1144,7 +1333,11 @@ prove these current failures:
 21. a rate-limit refresh held at a controlled gate is treated as complete after
     cancellation without its Task being joined; and
 22. the timeout-detach cases in `CodexReviewStoreCommandTests` return while an
-    owned worker is still unfinished.
+    owned worker is still unfinished;
+23. current stop/close cannot prove Store worker/rate-limit/cleanup completion
+    separately from Host reader/router/session/process completion; and
+24. multiple failures from later shutdown stages are logged or overwritten
+    after the first error instead of retained in deterministic order.
 
 Then commit green checkpoints:
 
@@ -1172,9 +1365,11 @@ Then commit green checkpoints:
   review dispatch;
 - recovery ACK before/after terminal keeps the old subscription/session alive
   until canonical/connection barrier completion;
-- canonical completed/failed during recovery suppresses replacement; canonical
-  interrupted and policy-recoverable connection terminal create exactly one
-  replacement candidate; nonrecoverable terminal creates none;
+- canonical completed/failed during recovery suppresses that attempt's
+  replacement candidate; canonical interrupted and policy-recoverable
+  connection terminal create exactly one candidate; none of these per-attempt
+  decisions suppresses the mandatory AppServer runtime replacement after a
+  shared old-runtime close signal;
 - cancellation during recovery joins the same request/barrier with one interrupt
   and prevents replacement;
 - cancellation admitted before disposition prevents backend token creation;
@@ -1219,21 +1414,43 @@ Then commit green checkpoints:
   the Host factory creates exactly one replacement client/backend pair;
 - the old backend is used only for handoff/cleanup and the new backend only for
   sibling resume; no sibling resume reaches the closed client;
-- a sibling canonical terminal that wins before force-close suppresses its
-  replacement, and if all siblings are terminal no replacement is created;
+- once old-runtime close is signaled, zero eligible siblings still creates and
+  publishes exactly one replacement runtime when the Store remains open;
 - replacement creation/validation failure gives every still-eligible sibling
-  the same typed terminal failure without a retry loop;
+  the same typed terminal failure without a retry loop, publishes runtime
+  failed, keeps Store review/runtime admission closed, and leaves the one MCP
+  network generation active for typed status/failure responses;
 - concurrent/repeated close returns the same success/error;
 - close/start, close/restart, stop/close, and concurrent-close interleavings all
   join the recorded owner; a stale acquired handle is closed exactly once and
   never published;
 - stop during close joins; start/restart after close are no-ops;
-- MCP rejects requests admitted after `closeAdmission()`, awaits every handler
-  admitted before it, and only then disposes the HTTP/protocol server;
-- rate-limit/auth/router/worker/cleanup Tasks cannot callback after close
-  completion;
-- repeated close replays the same success/error, preserving cleanup,
-  force-close, MCP-drain, and process-close origin;
+- runtime-disable stop closes/drains/awaits one MCP lease, later start prepares
+  and activates a new MCP generation on the same app-lifetime owner, while
+  restartSameAccount/recoveryReplacement keep the existing listener and create
+  no second lease;
+- MCP configured with port 0 returns no pre-activation publication snapshot;
+  activation returns the actual nonzero bound URL, and only exact-generation
+  post-activation revalidation publishes it;
+- Direct/Preview/Testing compositions that explicitly provide no MCP capability
+  return `serverURL == nil`; they never synthesize a loopback/default URL, while
+  a Live activated listener returning `nil` is a typed contract failure;
+- application close terminalizes the MCP owner; MCP rejects requests after
+  network admission close, awaits all previously admitted handlers, and then
+  signals/awaits listener/session disposal;
+- controlled owner gates prove Store review workers/rate-limit/cleanup finish
+  before AppServer `close()` begins; that combined close sends the client/
+  process signal before its physical-completion gate, and Store close remains
+  pending while the gate is held. `waitUntilClosed()` joins the same result;
+- forced close signals/waits Host termination and separately joins affected
+  Store workers before forced semantic publication;
+- rate-limit/worker/Store-cleanup callbacks and Host auth/router/session/client/
+  process callbacks are independently absent after their owner completion;
+- inject failures into MCP drain/stop/wait, Store worker/rate-limit/cleanup,
+  AppServer combined close, and Host idempotent wait together; repeated close
+  replays one `first` plus every `additionalInLifecycleOrder`, with registration
+  ordinal inside concurrent stages, no duplicate of the handle's replayed aggregate,
+  and no log-only loss;
 - no callback, event, process, request, or observation after close completion;
 - UI render Task is cancelled and awaited before store close;
 - Cancel Quit replies `false`; Quit Anyway replies `true`; success replies
