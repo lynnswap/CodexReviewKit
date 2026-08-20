@@ -108,7 +108,19 @@ The proposed Phase 2 gate now includes:
 | 2026-08-20 | Phase 2 gate converged | Persistence, recovery-contract, and lifecycle/source-of-truth critics independently reported zero implementation blockers after fail-closed persistence, trigger-specific runtime semantics, typed ingestion containment, one final-result owner, bounded final output, and failed-state close were fixed. |
 | 2026-08-20 | Final self-review | Review MCP run `35CF35A6-03DF-4460-8DDF-736C7D8215E4` completed with zero findings: the docs-only recovery contracts were internally consistent and introduced no definite correctness issue. |
 
-## Open decisions
+## Remaining decisions
 
-- Design-gate approval for [recovery-design-2026-08-20.md](recovery-design-2026-08-20.md).
+- The user approved the Phase 2 design gate on 2026-08-20; implementation may
+  proceed on `codex/v0-6-2-recovery`.
 - Live MCP probes will determine whether any unreleased `runId` aliases are required; the published v0.6.2 field names remain the default.
+
+## Active implementation slices
+
+| Wave / slice | Budget | Owner boundary | State |
+|---|---|---|---|
+| Wave 0 / RecoveryV1 environment | 4 hours; 4 production + 4 test files | `CodexReviewHost` composition/runtime paths | Ready for worker |
+| Wave 1 / #103 log viewport | 3 hours; 2 production + 2 test files | ReviewUI native scroll/layout | Ready for worker |
+| Wave 1 / compatibility gates | 5 hours; 10 files | external consumer/API/MCP contract tests | Ready for worker |
+
+The committed worker contract is
+[recovery-wave-0-1-task-brief-2026-08-20.md](recovery-wave-0-1-task-brief-2026-08-20.md).
