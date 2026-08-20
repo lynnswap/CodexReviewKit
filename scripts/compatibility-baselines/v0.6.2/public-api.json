@@ -16660,6 +16660,28 @@
             "declKind": "Func",
             "funcSelfKind": "NonMutating",
             "kind": "Function",
+            "mangledName": "$s11CodexReview0aB5StoreC5closeyyYaKF",
+            "moduleName": "CodexReview",
+            "name": "close",
+            "printedName": "close()",
+            "throwing": true,
+            "usr": "s:11CodexReview0aB5StoreC5closeyyYaKF"
+          },
+          {
+            "children": [
+              {
+                "kind": "TypeNominal",
+                "name": "Void",
+                "printedName": "()"
+              }
+            ],
+            "declAttributes": [
+              "Final",
+              "Custom"
+            ],
+            "declKind": "Func",
+            "funcSelfKind": "NonMutating",
+            "kind": "Function",
             "mangledName": "$s11CodexReview0aB5StoreC7restartyyYaF",
             "moduleName": "CodexReview",
             "name": "restart",
