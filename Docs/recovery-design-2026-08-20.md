@@ -720,6 +720,117 @@ fallback. Until then, ReviewMonitor preserves the Unicode `delta` already
 normalized by app-server for review command items; it does not base64-decode
 unowned standalone chunks.
 
+### Saved-account identity and artifact owner (#97, #107)
+
+App-server `account/read` exposes one observed provider account and ChatGPT
+email is nullable; it does not expose a stable account/user ID. Recovery never
+derives identity from email, provider name, raw credential bytes, or the fixed
+string `"api-key"`.
+
+- The saved-account registry allocates one canonical UUID-backed
+  `SavedAccountID` before login dispatch and records it in a durable pending
+  authentication manifest. Crash replay of that operation reuses the ID.
+- Provider is `.chatGPT`, `.apiKey`, or legacy registry/runtime-only
+  `.amazonBedrock`. `lastKnownEmail` is optional presentation metadata only. A
+  nil read does not erase a previously known email; a new nil-email account
+  displays `"ChatGPT"`.
+- Equal/nil emails never implicitly merge accounts. Runtime refresh binds the
+  observed account to an explicit saved ID or the registry active ID.
+- Registry-produced public `CodexAccount` values pass
+  `SavedAccountID.rawValue` as their explicit `id`/`accountKey`. The released
+  nonoptional email/masked-email surface and initializer remain unchanged; an
+  external caller that omits `accountKey` retains its existing normalized-email
+  identity behavior. The compatibility label for a registry nil-email account
+  is `"ChatGPT"`. Identity/presentation types stay package-only.
+- The registry admits at most one API-key provider account. A second API-key
+  sign-in/add-account fails before staging creation or secret unwrap. Implicit
+  replacement/fingerprint comparison is not supported; remove then add creates
+  a new saved ID.
+- `.addAccount` for either provider requires an existing active saved ID. With
+  no active account it returns a typed invalid-state error, never an implicit
+  `.signIn` conversion or automatic activation.
+- `CodexReviewAuthModel.hasActiveSavedAccount` is true only when RegistryV2's
+  active ID resolves to a ready saved record and the selected public account is
+  that projection. A detached/current-session account may keep public
+  `isAuthenticated == true` for compatibility but cannot admit `.addAccount`.
+
+Credentials are opaque immutable artifact revisions under
+`SavedAccounts/<SavedAccountID>/revisions/<RevisionID>/auth.json`. ReviewMonitor
+validates regular-file/symlink boundaries, owner-only permissions, nonempty
+bounded size, SHA-256, and byte count, but never decodes secret/JWT/account-ID
+content. File and parent directory are fsynced before a revision can be named by
+the registry. Registry, pending manifest, activation journal, and runtime lease
+use temp write + fsync + same-directory rename + directory fsync; corruption or
+missing references fail closed rather than becoming an empty registry.
+
+```text
+RecoveryV1/SavedAccounts/registry.json
+  RegistryV2(schemaVersion, generation, contentHash, activeAccountID?, accounts[])
+  account = id, provider, presentation, planType?, artifactRevision(id, sha256,
+            byteCount), lastActivatedAt?, cached non-secret metadata
+RecoveryV1/SavedAccounts/pending-authentication.json
+  sessionID, candidateAccountID, intent, provider, previousActiveAccountID?,
+  phase, cancellationIntent
+RecoveryV1/SavedAccounts/activation-journal.json
+  before registry generation/hash, complete desired registry bytes/hash,
+  previous shared fingerprint?, desired artifact revision/fingerprint, phase
+RecoveryV1/SavedAccounts/runtime-lease.json
+  runtime generation, activeAccountID, base artifact revision/fingerprint
+RecoveryV1/SavedAccounts/<SavedAccountID>/revisions/<RevisionID>/auth.json
+RecoveryV1/LoginStaging/<SessionID>/auth.json
+RecoveryV1/CodexHome/auth.json
+```
+
+The existing unversioned saved-account registry is schema v0. Wave 5 performs
+one validated, crash-safe conversion to RegistryV2 before auth/runtime
+admission; it never edits v0 in place or treats decode failure as no accounts.
+A durable migration journal assigns and preserves generated IDs across crash,
+maps `activeAccountKey` only when it identifies exactly one entry, copies each
+email-keyed mutable `auth.json` into one verified immutable revision, and then
+atomically publishes v2. Duplicate normalized keys, ambiguous active mapping,
+multiple API-key entries, missing/corrupt referenced artifacts, or unsafe paths
+produce a typed auth-migration failure while leaving v0 untouched and durable
+review history readable. Existing `.amazonBedrock` entries are preserved as a
+registry/runtime-selectable provider (no new login UI); they are not silently
+dropped or counted as the API-key slot.
+
+`.addAccount` closes and awaits the staging app-server, writes one immutable
+artifact revision, and atomically adds its metadata while leaving active ID,
+shared auth bytes, and runtime generation unchanged. For `.signIn`,
+`LoginSession` durably writes only the unreferenced candidate revision and hands
+`PreparedAuthenticationCandidate` to the Wave 3 runtime transition owner; it
+does not create an activation journal or mutate the shared home. The runtime
+owner first interrupts/commits affected reviews, closes and joins the old
+runtime, writes back its working auth revision, and durably clears the old
+runtime lease. It then rereads the latest registry generation and creates the
+activation journal containing that exact before state, the desired registry
+with candidate, desired artifact fingerprint, and previous active ID. The
+journal is the product commit point; startup must forward-complete it before
+auth/runtime admission. The owner then applies it to shared
+`CodexHome/auth.json` and registry before starting the replacement.
+Exactly one `.accountTransition` validates authoritative `account/read` before
+runtime publication and durably removes the journal. Third-state journal/
+registry/shared-auth combinations fail closed.
+After journal commit, an incomplete activation returns
+`.committedActivationPending` and blocks new authentication admission; it is
+never thrown as an ordinary pre-commit error that the UI could retry with a new
+session.
+
+A valid state never has both an old runtime lease and an activation journal:
+journal creation is admitted only after durable lease removal. Startup that
+finds both treats it as persistence inconsistency and fails auth/runtime
+admission rather than guessing an order.
+
+The shared auth file is a runtime working copy because app-server may refresh
+tokens. A durable runtime lease records active saved ID, runtime generation, and
+base artifact revision before launch. After app-server close, the verified
+working copy is written back as a new immutable revision before clearing the
+lease. Startup reconciles a leftover lease with an isolated provider read or
+fails closed; email never decides whether it is a different account. Staging is
+deleted only after every writer/runtime Task finishes. Outcome-unknown retains
+its pending manifest/staging for next-start reconciliation; an unowned orphan
+staging directory is cleaned before admission, with typed cleanup debt/failure.
+
 ### ChatGPT login state machine (#107)
 
 One `LoginSession` owns an isolated recovery staging Codex home and app-server,
@@ -728,6 +839,14 @@ cancellation request, and close completion. Authentication never writes first
 to the active shared `RecoveryV1/CodexHome`: upstream login persists credentials
 before returning success, so doing so would let `.addAccount` replace the active
 account before product adoption.
+
+`AuthenticationClosePolicy` injects `providerEventGrace`,
+`reconciliationGrace`, and the suspending clock (production defaults 10 seconds
+each; tests use controlled gates). A grace expiry triggers staging connection/
+process close and a fresh same-home read; it is never treated as success or as
+proof of cancellation. Reconciliation expiry records typed outcome-unknown,
+retains the pending manifest/staging debt, joins all session Tasks, and lets
+`LoginSession.close()` finish rather than wait indefinitely.
 
 1. Current app-server login start returns typed `loginId` and `authUrl` and
    starts its localhost callback listener.
@@ -741,19 +860,35 @@ account before product adoption.
    browser once and continues observing the app-server login.
 5. User/native cancellation requests app-server
    `account/login/cancel(loginId)` and awaits its acknowledgement plus the login
-   observation Task. Other presentation failure is typed and closes the login.
-6. `account/login/completed` followed by authoritative account read from the
-   same staging app-server is the only success owner. UI callback arrival is
-   never success.
+   observation Task. `notFound` is a race requiring reconciliation, not proof of
+   cancellation. The durable cancellation intent linearizes with the activation
+   journal commit: cancellation admitted first prevents ChatGPT artifact
+   adoption even if provider success arrives later; a journal committed first
+   is success/activation-pending and cannot be relabeled cancelled. Other
+   presentation failure is typed and closes the login.
+6. Matching successful `account/login/completed` moves to
+   `completedSuccessAwaitingPostCompletionAccountUpdate`. A prior
+   `account/updated` is ignored because upstream sends completion before
+   `auth_manager.reload()`. Only the next typed ChatGPT account update followed
+   by `account/read` from the same staging home is authoritative success;
+   `email == nil` is valid. Missing/malformed update, read failure, or connection
+   loss is outcome-unknown and is reconciled by a fresh app-server read of that
+   same staging home, never by resending login. UI callback arrival is never
+   success.
 7. After authoritative success, close and await the staging app-server, then
-   atomically adopt its opaque auth artifact into the recovery-owned saved-
-   account registry. ReviewMonitor does not decode secret bytes. `.signIn`
-   activates the adopted artifact in the shared Codex home only after adoption;
-   `.addAccount` leaves the existing shared active artifact/runtime unchanged
-   until a separate explicit account-selection command.
+   adopt its opaque artifact through the revision/journal contract above.
+   `.signIn` activates only after durable adoption; `.addAccount` leaves the
+   existing active ID, shared artifact, and runtime byte-for-byte unchanged.
 8. `LoginSession.close()` finishes/cancels presentation, prevents later
    callbacks, requests SDK cancellation when required, and awaits its root Task.
    Concurrent cancel/close callers join the same completion.
+
+Staging runtime close uses the same typed process/connection completion
+contract as Wave 3. It awaits the real process terminal (force-closing through
+the injected policy when needed) before reporting an auth terminal or deleting
+staging. Failure records `stagingRuntimeClose` plus outcome debt; during
+application close it contributes a typed runtime close failure and can never be
+reported as a clean close or detached Task.
 
 External-browser open failure, login cancellation failure, stock completion
 failure, and account-read failure remain distinct typed errors. A second login
@@ -770,23 +905,23 @@ the raw value. After that request, only the staging app-server credential store,
 then the recovery-owned opaque saved-account artifact and explicitly activated
 shared Codex home may persist it, matching the current Codex restart contract.
 
-The immediate `{ type: "apiKey" }` response is an accepted-submission signal,
-not the UI success owner. `account/login/completed`, `account/updated`, and an
-authoritative `account/read` are reconciled by one auth session; only the read
-state publishes success. A response/notification loss is outcome-unknown and is
-resolved by `account/read`, never by resubmitting the raw key. Concurrent
-sign-in/add-account requests are rejected while that session owns admission.
-Once dispatch has handed the key to app-server there is no reversible client
-cancel RPC for this mode: UI cancellation closes presentation only, and a
-confirmed app-server write/account read wins rather than being mislabeled as
-cancelled. An outcome-unknown request is reconciled before another key can be
-admitted. After authoritative account read, the same atomic adoption rules apply:
-`.signIn` activates only after saved-account adoption; `.addAccount` preserves
-the existing active ChatGPT/API-key artifact. Cancellation, failure, or adoption
-rollback closes the staging runtime and removes its owner-only directory only
-after all writers have completed. After restart the app installs the selected
-opaque artifact into the RecoveryV1 shared home and reads it through app-server;
-ReviewMonitor never reloads or decodes the API key itself.
+Upstream sends the immediate `{ type: "apiKey" }` response only after saving the
+file credential and reloading auth, but product success still requires the same
+staging runtime's authoritative `account/read == .apiKey` plus durable artifact
+adoption. The transport owner records write admission as `.notWritten` or
+`.mayHaveBeenWritten`. Pre-write cancellation sends no request and cleans up;
+post-write cancellation sends no ChatGPT cancel RPC, keeps the root request
+Task, and lets confirmed success/read win. A known rejection is no-commit.
+Response/notification/connection loss after write is outcome-unknown and uses a
+fresh app-server read of the same staging home: `.apiKey` commits, no account is
+no-commit, another provider is protocol failure. It never resends or retains the
+raw key. If reconciliation is impossible, the durable pending manifest blocks a
+new authentication attempt until resolved. Concurrent authentication requests
+are rejected while the session owns admission. After authoritative read, the
+same revision/journal rules apply: `.signIn` activates after durable adoption;
+`.addAccount` preserves the existing active artifact/runtime. Staging closes and
+deletes only after all writers complete. ReviewMonitor never reloads or decodes
+the API key itself.
 
 ### Startup and shutdown
 
@@ -802,8 +937,16 @@ Startup order:
 4. Start the history subscription, await its first atomic snapshot, and publish
    `.loaded` or a visible typed `.failed` state. A history failure does not
    start MCP or app-server.
-5. Only after history is loaded, open MCP admission and start app-server live
-   ingestion.
+5. Resolve the Codex executable once for the app lifetime.
+6. Before primary runtime/MCP admission, recover authentication in this order:
+   migrate RegistryV0→V2; reject the invalid simultaneous old-lease+journal
+   state; reconcile a leftover runtime lease; forward-complete an activation
+   journal; reconcile pending authentication/staging; then materialize the
+   registry active artifact into the shared Codex home.
+7. Only after history is loaded and auth recovery is authoritative, open MCP
+   admission and start the primary app-server runtime/live ingestion. Auth
+   recovery failure remains visible without replacing the already loaded
+   history UI.
 
 Preview/XCTest compositions that intentionally keep the embedded runtime inert
 still execute steps 1–4 against a unique temporary database. Their synchronous
@@ -1222,6 +1365,7 @@ public extension CodexReviewStore {
     ) -> CodexReviewStore
 }
 
+// CodexReview domain package contract consumed by CodexReviewHost.
 package struct CodexReviewAPIKey: Sendable,
     CustomStringConvertible, CustomDebugStringConvertible
 {
@@ -1229,6 +1373,99 @@ package struct CodexReviewAPIKey: Sendable,
     package func withValue<Result: Sendable>(
         _ operation: @Sendable (String) async throws -> Result
     ) async rethrows -> Result
+}
+
+package struct SavedAccountID: RawRepresentable, Hashable, Codable, Sendable {
+    package let rawValue: String
+    package init(rawValue: String)
+}
+
+package enum SavedAccountProvider: String, Codable, Sendable {
+    case chatGPT
+    case apiKey
+    case amazonBedrock
+}
+
+package struct SavedAccountPresentation: Codable, Equatable, Sendable {
+    package var lastKnownEmail: String?
+    package init(lastKnownEmail: String?)
+}
+
+package enum ObservedCodexAccount: Equatable, Sendable {
+    case chatGPT(email: String?, planType: String)
+    case apiKey
+    case amazonBedrock
+}
+
+package struct CodexAuthObservation: Equatable, Sendable {
+    package let account: ObservedCodexAccount?
+    package let requiresOpenAIAuth: Bool
+    package init(account: ObservedCodexAccount?, requiresOpenAIAuth: Bool)
+}
+
+package enum AuthenticationWriteAdmission: Sendable, Equatable {
+    case notWritten
+    case mayHaveBeenWritten
+}
+
+package actor AuthenticationWriteGate {
+    package init()
+    package func requestCancellation() -> AuthenticationWriteAdmission
+    // Called by transport immediately before stdin write. True irreversibly
+    // transitions to mayHaveBeenWritten; false proves cancellation prevented it.
+    package func admitWrite() -> Bool
+    package func snapshot() -> AuthenticationWriteAdmission
+}
+
+package struct AuthenticationClosePolicy: Sendable {
+    package let providerEventGrace: Duration
+    package let reconciliationGrace: Duration
+    package let sleep: @Sendable (Duration) async throws -> Void
+    package init(
+        providerEventGrace: Duration,
+        reconciliationGrace: Duration,
+        sleep: @escaping @Sendable (Duration) async throws -> Void
+    )
+}
+
+package enum CodexReviewAuthenticationFailure: LocalizedError, Sendable {
+    case alreadyInProgress
+    case apiKeyAccountAlreadyExists
+    case addAccountRequiresActiveSavedAccount
+    case presentation(String)
+    case providerCompletion(String)
+    case accountRead(String)
+    case protocolMismatch(String)
+    case stagingRuntimeClose(String)
+    case outcomeUnknown(sessionID: String)
+    case registryMigration(String)
+    case persistenceInconsistent(String)
+}
+
+package struct PreparedAuthenticationCandidate: Sendable {
+    package let sessionID: String
+    package let savedAccountID: SavedAccountID
+    package let provider: SavedAccountProvider
+    package let presentation: SavedAccountPresentation
+    package let artifactRevisionID: String
+    package let artifactSHA256: String
+    package let artifactByteCount: Int
+    package init(
+        sessionID: String,
+        savedAccountID: SavedAccountID,
+        provider: SavedAccountProvider,
+        presentation: SavedAccountPresentation,
+        artifactRevisionID: String,
+        artifactSHA256: String,
+        artifactByteCount: Int
+    )
+}
+
+package enum CodexReviewAuthenticationResult: Sendable {
+    case signedIn(SavedAccountID)
+    case added(SavedAccountID)
+    case cancelled
+    case committedActivationPending(SavedAccountID, message: String)
 }
 
 package enum CodexReviewAuthenticationMethod: Sendable {
@@ -1241,14 +1478,41 @@ package enum CodexReviewAuthenticationRequest: Sendable {
     case addAccount(using: CodexReviewAuthenticationMethod)
 }
 
+package extension CodexReviewAuthModel {
+    var hasActiveSavedAccount: Bool { get }
+}
+
 package extension CodexReviewStore {
+    @discardableResult
     func performPrimaryAuthenticationAction(
         _ request: CodexReviewAuthenticationRequest
-    ) async throws
+    ) async throws -> CodexReviewAuthenticationResult
+}
+
+package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend {
+    // Existing non-auth requirements remain unchanged. Retired parallel
+    // signIn/addAccount requirements are removed from the protocol body.
+    func authenticate(
+        auth: CodexReviewAuthModel,
+        request: CodexReviewAuthenticationRequest
+    ) async throws -> CodexReviewAuthenticationResult
 }
 
 // CodexReviewHost
 package struct CodexExecutableResolver: Sendable {
+    package struct Configuration: Sendable {
+        package let homeDirectoryURL: URL
+        package let systemApplicationsDirectoryURL: URL
+        package let fallbackExecutableDirectories: [URL]
+    }
+
+    package struct FileSystem: Sendable {
+        package var canonicalURL: @Sendable (URL) throws -> URL
+        package var isExecutableRegularFile: @Sendable (URL) -> Bool
+        package var bundleIdentifier: @Sendable (URL) throws -> String?
+    }
+
+    package init(configuration: Configuration, fileSystem: FileSystem)
     package func resolve(
         configuredPath: String?,
         environment: [String: String]
@@ -1446,7 +1710,7 @@ case .chatGPT:
 case .apiKey(let input):
     .apiKey(try CodexReviewAPIKey(validating: input))
 }
-let request: CodexReviewAuthenticationRequest = store.auth.isAuthenticated
+let request: CodexReviewAuthenticationRequest = store.auth.hasActiveSavedAccount
     ? .addAccount(using: method)
     : .signIn(using: method)
 try await store.performPrimaryAuthenticationAction(request)
@@ -1462,6 +1726,14 @@ the secret in observable or durable state. The resolver is the only executable
 candidate/precedence owner; process transport receives one validated absolute
 executable URL and performs no second PATH/app-bundle search.
 
+Observed on 2026-08-20: `launchctl getenv PATH` was empty, while the Xcode-
+launched ReviewMonitor environment selected `/opt/homebrew/bin/codex`; the
+official `/Applications/ChatGPT.app` had bundle ID `com.openai.codex` and a
+bundled CLI, and same-named apps under `~/Applications` were Safari Web Apps.
+This evidence makes both injected deterministic filesystem roots and bundle-ID
+validation load-bearing. Precedence remains contractual rather than choosing by
+version: selecting the bundled CLI ahead of PATH requires an explicit setting.
+
 Executable precedence is fixed:
 
 1. An explicit normalized settings path. If present but not executable, throw;
@@ -1470,21 +1742,34 @@ Executable precedence is fixed:
    `CODEX_APP_SERVER_CODEX_EXECUTABLE`, `CODEX_REVIEW_CODEX_EXECUTABLE`,
    `CODEX_EXECUTABLE` order. An invalid explicit command throws.
 3. `codex` in the process `PATH`, preserving PATH order.
-4. `$HOME/.local/bin/codex`.
+   Empty components are ignored rather than interpreted as the current working
+   directory.
+4. `<injected-home-directory>/.local/bin/codex`.
 5. App-bundle resources, in this order:
    `/Applications/ChatGPT.app/Contents/Resources/codex`,
    `/Applications/Codex.app/Contents/Resources/codex`,
-   `$HOME/Applications/ChatGPT.app/Contents/Resources/codex`, then
-   `$HOME/Applications/Codex.app/Contents/Resources/codex`.
+   `<injected-home>/Applications/ChatGPT.app/Contents/Resources/codex`, then
+   `<injected-home>/Applications/Codex.app/Contents/Resources/codex`.
 6. `/opt/homebrew/bin/codex`, `/usr/local/bin/codex`, then standard system bin
    directories.
 
-Candidates are deduplicated and must resolve to executable regular files.
+The home URL comes from `FileManager.homeDirectoryForCurrentUser` at live
+composition, not the `HOME` environment. Candidates are resolved to standardized
+absolute symlink destinations, deduplicated, and must be executable regular
+files.
 Bundle-resource candidates additionally require an existing `.app` directory,
 an `Info.plist` whose `CFBundleIdentifier` is `com.openai.codex`, and the exact
 `Contents/Resources/codex` layout before executable validation. Total failure
-returns one typed error containing the requested command and searched
-directories, without making transport repeat the search.
+returns one typed source-by-source search trace. Invalid implicit PATH/home/
+bundle/system candidates continue; an invalid explicit setting or the first
+present explicit environment key throws without fallback. The composition root
+resolves exactly once per app lifetime and injects the same URL into primary and
+staging runtimes. Transport requires that URL and performs no second search;
+session-source capability probing also uses only that executable.
+Live composition supplies `/Applications`, the known fallback bin directories,
+and the real filesystem collaborator once. Tests inject temporary application/
+home/bin roots and metadata through `Configuration`/`FileSystem`; they never
+create fake bundles or executables in real system directories.
 
 ### History paging and deletion consumer
 
@@ -1653,8 +1938,30 @@ Within the recovery branch:
   fake clock plus real worker completion.
 - Current ChatGPT login success, cancel, fallback, restart, and API-key accepted
   response/notification/account-read/outcome-unknown flow.
+- Nullable ChatGPT email, stable generated saved IDs across nil/non-nil reads,
+  same/nil-email accounts remaining distinct, one API-key slot, and duplicate
+  rejection before staging/secret access.
+- ChatGPT pre-completion account update is ignored; matching completion then
+  post-reload update/read is required. API-key pre/post-write cancellation,
+  response/connection loss, same-home reconciliation, and pending-admission
+  debt are continuation-controlled without secret replay.
+- Immutable artifact, registry, pending manifest, activation journal, and
+  runtime-lease crash points; hash/reference corruption fails closed; add-
+  account keeps shared bytes/runtime unchanged; sign-in forward-completes one
+  activation and performs one Wave 3 account transition.
+- RegistryV0 migration-journal crash points preserve order/non-secret metadata,
+  generated IDs, and Amazon Bedrock; ambiguous active key, duplicate key,
+  multiple API-key entries, and missing artifact fail without changing v0.
+- Provider-event and reconciliation grace expiry each trigger owned close/read,
+  never fabricate success/cancellation, and leave finite typed debt. Staging
+  process close failure retains and joins the real resource Task.
+- Journal-committed `.committedActivationPending` rejects reauthentication and
+  forward-completes the same saved ID after restart. Simultaneous old runtime
+  lease + activation journal is rejected as an impossible persisted state.
 - Executable precedence including installed ChatGPT.app/Codex.app bundle
-  identity, invalid explicit path, deduplication, and total failure.
+  identity, classic/Safari bundle rejection, invalid explicit no-fallback,
+  PATH order/empty components, injected home, symlink deduplication, total
+  failure, and proof that transport performs no second discovery.
 - Runtime transition matrix coverage for explicit cancel, stop, same-account
   restart, account change/reconciliation, recoverable network loss,
   nonrecoverable protocol/process death, and application termination.
