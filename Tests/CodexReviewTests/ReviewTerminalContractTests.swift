@@ -96,10 +96,21 @@ struct ReviewTerminalContractTests {
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         )
         await backend.waitForStartReview()
-        await backend.yield(.messageDelta("No findings.", itemID: "assistant-final"))
         await backend.yield(.logEntry(
             kind: .agentMessage,
-            text: "No findings.",
+            text: "Complete non-final message",
+            groupID: "non-final",
+            replacesGroup: true
+        ))
+        await backend.yield(.logEntry(
+            kind: .agentMessage,
+            text: "Partial final",
+            groupID: "assistant-final",
+            replacesGroup: true
+        ))
+        await backend.yield(.logEntry(
+            kind: .agentMessage,
+            text: "Complete final",
             groupID: "assistant-final",
             replacesGroup: true
         ))
@@ -120,10 +131,10 @@ struct ReviewTerminalContractTests {
         await backend.yield(.completed(summary: "Succeeded.", result: "No findings."))
 
         let result = try await started
-        let visibleFinalRows = result.logs.filter { $0.kind == .agentMessage }
-        #expect(visibleFinalRows.count == 1)
-        #expect(visibleFinalRows.first?.groupID == "review-result")
-        #expect(visibleFinalRows.first?.text == "No findings.")
+        let visibleAgentRows = result.logs.filter { $0.kind == .agentMessage }
+        #expect(visibleAgentRows.map(\.groupID) == ["non-final", "review-result"])
+        #expect(visibleAgentRows.map(\.text) == ["Complete non-final message", "No findings."])
+        #expect(visibleAgentRows.contains { $0.groupID == "assistant-final" } == false)
     }
 
     @Test func sparseSummaryPromotesItsExistingRowWithoutAppendingAnotherFinalRow() async throws {

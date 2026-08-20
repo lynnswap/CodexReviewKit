@@ -336,6 +336,21 @@ struct CurrentV2ReviewDecoderReducerTests {
         }
     }
 
+    @Test(arguments: ["turn/failed", "turn/cancelled", "agent/message", "log"])
+    func retiredNotificationMethodsAreUnrelatedToCurrentV2ReviewReduction(
+        _ method: String
+    ) {
+        let notification = JSONRPC.Notification(
+            method: method,
+            params: Data(#"{"threadId":"thread-review","turnId":"turn-review","message":"legacy"}"#.utf8)
+        )
+
+        guard case .unrelated = CurrentV2ReviewNotificationDecoder.decode(notification) else {
+            Issue.record("Expected \(method) to stay outside current-v2 review reduction")
+            return
+        }
+    }
+
     @Test func malformedKnownPayloadRetainsItsSelectableAttemptIdentity() throws {
         let malformed = JSONRPC.Notification(
             method: "item/completed",
@@ -352,6 +367,24 @@ struct CurrentV2ReviewDecoderReducerTests {
             Issue.record("Expected malformed-known-event classification")
             return
         }
+    }
+
+    @Test func unsupportedClosedUnionItemIsAttemptClassified() throws {
+        let unsupported = JSONRPC.Notification(
+            method: "item/completed",
+            params: Data(#"{"threadId":"thread-review","turnId":"turn-review","item":{"type":"futureItem","id":"item-1"}}"#.utf8)
+        )
+
+        guard case .failure(let failure) = CurrentV2ReviewNotificationDecoder.decode(unsupported) else {
+            Issue.record("Expected a typed unsupported-item failure")
+            return
+        }
+        #expect(failure.routedThreadID == "thread-review")
+        #expect(failure.routedTurnID == "turn-review")
+        #expect(failure.error == .unsupportedItemType(
+            method: "item/completed",
+            type: "futureItem"
+        ))
     }
 
     @Test func missingPreRoutingIdentityIsConnectionClassified() throws {
@@ -737,6 +770,57 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         #expect(await transport.isClosedForTesting() == false)
     }
 
+    @Test func unsupportedItemFailsOnlyItsSelectedAttempt() async throws {
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let failedAttempt = await backend.reviewAttemptForTesting(.init(
+            attemptID: "attempt-1",
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "thread-1"
+        ))
+        let healthyAttempt = await backend.reviewAttemptForTesting(.init(
+            attemptID: "attempt-2",
+            threadID: "thread-2",
+            turnID: "turn-2",
+            reviewThreadID: "thread-2"
+        ))
+
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: V2ItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(type: "futureItem", id: "item-1")
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: V2ItemNotification(
+                threadID: "thread-2",
+                turnID: "turn-2",
+                item: .init(type: "exitedReviewMode", id: "result", review: "Healthy review")
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: V2TurnNotification(
+                threadID: "thread-2",
+                turn: .init(id: "turn-2", items: [], itemsView: "notLoaded", status: "completed")
+            )
+        )
+
+        #expect(try await failedAttempt.events.next() == .failed(
+            "Unsupported app-server item type futureItem in item/completed."
+        ))
+        #expect(try await collectEvents(from: healthyAttempt.events).last == .completed(
+            summary: "Succeeded.",
+            result: "Healthy review"
+        ))
+        #expect(await backend.notificationRouterMetricsForTesting().attemptFailures == 1)
+        #expect(await transport.isClosedForTesting() == false)
+    }
+
     @Test func conflictingActiveRoutingClosesTheConnectionAndFailsAffectedAttempts() async throws {
         let transport = FakeJSONRPCTransport()
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
@@ -773,7 +857,7 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         #expect(await transport.isClosedForTesting())
     }
 
-    @Test func unknownUnrelatedMethodProducesOneDiagnosticAndConnectionContinues() async throws {
+    @Test func retiredAndUnknownMethodsCannotBypassReducerTerminal() async throws {
         let transport = FakeJSONRPCTransport()
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
         let attempt = await backend.reviewAttemptForTesting(.init(
@@ -791,6 +875,16 @@ struct CurrentV2ReviewRoutingIntegrationTests {
             method: "account/updated",
             params: ["accountId": "account-2"]
         )
+        for method in ["turn/failed", "turn/cancelled", "agent/message", "log"] {
+            try await transport.emitServerNotification(
+                method: method,
+                params: [
+                    "threadId": "thread-review",
+                    "turnId": "turn-review",
+                    "message": "legacy terminal bypass",
+                ]
+            )
+        }
         try await transport.emitServerNotification(
             method: "item/completed",
             params: V2ItemNotification(
@@ -807,13 +901,23 @@ struct CurrentV2ReviewRoutingIntegrationTests {
             )
         )
 
-        #expect(try await collectEvents(from: attempt.events).last == .completed(
-            summary: "Succeeded.",
-            result: "No findings."
-        ))
+        #expect(try await collectEvents(from: attempt.events) == [
+            .started(
+                turnID: "turn-review",
+                reviewThreadID: "thread-review",
+                model: nil
+            ),
+            .logEntry(
+                kind: .agentMessage,
+                text: "No findings.",
+                groupID: "result",
+                replacesGroup: true
+            ),
+            .completed(summary: "Succeeded.", result: "No findings."),
+        ])
         let metrics = await backend.notificationRouterMetricsForTesting()
-        #expect(metrics.diagnostics == 1)
-        #expect(metrics.ignored == 2)
+        #expect(metrics.diagnostics == 5)
+        #expect(metrics.ignored == 6)
         #expect(await transport.isClosedForTesting() == false)
     }
 

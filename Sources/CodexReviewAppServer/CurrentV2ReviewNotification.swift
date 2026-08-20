@@ -191,8 +191,14 @@ enum CurrentV2ReviewNotificationDecoder {
             guard threadID != nil else {
                 throw ReviewIngestionError.missingRoutingIdentity(method: method)
             }
-        case "agent/message", "log", "error", "turn/failed", "turn/cancelled",
-            "warning", "guardianWarning", "deprecationNotice", "configWarning":
+        case "error":
+            let error = try requiredObject("error", in: object)
+            _ = try requiredString("message", in: error)
+            _ = try requiredBool("willRetry", in: object)
+            guard (threadID == nil) == (turnID == nil) else {
+                throw ReviewIngestionError.missingRoutingIdentity(method: method)
+            }
+        case "warning", "guardianWarning", "deprecationNotice", "configWarning":
             break
         default:
             break
@@ -201,6 +207,12 @@ enum CurrentV2ReviewNotificationDecoder {
 
     private static func validateItem(_ item: [String: Any], method: String) throws {
         let type = try requiredString("type", in: item)
+        guard supportedItemTypes.contains(type) else {
+            throw ReviewIngestionError.unsupportedItemType(
+                method: method,
+                type: type
+            )
+        }
         _ = try requiredString("id", in: item)
         if type == "agentMessage" {
             _ = try requiredStringAllowingEmpty("text", in: item)
@@ -299,6 +311,16 @@ enum CurrentV2ReviewNotificationDecoder {
         return value
     }
 
+    private static func requiredBool(
+        _ key: String,
+        in object: [String: Any]
+    ) throws -> Bool {
+        guard let value = object[key] as? Bool else {
+            throw PayloadError("\(key) must be a boolean")
+        }
+        return value
+    }
+
     private static func nonemptyString(_ value: Any?) -> String? {
         guard let value = value as? String else {
             return nil
@@ -345,8 +367,6 @@ enum CurrentV2ReviewNotificationDecoder {
         "thread/compacted",
         "turn/started",
         "turn/completed",
-        "turn/failed",
-        "turn/cancelled",
         "turn/diff/updated",
         "turn/plan/updated",
         "item/started",
@@ -363,9 +383,26 @@ enum CurrentV2ReviewNotificationDecoder {
         "item/fileChange/outputDelta",
         "item/fileChange/patchUpdated",
         "item/mcpToolCall/progress",
-        "agent/message",
-        "log",
         "model/rerouted",
         "model/verification",
+    ]
+
+    private static let supportedItemTypes: Set<String> = [
+        "userMessage",
+        "hookPrompt",
+        "agentMessage",
+        "plan",
+        "reasoning",
+        "commandExecution",
+        "fileChange",
+        "mcpToolCall",
+        "dynamicToolCall",
+        "collabAgentToolCall",
+        "webSearch",
+        "imageView",
+        "imageGeneration",
+        "enteredReviewMode",
+        "exitedReviewMode",
+        "contextCompaction",
     ]
 }
