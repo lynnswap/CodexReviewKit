@@ -995,13 +995,27 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         case .preserveActiveAccount:
             let temporaryCodexHomeURL = try await recoveryEnvironment
                 .prepareLoginStagingCodexHome(sessionID: UUID())
-            let runtime = try await appServerRuntimeFactory(temporaryCodexHomeURL)
-            return .init(
-                client: runtime.client,
-                backend: runtime.backend,
-                codexHomeURL: temporaryCodexHomeURL,
-                usesPrimaryRuntime: false
-            )
+            do {
+                let runtime = try await appServerRuntimeFactory(temporaryCodexHomeURL)
+                return .init(
+                    client: runtime.client,
+                    backend: runtime.backend,
+                    codexHomeURL: temporaryCodexHomeURL,
+                    usesPrimaryRuntime: false
+                )
+            } catch {
+                let runtimeCreationError = error
+                do {
+                    try await recoveryEnvironment.removeLoginStagingCodexHome(
+                        at: temporaryCodexHomeURL
+                    )
+                } catch {
+                    logger.error(
+                        "Failed to remove login staging home after runtime creation failed (primary: \(runtimeCreationError.localizedDescription, privacy: .public); cleanup: \(error.localizedDescription, privacy: .public))"
+                    )
+                }
+                throw runtimeCreationError
+            }
         }
     }
 

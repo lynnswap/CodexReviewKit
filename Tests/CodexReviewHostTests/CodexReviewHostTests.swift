@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import AppKit
 import AuthenticationServices
 import Testing
@@ -376,6 +377,139 @@ struct CodexReviewHostTests {
             atPath: recoveryEnvironment(homeURL: homeURL).historyDatabaseURL.path
         ) == false)
         await store.stop()
+    }
+
+    @Test func recoveryEnvironmentRejectsFilesystemRootWithoutChangingPermissions() async throws {
+        let homeURL = try temporaryHome()
+        let environment = recoveryEnvironment(homeURL: homeURL)
+            .configured(codexHomePath: "/")
+        let rootURL = URL(filePath: "/", directoryHint: .isDirectory)
+        let permissionsBeforePreparation = try posixPermissions(at: rootURL)
+
+        do {
+            try await environment.prepare()
+            Issue.record("Expected the filesystem root Codex home to be rejected.")
+        } catch let error as CodexReviewRecoveryEnvironmentError {
+            #expect(error == .unsafeCodexHome(rootURL))
+        }
+
+        #expect(try posixPermissions(at: rootURL) == permissionsBeforePreparation)
+        #expect(FileManager.default.fileExists(atPath: environment.recoveryDirectoryURL.path) == false)
+    }
+
+    @Test func recoveryEnvironmentRejectsSharedExplicitCodexHomeWithoutChangingPermissions() async throws {
+        let homeURL = try temporaryHome()
+        let sharedCodexHomeURL = homeURL.appendingPathComponent("shared-home", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: sharedCodexHomeURL,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: NSNumber(value: 0o755)]
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: 0o755)],
+            ofItemAtPath: sharedCodexHomeURL.path
+        )
+        let environment = recoveryEnvironment(homeURL: homeURL)
+            .configured(codexHomePath: sharedCodexHomeURL.path)
+
+        do {
+            try await environment.prepare()
+            Issue.record("Expected a shared explicit Codex home to be rejected.")
+        } catch let error as CodexReviewRecoveryEnvironmentError {
+            #expect(error == .directoryPermissionsMismatch(sharedCodexHomeURL, actual: 0o755))
+        }
+
+        #expect(try posixPermissions(at: sharedCodexHomeURL) == 0o755)
+        #expect(FileManager.default.fileExists(atPath: environment.recoveryDirectoryURL.path) == false)
+    }
+
+    @Test func recoveryEnvironmentPreservesSafeExistingExplicitCodexHome() async throws {
+        let homeURL = try temporaryHome()
+        let codexHomeURL = homeURL.appendingPathComponent("dedicated-codex-home", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: codexHomeURL,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: NSNumber(value: 0o700)]
+        )
+        let sentinelURL = codexHomeURL.appendingPathComponent("sentinel")
+        try Data("owned".utf8).write(to: sentinelURL)
+        let environment = recoveryEnvironment(homeURL: homeURL)
+            .configured(codexHomePath: codexHomeURL.path)
+
+        try await environment.prepare()
+        try await environment.prepare()
+
+        #expect(try posixPermissions(at: codexHomeURL) == 0o700)
+        #expect(try Data(contentsOf: sentinelURL) == Data("owned".utf8))
+        #expect(try posixPermissions(at: environment.codexSQLiteHomeURL) == 0o700)
+    }
+
+    @Test func recoveryEnvironmentRejectsRuntimeParentAsExplicitCodexHome() async throws {
+        let homeURL = try temporaryHome()
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: 0o700)],
+            ofItemAtPath: homeURL.path
+        )
+        let environment = recoveryEnvironment(homeURL: homeURL)
+            .configured(codexHomePath: homeURL.path)
+
+        do {
+            try await environment.prepare()
+            Issue.record("Expected the runtime parent Codex home to be rejected.")
+        } catch let error as CodexReviewRecoveryEnvironmentError {
+            #expect(error == .unsafeCodexHome(homeURL))
+        }
+
+        #expect(try posixPermissions(at: homeURL) == 0o700)
+        #expect(FileManager.default.fileExists(atPath: environment.recoveryDirectoryURL.path) == false)
+    }
+
+    @Test func recoveryEnvironmentRejectsExplicitCodexHomeSymlinkWithoutChangingTarget() async throws {
+        let homeURL = try temporaryHome()
+        let targetURL = homeURL.appendingPathComponent("private-target", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: targetURL,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: NSNumber(value: 0o700)]
+        )
+        let aliasURL = homeURL.appendingPathComponent("codex-home-alias", isDirectory: true)
+        try FileManager.default.createSymbolicLink(at: aliasURL, withDestinationURL: targetURL)
+        let environment = recoveryEnvironment(homeURL: homeURL)
+            .configured(codexHomePath: aliasURL.path)
+
+        do {
+            try await environment.prepare()
+            Issue.record("Expected a symbolic-link Codex home to be rejected.")
+        } catch let error as CodexReviewRecoveryEnvironmentError {
+            #expect(error == .unsafeCodexHome(aliasURL))
+        }
+
+        #expect(try posixPermissions(at: targetURL) == 0o700)
+        #expect(FileManager.default.fileExists(atPath: environment.recoveryDirectoryURL.path) == false)
+    }
+
+    @Test func recoveryEnvironmentRejectsNonOwnedExplicitCodexHomeWithoutChangingPermissions() async throws {
+        let homeURL = try temporaryHome()
+        let nonOwnedURL = URL(filePath: "/Library", directoryHint: .isDirectory)
+        let permissionsBeforePreparation = try posixPermissions(at: nonOwnedURL)
+        let environment = recoveryEnvironment(homeURL: homeURL)
+            .configured(codexHomePath: nonOwnedURL.path)
+
+        do {
+            try await environment.prepare()
+            Issue.record("Expected a non-owned explicit Codex home to be rejected.")
+        } catch let error as CodexReviewRecoveryEnvironmentError {
+            guard case .directoryOwnershipMismatch(let url, let expected, let actual) = error else {
+                Issue.record("Expected an ownership mismatch, received \(error).")
+                return
+            }
+            #expect(url == nonOwnedURL)
+            #expect(expected == Int(geteuid()))
+            #expect(actual != expected)
+        }
+
+        #expect(try posixPermissions(at: nonOwnedURL) == permissionsBeforePreparation)
+        #expect(FileManager.default.fileExists(atPath: environment.recoveryDirectoryURL.path) == false)
     }
 
     @Test func liveStorePassesRuntimePreferenceMCPPortAndPathToHTTPServerFactory() async throws {
@@ -1839,6 +1973,57 @@ struct CodexReviewHostTests {
 
         let resolvedIsolatedCodexHomeURL = try #require(isolatedCodexHomeURL)
         #expect(failedMessage(from: store.auth.phase) == "Review runtime is not running.")
+        #expect(FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path) == false)
+    }
+
+    @Test func liveStoreRemovesIsolatedLoginHomeWhenRuntimeCreationFails() async throws {
+        let homeURL = try temporaryHome()
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "active@example.com",
+            accounts: ["active@example.com"]
+        )
+        var isolatedCodexHomeURL: URL?
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            recoveryEnvironment: recoveryEnvironment(homeURL: homeURL),
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transportFactory: { codexHomeURL in
+                isolatedCodexHomeURL = codexHomeURL
+                throw CodexReviewAPI.Error.io("isolated runtime creation failed")
+            }
+        )
+        let previousFailureCount = store.auth.authenticationFailureCount
+
+        await store.addAccount()
+
+        let resolvedIsolatedCodexHomeURL = try #require(isolatedCodexHomeURL)
+        #expect(store.auth.authenticationFailureCount == previousFailureCount + 1)
+        #expect(failedMessage(from: store.auth.phase) == "isolated runtime creation failed")
+        #expect(FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path) == false)
+    }
+
+    @Test func liveStoreRemovesIsolatedLoginHomeWhenRuntimeCreationIsCancelled() async throws {
+        let homeURL = try temporaryHome()
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "active@example.com",
+            accounts: ["active@example.com"]
+        )
+        var isolatedCodexHomeURL: URL?
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            recoveryEnvironment: recoveryEnvironment(homeURL: homeURL),
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transportFactory: { codexHomeURL in
+                isolatedCodexHomeURL = codexHomeURL
+                throw CancellationError()
+            }
+        )
+
+        await store.addAccount()
+
+        let resolvedIsolatedCodexHomeURL = try #require(isolatedCodexHomeURL)
         #expect(FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path) == false)
     }
 

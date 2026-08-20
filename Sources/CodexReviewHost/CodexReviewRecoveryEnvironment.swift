@@ -1,10 +1,14 @@
 import Foundation
+import Darwin
 import CodexReviewAppServer
 
 package enum CodexReviewRecoveryEnvironmentError: Error, Equatable, LocalizedError, Sendable {
     case invalidDirectoryURL(URL)
+    case unsafeCodexHome(URL)
     case legacyCodexHome(URL)
+    case symbolicLinkDirectory(URL)
     case directoryPreparationFailed(URL, message: String)
+    case directoryOwnershipMismatch(URL, expected: Int, actual: Int)
     case directoryPermissionsMismatch(URL, actual: Int)
     case invalidLoginStagingDirectory(URL)
     case directoryRemovalFailed(URL, message: String)
@@ -13,10 +17,16 @@ package enum CodexReviewRecoveryEnvironmentError: Error, Equatable, LocalizedErr
         switch self {
         case .invalidDirectoryURL(let url):
             "RecoveryV1 requires an absolute file URL, but received \(url.absoluteString)."
+        case .unsafeCodexHome(let url):
+            "RecoveryV1 requires a dedicated Codex home and cannot use \(url.path)."
         case .legacyCodexHome(let url):
             "The legacy Codex home at \(url.path) is a read-only migration input and cannot be used by RecoveryV1."
+        case .symbolicLinkDirectory(let url):
+            "RecoveryV1 cannot claim ownership of the symbolic-link directory at \(url.path)."
         case .directoryPreparationFailed(let url, let message):
             "Unable to prepare the RecoveryV1 directory at \(url.path): \(message)"
+        case .directoryOwnershipMismatch(let url, let expected, let actual):
+            "RecoveryV1 requires \(url.path) to be owned by user \(expected), but found owner \(actual)."
         case .directoryPermissionsMismatch(let url, let actual):
             "RecoveryV1 requires owner-only permissions at \(url.path), but found \(String(format: "%03o", actual))."
         case .invalidLoginStagingDirectory(let url):
@@ -41,6 +51,7 @@ package struct CodexReviewRecoveryEnvironment: Equatable, Sendable {
     }
 
     private let legacyCodexHomeURL: URL
+    private let usesExplicitCodexHome: Bool
 
     package static var production: Self {
         let recoveryDirectoryURL = URL.applicationSupportDirectory
@@ -58,9 +69,10 @@ package struct CodexReviewRecoveryEnvironment: Equatable, Sendable {
         codexHomeURL: URL? = nil,
         legacyCodexHomeURL: URL
     ) {
+        let defaultCodexHomeURL = recoveryDirectoryURL
+            .appending(path: "CodexHome", directoryHint: .isDirectory)
         self.recoveryDirectoryURL = recoveryDirectoryURL
-        self.codexHomeURL = codexHomeURL
-            ?? recoveryDirectoryURL.appending(path: "CodexHome", directoryHint: .isDirectory)
+        self.codexHomeURL = codexHomeURL ?? defaultCodexHomeURL
         self.loginStagingDirectoryURL = recoveryDirectoryURL
             .appending(path: "LoginStaging", directoryHint: .isDirectory)
         self.savedAccountsDirectoryURL = recoveryDirectoryURL
@@ -68,6 +80,9 @@ package struct CodexReviewRecoveryEnvironment: Equatable, Sendable {
         self.historyDatabaseURL = recoveryDirectoryURL
             .appending(path: "review-history.sqlite", directoryHint: .notDirectory)
         self.legacyCodexHomeURL = legacyCodexHomeURL
+        self.usesExplicitCodexHome = codexHomeURL.map {
+            $0.standardizedFileURL != defaultCodexHomeURL.standardizedFileURL
+        } ?? false
     }
 
     package func configured(codexHomePath: String?) -> Self {
@@ -135,12 +150,22 @@ package struct CodexReviewRecoveryEnvironment: Equatable, Sendable {
         try Self.validateDirectoryURL(loginStagingDirectoryURL)
         try Self.validateDirectoryURL(savedAccountsDirectoryURL)
 
+        if usesExplicitCodexHome {
+            try Self.validateExplicitCodexHomeBoundary(
+                codexHomeURL,
+                recoveryDirectoryURL: recoveryDirectoryURL,
+                legacyCodexHomeURL: legacyCodexHomeURL
+            )
+        }
+
         let resolvedLegacyURL = legacyCodexHomeURL.standardizedFileURL.resolvingSymlinksInPath()
-        let directoryURLs = [
+        let recoveryDirectoryURLs = [
             recoveryDirectoryURL,
             loginStagingDirectoryURL,
             savedAccountsDirectoryURL,
-        ] + Self.codexRuntimeDirectoryURLs(codexHomeURL: codexHomeURL)
+        ]
+        let codexRuntimeDirectoryURLs = Self.codexRuntimeDirectoryURLs(codexHomeURL: codexHomeURL)
+        let directoryURLs = recoveryDirectoryURLs + codexRuntimeDirectoryURLs
         for directoryURL in directoryURLs {
             let resolvedDirectoryURL = directoryURL.standardizedFileURL.resolvingSymlinksInPath()
             guard Self.isSameOrDescendant(resolvedDirectoryURL, of: resolvedLegacyURL) == false else {
@@ -148,8 +173,19 @@ package struct CodexReviewRecoveryEnvironment: Equatable, Sendable {
             }
         }
 
-        for directoryURL in directoryURLs {
+        for directoryURL in recoveryDirectoryURLs {
             try Self.prepareOwnerOnlyDirectory(at: directoryURL)
+        }
+        if usesExplicitCodexHome {
+            try Self.prepareExplicitCodexHomeDirectory(at: codexHomeURL)
+            try Self.prepareOwnerOnlyDirectory(
+                at: codexSQLiteHomeURL,
+                withIntermediateDirectories: false
+            )
+        } else {
+            for directoryURL in codexRuntimeDirectoryURLs {
+                try Self.prepareOwnerOnlyDirectory(at: directoryURL)
+            }
         }
     }
 
@@ -159,20 +195,27 @@ package struct CodexReviewRecoveryEnvironment: Equatable, Sendable {
         }
     }
 
-    package static func prepareOwnerOnlyDirectory(at url: URL) throws {
+    package static func prepareOwnerOnlyDirectory(
+        at url: URL,
+        withIntermediateDirectories: Bool = true
+    ) throws {
         let fileManager = FileManager.default
         do {
             var isDirectory = ObjCBool(false)
-            if fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory),
-               isDirectory.boolValue == false
-            {
-                throw CocoaError(.fileWriteFileExists)
+            let exists = fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory)
+            if exists {
+                guard isDirectory.boolValue else {
+                    throw CocoaError(.fileWriteFileExists)
+                }
+            } else {
+                try fileManager.createDirectory(
+                    at: url,
+                    withIntermediateDirectories: withIntermediateDirectories,
+                    attributes: [.posixPermissions: NSNumber(value: ownerOnlyDirectoryPermissions)]
+                )
             }
-            try fileManager.createDirectory(
-                at: url,
-                withIntermediateDirectories: true,
-                attributes: [.posixPermissions: NSNumber(value: ownerOnlyDirectoryPermissions)]
-            )
+            try validateDirectoryIsNotSymbolicLink(at: url, reportedURL: url)
+            try validateDirectoryOwnership(at: url, reportedURL: url)
             try fileManager.setAttributes(
                 [.posixPermissions: NSNumber(value: ownerOnlyDirectoryPermissions)],
                 ofItemAtPath: url.path
@@ -196,6 +239,155 @@ package struct CodexReviewRecoveryEnvironment: Equatable, Sendable {
         }
     }
 
+    private static func validateExplicitCodexHomeBoundary(
+        _ url: URL,
+        recoveryDirectoryURL: URL,
+        legacyCodexHomeURL: URL
+    ) throws {
+        let standardizedURL = url.standardizedFileURL
+        let resolvedURL = standardizedURL.resolvingSymlinksInPath()
+        guard resolvedURL.path != "/" else {
+            throw CodexReviewRecoveryEnvironmentError.unsafeCodexHome(url)
+        }
+
+        let resolvedLegacyURL = legacyCodexHomeURL.standardizedFileURL.resolvingSymlinksInPath()
+        if isSameOrDescendant(resolvedURL, of: resolvedLegacyURL) {
+            throw CodexReviewRecoveryEnvironmentError.legacyCodexHome(url)
+        }
+        guard isSameOrDescendant(resolvedLegacyURL, of: resolvedURL) == false else {
+            throw CodexReviewRecoveryEnvironmentError.unsafeCodexHome(url)
+        }
+
+        let resolvedRecoveryURL = recoveryDirectoryURL.standardizedFileURL.resolvingSymlinksInPath()
+        guard pathsOverlap(resolvedURL, resolvedRecoveryURL) == false else {
+            throw CodexReviewRecoveryEnvironmentError.unsafeCodexHome(url)
+        }
+
+        let fileManager = FileManager.default
+        var isDirectory = ObjCBool(false)
+        if fileManager.fileExists(atPath: standardizedURL.path, isDirectory: &isDirectory) {
+            do {
+                let resourceValues = try standardizedURL.resourceValues(forKeys: [.isSymbolicLinkKey])
+                guard resourceValues.isSymbolicLink != true else {
+                    throw CodexReviewRecoveryEnvironmentError.unsafeCodexHome(url)
+                }
+            } catch let error as CodexReviewRecoveryEnvironmentError {
+                throw error
+            } catch {
+                throw CodexReviewRecoveryEnvironmentError.directoryPreparationFailed(
+                    url,
+                    message: error.localizedDescription
+                )
+            }
+            guard isDirectory.boolValue else {
+                throw CodexReviewRecoveryEnvironmentError.directoryPreparationFailed(
+                    url,
+                    message: CocoaError(.fileWriteFileExists).localizedDescription
+                )
+            }
+            try validateDirectoryOwnership(at: resolvedURL, reportedURL: url)
+            try validateOwnerOnlyPermissions(at: resolvedURL, reportedURL: url)
+            return
+        }
+
+        let parentURL = standardizedURL.deletingLastPathComponent().resolvingSymlinksInPath()
+        var isParentDirectory = ObjCBool(false)
+        guard fileManager.fileExists(atPath: parentURL.path, isDirectory: &isParentDirectory),
+              isParentDirectory.boolValue
+        else {
+            throw CodexReviewRecoveryEnvironmentError.unsafeCodexHome(url)
+        }
+        try validateDirectoryOwnership(at: parentURL, reportedURL: url)
+    }
+
+    private static func prepareExplicitCodexHomeDirectory(at url: URL) throws {
+        let fileManager = FileManager.default
+        do {
+            var isDirectory = ObjCBool(false)
+            if fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) {
+                guard isDirectory.boolValue else {
+                    throw CocoaError(.fileWriteFileExists)
+                }
+            } else {
+                try fileManager.createDirectory(
+                    at: url,
+                    withIntermediateDirectories: false,
+                    attributes: [.posixPermissions: NSNumber(value: ownerOnlyDirectoryPermissions)]
+                )
+            }
+            let resolvedURL = url.standardizedFileURL.resolvingSymlinksInPath()
+            try validateDirectoryIsNotSymbolicLink(at: url, reportedURL: url)
+            try validateDirectoryOwnership(at: resolvedURL, reportedURL: url)
+            try validateOwnerOnlyPermissions(at: resolvedURL, reportedURL: url)
+        } catch let error as CodexReviewRecoveryEnvironmentError {
+            throw error
+        } catch {
+            throw CodexReviewRecoveryEnvironmentError.directoryPreparationFailed(
+                url,
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    private static func validateDirectoryOwnership(at url: URL, reportedURL: URL) throws {
+        do {
+            let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+            let ownerID = (attributes[.ownerAccountID] as? NSNumber)?.intValue ?? -1
+            let expectedOwnerID = Int(geteuid())
+            guard ownerID == expectedOwnerID else {
+                throw CodexReviewRecoveryEnvironmentError.directoryOwnershipMismatch(
+                    reportedURL,
+                    expected: expectedOwnerID,
+                    actual: ownerID
+                )
+            }
+        } catch let error as CodexReviewRecoveryEnvironmentError {
+            throw error
+        } catch {
+            throw CodexReviewRecoveryEnvironmentError.directoryPreparationFailed(
+                reportedURL,
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    private static func validateOwnerOnlyPermissions(at url: URL, reportedURL: URL) throws {
+        do {
+            let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+            let permissions = (attributes[.posixPermissions] as? NSNumber)?.intValue ?? -1
+            let effectivePermissions = permissions & 0o777
+            guard effectivePermissions == ownerOnlyDirectoryPermissions else {
+                throw CodexReviewRecoveryEnvironmentError.directoryPermissionsMismatch(
+                    reportedURL,
+                    actual: effectivePermissions
+                )
+            }
+        } catch let error as CodexReviewRecoveryEnvironmentError {
+            throw error
+        } catch {
+            throw CodexReviewRecoveryEnvironmentError.directoryPreparationFailed(
+                reportedURL,
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    private static func validateDirectoryIsNotSymbolicLink(at url: URL, reportedURL: URL) throws {
+        do {
+            let resourceValues = try url.resourceValues(forKeys: [.isSymbolicLinkKey])
+            guard resourceValues.isSymbolicLink != true else {
+                throw CodexReviewRecoveryEnvironmentError.symbolicLinkDirectory(reportedURL)
+            }
+        } catch let error as CodexReviewRecoveryEnvironmentError {
+            throw error
+        } catch {
+            throw CodexReviewRecoveryEnvironmentError.directoryPreparationFailed(
+                reportedURL,
+                message: error.localizedDescription
+            )
+        }
+    }
+
     private static func isSameOrDescendant(_ candidate: URL, of directory: URL) -> Bool {
         let candidateComponents = candidate.pathComponents
         let directoryComponents = directory.pathComponents
@@ -203,6 +395,10 @@ package struct CodexReviewRecoveryEnvironment: Equatable, Sendable {
             return false
         }
         return candidateComponents.prefix(directoryComponents.count).elementsEqual(directoryComponents)
+    }
+
+    private static func pathsOverlap(_ lhs: URL, _ rhs: URL) -> Bool {
+        isSameOrDescendant(lhs, of: rhs) || isSameOrDescendant(rhs, of: lhs)
     }
 
     private static func codexRuntimeDirectoryURLs(codexHomeURL: URL) -> [URL] {
