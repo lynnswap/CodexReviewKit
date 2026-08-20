@@ -1378,6 +1378,61 @@ extension ReviewUITests {
         #expect(transport.logStaleFragmentViewCountForTesting == 0)
     }
 
+    @Test func detailLogPreservesScrollAwayDuringMultilineLiveWindowResize() async throws {
+        let streamLog = (0..<80)
+            .map { index in
+                "stream.tick \(String(format: "%03d", index)) keeps an explicit scroll-away stable while multiline content reflows during a live window resize"
+            }
+            .joined(separator: "\n\n")
+        let job = makeJob(
+            id: "job-window-live-resize-scroll-away",
+            status: .running,
+            targetSummary: "Uncommitted changes",
+            summary: "Running review.",
+            logText: streamLog
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        let harness = makeWindowHarness(
+            store: store,
+            contentSize: NSSize(width: 1_060, height: 600)
+        )
+        let viewController = harness.viewController
+        let window = harness.window
+        let transport = viewController.transportViewControllerForTesting
+        var liveResizeActive = false
+        defer {
+            if liveResizeActive {
+                transport.endLogLiveResizeForTesting()
+            }
+            window.close()
+        }
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport)
+        window.layoutIfNeeded()
+        transport.view.layoutSubtreeIfNeeded()
+        #expect(transport.isLogPinnedToBottomForTesting)
+
+        let offsetBeforeResize = max(
+            transport.logMinimumVerticalScrollOffsetForTesting,
+            transport.logMaximumVerticalScrollOffsetForTesting - transport.logViewportHeightForTesting
+        )
+        transport.scrollLogToOffsetForTesting(offsetBeforeResize)
+        #expect(transport.isLogPinnedToBottomForTesting == false)
+
+        transport.beginLogLiveResizeForTesting()
+        liveResizeActive = true
+        window.setContentSize(NSSize(width: 620, height: 600))
+        window.layoutIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+        transport.view.layoutSubtreeIfNeeded()
+        transport.endLogLiveResizeForTesting()
+        liveResizeActive = false
+
+        #expect(abs(transport.logVerticalScrollOffsetForTesting - offsetBeforeResize) < 1)
+        #expect(transport.isLogPinnedToBottomForTesting == false)
+    }
+
     @Test func detailLogTextContainerExpandsAfterToolbarSidebarToggleAtCompactWidth() async throws {
         let job = makeJob(
             id: "job-toolbar-sidebar-toggle-textkit-width-regression",
