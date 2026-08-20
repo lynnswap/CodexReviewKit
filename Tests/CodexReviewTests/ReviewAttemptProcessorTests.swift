@@ -411,6 +411,42 @@ struct ReviewAttemptProcessorTests {
         }
     }
 
+    @Test func cancellationAfterOutcomeUnknownThreadDispatchDrainsThroughForcedConnectionTerminal() async throws {
+        let graceGate = AsyncGate()
+        let admission = ReviewStartAdmission(closePolicy: controlledClosePolicy(gate: graceGate))
+        let threadDispatched = InvocationProbe()
+        let threadResponseGate = AsyncGate()
+        let forceClose = InvocationProbe()
+        let connection = ReviewRuntimeCloseFailure.connection("Forced close")
+        let startTask = await admission.start { admission in
+            #expect(await admission.admitThreadStartDispatch())
+            await threadDispatched.record()
+            await threadResponseGate.wait()
+            try Task.checkCancellation()
+            Issue.record("Thread request outlived its typed connection terminal.")
+            return .init(run: canonicalRun)
+        }
+        await threadDispatched.waitForInvocation()
+
+        let cancellation = Task {
+            try await admission.cancel(
+                .system(message: "Stop"),
+                interrupt: { _, _ in Issue.record("Thread-only attempt interrupted a turn.") },
+                forceClose: {
+                    await forceClose.record()
+                    await admission.recordConnectionTerminal(connection)
+                }
+            )
+        }
+        await graceGate.open()
+        await forceClose.waitForInvocation()
+
+        #expect(try await cancellation.value.terminal == .connection(connection))
+        await #expect(throws: CancellationError.self) {
+            try await startTask.value
+        }
+    }
+
     @Test func cancellationAfterThreadResponseRefusesNotSentReviewDispatch() async throws {
         let admission = ReviewStartAdmission(closePolicy: controlledClosePolicy(gate: AsyncGate()))
         let prepared = InvocationProbe()
@@ -484,6 +520,44 @@ struct ReviewAttemptProcessorTests {
             run: canonicalRun,
             terminal: .interrupted(.requested(.mcpClient(message: "Stop")))
         ))
+    }
+
+    @Test func cancellationAfterOutcomeUnknownReviewDispatchDrainsThroughForcedConnectionTerminal() async throws {
+        let graceGate = AsyncGate()
+        let admission = ReviewStartAdmission(closePolicy: controlledClosePolicy(gate: graceGate))
+        let reviewDispatched = InvocationProbe()
+        let reviewResponseGate = AsyncGate()
+        let forceClose = InvocationProbe()
+        let connection = ReviewRuntimeCloseFailure.connection("Forced close")
+        let startTask = await admission.start { admission in
+            #expect(await admission.admitThreadStartDispatch())
+            await admission.recordPreparedThread(provisionalRun)
+            #expect(await admission.admitReviewStartDispatch(for: provisionalRun))
+            await reviewDispatched.record()
+            await reviewResponseGate.wait()
+            try Task.checkCancellation()
+            Issue.record("Review request outlived its typed connection terminal.")
+            return .init(run: canonicalRun)
+        }
+        await reviewDispatched.waitForInvocation()
+
+        let cancellation = Task {
+            try await admission.cancel(
+                .system(message: "Stop"),
+                interrupt: { _, _ in Issue.record("Unresolved review request interrupted a turn.") },
+                forceClose: {
+                    await forceClose.record()
+                    await admission.recordConnectionTerminal(connection)
+                }
+            )
+        }
+        await graceGate.open()
+        await forceClose.waitForInvocation()
+
+        #expect(try await cancellation.value.terminal == .connection(connection))
+        await #expect(throws: CancellationError.self) {
+            try await startTask.value
+        }
     }
 
     @Test func duplicateCleanupCallersJoinOneOwnedTask() async throws {

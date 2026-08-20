@@ -260,6 +260,9 @@ package actor ReviewStartAdmission {
         guard terminal == nil else {
             return
         }
+        if Self.isOutcomeUnknownStartPhase(phase) {
+            startTask?.cancel()
+        }
         receiveTerminal(.connection(failure))
     }
 
