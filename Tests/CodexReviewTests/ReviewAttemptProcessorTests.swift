@@ -270,6 +270,7 @@ struct ReviewAttemptProcessorTests {
                 forceClose: {}
             )
         }
+        await requestStarted.waitForInvocation()
         let second = Task {
             try await admission.cancel(
                 .mcpClient(message: "Stop"),
@@ -279,7 +280,6 @@ struct ReviewAttemptProcessorTests {
                 forceClose: {}
             )
         }
-        await requestStarted.waitForInvocation()
         try await admission.recordCanonicalTerminal(
             .interrupted(.requested(.mcpClient(message: "Stop"))),
             for: run
