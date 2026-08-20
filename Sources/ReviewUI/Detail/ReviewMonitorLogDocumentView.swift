@@ -48,6 +48,8 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     private var glowTimer: Timer?
     var contentInsets: NSEdgeInsets = .init()
     var textContainerInset = NSSize(width: 12, height: 10)
+    var onViewportLayoutWillLayout: (() -> Void)?
+    var onViewportLayoutDidLayout: (() -> Void)?
     var onLayoutInvalidated: (() -> Void)?
     var onUserSelectionChanged: (() -> Void)?
     var onCommandOutputPanelToggle: ((ReviewMonitorLog.BlockID) -> Void)?
@@ -2326,6 +2328,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     }
 
     func textViewportLayoutControllerWillLayout(_ textViewportLayoutController: NSTextViewportLayoutController) {
+        onViewportLayoutWillLayout?()
         lastUsedFragmentViews = visibleFragmentViews
     }
 
@@ -2406,6 +2409,9 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     }
 
     func textViewportLayoutControllerDidLayout(_ textViewportLayoutController: NSTextViewportLayoutController) {
+        defer {
+            onViewportLayoutDidLayout?()
+        }
         for staleView in lastUsedFragmentViews {
             staleView.removeFromSuperview()
             visibleFragmentViews.remove(staleView)
