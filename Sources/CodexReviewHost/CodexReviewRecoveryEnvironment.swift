@@ -1,4 +1,5 @@
 import Foundation
+import CodexReviewAppServer
 
 package enum CodexReviewRecoveryEnvironmentError: Error, Equatable, LocalizedError, Sendable {
     case invalidDirectoryURL(URL)
@@ -34,6 +35,10 @@ package struct CodexReviewRecoveryEnvironment: Equatable, Sendable {
     package let loginStagingDirectoryURL: URL
     package let savedAccountsDirectoryURL: URL
     package let historyDatabaseURL: URL
+
+    package var codexSQLiteHomeURL: URL {
+        AppServerCodexHome.sqliteHomeURL(for: codexHomeURL)
+    }
 
     private let legacyCodexHomeURL: URL
 
@@ -93,7 +98,9 @@ package struct CodexReviewRecoveryEnvironment: Equatable, Sendable {
         let url = loginStagingCodexHomeURL(sessionID: sessionID)
         try await Task.detached(priority: .utility) {
             try Self.validateDirectoryURL(url)
-            try Self.prepareOwnerOnlyDirectory(at: url)
+            for directoryURL in Self.codexRuntimeDirectoryURLs(codexHomeURL: url) {
+                try Self.prepareOwnerOnlyDirectory(at: directoryURL)
+            }
         }.value
         return url
     }
@@ -131,10 +138,9 @@ package struct CodexReviewRecoveryEnvironment: Equatable, Sendable {
         let resolvedLegacyURL = legacyCodexHomeURL.standardizedFileURL.resolvingSymlinksInPath()
         let directoryURLs = [
             recoveryDirectoryURL,
-            codexHomeURL,
             loginStagingDirectoryURL,
             savedAccountsDirectoryURL,
-        ]
+        ] + Self.codexRuntimeDirectoryURLs(codexHomeURL: codexHomeURL)
         for directoryURL in directoryURLs {
             let resolvedDirectoryURL = directoryURL.standardizedFileURL.resolvingSymlinksInPath()
             guard Self.isSameOrDescendant(resolvedDirectoryURL, of: resolvedLegacyURL) == false else {
@@ -197,6 +203,13 @@ package struct CodexReviewRecoveryEnvironment: Equatable, Sendable {
             return false
         }
         return candidateComponents.prefix(directoryComponents.count).elementsEqual(directoryComponents)
+    }
+
+    private static func codexRuntimeDirectoryURLs(codexHomeURL: URL) -> [URL] {
+        [
+            codexHomeURL,
+            AppServerCodexHome.sqliteHomeURL(for: codexHomeURL),
+        ]
     }
 
     private static let ownerOnlyDirectoryPermissions = 0o700
