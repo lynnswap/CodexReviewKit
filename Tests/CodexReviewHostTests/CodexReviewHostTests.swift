@@ -1004,6 +1004,10 @@ struct CodexReviewHostTests {
         try await firstTransport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-first", model: "gpt-5"), for: "thread/start")
         try await firstTransport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-first"), for: "review/start")
         try await firstTransport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        try await firstTransport.enqueue(
+            AppServerAPI.Thread.Unsubscribe.Response(status: .unsubscribed),
+            for: "thread/unsubscribe"
+        )
 
         let secondTransport = FakeJSONRPCTransport()
         try await secondTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
@@ -1041,7 +1045,20 @@ struct CodexReviewHostTests {
         )
         await waitUntil { store.jobs.first?.core.run.turnID == "turn-first" }
 
-        try await store.switchAccount(CodexAccount(email: "second@example.com"))
+        let switchTask = Task { @MainActor in
+            try await store.switchAccount(CodexAccount(email: "second@example.com"))
+        }
+        await firstTransport.waitForResponseDelivery(method: "turn/interrupt")
+        try await firstTransport.emitServerNotification(
+            method: "turn/completed",
+            params: HostTurnNotification(
+                threadID: "thread-first",
+                turnID: "turn-first",
+                status: "interrupted",
+                errorMessage: "Account switched."
+            )
+        )
+        try await switchTask.value
         let result = try await reviewRead
         await secondTransport.waitForRequestCount(2)
         await firstTransport.waitForRequestCount(8)
@@ -1084,6 +1101,10 @@ struct CodexReviewHostTests {
         try await firstTransport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-active", model: "gpt-5"), for: "thread/start")
         try await firstTransport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-active"), for: "review/start")
         try await firstTransport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        try await firstTransport.enqueue(
+            AppServerAPI.Thread.Unsubscribe.Response(status: .unsubscribed),
+            for: "thread/unsubscribe"
+        )
         try await firstTransport.enqueue(EmptyResponse(), for: "account/logout")
 
         let secondTransport = FakeJSONRPCTransport()
@@ -1112,7 +1133,20 @@ struct CodexReviewHostTests {
         )
         await waitUntil { store.jobs.first?.core.run.turnID == "turn-active" }
 
-        await store.logout()
+        let logoutTask = Task { @MainActor in
+            await store.logout()
+        }
+        await firstTransport.waitForResponseDelivery(method: "turn/interrupt")
+        try await firstTransport.emitServerNotification(
+            method: "turn/completed",
+            params: HostTurnNotification(
+                threadID: "thread-active",
+                turnID: "turn-active",
+                status: "interrupted",
+                errorMessage: "Signed out."
+            )
+        )
+        await logoutTask.value
         let result = try await reviewRead
         await secondTransport.waitForRequestCount(2)
 
@@ -1189,6 +1223,10 @@ struct CodexReviewHostTests {
         try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
         try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-1"), for: "review/start")
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        try await transport.enqueue(
+            AppServerAPI.Thread.Unsubscribe.Response(status: .unsubscribed),
+            for: "thread/unsubscribe"
+        )
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
@@ -1225,6 +1263,16 @@ struct CodexReviewHostTests {
         #expect(jobBeforeInterruptCompletes.cancellationRequested)
         #expect(jobBeforeInterruptCompletes.core.lifecycle.cancellation?.message == "Review runtime stopped.")
         await interruptGate.open()
+        await transport.waitForResponseDelivery(method: "turn/interrupt")
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: HostTurnNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                status: "interrupted",
+                errorMessage: "Review runtime stopped."
+            )
+        )
         await stopTask.value
         let result = try await reviewRead
 
@@ -1241,11 +1289,13 @@ struct CodexReviewHostTests {
         #expect(interruptIndex < deleteIndex)
     }
 
-    @Test func liveStoreStopBoundsStuckReviewCancellationCleanup() async throws {
+    @Test func liveStoreStopGraceForceClosesAndAwaitsConnectionTerminal() async throws {
         let homeURL = try temporaryHome()
         let interruptGate = AsyncGate()
+        let graceStarted = AsyncGate()
+        let graceGate = AsyncGate()
         let transport = FakeJSONRPCTransport()
-        await transport.holdNext(method: "turn/interrupt", gate: interruptGate)
+        await transport.holdNextIgnoringCancellation(method: "turn/interrupt", gate: interruptGate)
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
         try await transport.enqueue(
@@ -1258,7 +1308,14 @@ struct CodexReviewHostTests {
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
-            shutdownCleanupTimeout: .milliseconds(20),
+            reviewRuntimeClosePolicy: .init(
+                terminalGrace: .seconds(10),
+                sleep: { _ in
+                    await graceStarted.open()
+                    await graceGate.wait()
+                    try Task.checkCancellation()
+                }
+            ),
             transport: transport
         )
 
@@ -1269,18 +1326,30 @@ struct CodexReviewHostTests {
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
         }
-        await waitUntil { store.jobs.first?.core.run.turnID == "turn-1" }
+        await transport.waitForRequest(method: "review/start")
+        let jobID = try #require(store.jobs.first?.id)
+        let admission = try #require(store.reviewStartAdmissions[jobID])
+        let run = try #require(await admission.waitForActiveRun())
+        #expect(run.turnID == "turn-1")
+        let worker = try #require(store.reviewWorkerTasks[jobID])
 
-        let startedAt = Date()
-        await store.stop()
-        let elapsed = Date().timeIntervalSince(startedAt)
-        let resultBeforeRemoteCleanupUnblocked = try await waitForTaskValue(reviewRead, timeout: .seconds(1))
-        await interruptGate.open()
-        let result = try #require(resultBeforeRemoteCleanupUnblocked)
+        let stopFinished = CompletionFlag()
+        let stopTask = Task { @MainActor in
+            await store.stop()
+            await stopFinished.complete()
+        }
+        await graceStarted.wait()
+        #expect(await stopFinished.isCompleted() == false)
+        await graceGate.open()
+        await transport.waitForCloseCall()
+        await worker.value
+        await stopTask.value
+        let result = try await reviewRead.value
 
-        #expect(elapsed < 1)
-        #expect(result.core.lifecycle.status == .cancelled)
-        #expect(await transport.recordedRequests().map(\.method).contains("turn/interrupt"))
+        #expect(result.core.lifecycle.status == .failed)
+        #expect(result.core.lifecycle.terminal?.kind == .interrupted)
+        #expect(await transport.closeCallCountForTesting() >= 1)
+        #expect(await stopFinished.isCompleted())
     }
 
     @Test func liveStoreStopDrainsRecoveryWaitingWorkerCleanupBeforeDroppingBackend() async throws {
@@ -2056,5 +2125,33 @@ private actor CompletionFlag {
 
     func isCompleted() -> Bool {
         completed
+    }
+}
+
+private struct HostTurnNotification: Encodable, Sendable {
+    struct Turn: Encodable, Sendable {
+        struct TurnError: Encodable, Sendable {
+            var message: String
+        }
+
+        var id: String
+        var items: [String]
+        var itemsView: String
+        var status: String
+        var error: TurnError
+    }
+
+    var threadId: String
+    var turn: Turn
+
+    init(threadID: String, turnID: String, status: String, errorMessage: String) {
+        self.threadId = threadID
+        self.turn = Turn(
+            id: turnID,
+            items: [],
+            itemsView: "notLoaded",
+            status: status,
+            error: .init(message: errorMessage)
+        )
     }
 }

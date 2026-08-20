@@ -962,6 +962,7 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
     private var maxActiveByMethod: [String: Int] = [:]
     private var gatesByMethod: [String: RequestGate] = [:]
     private var oneShotGatesByMethod: [String: [RequestGate]] = [:]
+    private var activeRequestGates: [Int: RequestGate] = [:]
     private var requestCountWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
     private var requestMethodWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
     private var responseMethodWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
@@ -970,6 +971,7 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
     private var closed = false
     private var closeFailure: ReviewRuntimeCloseFailure?
     private var closeCallCount = 0
+    private var closeWaiters: [CheckedContinuation<Void, Never>] = []
 
     package init(responses: [String: [Data]] = [:]) {
         self.responses = responses
@@ -1021,7 +1023,9 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
         )
         let queuedResponse = dequeueResponse(for: request.method)
         if let gate = dequeueOneShotGate(for: request.method) ?? gatesByMethod[request.method] {
+            activeRequestGates[request.id] = gate
             await gate.wait()
+            activeRequestGates.removeValue(forKey: request.id)
         }
         activeByMethod[request.method, default: 1] -= 1
         guard closed == false else {
@@ -1071,8 +1075,15 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
 
     package func close() async throws {
         closeCallCount += 1
+        let closeWaiters = closeWaiters
+        self.closeWaiters.removeAll(keepingCapacity: false)
+        for waiter in closeWaiters {
+            waiter.resume()
+        }
         closed = true
-        let gates = Array(gatesByMethod.values) + oneShotGatesByMethod.values.flatMap { $0 }
+        let gates = Array(gatesByMethod.values)
+            + oneShotGatesByMethod.values.flatMap { $0 }
+            + activeRequestGates.values
         for gate in gates {
             await gate.gate.open()
         }
@@ -1162,6 +1173,19 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
 
     package func closeCallCountForTesting() -> Int {
         closeCallCount
+    }
+
+    package func waitForCloseCall() async {
+        if closeCallCount > 0 {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            if closeCallCount > 0 {
+                continuation.resume()
+            } else {
+                closeWaiters.append(continuation)
+            }
+        }
     }
 
     package func maxActiveCount(for method: String) -> Int {

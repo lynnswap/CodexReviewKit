@@ -163,6 +163,7 @@ package actor ReviewStartAdmission {
     private var forceCloseResult: Result<Void, ReviewRuntimeCloseFailure>?
     private var cancellationResult: Result<ReviewAttemptCancellationResolution, any Error>?
     private var terminalWaiters: [UUID: CheckedContinuation<ReviewAttemptBarrierTerminal?, Never>] = [:]
+    private var activeRunWaiters: [CheckedContinuation<CodexReviewBackendModel.Review.Run?, Never>] = []
     private var cancellationWaiters: [CheckedContinuation<Result<ReviewAttemptCancellationResolution, any Error>, Never>] = []
 
     package init(closePolicy: ReviewRuntimeClosePolicy = .production) {
@@ -231,6 +232,7 @@ package actor ReviewStartAdmission {
             return
         }
         phase = .active(run)
+        resumeActiveRunWaiters(returning: run)
     }
 
     package func recordCanonicalTerminal(
@@ -303,6 +305,24 @@ package actor ReviewStartAdmission {
 
     package func currentPhase() -> Phase { phase }
 
+    package func waitForActiveRun() async -> CodexReviewBackendModel.Review.Run? {
+        if let activeRun {
+            return activeRun
+        }
+        if terminal != nil {
+            return nil
+        }
+        return await withCheckedContinuation { continuation in
+            if let activeRun {
+                continuation.resume(returning: activeRun)
+            } else if terminal != nil {
+                continuation.resume(returning: nil)
+            } else {
+                activeRunWaiters.append(continuation)
+            }
+        }
+    }
+
     package func cancellationRequest() -> ReviewCancellation? {
         requestedCancellation
     }
@@ -323,6 +343,7 @@ package actor ReviewStartAdmission {
         case .success(let attempt):
             if terminal == nil {
                 phase = .active(attempt.run)
+                resumeActiveRunWaiters(returning: attempt.run)
             }
         case .failure(let error):
             if let cancellation = (error as? ReviewStartCancelledBeforeDispatch)?.cancellation {
@@ -544,7 +565,18 @@ package actor ReviewStartAdmission {
         for waiter in waiters {
             waiter.resume(returning: terminal)
         }
+        resumeActiveRunWaiters(returning: nil)
         resolveCancellationIfPossible()
+    }
+
+    private func resumeActiveRunWaiters(
+        returning run: CodexReviewBackendModel.Review.Run?
+    ) {
+        let waiters = activeRunWaiters
+        activeRunWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume(returning: run)
+        }
     }
 
     private func resolveCancellationIfPossible() {
