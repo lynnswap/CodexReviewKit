@@ -779,6 +779,9 @@ Expected production owners (consolidate rather than use every file):
 - `Sources/CodexReview/Store/CodexReviewStore.swift`
 - `Sources/CodexReview/Store/CodexReviewStoreCancellation.swift`
 - `Sources/CodexReview/Store/CodexReviewStoreReviews.swift`
+- `Sources/CodexReview/Store/CodexReviewStoreTesting.swift`, limited to
+  cancelling/awaiting workers and activation/admission work before clearing the
+  new sole attempt registry
 - `Sources/CodexReview/CodexReviewBackend.swift`
 - `Sources/CodexReview/Store/CodexReviewStoreBackend.swift`
 - `Sources/CodexReview/Store/PreviewCodexReviewStoreBackend.swift`
@@ -793,6 +796,12 @@ Expected production owners (consolidate rather than use every file):
 - `Sources/CodexReviewHost/LiveCodexReviewStoreBackend.swift`
 - `Sources/CodexReviewHost/CodexReviewHost.swift`
 
+Matching test-only compile seam:
+
+- `Tests/ReviewUITests/ReviewUITests.swift`, limited to the fixture/test-double
+  seam required to compile and exercise the new internal registry/backend
+  contract; no `Sources/ReviewUI` production behavior is in Wave 3A
+
 Wave 3A propagates the reviewed throwing transport/client close and throwing
 `cleanupReview` signatures through StoreBackend, preview/testing conformances,
 and the minimum Host call sites so the slice compiles and is independently
@@ -800,6 +809,22 @@ green. Unsubscribe/delete/background-terminal cleanup rejection is typed as
 `ReviewRuntimeCloseFailure.cleanup`; no `try?` cleanup remains on the review
 barrier. Wave 3A does not implement public store close, Host runtime replacement,
 MCP drain, or ReviewUI.
+
+The Wave 3A implementation of
+`cancelAndDetachReviewWorkersForRuntimeStop(jobIDs:)` may move the worker Task to
+the existing detached-task registry, but it must retain the corresponding
+`ReviewAttemptOwnership`. The detached worker first resolves any pending start
+activation to cancellation/terminal without releasing backend dispatch, awaits
+admission/start/cleanup completion, then removes only the same ownership
+generation on the Store actor. `CodexReviewStoreTesting` follows
+the same order: cancel, await all live/detached workers and activation/admission
+work, then clear the sole registry. Clearing ownership at detach time would make
+cancel/close unable to reach the operation that still owns backend-write
+authority.
+
+This detachment is a Wave 3A compatibility boundary only. Wave 3B replaces it
+with the recorded runtime/store close Task and removes timeout detachment as an
+owner; do not grow a second lifecycle around the temporary dictionary.
 
 ### Wave 3B — store runtime, Host/MCP, and public close
 
@@ -847,6 +872,7 @@ Expected tests:
 - recovery-disposition/token linearization and coherent attempt-ownership tests
 - typed mailbox failure round-trip and recoverability classification tests
 - initial/replacement registered-start activation-gate tests
+- detached-worker ownership retention and testing-cleanup ordering tests
 - Host runtime start/restart/stop reentrancy tests
 - MCP admitted-handler drain tests
 - ReviewUI close-and-await tests
@@ -887,7 +913,9 @@ prove these current failures:
 15. cancellation/terminal recorded before start registration is overwritten by
     unconditional transition to thread preparation;
 16. a Task returned by start registration can reach backend dispatch before its
-    handle is published in Store attempt ownership.
+    handle is published in Store attempt ownership;
+17. runtime-stop detachment removes attempt state while the detached worker still
+    owns activation/admission/backend-write authority.
 
 Then commit green checkpoints:
 
@@ -944,6 +972,9 @@ Then commit green checkpoints:
   idempotent, and stale/wrong-handle activation is a typed contract failure;
 - close/cancel with an unactivated registered start resolves its gate and joins
   the Task without backend writes or leaked continuation;
+- runtime-stop detach retains the exact `ReviewAttemptOwnership` until the
+  detached worker resolves activation/admission and removes that generation;
+  testing cleanup cancels and awaits live/detached workers before registry clear;
 - mailbox-to-Store round-trip preserves every `ReviewAttemptStreamFailure` case
   and payload; verified network/owned recoverable close may resume, while
   unexpected connection, process, protocol, and unknown failures never do;

@@ -703,6 +703,17 @@ assumption about when a newly created Task happens to run. Store close/cancel
 resolves every pending activation gate and awaits its registered Task, so an
 unactivated handle cannot leak or block shutdown.
 
+Wave 3A temporarily retains the existing runtime-stop detachment entry point,
+but detachment applies only to the worker Task registry, never semantic attempt
+ownership. `cancelAndDetachReviewWorkersForRuntimeStop` moves/cancels the worker
+handle while retaining `ReviewAttemptOwnership` until that detached worker has
+resolved any pending activation gate to cancellation/terminal, joined its
+admission/start work, and removes the same ownership generation on the Store
+actor. Test cleanup likewise cancels and
+awaits workers before clearing the sole registry. Wave 3B replaces this temporary
+Task detachment with the single runtime/store close authority; it is not a
+second lifecycle owner or a permanent fallback.
+
 Runtime transitions use this fixed product policy:
 
 | Trigger | Current attempt | Product review | Next attempt | Duration | MCP waiter |
