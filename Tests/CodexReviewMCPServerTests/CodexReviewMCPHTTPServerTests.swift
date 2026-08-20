@@ -56,6 +56,45 @@ struct CodexReviewMCPHTTPServerTests {
         }
     }
 
+    @Test func toolsListMatchesPublishedV062Golden() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+
+        try await withHTTPServer(store: store) { server in
+            let sessionID = try await initializeSession(endpoint: await server.url)
+            let response = try await postJSONRPC(
+                endpoint: await server.url,
+                sessionID: sessionID,
+                body: [
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/list",
+                ]
+            )
+            let actualTools = try #require(response.value(for: ["result", "tools"]) as? [[String: Any]])
+            let goldenURL = try #require(Bundle.module.url(
+                forResource: "tools-list-v0.6.2",
+                withExtension: "json"
+            ))
+            let goldenTools = try #require(
+                JSONSerialization.jsonObject(with: Data(contentsOf: goldenURL)) as? [[String: Any]]
+            )
+            let publishedNames = [
+                "review_start",
+                "review_await",
+                "review_read",
+                "review_list",
+                "review_cancel",
+            ]
+
+            #expect(goldenTools.compactMap { $0["name"] as? String } == publishedNames)
+            #expect(actualTools.compactMap { $0["name"] as? String } == publishedNames)
+            #expect(try canonicalJSON(actualTools) == canonicalJSON(goldenTools))
+        }
+    }
+
     @Test func streamableHTTPAllowsConfiguredHostDuringValidation() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
@@ -1168,6 +1207,11 @@ struct CodexReviewMCPHTTPServerTests {
 
     private func makeJSONBody(_ body: [String: Any]) throws -> Data {
         try JSONSerialization.data(withJSONObject: body)
+    }
+
+    private func canonicalJSON(_ value: Any) throws -> String {
+        let data = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+        return String(decoding: data, as: UTF8.self)
     }
 
     private nonisolated func postJSONRPCData(
