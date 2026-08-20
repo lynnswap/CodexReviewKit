@@ -17,12 +17,12 @@ package protocol CodexReviewBackend: Sendable {
     func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws
     func forceCloseReviewConnection() async throws
     func beginReviewRecovery(
-        _ run: CodexReviewBackendModel.Review.Run,
-        reason: CodexReviewBackendModel.CancellationReason
+        _ barrier: ReviewAttemptRecoveryBarrier
     ) async throws -> CodexReviewBackendModel.Review.RecoveryToken
     func resumeReviewRecovery(
         _ token: CodexReviewBackendModel.Review.RecoveryToken,
-        request: CodexReviewBackendModel.Review.Start
+        request: CodexReviewBackendModel.Review.Start,
+        admission: ReviewStartAdmission
     ) async throws -> BackendReviewAttempt
     func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws
 }
