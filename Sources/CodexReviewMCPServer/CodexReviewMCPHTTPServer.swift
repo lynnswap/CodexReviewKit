@@ -98,6 +98,161 @@ package extension CodexReviewMCPHTTPServer {
     }
 }
 
+private final class MCPHTTPAdmissionRegistry: @unchecked Sendable {
+    struct Admission: Sendable {
+        fileprivate let id: UUID
+    }
+
+    private struct AdmissionCountWaiter {
+        let targetCount: Int
+        let continuation: CheckedContinuation<Void, Never>
+    }
+
+    private let lock = NSLock()
+    private var acceptsRequests = false
+    private var admittedRequestIDs: Set<UUID> = []
+    private var drainWaiters: [CheckedContinuation<Void, Never>] = []
+    private var totalAdmissionCount = 0
+    private var admissionCountWaiters: [UUID: AdmissionCountWaiter] = [:]
+
+    func open() {
+        lock.lock()
+        precondition(
+            admittedRequestIDs.isEmpty,
+            "MCPHTTPAdmissionRegistry must drain one listener generation before reopening."
+        )
+        acceptsRequests = true
+        lock.unlock()
+    }
+
+    func close() {
+        lock.lock()
+        acceptsRequests = false
+        lock.unlock()
+    }
+
+    func admit() -> Admission? {
+        let waiters: [CheckedContinuation<Void, Never>]
+        lock.lock()
+        guard acceptsRequests else {
+            lock.unlock()
+            return nil
+        }
+        let admission = Admission(id: UUID())
+        admittedRequestIDs.insert(admission.id)
+        totalAdmissionCount += 1
+        let completedWaiterIDs = admissionCountWaiters.compactMap { id, waiter in
+            totalAdmissionCount >= waiter.targetCount ? id : nil
+        }
+        waiters = completedWaiterIDs.compactMap {
+            admissionCountWaiters.removeValue(forKey: $0)?.continuation
+        }
+        lock.unlock()
+        for waiter in waiters {
+            waiter.resume()
+        }
+        return admission
+    }
+
+    func finish(_ admission: Admission) {
+        let waiters: [CheckedContinuation<Void, Never>]
+        lock.lock()
+        precondition(
+            admittedRequestIDs.remove(admission.id) != nil,
+            "MCPHTTPAdmissionRegistry owns exactly one completion per admitted request."
+        )
+        if admittedRequestIDs.isEmpty {
+            waiters = drainWaiters
+            drainWaiters.removeAll(keepingCapacity: false)
+        } else {
+            waiters = []
+        }
+        lock.unlock()
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+
+    func waitUntilDrained() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if admittedRequestIDs.isEmpty {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                drainWaiters.append(continuation)
+                lock.unlock()
+            }
+        }
+    }
+
+    func admissionCount() -> Int {
+        lock.lock()
+        let count = totalAdmissionCount
+        lock.unlock()
+        return count
+    }
+
+    func waitForAdmissionCount(_ targetCount: Int) async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if totalAdmissionCount >= targetCount {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                admissionCountWaiters[UUID()] = .init(
+                    targetCount: targetCount,
+                    continuation: continuation
+                )
+                lock.unlock()
+            }
+        }
+    }
+}
+
+private actor MCPHTTPHandlerEntryGate {
+    private var shouldHoldNextEntry = false
+    private var releaseWasRequested = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func holdNextEntry() {
+        precondition(
+            shouldHoldNextEntry == false && continuation == nil,
+            "MCPHTTPHandlerEntryGate owns at most one held test entry."
+        )
+        shouldHoldNextEntry = true
+        releaseWasRequested = false
+    }
+
+    func waitIfNeeded() async {
+        guard shouldHoldNextEntry else {
+            return
+        }
+        if releaseWasRequested {
+            shouldHoldNextEntry = false
+            releaseWasRequested = false
+            return
+        }
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+        shouldHoldNextEntry = false
+        releaseWasRequested = false
+    }
+
+    func release() {
+        guard shouldHoldNextEntry else {
+            return
+        }
+        if let continuation {
+            self.continuation = nil
+            continuation.resume()
+        } else {
+            releaseWasRequested = true
+        }
+    }
+}
+
 package actor CodexReviewMCPHTTPServer {
     private struct SessionContext {
         let server: Server
@@ -122,9 +277,10 @@ package actor CodexReviewMCPHTTPServer {
     private var sessions: [String: SessionContext] = [:]
     private var cleanupTask: Task<Void, Never>?
     private var boundURL: URL?
-    private var acceptsRequests = false
-    private var admittedRequestCount = 0
-    private var admittedRequestDrainWaiters: [CheckedContinuation<Void, Never>] = []
+    private let admissionRegistry = MCPHTTPAdmissionRegistry()
+    private let handlerEntryGate = MCPHTTPHandlerEntryGate()
+    private var admittedHandlerDrainDidBegin = false
+    private var admittedHandlerDrainStartWaiters: [CheckedContinuation<Void, Never>] = []
 
     package init(
         adapter: CodexReviewMCPServer,
@@ -177,13 +333,19 @@ package actor CodexReviewMCPHTTPServer {
             return
         }
 
+        let admissionRegistry = admissionRegistry
+        let handlerEntryGate = handlerEntryGate
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 128)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
                 channel.pipeline.configureHTTPServerPipeline().flatMap {
-                    channel.pipeline.addHandler(CodexReviewMCPHTTPHandler(server: self))
+                    channel.pipeline.addHandler(CodexReviewMCPHTTPHandler(
+                        server: self,
+                        admissionRegistry: admissionRegistry,
+                        entryGate: handlerEntryGate
+                    ))
                 }
             }
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
@@ -195,9 +357,15 @@ package actor CodexReviewMCPHTTPServer {
                 host: configuration.host,
                 port: configuration.port
             ).get()
+            guard Task.isCancelled == false else {
+                try? await channel.close()
+                try? await group.shutdownGracefully()
+                throw CancellationError()
+            }
             self.eventLoopGroup = group
             self.channel = channel
-            acceptsRequests = true
+            admissionRegistry.open()
+            admittedHandlerDrainDidBegin = false
             let actualPort = channel.localAddress?.port
             boundURL = configuration.url(boundPort: actualPort)
             cleanupTask = Task { [weak self] in
@@ -216,10 +384,13 @@ package actor CodexReviewMCPHTTPServer {
     package func stop() async {
         await closeAdmission()
         cleanupTask?.cancel()
-        await cleanupTask?.value
-        cleanupTask = nil
-        await closeAllSessions()
+        let cleanupTask = cleanupTask
+        self.cleanupTask = nil
         await waitForAdmittedHandlers()
+        await cleanupTask?.value
+        await closeAllSessions()
+        try? await channel?.close()
+        channel = nil
         if let eventLoopGroup {
             try? await eventLoopGroup.shutdownGracefully()
         }
@@ -229,42 +400,37 @@ package actor CodexReviewMCPHTTPServer {
     }
 
     package func closeAdmission() async {
-        guard acceptsRequests || channel != nil else {
-            return
-        }
-        acceptsRequests = false
+        admissionRegistry.close()
         try? await channel?.close()
         channel = nil
     }
 
     package func waitForAdmittedHandlers() async {
-        guard admittedRequestCount > 0 else {
-            return
+        admittedHandlerDrainDidBegin = true
+        let startWaiters = admittedHandlerDrainStartWaiters
+        admittedHandlerDrainStartWaiters.removeAll(keepingCapacity: false)
+        for waiter in startWaiters {
+            waiter.resume()
         }
-        await withCheckedContinuation { continuation in
-            if admittedRequestCount == 0 {
-                continuation.resume()
-            } else {
-                admittedRequestDrainWaiters.append(continuation)
-            }
-        }
+        await admissionRegistry.waitUntilDrained()
     }
 
     package func handleHTTPRequest(_ request: HTTPRequest) async -> HTTPResponse {
-        await performTrackedHTTPRequest(request).response
-    }
-
-    fileprivate func handleTrackedHTTPRequest(_ request: HTTPRequest) async -> TrackedHTTPResponse {
-        guard acceptsRequests else {
-            return .init(response: .error(
+        guard let admission = admissionRegistry.admit() else {
+            return .error(
                 statusCode: 503,
                 .internalError("MCP server is not accepting requests.")
-            ))
+            )
         }
-        admittedRequestCount += 1
-        let tracked = await performTrackedHTTPRequest(request)
-        finishAdmittedRequest()
-        return tracked
+        let response = await performTrackedHTTPRequest(request).response
+        admissionRegistry.finish(admission)
+        return response
+    }
+
+    fileprivate func handleAdmittedHTTPRequest(
+        _ request: HTTPRequest
+    ) async -> TrackedHTTPResponse {
+        await performTrackedHTTPRequest(request)
     }
 
     private func performTrackedHTTPRequest(_ request: HTTPRequest) async -> TrackedHTTPResponse {
@@ -298,22 +464,6 @@ package actor CodexReviewMCPHTTPServer {
                 .invalidRequest("Bad Request: Missing \(HTTPHeaderName.sessionID) header")
             )
         )
-    }
-
-    private func finishAdmittedRequest() {
-        precondition(
-            admittedRequestCount > 0,
-            "CodexReviewMCPHTTPServer owns one completion per admitted request."
-        )
-        admittedRequestCount -= 1
-        guard admittedRequestCount == 0 else {
-            return
-        }
-        let waiters = admittedRequestDrainWaiters
-        admittedRequestDrainWaiters.removeAll(keepingCapacity: false)
-        for waiter in waiters {
-            waiter.resume()
-        }
     }
 
     private func createSessionAndHandle(_ request: HTTPRequest) async -> TrackedHTTPResponse {
@@ -465,6 +615,41 @@ package actor CodexReviewMCPHTTPServer {
 
     package func sessionActiveRequestCountForTesting(sessionID: String) -> Int? {
         sessions[sessionID]?.activeRequestCount
+    }
+
+    package func listenerIsOpenForTesting() -> Bool {
+        channel != nil
+    }
+
+    package func admittedNetworkRequestCountForTesting() -> Int {
+        admissionRegistry.admissionCount()
+    }
+
+    package func waitForAdmittedNetworkRequestCountForTesting(
+        _ count: Int
+    ) async {
+        await admissionRegistry.waitForAdmissionCount(count)
+    }
+
+    package func holdNextNetworkHandlerEntryForTesting() async {
+        await handlerEntryGate.holdNextEntry()
+    }
+
+    package func releaseNetworkHandlerEntryForTesting() async {
+        await handlerEntryGate.release()
+    }
+
+    package func waitForAdmittedHandlerDrainToBeginForTesting() async {
+        if admittedHandlerDrainDidBegin {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            if admittedHandlerDrainDidBegin {
+                continuation.resume()
+            } else {
+                admittedHandlerDrainStartWaiters.append(continuation)
+            }
+        }
     }
 
     private func closeExpiredSessions(now: Date) async {
@@ -623,13 +808,21 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
     }
 
     private let server: CodexReviewMCPHTTPServer
+    private let admissionRegistry: MCPHTTPAdmissionRegistry
+    private let entryGate: MCPHTTPHandlerEntryGate
     private var requestState: RequestState?
     private var activeStreamTask: Task<Void, Never>?
     private var activeStreamID: UUID?
     private var activeStreamCompletion: ActiveRequestCompletion?
 
-    init(server: CodexReviewMCPHTTPServer) {
+    init(
+        server: CodexReviewMCPHTTPServer,
+        admissionRegistry: MCPHTTPAdmissionRegistry,
+        entryGate: MCPHTTPHandlerEntryGate
+    ) {
         self.server = server
+        self.admissionRegistry = admissionRegistry
+        self.entryGate = entryGate
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -647,9 +840,21 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
                 return
             }
             requestState = nil
+            guard let admission = admissionRegistry.admit() else {
+                writeAdmissionClosedResponse(
+                    version: state.head.version,
+                    context: context
+                )
+                return
+            }
             nonisolated(unsafe) let context = context
             Task {
-                await handleRequest(state: state, context: context)
+                await entryGate.waitIfNeeded()
+                await handleRequest(
+                    state: state,
+                    admission: admission,
+                    context: context
+                )
             }
         }
     }
@@ -688,8 +893,10 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
 
     private func handleRequest(
         state: RequestState,
+        admission: MCPHTTPAdmissionRegistry.Admission,
         context: ChannelHandlerContext
     ) async {
+        defer { admissionRegistry.finish(admission) }
         let head = state.head
         let path = head.uri.split(separator: "?").first.map(String.init) ?? head.uri
         let endpoint = await server.endpoint
@@ -703,8 +910,39 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
         }
 
         let request = makeHTTPRequest(from: state)
-        let response = await server.handleTrackedHTTPRequest(request)
+        let response = await server.handleAdmittedHTTPRequest(request)
         await writeResponse(response, version: head.version, context: context)
+    }
+
+    private func writeAdmissionClosedResponse(
+        version: HTTPVersion,
+        context: ChannelHandlerContext
+    ) {
+        let response = HTTPResponse.error(
+            statusCode: 503,
+            .internalError("MCP server is not accepting requests.")
+        )
+        var head = HTTPResponseHead(
+            version: version,
+            status: .serviceUnavailable
+        )
+        for (name, value) in response.headers {
+            head.headers.add(name: name, value: value)
+        }
+        let body = response.bodyData
+        if let body {
+            head.headers.add(name: "Content-Length", value: "\(body.count)")
+        }
+        context.write(wrapOutboundOut(.head(head)), promise: nil)
+        if let body {
+            var buffer = context.channel.allocator.buffer(capacity: body.count)
+            buffer.writeBytes(body)
+            context.write(
+                wrapOutboundOut(.body(.byteBuffer(buffer))),
+                promise: nil
+            )
+        }
+        context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
     }
 
     private func makeHTTPRequest(from state: RequestState) -> HTTPRequest {
@@ -749,42 +987,64 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
         switch response {
         case .stream(let stream, _):
             let streamID = UUID()
-            let streamTask = Task {
-                var head = HTTPResponseHead(version: version, status: status)
-                for (name, value) in headers {
-                    head.headers.add(name: name, value: value)
-                }
-
-                var iterator = stream.makeAsyncIterator()
-                do {
-                    try Task.checkCancellation()
-                    try await writeResponsePart(.head(head), context: context, eventLoop: eventLoop)
-                    while let chunk = try await iterator.next() {
-                        try Task.checkCancellation()
-                        try await writeResponseBody(chunk, context: context, eventLoop: eventLoop)
-                    }
-                } catch is CancellationError {
-                    trackedResponse.streamCompletion?.finish()
-                    return
-                } catch {
-                    trackedResponse.streamCompletion?.finish()
-                    logger.error("MCP SSE stream failed: \(error.localizedDescription, privacy: .public)")
-                }
-
-                guard Task.isCancelled == false else {
-                    return
-                }
-                try? await writeResponsePart(.end(nil), context: context, eventLoop: eventLoop)
-            }
+            let registration = eventLoop.makePromise(of: Void.self)
             eventLoop.execute {
+                guard context.channel.isActive else {
+                    trackedResponse.streamCompletion?.finish()
+                    registration.succeed(())
+                    return
+                }
+                let streamTask = Task {
+                    defer {
+                        eventLoop.execute {
+                            if self.activeStreamID == streamID {
+                                self.activeStreamTask = nil
+                                self.activeStreamID = nil
+                                self.activeStreamCompletion = nil
+                            }
+                        }
+                    }
+                    var head = HTTPResponseHead(version: version, status: status)
+                    for (name, value) in headers {
+                        head.headers.add(name: name, value: value)
+                    }
+
+                    var iterator = stream.makeAsyncIterator()
+                    do {
+                        try Task.checkCancellation()
+                        try await self.writeResponsePart(
+                            .head(head),
+                            context: context,
+                            eventLoop: eventLoop
+                        )
+                        while let chunk = try await iterator.next() {
+                            try Task.checkCancellation()
+                            try await self.writeResponseBody(
+                                chunk,
+                                context: context,
+                                eventLoop: eventLoop
+                            )
+                        }
+                    } catch is CancellationError {
+                        trackedResponse.streamCompletion?.finish()
+                        return
+                    } catch {
+                        trackedResponse.streamCompletion?.finish()
+                        logger.error("MCP SSE stream failed: \(error.localizedDescription, privacy: .public)")
+                    }
+
+                    guard Task.isCancelled == false else {
+                        return
+                    }
+                    try? await self.writeResponsePart(
+                        .end(nil),
+                        context: context,
+                        eventLoop: eventLoop
+                    )
+                }
                 context.channel.closeFuture.whenComplete { _ in
                     trackedResponse.streamCompletion?.finish()
                     streamTask.cancel()
-                }
-                guard context.channel.isActive else {
-                    trackedResponse.streamCompletion?.finish()
-                    streamTask.cancel()
-                    return
                 }
                 self.activeStreamTask?.cancel()
                 self.activeStreamCompletion?.finish()
@@ -792,15 +1052,9 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
                 self.activeStreamID = streamID
                 self.activeStreamCompletion = trackedResponse.streamCompletion
                 context.read()
+                registration.succeed(())
             }
-            await streamTask.value
-            eventLoop.execute {
-                if self.activeStreamID == streamID {
-                    self.activeStreamTask = nil
-                    self.activeStreamID = nil
-                    self.activeStreamCompletion = nil
-                }
-            }
+            try? await registration.futureResult.get()
 
         default:
             let body = response.bodyData

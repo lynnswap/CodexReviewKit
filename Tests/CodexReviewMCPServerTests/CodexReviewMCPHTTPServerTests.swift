@@ -102,8 +102,10 @@ struct CodexReviewMCPHTTPServerTests {
         )
         let server = CodexReviewMCPHTTPServer(
             adapter: CodexReviewMCPServer(store: store),
-            configuration: .init(host: "review.local", port: 9417)
+            configuration: .init(host: "127.0.0.1", port: 0)
         )
+        try await server.start()
+        let boundPort = try #require(await server.url.port)
         let initializeBody = try makeJSONBody([
             "jsonrpc": "2.0",
             "id": 1,
@@ -120,7 +122,7 @@ struct CodexReviewMCPHTTPServerTests {
         let response = await server.handleHTTPRequest(HTTPRequest(
             method: "POST",
             headers: [
-                HTTPHeaderName.host: "review.local:9417",
+                HTTPHeaderName.host: "127.0.0.1:\(boundPort)",
                 HTTPHeaderName.accept: "text/event-stream, application/json",
                 HTTPHeaderName.contentType: "application/json",
             ],
@@ -130,7 +132,7 @@ struct CodexReviewMCPHTTPServerTests {
         let denied = await server.handleHTTPRequest(HTTPRequest(
             method: "POST",
             headers: [
-                HTTPHeaderName.host: "other.local:9417",
+                HTTPHeaderName.host: "other.local:\(boundPort)",
                 HTTPHeaderName.accept: "text/event-stream, application/json",
                 HTTPHeaderName.contentType: "application/json",
             ],
@@ -141,6 +143,18 @@ struct CodexReviewMCPHTTPServerTests {
         #expect(response.statusCode == 200)
         #expect(response.headers[HTTPHeaderName.sessionID]?.isEmpty == false)
         #expect(denied.statusCode == 421)
+        await server.closeAdmission()
+        let afterAdmissionClose = await server.handleHTTPRequest(HTTPRequest(
+            method: "POST",
+            headers: [
+                HTTPHeaderName.host: "127.0.0.1:\(boundPort)",
+                HTTPHeaderName.accept: "text/event-stream, application/json",
+                HTTPHeaderName.contentType: "application/json",
+            ],
+            body: initializeBody,
+            path: "/mcp"
+        ))
+        #expect(afterAdmissionClose.statusCode == 503)
         await server.stop()
     }
 
@@ -1059,6 +1073,67 @@ struct CodexReviewMCPHTTPServerTests {
         }
     }
 
+    @Test func stopDrainsAdmittedHandlerBeforeClosingItsSession() async throws {
+        let backend = FakeCodexReviewBackend()
+        let requestGate = AsyncGate()
+        await backend.holdStartReview(with: requestGate)
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        let server = CodexReviewMCPHTTPServer(
+            adapter: CodexReviewMCPServer(store: store),
+            configuration: .init(port: 0)
+        )
+        try await server.start()
+        let endpoint = await server.url
+        let sessionID = try await initializeSession(endpoint: endpoint)
+        let priorAdmissionCount = await server.admittedNetworkRequestCountForTesting()
+        await server.holdNextNetworkHandlerEntryForTesting()
+        let requestBody = try makeJSONBody([
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": [
+                "name": "review_start",
+                "arguments": [
+                    "cwd": "/tmp/project",
+                    "target": ["type": "uncommittedChanges"],
+                ],
+            ],
+        ])
+        let requestTask = Task {
+            try await postJSONRPCData(
+                endpoint: endpoint,
+                sessionID: sessionID,
+                bodyData: requestBody
+            )
+        }
+        await server.waitForAdmittedNetworkRequestCountForTesting(
+            priorAdmissionCount + 1
+        )
+
+        let stopFinished = CompletionFlag()
+        let stopTask = Task {
+            await server.stop()
+            await stopFinished.complete()
+        }
+        await server.waitForAdmittedHandlerDrainToBeginForTesting()
+
+        #expect(await server.listenerIsOpenForTesting() == false)
+        #expect(await server.sessionActiveRequestCountForTesting(sessionID: sessionID) != nil)
+        #expect(await stopFinished.isCompleted() == false)
+
+        await server.releaseNetworkHandlerEntryForTesting()
+        await requestGate.open()
+        await backend.yield(.completed(summary: "Done", result: "review text"))
+        _ = try? await requestTask.value
+        await stopTask.value
+
+        #expect(await stopFinished.isCompleted())
+        #expect(await server.sessionActiveRequestCountForTesting(sessionID: sessionID) == nil)
+    }
+
     @Test func streamableHTTPDoesNotExpireSessionWithOpenEventStream() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
@@ -1506,6 +1581,18 @@ struct CodexReviewMCPHTTPServerTests {
             )
         }
         store.reviewAttemptOwnerships[job.id] = .initialStart(registered)
+    }
+}
+
+private actor CompletionFlag {
+    private var completed = false
+
+    func complete() {
+        completed = true
+    }
+
+    func isCompleted() -> Bool {
+        completed
     }
 }
 

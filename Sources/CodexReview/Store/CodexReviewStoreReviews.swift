@@ -59,6 +59,8 @@ extension CodexReviewStore {
             throw CodexReviewAPI.Error.io(
                 "Review runtime transition is in progress."
             )
+        case .failed:
+            throw CodexReviewAPI.Error.io("Review runtime is not running.")
         case .stopped, .running:
             break
         }

@@ -878,6 +878,7 @@ package final class TestingRuntimeLifecycleHandle: RuntimeLifecycleHandle {
     package private(set) var closeAdmissionCallCount = 0
     package private(set) var closeCallCount = 0
     package private(set) var waitUntilClosedCallCount = 0
+    package private(set) var closePurposes: [ReviewRuntimeTransitionPurpose] = []
 
     private let onActivate: @MainActor @Sendable () -> Void
     private let onClose: @MainActor @Sendable () -> Void
@@ -900,7 +901,8 @@ package final class TestingRuntimeLifecycleHandle: RuntimeLifecycleHandle {
         closeAdmissionCallCount += 1
     }
 
-    package func close(purpose _: ReviewRuntimeTransitionPurpose) async throws {
+    package func close(purpose: ReviewRuntimeTransitionPurpose) async throws {
+        closePurposes.append(purpose)
         closeCallCount += 1
         guard didClose == false else {
             return
@@ -920,6 +922,80 @@ package final class TestingRuntimeLifecycleHandle: RuntimeLifecycleHandle {
 }
 
 @MainActor
+package final class TestingMCPServerLifecycleOwner: MCPServerLifecycleOwner {
+    package private(set) var prepareCallCount = 0
+    package private(set) var activateCallCount = 0
+    package private(set) var stopCallCount = 0
+    package private(set) var waitUntilStoppedCallCount = 0
+    package private(set) var preparedGenerations: [MCPServerGeneration] = []
+    package private(set) var activatedGenerations: [MCPServerGeneration] = []
+
+    private let serverURL: URL?
+    private var nextGeneration: UInt64 = 0
+    private var preparationGate: AsyncGate?
+    private let preparationStartedGate = AsyncGate()
+    private let preparationCancellationGate = AsyncGate()
+
+    package init(serverURL: URL? = nil) {
+        self.serverURL = serverURL
+    }
+
+    package func holdPreparation(with gate: AsyncGate) {
+        preparationGate = gate
+    }
+
+    package func waitForPreparation() async {
+        await preparationStartedGate.wait()
+    }
+
+    package func waitForPreparationCancellation() async {
+        await preparationCancellationGate.wait()
+    }
+
+    package func prepare() async throws -> PreparedMCPServer {
+        prepareCallCount += 1
+        nextGeneration &+= 1
+        await preparationStartedGate.open()
+        if let preparationGate {
+            let cancellationGate = preparationCancellationGate
+            await withTaskCancellationHandler {
+                await preparationGate.waitIgnoringCancellation()
+            } onCancel: {
+                Task { await cancellationGate.open() }
+            }
+            self.preparationGate = nil
+        }
+        let generation = MCPServerGeneration(rawValue: nextGeneration)
+        preparedGenerations.append(generation)
+        return .init(generation: generation)
+    }
+
+    package func activate(
+        _ generation: MCPServerGeneration
+    ) async throws -> MCPServerPublicationSnapshot {
+        activateCallCount += 1
+        activatedGenerations.append(generation)
+        return .init(serverURL: serverURL)
+    }
+
+    package func closeAdmission() async {}
+
+    package func drainAdmittedHandlers() async throws {}
+
+    package func stop() async throws {
+        stopCallCount += 1
+    }
+
+    package func waitUntilStopped() async throws {
+        waitUntilStoppedCallCount += 1
+    }
+
+    package func close() async throws {}
+
+    package func waitUntilClosed() async throws {}
+}
+
+@MainActor
 package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     package let reviewBackend: FakeCodexReviewBackend
     package let seed: CodexReviewStoreSeed
@@ -928,19 +1004,21 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     package private(set) var startRequests: [Bool] = []
     package private(set) var reviewStartOwnershipSnapshots: [StoreAttemptSnapshot?] = []
     package private(set) var recoveryResumeOwnershipSnapshots: [StoreAttemptSnapshot?] = []
-    package let mcpServerLifecycle: any MCPServerLifecycleOwner = NoMCPServerLifecycleOwner()
+    package let mcpServerLifecycle: any MCPServerLifecycleOwner
     package private(set) var lastPreparedRuntimeHandle: TestingRuntimeLifecycleHandle?
     private weak var store: CodexReviewStore?
     private var runtimePreparationGate: AsyncGate?
-    private let runtimePreparationStartedGate = AsyncGate()
-    private let runtimePreparationCancellationGate = AsyncGate()
+    private var runtimePreparationStartedGate = AsyncGate()
+    private var runtimePreparationCancellationGate = AsyncGate()
 
     package init(
         reviewBackend: FakeCodexReviewBackend,
-        seed: CodexReviewStoreSeed = .init()
+        seed: CodexReviewStoreSeed = .init(),
+        mcpServerLifecycle: any MCPServerLifecycleOwner = NoMCPServerLifecycleOwner()
     ) {
         self.reviewBackend = reviewBackend
         self.seed = seed
+        self.mcpServerLifecycle = mcpServerLifecycle
         self.currentSettingsSnapshot = seed.initialSettingsSnapshot
     }
 
@@ -954,6 +1032,8 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     package func holdRuntimePreparation(with gate: AsyncGate) {
         runtimePreparationGate = gate
+        runtimePreparationStartedGate = AsyncGate()
+        runtimePreparationCancellationGate = AsyncGate()
     }
 
     package func waitForRuntimePreparation() async {

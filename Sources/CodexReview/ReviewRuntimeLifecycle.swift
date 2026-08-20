@@ -91,7 +91,13 @@ package enum ReviewStoreRuntimeState {
     )
     case transitioning(
         generation: ReviewRuntimeGeneration,
+        purpose: ReviewRuntimeTransitionPurpose,
         task: Task<Void, Never>
+    )
+    case failed(
+        generation: ReviewRuntimeGeneration,
+        retainedMCPGeneration: MCPServerGeneration,
+        serverURL: URL?
     )
 
     package var generation: ReviewRuntimeGeneration {
@@ -99,7 +105,8 @@ package enum ReviewStoreRuntimeState {
         case .stopped(let generation),
              .acquiring(let generation, _),
              .running(let generation, _, _),
-             .transitioning(let generation, _):
+             .transitioning(let generation, _, _),
+             .failed(let generation, _, _):
             generation
         }
     }

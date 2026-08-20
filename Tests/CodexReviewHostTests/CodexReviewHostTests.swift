@@ -286,6 +286,385 @@ struct CodexReviewHostTests {
         await store.stop()
     }
 
+    @Test func liveStoreRestartReplacesOnlyAppServerAndRetainsMCPListener() async throws {
+        let homeURL = try temporaryHome()
+        let firstTransport = FakeJSONRPCTransport()
+        let secondTransport = FakeJSONRPCTransport()
+        for transport in [firstTransport, secondTransport] {
+            try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+            try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
+            try await transport.enqueue(
+                AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+                for: "config/read"
+            )
+            try await transport.enqueue(
+                AppServerAPI.Model.List.Response(data: []),
+                for: "model/list"
+            )
+        }
+        var transports = [firstTransport, secondTransport]
+        var mcpServerFactoryCallCount = 0
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            mcpHTTPServerFactory: { store, configuration in
+                mcpServerFactoryCallCount += 1
+                return CodexReviewMCPHTTPServer(
+                    adapter: CodexReviewMCPServer(store: store),
+                    configuration: .init(
+                        host: configuration.host,
+                        port: 0,
+                        endpoint: configuration.endpoint
+                    )
+                )
+            },
+            mcpHTTPServerBindChecker: { _ in },
+            transportFactory: { _ in transports.removeFirst() }
+        )
+
+        await store.start()
+        let initialURL = try #require(store.serverURL)
+
+        await store.restart()
+
+        #expect(store.serverState == .running)
+        #expect(store.serverURL == initialURL)
+        #expect(initialURL.port != 0)
+        #expect(mcpServerFactoryCallCount == 1)
+        #expect(transports.isEmpty)
+
+        await store.stop()
+    }
+
+    @Test func liveMCPOwnerStopDuringPreparationJoinsAndAllowsLaterStart() async throws {
+        let homeURL = try temporaryHome()
+        let preparationStarted = AsyncGate()
+        let preparationCancelled = AsyncGate()
+        let preparationRelease = AsyncGate()
+        let server = ControlledMCPHTTPServer(
+            endpoint: try #require(URL(string: "http://127.0.0.1:19418/mcp"))
+        )
+        let lifecycleCalls = MCPLifecycleCallProbe()
+        var factoryCallCount = 0
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            mcpHTTPServerFactory: { _, _ in
+                factoryCallCount += 1
+                return server
+            },
+            mcpHTTPServerBindChecker: { _ in
+                await preparationStarted.open()
+                await withTaskCancellationHandler {
+                    await preparationRelease.waitIgnoringCancellation()
+                } onCancel: {
+                    Task { await preparationCancelled.open() }
+                }
+            },
+            mcpLifecycleCallObserver: { call, count in
+                lifecycleCalls.record(call, count: count)
+            },
+            transportFactory: { _ in FakeJSONRPCTransport() }
+        )
+        let owner = store.backend.mcpServerLifecycle
+
+        let prepareTask = Task { try await owner.prepare() }
+        await preparationStarted.wait()
+        let firstStop = Task { try await owner.stop() }
+        await preparationCancelled.wait()
+        let secondStop = Task { try await owner.stop() }
+        await lifecycleCalls.waitFor(.stop, count: 2)
+
+        #expect(factoryCallCount == 0)
+        await preparationRelease.open()
+        await #expect(throws: ReviewLifecycleResourceFailure.self) {
+            _ = try await prepareTask.value
+        }
+        try await firstStop.value
+        try await secondStop.value
+        try await owner.waitUntilStopped()
+        #expect(factoryCallCount == 0)
+
+        let prepared = try await owner.prepare()
+        let repeatedPreparation = try await owner.prepare()
+        let snapshot = try await owner.activate(prepared.generation)
+        let repeatedSnapshot = try await owner.activate(prepared.generation)
+        let serverURL = await server.url
+        #expect(repeatedPreparation.generation == prepared.generation)
+        #expect(snapshot.serverURL == serverURL)
+        #expect(repeatedSnapshot.serverURL == snapshot.serverURL)
+        #expect(factoryCallCount == 1)
+        #expect(server.startCallCount == 1)
+        try await owner.stop()
+        try await owner.waitUntilStopped()
+    }
+
+    @Test func liveStoreStopSignalsHeldMCPPreparationBeforeJoiningAcquisition() async throws {
+        let homeURL = try temporaryHome()
+        let preparationStarted = AsyncGate()
+        let preparationCancelled = AsyncGate()
+        let preparationRelease = AsyncGate()
+        var mcpFactoryCallCount = 0
+        var appServerFactoryCallCount = 0
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            mcpHTTPServerFactory: { _, configuration in
+                mcpFactoryCallCount += 1
+                return NoopMCPHTTPServer(endpoint: configuration.url())
+            },
+            mcpHTTPServerBindChecker: { _ in
+                await preparationStarted.open()
+                await withTaskCancellationHandler {
+                    await preparationRelease.waitIgnoringCancellation()
+                } onCancel: {
+                    Task { await preparationCancelled.open() }
+                }
+            },
+            transportFactory: { _ in
+                appServerFactoryCallCount += 1
+                return FakeJSONRPCTransport()
+            }
+        )
+
+        let startTask = Task { @MainActor in
+            await store.start()
+        }
+        await preparationStarted.wait()
+        let stopFinished = CompletionFlag()
+        let stopTask = Task { @MainActor in
+            await store.stop()
+            await stopFinished.complete()
+        }
+        await preparationCancelled.wait()
+
+        #expect(await stopFinished.isCompleted() == false)
+        #expect(mcpFactoryCallCount == 0)
+        #expect(appServerFactoryCallCount == 0)
+
+        await preparationRelease.open()
+        await stopTask.value
+        await startTask.value
+
+        #expect(await stopFinished.isCompleted())
+        #expect(store.serverState == .stopped)
+        #expect(store.serverURL == nil)
+        #expect(mcpFactoryCallCount == 0)
+        #expect(appServerFactoryCallCount == 0)
+    }
+
+    @Test func liveStoreStopSignalsHeldMCPActivationBeforeJoiningAcquisition() async throws {
+        let homeURL = try temporaryHome()
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
+        try await transport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Model.List.Response(data: []),
+            for: "model/list"
+        )
+        let activationRelease = AsyncGate()
+        let server = ControlledMCPHTTPServer(
+            endpoint: try #require(URL(string: "http://127.0.0.1:19424/mcp"))
+        )
+        server.holdStart(with: activationRelease)
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            mcpHTTPServerFactory: { _, _ in server },
+            mcpHTTPServerBindChecker: { _ in },
+            transportFactory: { _ in transport }
+        )
+
+        let startTask = Task { @MainActor in
+            await store.start()
+        }
+        await server.waitForStart()
+        let stopFinished = CompletionFlag()
+        let stopTask = Task { @MainActor in
+            await store.stop()
+            await stopFinished.complete()
+        }
+        await server.waitForStartCancellation()
+
+        #expect(await stopFinished.isCompleted() == false)
+        #expect(store.serverURL == nil)
+        #expect(server.stopCallCount == 0)
+
+        await activationRelease.open()
+        await stopTask.value
+        await startTask.value
+
+        #expect(await stopFinished.isCompleted())
+        #expect(store.serverState == .stopped)
+        #expect(store.serverURL == nil)
+        #expect(server.stopCallCount == 1)
+    }
+
+    @Test func liveMCPOwnerJoinerCancellationDoesNotCancelSharedOperations() async throws {
+        let homeURL = try temporaryHome()
+        let preparationStarted = AsyncGate()
+        let preparationRelease = AsyncGate()
+        let activationRelease = AsyncGate()
+        let server = ControlledMCPHTTPServer(
+            endpoint: try #require(URL(string: "http://127.0.0.1:19423/mcp"))
+        )
+        server.holdStart(with: activationRelease)
+        var bindCheckCallCount = 0
+        var factoryCallCount = 0
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            mcpHTTPServerFactory: { _, _ in
+                factoryCallCount += 1
+                return server
+            },
+            mcpHTTPServerBindChecker: { _ in
+                bindCheckCallCount += 1
+                await preparationStarted.open()
+                await preparationRelease.waitIgnoringCancellation()
+            },
+            transportFactory: { _ in FakeJSONRPCTransport() }
+        )
+        let owner = store.backend.mcpServerLifecycle
+
+        let firstPreparation = Task { try await owner.prepare() }
+        await preparationStarted.wait()
+        let secondPreparation = Task { try await owner.prepare() }
+        firstPreparation.cancel()
+        await preparationRelease.open()
+        let firstPrepared = try await firstPreparation.value
+        let secondPrepared = try await secondPreparation.value
+
+        #expect(firstPrepared.generation == secondPrepared.generation)
+        #expect(bindCheckCallCount == 1)
+        #expect(factoryCallCount == 1)
+
+        let firstActivation = Task {
+            try await owner.activate(firstPrepared.generation)
+        }
+        await server.waitForStart()
+        let secondActivation = Task {
+            try await owner.activate(firstPrepared.generation)
+        }
+        firstActivation.cancel()
+        await activationRelease.open()
+        let firstSnapshot = try await firstActivation.value
+        let secondSnapshot = try await secondActivation.value
+
+        #expect(firstSnapshot.serverURL == secondSnapshot.serverURL)
+        #expect(server.startCallCount == 1)
+        try await owner.stop()
+    }
+
+    @Test func liveMCPOwnerStopDuringActivationJoinsAndStartsNewLeaseLater() async throws {
+        let homeURL = try temporaryHome()
+        let firstServer = ControlledMCPHTTPServer(
+            endpoint: try #require(URL(string: "http://127.0.0.1:19419/mcp"))
+        )
+        let secondServer = ControlledMCPHTTPServer(
+            endpoint: try #require(URL(string: "http://127.0.0.1:19420/mcp"))
+        )
+        let lifecycleCalls = MCPLifecycleCallProbe()
+        let activationRelease = AsyncGate()
+        firstServer.holdStart(with: activationRelease)
+        var servers = [firstServer, secondServer]
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            mcpHTTPServerFactory: { _, _ in servers.removeFirst() },
+            mcpHTTPServerBindChecker: { _ in },
+            mcpLifecycleCallObserver: { call, count in
+                lifecycleCalls.record(call, count: count)
+            },
+            transportFactory: { _ in FakeJSONRPCTransport() }
+        )
+        let owner = store.backend.mcpServerLifecycle
+        let prepared = try await owner.prepare()
+        let activationTask = Task {
+            try await owner.activate(prepared.generation)
+        }
+        await firstServer.waitForStart()
+
+        let firstStop = Task { try await owner.stop() }
+        await firstServer.waitForStartCancellation()
+        let secondStop = Task { try await owner.stop() }
+        await lifecycleCalls.waitFor(.stop, count: 2)
+        #expect(firstServer.stopCallCount == 0)
+
+        await activationRelease.open()
+        await #expect(throws: ReviewLifecycleResourceFailure.self) {
+            _ = try await activationTask.value
+        }
+        try await firstStop.value
+        try await secondStop.value
+        try await owner.waitUntilStopped()
+        #expect(firstServer.stopCallCount == 1)
+
+        let nextPrepared = try await owner.prepare()
+        let nextSnapshot = try await owner.activate(nextPrepared.generation)
+        let repeatedSnapshot = try await owner.activate(nextPrepared.generation)
+        let secondServerURL = await secondServer.url
+        #expect(nextPrepared.generation != prepared.generation)
+        #expect(nextSnapshot.serverURL == secondServerURL)
+        #expect(repeatedSnapshot.serverURL == nextSnapshot.serverURL)
+        #expect(secondServer.startCallCount == 1)
+        #expect(servers.isEmpty)
+        try await owner.stop()
+    }
+
+    @Test func liveMCPOwnerCloseDuringActivationJoinsAndPreventsLatePublication() async throws {
+        let homeURL = try temporaryHome()
+        let server = ControlledMCPHTTPServer(
+            endpoint: try #require(URL(string: "http://127.0.0.1:19421/mcp"))
+        )
+        let lifecycleCalls = MCPLifecycleCallProbe()
+        let activationRelease = AsyncGate()
+        server.holdStart(with: activationRelease)
+        var factoryCallCount = 0
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            mcpHTTPServerFactory: { _, _ in
+                factoryCallCount += 1
+                return server
+            },
+            mcpHTTPServerBindChecker: { _ in },
+            mcpLifecycleCallObserver: { call, count in
+                lifecycleCalls.record(call, count: count)
+            },
+            transportFactory: { _ in FakeJSONRPCTransport() }
+        )
+        let owner = store.backend.mcpServerLifecycle
+        let prepared = try await owner.prepare()
+        let activationTask = Task {
+            try await owner.activate(prepared.generation)
+        }
+        await server.waitForStart()
+
+        let firstClose = Task { try await owner.close() }
+        await server.waitForStartCancellation()
+        let secondClose = Task { try await owner.close() }
+        await lifecycleCalls.waitFor(.close, count: 2)
+        #expect(server.stopCallCount == 0)
+
+        await activationRelease.open()
+        await #expect(throws: ReviewLifecycleResourceFailure.self) {
+            _ = try await activationTask.value
+        }
+        try await firstClose.value
+        try await secondClose.value
+        try await owner.waitUntilClosed()
+        #expect(server.stopCallCount == 1)
+        #expect(factoryCallCount == 1)
+        await #expect(throws: ReviewLifecycleResourceFailure.self) {
+            _ = try await owner.prepare()
+        }
+    }
+
     @Test func liveStoreReportsMCPPortOwnerWhenEndpointPortInUseAndDoesNotLaunchAppServer() async throws {
         let homeURL = try temporaryHome()
         let port = 54321
@@ -2200,6 +2579,108 @@ private func failedMessage(from phase: CodexReviewAuthModel.Phase) -> String? {
         return nil
     }
     return message
+}
+
+@MainActor
+private final class MCPLifecycleCallProbe {
+    private struct Waiter {
+        let call: CodexReviewMCPLifecycleCall
+        let count: Int
+        let continuation: CheckedContinuation<Void, Never>
+    }
+
+    private var counts: [CodexReviewMCPLifecycleCall: Int] = [:]
+    private var waiters: [UUID: Waiter] = [:]
+
+    func record(_ call: CodexReviewMCPLifecycleCall, count: Int) {
+        counts[call] = count
+        let completedWaiterIDs = waiters.compactMap { id, waiter in
+            waiter.call == call && count >= waiter.count ? id : nil
+        }
+        for waiterID in completedWaiterIDs {
+            waiters.removeValue(forKey: waiterID)?.continuation.resume()
+        }
+    }
+
+    func waitFor(_ call: CodexReviewMCPLifecycleCall, count: Int) async {
+        if counts[call, default: 0] >= count {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            if counts[call, default: 0] >= count {
+                continuation.resume()
+            } else {
+                waiters[UUID()] = .init(
+                    call: call,
+                    count: count,
+                    continuation: continuation
+                )
+            }
+        }
+    }
+}
+
+@MainActor
+private final class ControlledMCPHTTPServer: CodexReviewMCPHTTPServing {
+    private let endpoint: URL
+    private var startGate: AsyncGate?
+    private var startStartedGate = AsyncGate()
+    private var startCancellationGate = AsyncGate()
+
+    private(set) var startCallCount = 0
+    private(set) var closeAdmissionCallCount = 0
+    private(set) var waitForAdmittedHandlersCallCount = 0
+    private(set) var stopCallCount = 0
+
+    init(endpoint: URL) {
+        self.endpoint = endpoint
+    }
+
+    var url: URL {
+        get async {
+            endpoint
+        }
+    }
+
+    func holdStart(with gate: AsyncGate) {
+        startGate = gate
+        startStartedGate = AsyncGate()
+        startCancellationGate = AsyncGate()
+    }
+
+    func waitForStart() async {
+        await startStartedGate.wait()
+    }
+
+    func waitForStartCancellation() async {
+        await startCancellationGate.wait()
+    }
+
+    func start() async throws {
+        startCallCount += 1
+        await startStartedGate.open()
+        if let startGate {
+            let cancellationGate = startCancellationGate
+            await withTaskCancellationHandler {
+                await startGate.waitIgnoringCancellation()
+            } onCancel: {
+                Task { await cancellationGate.open() }
+            }
+            self.startGate = nil
+        }
+    }
+
+    func closeAdmission() async {
+        closeAdmissionCallCount += 1
+    }
+
+    func waitForAdmittedHandlers() async {
+        waitForAdmittedHandlersCallCount += 1
+    }
+
+    func stop() async {
+        stopCallCount += 1
+    }
 }
 
 private final class NoopMCPHTTPServer: CodexReviewMCPHTTPServing, @unchecked Sendable {

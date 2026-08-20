@@ -40,6 +40,16 @@ package typealias CodexReviewMCPHTTPServerBindChecker = @MainActor @Sendable (
     CodexReviewMCPHTTPServer.Configuration
 ) async throws -> Void
 
+package enum CodexReviewMCPLifecycleCall: Hashable, Sendable {
+    case stop
+    case close
+}
+
+package typealias CodexReviewMCPLifecycleCallObserver = @MainActor @Sendable (
+    CodexReviewMCPLifecycleCall,
+    Int
+) -> Void
+
 package protocol CodexReviewMCPHTTPServing: AnyObject, Sendable {
     var url: URL { get async }
 
@@ -78,6 +88,7 @@ public extension CodexReviewStore {
         externalURLOpener: @escaping @MainActor @Sendable (URL) -> Void = defaultExternalURLOpener,
         mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
         mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
+        mcpLifecycleCallObserver: CodexReviewMCPLifecycleCallObserver? = nil,
         shutdownCleanupTimeout: Duration = .seconds(2),
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
         networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
@@ -92,6 +103,7 @@ public extension CodexReviewStore {
             externalURLOpener: externalURLOpener,
             mcpPortOwnerResolver: mcpPortOwnerResolver,
             mcpHTTPServerBindChecker: mcpHTTPServerBindChecker,
+            mcpLifecycleCallObserver: mcpLifecycleCallObserver,
             shutdownCleanupTimeout: shutdownCleanupTimeout,
             networkMonitor: networkMonitor,
             networkRecoveryPolicy: networkRecoveryPolicy,
@@ -112,6 +124,7 @@ public extension CodexReviewStore {
         ) -> any CodexReviewMCPHTTPServing)? = nil,
         mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
         mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
+        mcpLifecycleCallObserver: CodexReviewMCPLifecycleCallObserver? = nil,
         shutdownCleanupTimeout: Duration = .seconds(2),
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
         networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
@@ -128,6 +141,7 @@ public extension CodexReviewStore {
                 mcpHTTPServerFactory: mcpHTTPServerFactory,
                 mcpPortOwnerResolver: mcpPortOwnerResolver,
                 mcpHTTPServerBindChecker: mcpHTTPServerBindChecker,
+                mcpLifecycleCallObserver: mcpLifecycleCallObserver,
                 shutdownCleanupTimeout: shutdownCleanupTimeout,
                 appServerRuntimeFactory: { codexHomeURL in
                     let client = AppServerClient(transport: try await transportFactory(codexHomeURL))
@@ -191,6 +205,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         },
         mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
         mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
+        mcpLifecycleCallObserver: CodexReviewMCPLifecycleCallObserver? = nil,
         shutdownCleanupTimeout: Duration = .seconds(2),
         appServerRuntimeFactory: AppServerRuntimeFactory? = nil
     ) {
@@ -213,7 +228,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             configuration: mcpHTTPServerConfiguration,
             factory: mcpHTTPServerFactory,
             portOwnerResolver: resolvedPortOwnerResolver,
-            bindChecker: resolvedBindChecker
+            bindChecker: resolvedBindChecker,
+            lifecycleCallObserver: mcpLifecycleCallObserver
         )
         self.shutdownCleanupTimeout = shutdownCleanupTimeout
         self.appServerRuntimeFactory = appServerRuntimeFactory ?? Self.makeAppServerRuntimeFactory(
@@ -1722,33 +1738,69 @@ private final class LiveRuntimeLifecycleHandle: RuntimeLifecycleHandle {
 private final class LiveMCPServerLifecycleOwner: MCPServerLifecycleOwner {
     typealias Factory = LiveCodexReviewStoreBackend.MCPHTTPServerFactory
 
+    private struct Lease: Sendable {
+        let generation: MCPServerGeneration
+        let server: (any CodexReviewMCPHTTPServing)?
+    }
+
+    private struct Activation: Sendable {
+        let lease: Lease
+        let snapshot: MCPServerPublicationSnapshot
+    }
+
+    private typealias PreparationResult = Result<Lease, ReviewLifecycleResourceFailure>
+    private typealias ActivationResult = Result<Activation, ReviewLifecycleResourceFailure>
+    private typealias LifecycleResult = Result<Void, ReviewLifecycleResourceFailure>
+
     private enum State {
         case stopped
-        case prepared(MCPServerGeneration, (any CodexReviewMCPHTTPServing)?)
-        case running(MCPServerGeneration, (any CodexReviewMCPHTTPServing)?)
-        case stopping
-        case closing
-        case closed
+        case preparing(
+            operationID: UInt64,
+            generation: MCPServerGeneration,
+            task: Task<PreparationResult, Never>
+        )
+        case prepared(Lease)
+        case activating(
+            operationID: UInt64,
+            lease: Lease,
+            task: Task<ActivationResult, Never>
+        )
+        case running(Lease, MCPServerPublicationSnapshot)
+        case stopping(
+            operationID: UInt64,
+            task: Task<LifecycleResult, Never>
+        )
+        case closing(
+            operationID: UInt64,
+            task: Task<LifecycleResult, Never>
+        )
+        case closed(LifecycleResult)
     }
 
     private let configuration: CodexReviewMCPHTTPServer.Configuration
     private let factory: Factory?
     private let portOwnerResolver: CodexReviewMCPPortOwnerResolver
     private let bindChecker: CodexReviewMCPHTTPServerBindChecker
+    private let lifecycleCallObserver: CodexReviewMCPLifecycleCallObserver?
     private weak var store: CodexReviewStore?
     private var state: State = .stopped
     private var nextGeneration: UInt64 = 0
+    private var nextOperationID: UInt64 = 0
+    private var stopCallerCount = 0
+    private var closeCallerCount = 0
 
     init(
         configuration: CodexReviewMCPHTTPServer.Configuration,
         factory: Factory?,
         portOwnerResolver: @escaping CodexReviewMCPPortOwnerResolver,
-        bindChecker: @escaping CodexReviewMCPHTTPServerBindChecker
+        bindChecker: @escaping CodexReviewMCPHTTPServerBindChecker,
+        lifecycleCallObserver: CodexReviewMCPLifecycleCallObserver?
     ) {
         self.configuration = configuration
         self.factory = factory
         self.portOwnerResolver = portOwnerResolver
         self.bindChecker = bindChecker
+        self.lifecycleCallObserver = lifecycleCallObserver
     }
 
     func attachStore(_ store: CodexReviewStore) {
@@ -1756,90 +1808,191 @@ private final class LiveMCPServerLifecycleOwner: MCPServerLifecycleOwner {
     }
 
     func prepare() async throws -> PreparedMCPServer {
-        guard case .stopped = state else {
+        let operationID: UInt64
+        let generation: MCPServerGeneration
+        let task: Task<PreparationResult, Never>
+        switch state {
+        case .stopped:
+            nextGeneration &+= 1
+            generation = MCPServerGeneration(rawValue: nextGeneration)
+            operationID = makeOperationID()
+            task = makePreparationTask(generation: generation)
+            state = .preparing(
+                operationID: operationID,
+                generation: generation,
+                task: task
+            )
+        case .preparing(let currentOperationID, let currentGeneration, let currentTask):
+            operationID = currentOperationID
+            generation = currentGeneration
+            task = currentTask
+        case .prepared(let lease):
+            return .init(generation: lease.generation)
+        case .activating, .running, .stopping:
             throw ReviewLifecycleResourceFailure.mcpServer(
                 "MCP preparation requires stopped state."
             )
-        }
-        nextGeneration &+= 1
-        let generation = MCPServerGeneration(rawValue: nextGeneration)
-        guard let factory else {
-            state = .prepared(generation, nil)
-            return .init(generation: generation)
-        }
-        guard let store else {
-            throw ReviewLifecycleResourceFailure.mcpServer(
-                "MCP preparation requires its attached Store."
-            )
-        }
-        do {
-            try await bindChecker(configuration)
-        } catch {
-            throw await mappedPreparationFailure(error)
-        }
-        let server = factory(store, configuration)
-        state = .prepared(generation, server)
-        return .init(generation: generation)
-    }
-
-    func activate(
-        _ generation: MCPServerGeneration
-    ) async throws -> MCPServerPublicationSnapshot {
-        guard case .prepared(generation, let server) = state else {
-            throw ReviewLifecycleResourceFailure.mcpServer(
-                "MCP activation requires its exact prepared generation."
-            )
-        }
-        guard let server else {
-            state = .running(generation, nil)
-            return .init(serverURL: nil)
-        }
-        do {
-            try await server.start()
-            let url = await server.url
-            state = .running(generation, server)
-            return .init(serverURL: url)
-        } catch {
-            await server.stop()
-            state = .stopped
-            throw error
-        }
-    }
-
-    func closeAdmission() async {
-        guard case .running(_, let server) = state else {
-            return
-        }
-        await server?.closeAdmission()
-    }
-
-    func drainAdmittedHandlers() async throws {
-        guard case .running(_, let server) = state else {
-            return
-        }
-        await server?.waitForAdmittedHandlers()
-    }
-
-    func stop() async throws {
-        switch state {
-        case .stopped:
-            return
-        case .prepared(_, let server), .running(_, let server):
-            state = .stopping
-            await server?.closeAdmission()
-            await server?.stop()
-            state = .stopped
-        case .stopping:
-            return
         case .closing, .closed:
             throw ReviewLifecycleResourceFailure.mcpServer(
                 "MCP owner is closing or closed."
             )
         }
+
+        let result = await task.value
+        switch result {
+        case .failure(let failure):
+            if case .preparing(let currentOperationID, let currentGeneration, _) = state,
+               currentOperationID == operationID,
+               currentGeneration == generation {
+                state = .stopped
+            }
+            throw failure
+        case .success(let lease):
+            switch state {
+            case .preparing(let currentOperationID, let currentGeneration, _)
+                where currentOperationID == operationID && currentGeneration == generation:
+                state = .prepared(lease)
+                return .init(generation: generation)
+            case .prepared(let currentLease) where currentLease.generation == generation:
+                return .init(generation: generation)
+            default:
+                throw supersededFailure("preparation", generation: generation)
+            }
+        }
+    }
+
+    func activate(
+        _ generation: MCPServerGeneration
+    ) async throws -> MCPServerPublicationSnapshot {
+        let operationID: UInt64
+        let lease: Lease
+        let task: Task<ActivationResult, Never>
+        switch state {
+        case .prepared(let preparedLease) where preparedLease.generation == generation:
+            lease = preparedLease
+            operationID = makeOperationID()
+            task = makeActivationTask(lease: lease)
+            state = .activating(
+                operationID: operationID,
+                lease: lease,
+                task: task
+            )
+        case .activating(let currentOperationID, let currentLease, let currentTask)
+            where currentLease.generation == generation:
+            operationID = currentOperationID
+            lease = currentLease
+            task = currentTask
+        case .running(let currentLease, let snapshot)
+            where currentLease.generation == generation:
+            return snapshot
+        default:
+            throw ReviewLifecycleResourceFailure.mcpServer(
+                "MCP activation requires its exact prepared generation."
+            )
+        }
+
+        let result = await task.value
+        switch result {
+        case .success(let activation):
+            switch state {
+            case .activating(let currentOperationID, let currentLease, _)
+                where currentOperationID == operationID && currentLease.generation == generation:
+                state = .running(activation.lease, activation.snapshot)
+                return activation.snapshot
+            case .running(let currentLease, let snapshot)
+                where currentLease.generation == generation:
+                return snapshot
+            default:
+                throw supersededFailure("activation", generation: generation)
+            }
+        case .failure(let failure):
+            let cleanupTask = activationFailureCleanupTask(
+                operationID: operationID,
+                lease: lease
+            )
+            if let cleanupTask {
+                let cleanupResult = await cleanupTask.task.value
+                finishStoppingIfCurrent(
+                    cleanupTask.operationID,
+                    result: cleanupResult
+                )
+            }
+            throw failure
+        }
+    }
+
+    func closeAdmission() async {
+        switch state {
+        case .prepared(let lease), .running(let lease, _):
+            await lease.server?.closeAdmission()
+        case .activating(_, let lease, _):
+            await lease.server?.closeAdmission()
+        case .stopped, .preparing, .stopping, .closing, .closed:
+            return
+        }
+    }
+
+    func drainAdmittedHandlers() async throws {
+        switch state {
+        case .running(let lease, _):
+            await lease.server?.waitForAdmittedHandlers()
+        case .stopped, .preparing, .prepared, .activating, .stopping, .closing, .closed:
+            return
+        }
+    }
+
+    func stop() async throws {
+        stopCallerCount += 1
+        lifecycleCallObserver?(.stop, stopCallerCount)
+        let operationID: UInt64
+        let task: Task<LifecycleResult, Never>
+        switch state {
+        case .stopped:
+            return
+        case .preparing(_, _, let preparationTask):
+            operationID = makeOperationID()
+            task = makeLifecycleTask(preparationTask: preparationTask)
+            state = .stopping(operationID: operationID, task: task)
+        case .prepared(let lease), .running(let lease, _):
+            operationID = makeOperationID()
+            task = makeLifecycleTask(lease: lease)
+            state = .stopping(operationID: operationID, task: task)
+        case .activating(_, let lease, let activationTask):
+            operationID = makeOperationID()
+            task = makeLifecycleTask(
+                activationTask: activationTask,
+                lease: lease
+            )
+            state = .stopping(operationID: operationID, task: task)
+        case .stopping(let currentOperationID, let currentTask):
+            operationID = currentOperationID
+            task = currentTask
+        case .closing(_, let closeTask):
+            try await closeTask.value.get()
+            return
+        case .closed(let result):
+            try result.get()
+            return
+        }
+
+        let result = await task.value
+        finishStoppingIfCurrent(operationID, result: result)
+        try result.get()
     }
 
     func waitUntilStopped() async throws {
-        guard case .stopped = state else {
+        switch state {
+        case .stopped:
+            return
+        case .stopping(let operationID, let task):
+            let result = await task.value
+            finishStoppingIfCurrent(operationID, result: result)
+            try result.get()
+        case .closing(_, let task):
+            try await task.value.get()
+        case .closed(let result):
+            try result.get()
+        case .preparing, .prepared, .activating, .running:
             throw ReviewLifecycleResourceFailure.mcpServer(
                 "MCP owner did not stop."
             )
@@ -1847,29 +2000,209 @@ private final class LiveMCPServerLifecycleOwner: MCPServerLifecycleOwner {
     }
 
     func close() async throws {
+        closeCallerCount += 1
+        lifecycleCallObserver?(.close, closeCallerCount)
+        let operationID: UInt64
+        let task: Task<LifecycleResult, Never>
         switch state {
-        case .closed:
-            return
-        case .prepared(_, let server), .running(_, let server):
-            state = .closing
-            await server?.closeAdmission()
-            await server?.stop()
-            state = .closed
         case .stopped:
-            state = .closed
-        case .stopping, .closing:
-            throw ReviewLifecycleResourceFailure.mcpServer(
-                "MCP owner already has an in-flight lifecycle transition."
+            operationID = makeOperationID()
+            task = makeLifecycleTask()
+            state = .closing(operationID: operationID, task: task)
+        case .preparing(_, _, let preparationTask):
+            operationID = makeOperationID()
+            task = makeLifecycleTask(preparationTask: preparationTask)
+            state = .closing(operationID: operationID, task: task)
+        case .prepared(let lease), .running(let lease, _):
+            operationID = makeOperationID()
+            task = makeLifecycleTask(lease: lease)
+            state = .closing(operationID: operationID, task: task)
+        case .activating(_, let lease, let activationTask):
+            operationID = makeOperationID()
+            task = makeLifecycleTask(
+                activationTask: activationTask,
+                lease: lease
             )
+            state = .closing(operationID: operationID, task: task)
+        case .stopping(_, let stopTask):
+            operationID = makeOperationID()
+            task = makeLifecycleTask(lifecycleTask: stopTask)
+            state = .closing(operationID: operationID, task: task)
+        case .closing(let currentOperationID, let currentTask):
+            operationID = currentOperationID
+            task = currentTask
+        case .closed(let result):
+            try result.get()
+            return
         }
+
+        let result = await task.value
+        finishClosingIfCurrent(operationID, result: result)
+        try result.get()
     }
 
     func waitUntilClosed() async throws {
-        guard case .closed = state else {
+        switch state {
+        case .closing(let operationID, let task):
+            let result = await task.value
+            finishClosingIfCurrent(operationID, result: result)
+            try result.get()
+        case .closed(let result):
+            try result.get()
+        case .stopped, .preparing, .prepared, .activating, .running, .stopping:
             throw ReviewLifecycleResourceFailure.mcpServer(
                 "MCP owner did not close."
             )
         }
+    }
+
+    private func makeOperationID() -> UInt64 {
+        nextOperationID &+= 1
+        return nextOperationID
+    }
+
+    private func makePreparationTask(
+        generation: MCPServerGeneration
+    ) -> Task<PreparationResult, Never> {
+        let configuration = configuration
+        let bindChecker = bindChecker
+        let factory = factory
+        let store = store
+        return Task { @MainActor [weak self] in
+            guard let factory else {
+                return .success(.init(generation: generation, server: nil))
+            }
+            guard let store else {
+                return .failure(.mcpServer(
+                    "MCP preparation requires its attached Store."
+                ))
+            }
+            do {
+                try await bindChecker(configuration)
+                try Task.checkCancellation()
+                return .success(.init(
+                    generation: generation,
+                    server: factory(store, configuration)
+                ))
+            } catch {
+                guard let self else {
+                    return .failure(.mcpServer(error.localizedDescription))
+                }
+                return .failure(await self.mappedPreparationFailure(error))
+            }
+        }
+    }
+
+    private func makeActivationTask(
+        lease: Lease
+    ) -> Task<ActivationResult, Never> {
+        Task { @MainActor in
+            guard let server = lease.server else {
+                return .success(.init(
+                    lease: lease,
+                    snapshot: .init(serverURL: nil)
+                ))
+            }
+            do {
+                try await server.start()
+                try Task.checkCancellation()
+                return .success(.init(
+                    lease: lease,
+                    snapshot: .init(serverURL: await server.url)
+                ))
+            } catch {
+                return .failure(.mcpServer(error.localizedDescription))
+            }
+        }
+    }
+
+    private func makeLifecycleTask(
+        preparationTask: Task<PreparationResult, Never>? = nil,
+        activationTask: Task<ActivationResult, Never>? = nil,
+        lifecycleTask: Task<LifecycleResult, Never>? = nil,
+        lease initialLease: Lease? = nil
+    ) -> Task<LifecycleResult, Never> {
+        Task { @MainActor in
+            preparationTask?.cancel()
+            activationTask?.cancel()
+            var lease = initialLease
+            if let lease {
+                await lease.server?.closeAdmission()
+            }
+            if let preparationTask,
+               case .success(let preparedLease) = await preparationTask.value {
+                lease = preparedLease
+                await preparedLease.server?.closeAdmission()
+            }
+            if let activationTask {
+                _ = await activationTask.value
+            }
+            if let lifecycleTask {
+                _ = await lifecycleTask.value
+            } else {
+                await lease?.server?.stop()
+            }
+            return .success(())
+        }
+    }
+
+    private func activationFailureCleanupTask(
+        operationID: UInt64,
+        lease: Lease
+    ) -> (operationID: UInt64, task: Task<LifecycleResult, Never>)? {
+        switch state {
+        case .activating(let currentOperationID, let currentLease, _)
+            where currentOperationID == operationID
+                && currentLease.generation == lease.generation:
+            let cleanupOperationID = makeOperationID()
+            let task = makeLifecycleTask(lease: lease)
+            state = .stopping(operationID: cleanupOperationID, task: task)
+            return (cleanupOperationID, task)
+        case .stopping(let currentOperationID, let task):
+            return (currentOperationID, task)
+        case .closing(let currentOperationID, let task):
+            return (currentOperationID, task)
+        case .stopped, .preparing, .prepared, .activating, .running, .closed:
+            return nil
+        }
+    }
+
+    private func finishStoppingIfCurrent(
+        _ operationID: UInt64,
+        result: LifecycleResult
+    ) {
+        guard case .stopping(let currentOperationID, _) = state,
+              currentOperationID == operationID
+        else {
+            return
+        }
+        switch result {
+        case .success:
+            state = .stopped
+        case .failure:
+            state = .stopped
+        }
+    }
+
+    private func finishClosingIfCurrent(
+        _ operationID: UInt64,
+        result: LifecycleResult
+    ) {
+        guard case .closing(let currentOperationID, _) = state,
+              currentOperationID == operationID
+        else {
+            return
+        }
+        state = .closed(result)
+    }
+
+    private func supersededFailure(
+        _ operation: String,
+        generation: MCPServerGeneration
+    ) -> ReviewLifecycleResourceFailure {
+        .mcpServer(
+            "MCP \(operation) for generation \(generation.rawValue) was superseded by a lifecycle transition."
+        )
     }
 
     private func mappedPreparationFailure(
