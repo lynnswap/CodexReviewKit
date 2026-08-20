@@ -50,11 +50,11 @@ package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend, Sendable {
     ) async throws -> BackendReviewAttempt
     func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws
     func forceCloseReviewConnection() async throws
-    func beginReviewRecovery(
-        _ barrier: ReviewAttemptRecoveryBarrier
-    ) async throws -> CodexReviewBackendModel.Review.RecoveryToken
+    func prepareReviewRecovery(
+        _ candidate: ReviewRecoveryCandidate
+    ) async throws -> ReviewRecoveryHandoff
     func resumeReviewRecovery(
-        _ token: CodexReviewBackendModel.Review.RecoveryToken,
+        _ handoff: ReviewRecoveryHandoff,
         request: CodexReviewBackendModel.Review.Start,
         admission: ReviewStartAdmission
     ) async throws -> BackendReviewAttempt

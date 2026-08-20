@@ -16,11 +16,11 @@ package protocol CodexReviewBackend: Sendable {
     ) async throws -> BackendReviewAttempt
     func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws
     func forceCloseReviewConnection() async throws
-    func beginReviewRecovery(
-        _ barrier: ReviewAttemptRecoveryBarrier
-    ) async throws -> CodexReviewBackendModel.Review.RecoveryToken
+    func prepareReviewRecovery(
+        _ candidate: ReviewRecoveryCandidate
+    ) async throws -> ReviewRecoveryHandoff
     func resumeReviewRecovery(
-        _ token: CodexReviewBackendModel.Review.RecoveryToken,
+        _ handoff: ReviewRecoveryHandoff,
         request: CodexReviewBackendModel.Review.Start,
         admission: ReviewStartAdmission
     ) async throws -> BackendReviewAttempt
@@ -32,10 +32,11 @@ package extension CodexReviewBackend {
         _ request: CodexReviewBackendModel.Review.Start
     ) async throws -> BackendReviewAttempt {
         let admission = ReviewStartAdmission()
-        let task = await admission.start { admission in
+        let registered = try await admission.registerStart { admission in
             try await self.startReview(request, admission: admission)
         }
-        return try await task.value
+        try await admission.activateStart(registered.id)
+        return try await registered.task.value
     }
 }
 
@@ -52,15 +53,13 @@ package struct BackendReviewAttempt: Sendable {
 package actor BackendReviewEventMailbox {
     private enum Terminal {
         case finished
-        case cancelled
-        case failed(String)
+        case failed(ReviewAttemptStreamFailure)
     }
 
     private enum Delivery {
         case event(CodexReviewBackendModel.Review.Event)
         case finished
-        case cancelled
-        case failed(String)
+        case failed(ReviewAttemptStreamFailure)
     }
 
     private var bufferedEvents: [CodexReviewBackendModel.Review.Event] = []
@@ -75,10 +74,8 @@ package actor BackendReviewEventMailbox {
             return event
         case .finished:
             return nil
-        case .cancelled:
-            throw CancellationError()
-        case .failed(let message):
-            throw BackendReviewEventMailboxError(message: message)
+        case .failed(let failure):
+            throw failure
         }
     }
 
@@ -112,11 +109,11 @@ package actor BackendReviewEventMailbox {
         resumeWaitersForTerminal()
     }
 
-    package func fail(_ error: any Error) {
+    package func fail(_ failure: ReviewAttemptStreamFailure) {
         guard terminal == nil else {
             return
         }
-        terminal = error is CancellationError ? .cancelled : .failed(error.localizedDescription)
+        terminal = .failed(failure)
         resumeWaitersForTerminal()
     }
 
@@ -182,8 +179,6 @@ package actor BackendReviewEventMailbox {
         switch terminal {
         case .finished:
             return .finished
-        case .cancelled:
-            return .cancelled
         case .failed(let message):
             return .failed(message)
         }
@@ -196,18 +191,6 @@ package actor BackendReviewEventMailbox {
         case .started, .message, .messageDelta, .log, .logEntry:
             return false
         }
-    }
-}
-
-package struct BackendReviewEventMailboxError: LocalizedError, Sendable {
-    package var message: String
-
-    package init(message: String) {
-        self.message = message
-    }
-
-    package var errorDescription: String? {
-        message
     }
 }
 

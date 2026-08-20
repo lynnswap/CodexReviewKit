@@ -1018,17 +1018,17 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         try await appServerBackend.forceCloseReviewConnection()
     }
 
-    func beginReviewRecovery(
-        _ barrier: ReviewAttemptRecoveryBarrier
-    ) async throws -> CodexReviewBackendModel.Review.RecoveryToken {
+    func prepareReviewRecovery(
+        _ candidate: ReviewRecoveryCandidate
+    ) async throws -> ReviewRecoveryHandoff {
         guard let appServerBackend else {
             throw CodexReviewAPI.Error.io("Review runtime is not running.")
         }
-        return try await appServerBackend.beginReviewRecovery(barrier)
+        return try await appServerBackend.prepareReviewRecovery(candidate)
     }
 
     func resumeReviewRecovery(
-        _ token: CodexReviewBackendModel.Review.RecoveryToken,
+        _ handoff: ReviewRecoveryHandoff,
         request: CodexReviewBackendModel.Review.Start,
         admission: ReviewStartAdmission
     ) async throws -> BackendReviewAttempt {
@@ -1036,7 +1036,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             throw CodexReviewAPI.Error.io("Review runtime is not running.")
         }
         return try await appServerBackend.resumeReviewRecovery(
-            token,
+            handoff,
             request: request,
             admission: admission
         )

@@ -183,8 +183,8 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         case startReview(CodexReviewBackendModel.Review.Start)
         case interruptReview(CodexReviewBackendModel.Review.Run, CodexReviewBackendModel.CancellationReason)
         case forceCloseReviewConnection
-        case beginReviewRecovery(CodexReviewBackendModel.Review.Run, CodexReviewBackendModel.CancellationReason)
-        case resumeReviewRecovery(CodexReviewBackendModel.Review.RecoveryToken, CodexReviewBackendModel.Review.Start)
+        case prepareReviewRecovery(ReviewRecoveryCandidate)
+        case resumeReviewRecovery(ReviewRecoveryHandoff, CodexReviewBackendModel.Review.Start)
         case cleanupReview(CodexReviewBackendModel.Review.Run)
     }
 
@@ -379,7 +379,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
 
     package func waitForBeginReviewRecovery() async {
         if commands.contains(where: {
-            if case .beginReviewRecovery = $0 {
+            if case .prepareReviewRecovery = $0 {
                 true
             } else {
                 false
@@ -391,7 +391,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 if commands.contains(where: {
-                    if case .beginReviewRecovery = $0 {
+                    if case .prepareReviewRecovery = $0 {
                         true
                     } else {
                         false
@@ -562,7 +562,9 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         await interruptReviewGate?.open()
         let mailboxes = Array(eventMailboxes.values)
         for mailbox in mailboxes {
-            await mailbox.fail(ReviewRuntimeCloseFailure.connection("Connection force-closed."))
+            await mailbox.fail(.ownerForcedConnectionClose(
+                .connection("Connection force-closed.")
+            ))
         }
     }
 
@@ -572,27 +574,31 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         await resumeReviewRecoveryGate?.open()
     }
 
-    package func beginReviewRecovery(
-        _ barrier: ReviewAttemptRecoveryBarrier
-    ) async throws -> CodexReviewBackendModel.Review.RecoveryToken {
-        commands.append(.beginReviewRecovery(
-            barrier.run,
-            .init(message: barrier.cancellation.message)
-        ))
+    package func prepareReviewRecovery(
+        _ candidate: ReviewRecoveryCandidate
+    ) async throws -> ReviewRecoveryHandoff {
+        commands.append(.prepareReviewRecovery(candidate))
         let waiters = Array(beginReviewRecoveryWaiters.values)
         beginReviewRecoveryWaiters.removeAll(keepingCapacity: false)
         for waiter in waiters {
             waiter.resume()
         }
-        let run = barrier.run
-        return .init(interruptedRun: run, rollbackThreadID: run.reviewThreadID ?? run.threadID)
+        let run = candidate.resolved.run
+        return .init(
+            candidate: candidate,
+            token: .init(
+                interruptedRun: run,
+                rollbackThreadID: run.reviewThreadID ?? run.threadID
+            )
+        )
     }
 
     package func resumeReviewRecovery(
-        _ token: CodexReviewBackendModel.Review.RecoveryToken,
+        _ handoff: ReviewRecoveryHandoff,
         request: CodexReviewBackendModel.Review.Start,
         admission: ReviewStartAdmission
     ) async throws -> BackendReviewAttempt {
+        let token = handoff.token
         let run = token.interruptedRun
         let recoveredRun = nextRecoveredRun ?? .init(
             attemptID: "attempt-recovered",
@@ -613,7 +619,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
                 cancellation: await admission.cancellationRequest() ?? .system()
             )
         }
-        commands.append(.resumeReviewRecovery(token, request))
+        commands.append(.resumeReviewRecovery(handoff, request))
         let waiters = Array(resumeReviewRecoveryWaiters.values)
         resumeReviewRecoveryWaiters.removeAll(keepingCapacity: false)
         for waiter in waiters {
@@ -645,8 +651,11 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         await eventMailbox(for: run ?? nextRun).finish()
     }
 
-    package func finishEvents(throwing error: any Error, for run: CodexReviewBackendModel.Review.Run? = nil) async {
-        await eventMailbox(for: run ?? nextRun).fail(error)
+    package func finishEvents(
+        throwing failure: ReviewAttemptStreamFailure,
+        for run: CodexReviewBackendModel.Review.Run? = nil
+    ) async {
+        await eventMailbox(for: run ?? nextRun).fail(failure)
     }
 
     package func finishEventMailboxes() async {
@@ -948,19 +957,19 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         try await reviewBackend.forceCloseReviewConnection()
     }
 
-    package func beginReviewRecovery(
-        _ barrier: ReviewAttemptRecoveryBarrier
-    ) async throws -> CodexReviewBackendModel.Review.RecoveryToken {
-        try await reviewBackend.beginReviewRecovery(barrier)
+    package func prepareReviewRecovery(
+        _ candidate: ReviewRecoveryCandidate
+    ) async throws -> ReviewRecoveryHandoff {
+        try await reviewBackend.prepareReviewRecovery(candidate)
     }
 
     package func resumeReviewRecovery(
-        _ token: CodexReviewBackendModel.Review.RecoveryToken,
+        _ handoff: ReviewRecoveryHandoff,
         request: CodexReviewBackendModel.Review.Start,
         admission: ReviewStartAdmission
     ) async throws -> BackendReviewAttempt {
         try await reviewBackend.resumeReviewRecovery(
-            token,
+            handoff,
             request: request,
             admission: admission
         )

@@ -86,19 +86,81 @@ package struct ReviewStartCancelledBeforeDispatch: LocalizedError, Equatable, Se
     package var errorDescription: String? { cancellation.message }
 }
 
+package struct ReviewStartTerminatedBeforeActivation: LocalizedError, Equatable, Sendable {
+    package let terminal: ReviewAttemptBarrierTerminal
+
+    package init(terminal: ReviewAttemptBarrierTerminal) {
+        self.terminal = terminal
+    }
+
+    package var errorDescription: String? {
+        "Review start was resolved before activation: \(terminal.diagnosticDescription)."
+    }
+}
+
+package enum ReviewAttemptRecoveryTrigger: Equatable, Sendable {
+    case sameAccountRestart
+    case recoverableNetworkLoss
+
+    fileprivate var cancellation: ReviewCancellation {
+        switch self {
+        case .sameAccountRestart:
+            .system(message: "Review runtime is restarting.")
+        case .recoverableNetworkLoss:
+            .system(message: "Network unavailable; waiting to reconnect.")
+        }
+    }
+}
+
+package enum ReviewAttemptInterruptionPurpose: Equatable, Sendable {
+    case terminalCancellation(ReviewCancellation)
+    case recoverableTransition(ReviewAttemptRecoveryTrigger)
+}
+
+package enum ReviewAttemptStreamFailure: LocalizedError, Equatable, Sendable {
+    case recoverableNetwork(ReviewRuntimeCloseFailure)
+    case ownerForcedConnectionClose(ReviewRuntimeCloseFailure)
+    case unexpectedConnection(ReviewRuntimeCloseFailure)
+    case process(ReviewRuntimeCloseFailure)
+    case protocolViolation(ReviewAttemptContractFailure)
+    case workerContract(ReviewAttemptContractFailure)
+    case ownerCancellation
+
+    package var errorDescription: String? {
+        switch self {
+        case .recoverableNetwork(let failure),
+             .ownerForcedConnectionClose(let failure),
+             .unexpectedConnection(let failure),
+             .process(let failure):
+            failure.localizedDescription
+        case .protocolViolation(let failure), .workerContract(let failure):
+            failure.localizedDescription
+        case .ownerCancellation:
+            "Review event owner was cancelled before an attempt terminal."
+        }
+    }
+
+    package var permitsRecoveryReplacement: Bool {
+        switch self {
+        case .recoverableNetwork, .ownerForcedConnectionClose:
+            true
+        case .unexpectedConnection, .process, .protocolViolation,
+             .workerContract, .ownerCancellation:
+            false
+        }
+    }
+}
+
 package enum ReviewAttemptBarrierTerminal: Equatable, Sendable {
-    case canonical(
-        run: CodexReviewBackendModel.Review.Run,
-        terminal: ReviewTerminalRecord
-    )
-    case connection(ReviewRuntimeCloseFailure)
+    case canonical(ReviewTerminalRecord)
+    case stream(ReviewAttemptStreamFailure)
     case localCancellation(ReviewCancellation)
 
     package var diagnosticDescription: String {
         switch self {
-        case .canonical(let run, let terminal):
-            "canonical terminal \(terminal.kind.rawValue) for attempt \(run.attemptID)"
-        case .connection(let failure):
+        case .canonical(let terminal):
+            "canonical terminal \(terminal.kind.rawValue)"
+        case .stream(let failure):
             failure.localizedDescription
         case .localCancellation(let cancellation):
             cancellation.message
@@ -119,35 +181,118 @@ package struct ReviewAttemptCancellationResolution: Equatable, Sendable {
     }
 }
 
-package struct ReviewAttemptRecoveryBarrier: Equatable, Sendable {
-    package var run: CodexReviewBackendModel.Review.Run
-    package var terminal: ReviewAttemptBarrierTerminal
-    package var cancellation: ReviewCancellation
-    package var requestFailure: ReviewInterruptRequestFailure?
+package struct ReviewResolvedAttemptTerminal: Equatable, Sendable {
+    package let run: CodexReviewBackendModel.Review.Run
+    package let terminal: ReviewAttemptBarrierTerminal
+    package let requestFailure: ReviewInterruptRequestFailure?
 
     fileprivate init(
         run: CodexReviewBackendModel.Review.Run,
         terminal: ReviewAttemptBarrierTerminal,
-        cancellation: ReviewCancellation,
         requestFailure: ReviewInterruptRequestFailure?
     ) {
         self.run = run
         self.terminal = terminal
-        self.cancellation = cancellation
         self.requestFailure = requestFailure
     }
 }
 
-package struct ReviewRecoverySupersededByTerminal: LocalizedError, Equatable, Sendable {
-    package var terminal: ReviewAttemptBarrierTerminal
+package struct ReviewRecoveryCandidate: Equatable, Sendable {
+    package let resolved: ReviewResolvedAttemptTerminal
+    package let trigger: ReviewAttemptRecoveryTrigger
 
-    package init(terminal: ReviewAttemptBarrierTerminal) {
-        self.terminal = terminal
+    fileprivate init(
+        resolved: ReviewResolvedAttemptTerminal,
+        trigger: ReviewAttemptRecoveryTrigger
+    ) {
+        self.resolved = resolved
+        self.trigger = trigger
     }
+}
 
-    package var errorDescription: String? {
-        "Recovery was superseded by \(terminal.diagnosticDescription)."
+package struct ReviewProductTerminalDisposition: Equatable, Sendable {
+    package let resolved: ReviewResolvedAttemptTerminal
+    package let productTerminal: ReviewTerminalRecord
+
+    fileprivate init(
+        resolved: ReviewResolvedAttemptTerminal,
+        productTerminal: ReviewTerminalRecord
+    ) {
+        self.resolved = resolved
+        self.productTerminal = productTerminal
     }
+}
+
+package enum ReviewRecoveryDisposition: Equatable, Sendable {
+    case productTerminal(ReviewProductTerminalDisposition)
+    case replacement(ReviewRecoveryCandidate)
+}
+
+package struct ReviewRecoveryHandoff: Equatable, Sendable {
+    package let candidate: ReviewRecoveryCandidate
+    package let token: CodexReviewBackendModel.Review.RecoveryToken
+
+    package init(
+        candidate: ReviewRecoveryCandidate,
+        token: CodexReviewBackendModel.Review.RecoveryToken
+    ) {
+        self.candidate = candidate
+        self.token = token
+    }
+}
+
+package struct ReviewActiveAttempt: Sendable {
+    package let run: CodexReviewBackendModel.Review.Run
+    package let admission: ReviewStartAdmission
+
+    package init(
+        run: CodexReviewBackendModel.Review.Run,
+        admission: ReviewStartAdmission
+    ) {
+        self.run = run
+        self.admission = admission
+    }
+}
+
+package struct ReviewStartHandleID: Hashable, Sendable {
+    package let generation: UInt64
+
+    package init(generation: UInt64) {
+        self.generation = generation
+    }
+}
+
+package struct ReviewRegisteredStart: Sendable {
+    package let id: ReviewStartHandleID
+    package let admission: ReviewStartAdmission
+    package let task: Task<BackendReviewAttempt, any Error>
+
+    package init(
+        id: ReviewStartHandleID,
+        admission: ReviewStartAdmission,
+        task: Task<BackendReviewAttempt, any Error>
+    ) {
+        self.id = id
+        self.admission = admission
+        self.task = task
+    }
+}
+
+package enum ReviewAttemptOwnership: Sendable {
+    case initialStart(ReviewRegisteredStart)
+    case active(ReviewActiveAttempt)
+    case resolvingRecovery(ReviewActiveAttempt)
+    case recoveryDisposition(ReviewRecoveryDisposition)
+    case preparingRecovery(
+        candidate: ReviewRecoveryCandidate,
+        preparationTask: Task<ReviewRecoveryHandoff, any Error>
+    )
+    case waitingForRecovery(ReviewRecoveryHandoff)
+    case replacementStart(
+        handoff: ReviewRecoveryHandoff,
+        start: ReviewRegisteredStart
+    )
+    case terminal
 }
 
 /// Owns one review attempt from the first dispatch admission through terminal and cleanup.
@@ -161,6 +306,8 @@ package actor ReviewStartAdmission {
 
     package enum Phase: Equatable, Sendable {
         case queued
+        case registeredStart(ReviewStartHandleID)
+        case activatedStart(ReviewStartHandleID)
         case preparingThread(RequestDispatch)
         case startingReview(
             preparedRun: CodexReviewBackendModel.Review.Run,
@@ -182,8 +329,16 @@ package actor ReviewStartAdmission {
     private let closePolicy: ReviewRuntimeClosePolicy
     private var phase: Phase = .queued
     private var requestedCancellation: ReviewCancellation?
+    private var joinedTerminalCancellation: ReviewCancellation?
+    private var interruptionPurpose: ReviewAttemptInterruptionPurpose?
     private var startTask: Task<BackendReviewAttempt, any Error>?
+    private var nextStartGeneration: UInt64 = 0
+    private var registeredStartID: ReviewStartHandleID?
+    private var startActivationResult: Result<Void, any Error>?
+    private var startActivationWaiters: [CheckedContinuation<Result<Void, any Error>, Never>] = []
     private var cancellationTask: Task<ReviewAttemptCancellationResolution, any Error>?
+    private var recoveryDispositionTask: Task<ReviewRecoveryDisposition, any Error>?
+    private var installedRecoveryDisposition: ReviewRecoveryDisposition?
     private var interruptRequestTask: Task<Void, Never>?
     private var terminalBarrierTask: Task<Void, Never>?
     private var graceTask: Task<Void, Never>?
@@ -199,22 +354,35 @@ package actor ReviewStartAdmission {
     private var terminalWaiters: [UUID: CheckedContinuation<ReviewAttemptBarrierTerminal?, Never>] = [:]
     private var activeRunWaiters: [CheckedContinuation<CodexReviewBackendModel.Review.Run?, Never>] = []
     private var cancellationAdmissionWaiters: [CheckedContinuation<ReviewCancellation?, Never>] = []
+    private var interruptionAdmissionWaiters: [CheckedContinuation<ReviewAttemptInterruptionPurpose?, Never>] = []
     private var cancellationWaiters: [CheckedContinuation<Result<ReviewAttemptCancellationResolution, any Error>, Never>] = []
 
     package init(closePolicy: ReviewRuntimeClosePolicy = .production) {
         self.closePolicy = closePolicy
     }
 
-    package func start(
+    package func registerStart(
         _ operation: @escaping @Sendable (ReviewStartAdmission) async throws -> BackendReviewAttempt
-    ) -> Task<BackendReviewAttempt, any Error> {
-        precondition(
-            startTask == nil,
-            "ReviewStartAdmission owns exactly one registered start Task."
-        )
-        phase = .preparingThread(.notSent)
+    ) throws -> ReviewRegisteredStart {
+        guard startTask == nil else {
+            throw ReviewAttemptContractFailure(
+                message: "ReviewStartAdmission already owns a registered start Task."
+            )
+        }
+        nextStartGeneration &+= 1
+        let id = ReviewStartHandleID(generation: nextStartGeneration)
+        registeredStartID = id
+        if let terminal {
+            startActivationResult = .failure(startFailure(for: terminal))
+        } else if let requestedCancellation {
+            receiveTerminal(.localCancellation(requestedCancellation))
+        } else {
+            phase = .registeredStart(id)
+        }
         let task = Task {
             do {
+                try await self.waitForStartActivation(id)
+                try self.beginActivatedStart(id)
                 let attempt = try await operation(self)
                 self.finishStart(with: .success(attempt))
                 return attempt
@@ -224,7 +392,25 @@ package actor ReviewStartAdmission {
             }
         }
         startTask = task
-        return task
+        return ReviewRegisteredStart(id: id, admission: self, task: task)
+    }
+
+    package func activateStart(_ id: ReviewStartHandleID) throws {
+        guard registeredStartID == id else {
+            throw ReviewAttemptContractFailure(
+                message: "Start activation handle \(id.generation) is stale or belongs to another attempt."
+            )
+        }
+        if let startActivationResult {
+            return try startActivationResult.get()
+        }
+        guard case .registeredStart(id) = phase else {
+            throw ReviewAttemptContractFailure(
+                message: "Start activation handle \(id.generation) is not pending."
+            )
+        }
+        phase = .activatedStart(id)
+        resolveStartActivation(.success(()))
     }
 
     package func admitThreadStartDispatch() -> Bool {
@@ -235,7 +421,8 @@ package actor ReviewStartAdmission {
         case .preparingThread(.notSent):
             phase = .preparingThread(.outcomeUnknown)
             return true
-        case .queued, .preparingThread(.outcomeUnknown), .startingReview,
+        case .queued, .registeredStart, .activatedStart,
+             .preparingThread(.outcomeUnknown), .startingReview,
              .active, .interrupting, .finishing, .terminal:
             return false
         }
@@ -293,8 +480,13 @@ package actor ReviewStartAdmission {
         _ terminalRecord: ReviewTerminalRecord,
         for run: CodexReviewBackendModel.Review.Run
     ) throws {
+        guard let canonicalRun = registeredRun ?? canonicalRunForTerminal,
+              Self.matchesCanonicalPair(run, canonicalRun)
+        else {
+            return
+        }
         if let terminal {
-            let candidate = ReviewAttemptBarrierTerminal.canonical(run: run, terminal: terminalRecord)
+            let candidate = ReviewAttemptBarrierTerminal.canonical(terminalRecord)
             guard terminal == candidate else {
                 throw ReviewAttemptContractFailure(
                     message: "Conflicting terminal for review attempt \(run.attemptID)."
@@ -302,22 +494,23 @@ package actor ReviewStartAdmission {
             }
             return
         }
-        guard let canonicalRun = canonicalRunForTerminal,
-              Self.matchesCanonicalPair(run, canonicalRun)
-        else {
-            return
-        }
-        receiveTerminal(.canonical(run: run, terminal: terminalRecord))
+        receiveTerminal(.canonical(terminalRecord))
     }
 
-    package func recordConnectionTerminal(_ failure: ReviewRuntimeCloseFailure) {
-        guard terminal == nil else {
+    package func recordStreamTerminal(_ failure: ReviewAttemptStreamFailure) throws {
+        let candidate = ReviewAttemptBarrierTerminal.stream(failure)
+        if let terminal {
+            guard terminal == candidate else {
+                throw ReviewAttemptContractFailure(
+                    message: "Conflicting stream terminal for the review attempt."
+                )
+            }
             return
         }
         if Self.isOutcomeUnknownStartPhase(phase) {
             startTask?.cancel()
         }
-        receiveTerminal(.connection(failure))
+        receiveTerminal(candidate)
     }
 
     package func cancel(
@@ -328,6 +521,15 @@ package actor ReviewStartAdmission {
         ) async throws -> Void,
         forceClose: @escaping @Sendable () async throws -> Void
     ) async throws -> ReviewAttemptCancellationResolution {
+        if let recoveryDispositionTask {
+            joinedTerminalCancellation = cancellation
+            requestedCancellation = cancellation
+            resumeCancellationAdmissionWaiters(returning: cancellation)
+            let disposition = try await recoveryDispositionTask.value
+            return try cancellationResolution(for: disposition)
+        }
+        interruptionPurpose = .terminalCancellation(cancellation)
+        resumeInterruptionAdmissionWaiters(returning: interruptionPurpose)
         let resolution = try await joinedCancellationResolution(
             cancellation,
             interrupt: interrupt,
@@ -335,48 +537,169 @@ package actor ReviewStartAdmission {
         )
         if let requestFailure = resolution.requestFailure,
            case .outcomeUnknown = requestFailure.outcome,
-           case .connection(let connectionFailure) = resolution.terminal {
+           case .stream(let streamFailure) = resolution.terminal {
             throw ReviewInterruptRequestFailure(
                 outcome: requestFailure.outcome,
-                secondaryBarrierDiagnostic: connectionFailure.localizedDescription
+                secondaryBarrierDiagnostic: streamFailure.localizedDescription
             )
         }
         return resolution
     }
 
-    package func interruptForRecovery(
-        _ cancellation: ReviewCancellation,
+    package func beginRecovery(
+        trigger: ReviewAttemptRecoveryTrigger,
         interrupt: @escaping @Sendable (
             CodexReviewBackendModel.Review.Run,
             CodexReviewBackendModel.CancellationReason
         ) async throws -> Void,
         forceClose: @escaping @Sendable () async throws -> Void
-    ) async throws -> ReviewAttemptRecoveryBarrier {
-        guard let run = activeRun ?? canonicalRunForTerminal ?? registeredRun else {
+    ) async throws -> ReviewRecoveryDisposition {
+        if let recoveryDispositionTask {
+            return try await recoveryDispositionTask.value
+        }
+        guard cancellationTask == nil else {
+            throw ReviewAttemptContractFailure(
+                message: "Recovery cannot replace an admitted terminal cancellation."
+            )
+        }
+        guard activeRun != nil else {
             throw ReviewAttemptContractFailure(
                 message: "Recovery interruption requires one canonical review run."
             )
         }
+        interruptionPurpose = .recoverableTransition(trigger)
+        resumeInterruptionAdmissionWaiters(returning: interruptionPurpose)
+        let task = Task {
+            try await self.performRecovery(
+                trigger: trigger,
+                interrupt: interrupt,
+                forceClose: forceClose
+            )
+        }
+        recoveryDispositionTask = task
+        do {
+            return try await task.value
+        } catch {
+            recoveryDispositionTask = nil
+            interruptionPurpose = nil
+            throw error
+        }
+    }
+
+    private func performRecovery(
+        trigger: ReviewAttemptRecoveryTrigger,
+        interrupt: @escaping @Sendable (
+            CodexReviewBackendModel.Review.Run,
+            CodexReviewBackendModel.CancellationReason
+        ) async throws -> Void,
+        forceClose: @escaping @Sendable () async throws -> Void
+    ) async throws -> ReviewRecoveryDisposition {
+        guard let run = activeRun else {
+            throw ReviewAttemptContractFailure(
+                message: "Recovery interruption lost its active review run."
+            )
+        }
         let resolution = try await joinedCancellationResolution(
-            cancellation,
+            trigger.cancellation,
             interrupt: interrupt,
             forceClose: forceClose
         )
-        switch resolution.terminal {
-        case .canonical(_, let terminal) where terminal.kind != .interrupted:
-            throw ReviewRecoverySupersededByTerminal(terminal: resolution.terminal)
-        case .canonical, .connection:
-            return .init(
-                run: run,
-                terminal: resolution.terminal,
-                cancellation: cancellation,
-                requestFailure: resolution.requestFailure
-            )
-        case .localCancellation:
-            throw ReviewAttemptContractFailure(
-                message: "A dispatched review recovery cannot complete locally."
+        let resolved = ReviewResolvedAttemptTerminal(
+            run: run,
+            terminal: resolution.terminal,
+            requestFailure: resolution.requestFailure
+        )
+        let disposition = makeRecoveryDisposition(resolved, trigger: trigger)
+        installedRecoveryDisposition = disposition
+        return disposition
+    }
+
+    private func makeRecoveryDisposition(
+        _ resolved: ReviewResolvedAttemptTerminal,
+        trigger: ReviewAttemptRecoveryTrigger
+    ) -> ReviewRecoveryDisposition {
+        switch resolved.terminal {
+        case .canonical(let terminal):
+            switch terminal {
+            case .completed, .failed:
+                return .productTerminal(.init(
+                    resolved: resolved,
+                    productTerminal: terminal
+                ))
+            case .interrupted:
+                if let joinedTerminalCancellation {
+                    return .productTerminal(.init(
+                        resolved: resolved,
+                        productTerminal: .interrupted(.requested(joinedTerminalCancellation))
+                    ))
+                }
+                return .replacement(.init(resolved: resolved, trigger: trigger))
+            }
+        case .stream(let failure):
+            if let joinedTerminalCancellation {
+                if resolved.requestFailure == nil {
+                    return .productTerminal(.init(
+                        resolved: resolved,
+                        productTerminal: .interrupted(.requested(joinedTerminalCancellation))
+                    ))
+                }
+                return .productTerminal(.init(
+                    resolved: resolved,
+                    productTerminal: productTerminal(for: failure)
+                ))
+            }
+            if failure.permitsRecoveryReplacement {
+                return .replacement(.init(resolved: resolved, trigger: trigger))
+            }
+            return .productTerminal(.init(
+                resolved: resolved,
+                productTerminal: productTerminal(for: failure)
+            ))
+        case .localCancellation(let cancellation):
+            return .productTerminal(.init(
+                resolved: resolved,
+                productTerminal: .interrupted(.requested(cancellation))
+            ))
+        }
+    }
+
+    private func productTerminal(
+        for failure: ReviewAttemptStreamFailure
+    ) -> ReviewTerminalRecord {
+        switch failure {
+        case .process:
+            .interrupted(.previousProcessExit)
+        case .protocolViolation(let failure), .workerContract(let failure):
+            .failed(message: failure.localizedDescription)
+        case .ownerCancellation:
+            .failed(message: failure.localizedDescription)
+        case .recoverableNetwork, .ownerForcedConnectionClose,
+             .unexpectedConnection:
+            .interrupted(.transport(message: failure.localizedDescription))
+        }
+    }
+
+    private func cancellationResolution(
+        for disposition: ReviewRecoveryDisposition
+    ) throws -> ReviewAttemptCancellationResolution {
+        let resolved: ReviewResolvedAttemptTerminal = switch disposition {
+        case .productTerminal(let product):
+            product.resolved
+        case .replacement(let candidate):
+            candidate.resolved
+        }
+        if let requestFailure = resolved.requestFailure,
+           case .outcomeUnknown = requestFailure.outcome,
+           case .stream(let failure) = resolved.terminal {
+            throw ReviewInterruptRequestFailure(
+                outcome: requestFailure.outcome,
+                secondaryBarrierDiagnostic: failure.localizedDescription
             )
         }
+        return .init(
+            terminal: resolved.terminal,
+            requestFailure: resolved.requestFailure
+        )
     }
 
     private func joinedCancellationResolution(
@@ -393,8 +716,10 @@ package actor ReviewStartAdmission {
         if let terminal {
             return .init(terminal: terminal)
         }
-        requestedCancellation = cancellation
-        resumeCancellationAdmissionWaiters(returning: cancellation)
+        if joinedTerminalCancellation == nil {
+            requestedCancellation = cancellation
+            resumeCancellationAdmissionWaiters(returning: cancellation)
+        }
         let task = Task {
             try await self.performCancellation(
                 cancellation,
@@ -448,7 +773,11 @@ package actor ReviewStartAdmission {
     }
 
     package func waitForCancellationAdmission() async -> ReviewCancellation? {
-        if let requestedCancellation {
+        if let terminalCancellation = joinedTerminalCancellation
+            ?? terminalCancellationPurpose {
+            return terminalCancellation
+        }
+        if recoveryDispositionTask == nil, let requestedCancellation {
             return requestedCancellation
         }
         if terminal != nil {
@@ -458,12 +787,33 @@ package actor ReviewStartAdmission {
             return nil
         }
         return await withCheckedContinuation { continuation in
-            if let requestedCancellation {
+            if let terminalCancellation = joinedTerminalCancellation
+                ?? terminalCancellationPurpose {
+                continuation.resume(returning: terminalCancellation)
+            } else if recoveryDispositionTask == nil, let requestedCancellation {
                 continuation.resume(returning: requestedCancellation)
             } else if terminal != nil || startFailed {
                 continuation.resume(returning: nil)
             } else {
                 cancellationAdmissionWaiters.append(continuation)
+            }
+        }
+    }
+
+    package func waitForInterruptionAdmission() async -> ReviewAttemptInterruptionPurpose? {
+        if let interruptionPurpose {
+            return interruptionPurpose
+        }
+        if terminal != nil || startFailed {
+            return nil
+        }
+        return await withCheckedContinuation { continuation in
+            if let interruptionPurpose {
+                continuation.resume(returning: interruptionPurpose)
+            } else if terminal != nil || startFailed {
+                continuation.resume(returning: nil)
+            } else {
+                interruptionAdmissionWaiters.append(continuation)
             }
         }
     }
@@ -475,6 +825,70 @@ package actor ReviewStartAdmission {
             return nil
         }
         return await cleanupTask.result
+    }
+
+    private func waitForStartActivation(_ id: ReviewStartHandleID) async throws {
+        guard registeredStartID == id else {
+            throw ReviewAttemptContractFailure(
+                message: "Start handle \(id.generation) became stale before activation."
+            )
+        }
+        if let startActivationResult {
+            return try startActivationResult.get()
+        }
+        let result = await withCheckedContinuation { continuation in
+            if let startActivationResult {
+                continuation.resume(returning: startActivationResult)
+            } else {
+                startActivationWaiters.append(continuation)
+            }
+        }
+        try result.get()
+    }
+
+    private func beginActivatedStart(_ id: ReviewStartHandleID) throws {
+        guard registeredStartID == id else {
+            throw ReviewAttemptContractFailure(
+                message: "Start handle \(id.generation) became stale before dispatch."
+            )
+        }
+        if let terminal {
+            throw startFailure(for: terminal)
+        }
+        if let requestedCancellation {
+            let terminal = ReviewAttemptBarrierTerminal.localCancellation(requestedCancellation)
+            receiveTerminal(terminal)
+            throw startFailure(for: terminal)
+        }
+        guard case .activatedStart(id) = phase else {
+            throw ReviewAttemptContractFailure(
+                message: "Start handle \(id.generation) was not activated for dispatch."
+            )
+        }
+        phase = .preparingThread(.notSent)
+    }
+
+    private func resolveStartActivation(_ result: Result<Void, any Error>) {
+        guard startActivationResult == nil else {
+            return
+        }
+        startActivationResult = result
+        let waiters = startActivationWaiters
+        startActivationWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume(returning: result)
+        }
+    }
+
+    private func startFailure(for terminal: ReviewAttemptBarrierTerminal) -> any Error {
+        switch terminal {
+        case .localCancellation(let cancellation):
+            ReviewStartCancelledBeforeDispatch(cancellation: cancellation)
+        case .stream(let failure):
+            failure
+        case .canonical:
+            ReviewStartTerminatedBeforeActivation(terminal: terminal)
+        }
     }
 
     private func finishStart(
@@ -492,12 +906,18 @@ package actor ReviewStartAdmission {
             if let cancellation = (error as? ReviewStartCancelledBeforeDispatch)?.cancellation {
                 receiveTerminal(.localCancellation(cancellation))
             } else if error is CancellationError,
-                      let requestedCancellation,
-                      case .preparingThread(.notSent) = phase {
-                receiveTerminal(.localCancellation(requestedCancellation))
+                      let requestedCancellation {
+                switch phase {
+                case .registeredStart, .activatedStart, .preparingThread(.notSent):
+                    receiveTerminal(.localCancellation(requestedCancellation))
+                case .queued, .preparingThread(.outcomeUnknown), .startingReview,
+                     .active, .interrupting, .finishing, .terminal:
+                    break
+                }
             }
             resumeActiveRunWaiters(returning: nil)
             resumeCancellationAdmissionWaiters(returning: nil)
+            resumeInterruptionAdmissionWaiters(returning: nil)
         }
     }
 
@@ -512,6 +932,10 @@ package actor ReviewStartAdmission {
         if case .preparingThread(.notSent) = phase {
             startTask?.cancel()
         } else if case .queued = phase {
+            receiveTerminal(.localCancellation(cancellation))
+        } else if case .registeredStart = phase {
+            receiveTerminal(.localCancellation(cancellation))
+        } else if case .activatedStart = phase {
             receiveTerminal(.localCancellation(cancellation))
         } else if Self.isOutcomeUnknownStartPhase(phase) {
             installGraceTask(forceClose: forceClose)
@@ -719,6 +1143,9 @@ package actor ReviewStartAdmission {
 
     private func receiveTerminal(_ terminal: ReviewAttemptBarrierTerminal) {
         self.terminal = terminal
+        if registeredStartID != nil, startActivationResult == nil {
+            resolveStartActivation(.failure(startFailure(for: terminal)))
+        }
         phase = cancellationTask == nil ? .terminal(terminal) : .finishing(terminal)
         let waiters = Array(terminalWaiters.values)
         terminalWaiters.removeAll(keepingCapacity: false)
@@ -727,6 +1154,7 @@ package actor ReviewStartAdmission {
         }
         resumeActiveRunWaiters(returning: nil)
         resumeCancellationAdmissionWaiters(returning: nil)
+        resumeInterruptionAdmissionWaiters(returning: nil)
         resolveCancellationIfPossible()
     }
 
@@ -748,6 +1176,23 @@ package actor ReviewStartAdmission {
         for waiter in waiters {
             waiter.resume(returning: cancellation)
         }
+    }
+
+    private func resumeInterruptionAdmissionWaiters(
+        returning purpose: ReviewAttemptInterruptionPurpose?
+    ) {
+        let waiters = interruptionAdmissionWaiters
+        interruptionAdmissionWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume(returning: purpose)
+        }
+    }
+
+    private var terminalCancellationPurpose: ReviewCancellation? {
+        guard case .terminalCancellation(let cancellation) = interruptionPurpose else {
+            return nil
+        }
+        return cancellation
     }
 
     private func resolveCancellationIfPossible() {
@@ -790,12 +1235,12 @@ package actor ReviewStartAdmission {
                     return
                 }
                 switch terminal {
-                case .connection(let connectionFailure):
+                case .stream(let streamFailure):
                     resolveCancellation(.success(.init(
                         terminal: terminal,
                         requestFailure: ReviewInterruptRequestFailure(
                             outcome: requestFailure.outcome,
-                            secondaryBarrierDiagnostic: connectionFailure.localizedDescription
+                            secondaryBarrierDiagnostic: streamFailure.localizedDescription
                         )
                     )))
                 case .canonical, .localCancellation:
@@ -861,14 +1306,10 @@ package actor ReviewStartAdmission {
         switch phase {
         case .startingReview(let run, _), .active(let run), .interrupting(let run):
             run
-        case .finishing(let terminal), .terminal(let terminal):
-            if case .canonical(let run, _) = terminal {
-                run
-            } else {
-                nil
-            }
-        case .queued, .preparingThread:
-            nil
+        case .finishing, .terminal:
+            registeredRun
+        case .queued, .registeredStart, .activatedStart, .preparingThread:
+            registeredRun
         }
     }
 
@@ -876,7 +1317,8 @@ package actor ReviewStartAdmission {
         switch phase {
         case .active(let run), .interrupting(let run):
             run
-        case .queued, .preparingThread, .startingReview, .finishing, .terminal:
+        case .queued, .registeredStart, .activatedStart, .preparingThread,
+             .startingReview, .finishing, .terminal:
             nil
         }
     }
@@ -885,7 +1327,8 @@ package actor ReviewStartAdmission {
         switch phase {
         case .preparingThread(.outcomeUnknown), .startingReview(_, .outcomeUnknown):
             true
-        case .queued, .preparingThread(.notSent), .startingReview(_, .notSent),
+        case .queued, .registeredStart, .activatedStart,
+             .preparingThread(.notSent), .startingReview(_, .notSent),
              .active, .interrupting, .finishing, .terminal:
             false
         }

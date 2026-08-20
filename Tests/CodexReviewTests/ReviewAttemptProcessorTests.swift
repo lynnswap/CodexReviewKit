@@ -26,8 +26,7 @@ struct ReviewAttemptProcessorTests {
         let resolution = try await cancellation.value
 
         #expect(resolution.terminal == .canonical(
-            run: run,
-            terminal: .interrupted(.requested(.mcpClient(message: "Stop")))
+            .interrupted(.requested(.mcpClient(message: "Stop")))
         ))
         #expect(await admission.currentPhase() == .terminal(resolution.terminal))
     }
@@ -50,14 +49,11 @@ struct ReviewAttemptProcessorTests {
         await requestStarted.waitForInvocation()
         try await admission.recordCanonicalTerminal(.completed, for: run)
 
-        #expect(await admission.currentPhase() == .finishing(.canonical(
-            run: run,
-            terminal: .completed
-        )))
+        #expect(await admission.currentPhase() == .finishing(.canonical(.completed)))
         await requestGate.open()
         let resolution = try await cancellation.value
 
-        #expect(resolution.terminal == .canonical(run: run, terminal: .completed))
+        #expect(resolution.terminal == .canonical(.completed))
     }
 
     @Test func explicitRejectionReturnsAttemptToActive() async throws {
@@ -92,8 +88,7 @@ struct ReviewAttemptProcessorTests {
         )
 
         #expect(try await retry.value.terminal == .canonical(
-            run: run,
-            terminal: .interrupted(.requested(.mcpClient(message: "Stop again")))
+            .interrupted(.requested(.mcpClient(message: "Stop again")))
         ))
     }
 
@@ -121,7 +116,7 @@ struct ReviewAttemptProcessorTests {
         await requestGate.open()
         let resolution = try await cancellation.value
 
-        #expect(resolution.terminal == .canonical(run: run, terminal: .completed))
+        #expect(resolution.terminal == .canonical(.completed))
         #expect(resolution.requestFailure == rejection)
     }
 
@@ -151,8 +146,7 @@ struct ReviewAttemptProcessorTests {
 
         #expect(resolution.requestFailure == failure)
         #expect(resolution.terminal == .canonical(
-            run: run,
-            terminal: .interrupted(.requested(.mcpClient(message: "Stop")))
+            .interrupted(.requested(.mcpClient(message: "Stop")))
         ))
     }
 
@@ -175,7 +169,7 @@ struct ReviewAttemptProcessorTests {
             )
         }
         await requestFailed.waitForInvocation()
-        await admission.recordConnectionTerminal(connection)
+        try await admission.recordStreamTerminal(.unexpectedConnection(connection))
 
         do {
             _ = try await cancellation.value
@@ -184,17 +178,15 @@ struct ReviewAttemptProcessorTests {
             #expect(received.outcome == failure.outcome)
             #expect(received.secondaryBarrierDiagnostic == connection.localizedDescription)
         }
-        #expect(await admission.currentPhase() == .terminal(.connection(connection)))
+        #expect(await admission.currentPhase() == .terminal(.stream(.unexpectedConnection(connection))))
     }
 
     @Test func recoveryAckWaitsForInterruptedTerminalAndReturnsBarrier() async throws {
         let (admission, run) = try await makeActiveAdmission()
         let requestAccepted = InvocationProbe()
-        let recoveryCancellation = ReviewCancellation.system(message: "Recover")
-
         let recovery = Task {
-            try await admission.interruptForRecovery(
-                recoveryCancellation,
+            try await admission.beginRecovery(
+                trigger: .recoverableNetworkLoss,
                 interrupt: { _, _ in await requestAccepted.record() },
                 forceClose: {}
             )
@@ -202,15 +194,17 @@ struct ReviewAttemptProcessorTests {
         await requestAccepted.waitForInvocation()
         #expect(await admission.currentPhase() == .interrupting(run))
         try await admission.recordCanonicalTerminal(
-            .interrupted(.requested(recoveryCancellation)),
+            .interrupted(.server(message: "network recovery")),
             for: run
         )
 
-        let barrier = try await recovery.value
-        #expect(barrier.run == run)
-        #expect(barrier.terminal == .canonical(
-            run: run,
-            terminal: .interrupted(.requested(recoveryCancellation))
+        guard case .replacement(let candidate) = try await recovery.value else {
+            Issue.record("Interrupted recovery terminal must create a replacement candidate.")
+            return
+        }
+        #expect(candidate.resolved.run == run)
+        #expect(candidate.resolved.terminal == .canonical(
+            .interrupted(.server(message: "network recovery"))
         ))
     }
 
@@ -223,8 +217,8 @@ struct ReviewAttemptProcessorTests {
         let connection = ReviewRuntimeCloseFailure.connection("Connection ended")
 
         let recovery = Task {
-            try await admission.interruptForRecovery(
-                .system(message: "Recover"),
+            try await admission.beginRecovery(
+                trigger: .recoverableNetworkLoss,
                 interrupt: { _, _ in
                     await requestFailed.record()
                     throw requestFailure
@@ -233,21 +227,24 @@ struct ReviewAttemptProcessorTests {
             )
         }
         await requestFailed.waitForInvocation()
-        await admission.recordConnectionTerminal(connection)
+        try await admission.recordStreamTerminal(.recoverableNetwork(connection))
 
-        let barrier = try await recovery.value
-        #expect(barrier.run == run)
-        #expect(barrier.terminal == .connection(connection))
-        #expect(barrier.requestFailure?.outcome == requestFailure.outcome)
-        #expect(barrier.requestFailure?.secondaryBarrierDiagnostic == connection.localizedDescription)
+        guard case .replacement(let candidate) = try await recovery.value else {
+            Issue.record("Recoverable connection terminal must create a replacement candidate.")
+            return
+        }
+        #expect(candidate.resolved.run == run)
+        #expect(candidate.resolved.terminal == .stream(.recoverableNetwork(connection)))
+        #expect(candidate.resolved.requestFailure?.outcome == requestFailure.outcome)
+        #expect(candidate.resolved.requestFailure?.secondaryBarrierDiagnostic == connection.localizedDescription)
     }
 
     @Test func recoveryNaturalTerminalSupersedesReplacement() async throws {
         let (admission, run) = try await makeActiveAdmission()
         let requestAccepted = InvocationProbe()
         let recovery = Task {
-            try await admission.interruptForRecovery(
-                .system(message: "Recover"),
+            try await admission.beginRecovery(
+                trigger: .recoverableNetworkLoss,
                 interrupt: { _, _ in await requestAccepted.record() },
                 forceClose: {}
             )
@@ -255,11 +252,13 @@ struct ReviewAttemptProcessorTests {
         await requestAccepted.waitForInvocation()
         try await admission.recordCanonicalTerminal(.completed, for: run)
 
-        await #expect(throws: ReviewRecoverySupersededByTerminal(
-            terminal: .canonical(run: run, terminal: .completed)
-        )) {
-            try await recovery.value
+        guard case .productTerminal(let product) = try await recovery.value else {
+            Issue.record("Natural terminal must supersede replacement.")
+            return
         }
+        #expect(product.resolved.run == run)
+        #expect(product.resolved.terminal == .canonical(.completed))
+        #expect(product.productTerminal == .completed)
     }
 
     @Test func recoveryRejectionReturnsAttemptToActive() async throws {
@@ -269,8 +268,8 @@ struct ReviewAttemptProcessorTests {
         )
 
         await #expect(throws: rejection) {
-            try await admission.interruptForRecovery(
-                .system(message: "Recover"),
+            try await admission.beginRecovery(
+                trigger: .recoverableNetworkLoss,
                 interrupt: { _, _ in throw rejection },
                 forceClose: {}
             )
@@ -300,7 +299,9 @@ struct ReviewAttemptProcessorTests {
                 },
                 forceClose: {
                     await forceClose.record()
-                    await admission.recordConnectionTerminal(connection)
+                    try await admission.recordStreamTerminal(
+                        .ownerForcedConnectionClose(connection)
+                    )
                     await requestGate.open()
                 }
             )
@@ -313,7 +314,9 @@ struct ReviewAttemptProcessorTests {
             try await cancellation.value
         }
         #expect(await forceClose.invocationCount() == 1)
-        #expect(await admission.currentPhase() == .terminal(.connection(connection)))
+        #expect(await admission.currentPhase() == .terminal(
+            .stream(.ownerForcedConnectionClose(connection))
+        ))
     }
 
     @Test func forceCloseFailureRemainsTypedAfterOutcomeUnknownRequestCompletes() async throws {
@@ -387,10 +390,7 @@ struct ReviewAttemptProcessorTests {
             try await cancellation.value
         }
         #expect(await requestCancelled.invocationCount() == 1)
-        #expect(await admission.currentPhase() == .terminal(.canonical(
-            run: run,
-            terminal: .completed
-        )))
+        #expect(await admission.currentPhase() == .terminal(.canonical(.completed)))
     }
 
     @Test func duplicateCancellationCallersJoinOneRequest() async throws {
@@ -452,7 +452,7 @@ struct ReviewAttemptProcessorTests {
 
         #expect(await admission.currentPhase() == .interrupting(run))
         try await admission.recordCanonicalTerminal(.completed, for: run)
-        #expect(try await cancellation.value.terminal == .canonical(run: run, terminal: .completed))
+        #expect(try await cancellation.value.terminal == .canonical(.completed))
     }
 
     @Test func conflictingDuplicateTerminalFailsWithoutRewrite() async throws {
@@ -465,10 +465,7 @@ struct ReviewAttemptProcessorTests {
                 for: run
             )
         }
-        #expect(await admission.currentPhase() == .terminal(.canonical(
-            run: run,
-            terminal: .completed
-        )))
+        #expect(await admission.currentPhase() == .terminal(.canonical(.completed)))
     }
 
     @Test func queuedCancellationCompletesLocallyWithoutDispatch() async throws {
@@ -483,10 +480,169 @@ struct ReviewAttemptProcessorTests {
         #expect(resolution.terminal == .localCancellation(.mcpClient(message: "Stop")))
     }
 
+    @Test func registeredStartIsBackendInertUntilExactActivation() async throws {
+        let admission = ReviewStartAdmission(closePolicy: controlledClosePolicy(gate: AsyncGate()))
+        let backendWrite = InvocationProbe()
+        let registered = try await admission.registerStart { _ in
+            await backendWrite.record()
+            return .init(run: canonicalRun)
+        }
+
+        await Task.yield()
+        #expect(await backendWrite.invocationCount() == 0)
+        #expect(await admission.currentPhase() == .registeredStart(registered.id))
+
+        try await admission.activateStart(registered.id)
+        _ = try await registered.task.value
+        #expect(await backendWrite.invocationCount() == 1)
+    }
+
+    @Test func cancellationBetweenRegistrationAndActivationCompletesTaskWithoutWrite() async throws {
+        let admission = ReviewStartAdmission(closePolicy: controlledClosePolicy(gate: AsyncGate()))
+        let backendWrite = InvocationProbe()
+        let cancellation = ReviewCancellation.mcpClient(message: "Stop")
+        let registered = try await admission.registerStart { _ in
+            await backendWrite.record()
+            return .init(run: canonicalRun)
+        }
+
+        let resolution = try await admission.cancel(
+            cancellation,
+            interrupt: { _, _ in Issue.record("Unactivated start dispatched interrupt.") },
+            forceClose: { Issue.record("Unactivated start force-closed a connection.") }
+        )
+
+        #expect(resolution.terminal == .localCancellation(cancellation))
+        await #expect(throws: ReviewStartCancelledBeforeDispatch(cancellation: cancellation)) {
+            try await registered.task.value
+        }
+        #expect(await backendWrite.invocationCount() == 0)
+    }
+
+    @Test func cancellationBeforeRegistrationSurvivesRegistrationWithoutWrite() async throws {
+        let admission = ReviewStartAdmission(closePolicy: controlledClosePolicy(gate: AsyncGate()))
+        let cancellation = ReviewCancellation.mcpClient(message: "Stop")
+        _ = try await admission.cancel(
+            cancellation,
+            interrupt: { _, _ in Issue.record("Queued cancellation dispatched interrupt.") },
+            forceClose: {}
+        )
+        let backendWrite = InvocationProbe()
+
+        let registered = try await admission.registerStart { _ in
+            await backendWrite.record()
+            return .init(run: canonicalRun)
+        }
+
+        await #expect(throws: ReviewStartCancelledBeforeDispatch(cancellation: cancellation)) {
+            try await registered.task.value
+        }
+        #expect(await backendWrite.invocationCount() == 0)
+    }
+
+    @Test func activationIsIdempotentForLiveHandleAndRejectsWrongHandle() async throws {
+        let admission = ReviewStartAdmission(closePolicy: controlledClosePolicy(gate: AsyncGate()))
+        let operationGate = AsyncGate()
+        let registered = try await admission.registerStart { _ in
+            await operationGate.waitIgnoringCancellation()
+            return .init(run: canonicalRun)
+        }
+        let wrong = ReviewStartHandleID(generation: registered.id.generation + 1)
+
+        await #expect(throws: ReviewAttemptContractFailure.self) {
+            try await admission.activateStart(wrong)
+        }
+        try await admission.activateStart(registered.id)
+        try await admission.activateStart(registered.id)
+        await operationGate.open()
+        _ = try await registered.task.value
+    }
+
+    @Test func joinedExplicitCancellationInstallsProductDispositionBeforeRecoveryPreparation() async throws {
+        let (admission, run) = try await makeActiveAdmission()
+        let requestGate = AsyncGate()
+        let requestStarted = InvocationProbe()
+        let recovery = Task {
+            try await admission.beginRecovery(
+                trigger: .recoverableNetworkLoss,
+                interrupt: { _, _ in
+                    await requestStarted.record()
+                    await requestGate.waitIgnoringCancellation()
+                },
+                forceClose: {}
+            )
+        }
+        await requestStarted.waitForInvocation()
+        let cancellation = Task {
+            try await admission.cancel(
+                .mcpClient(message: "Stop"),
+                interrupt: { _, _ in Issue.record("Joined cancellation sent a second request.") },
+                forceClose: {}
+            )
+        }
+        #expect(await admission.waitForCancellationAdmission() == .mcpClient(message: "Stop"))
+        try await admission.recordCanonicalTerminal(
+            .interrupted(.server(message: "network recovery")),
+            for: run
+        )
+        await requestGate.open()
+
+        let disposition = try await recovery.value
+        guard case .productTerminal(let product) = disposition else {
+            Issue.record("Joined explicit cancellation must suppress replacement.")
+            return
+        }
+        #expect(product.resolved.run == run)
+        #expect(product.productTerminal == .interrupted(.requested(.mcpClient(message: "Stop"))))
+        _ = try await cancellation.value
+        #expect(await requestStarted.invocationCount() == 1)
+    }
+
+    @Test func recoveryClassifiesTypedStreamFailureBeforeTokenization() async throws {
+        let (recoverableAdmission, recoverableRun) = try await makeActiveAdmission()
+        let recoverableRequest = InvocationProbe()
+        let recoverable = Task {
+            try await recoverableAdmission.beginRecovery(
+                trigger: .recoverableNetworkLoss,
+                interrupt: { _, _ in await recoverableRequest.record() },
+                forceClose: {}
+            )
+        }
+        await recoverableRequest.waitForInvocation()
+        try await recoverableAdmission.recordStreamTerminal(
+            .recoverableNetwork(.connection("offline"))
+        )
+        guard case .replacement(let candidate) = try await recoverable.value else {
+            Issue.record("Verified network failure must produce a replacement candidate.")
+            return
+        }
+        #expect(candidate.resolved.run == recoverableRun)
+
+        let (protocolAdmission, protocolRun) = try await makeActiveAdmission()
+        let protocolFailure = ReviewAttemptContractFailure(message: "invalid notification")
+        let protocolRequest = InvocationProbe()
+        let nonrecoverable = Task {
+            try await protocolAdmission.beginRecovery(
+                trigger: .recoverableNetworkLoss,
+                interrupt: { _, _ in await protocolRequest.record() },
+                forceClose: {}
+            )
+        }
+        await protocolRequest.waitForInvocation()
+        try await protocolAdmission.recordStreamTerminal(.protocolViolation(protocolFailure))
+        guard case .productTerminal(let product) = try await nonrecoverable.value else {
+            Issue.record("Protocol failure must terminalize the product.")
+            return
+        }
+        #expect(product.resolved.run == protocolRun)
+        #expect(product.resolved.terminal == .stream(.protocolViolation(protocolFailure)))
+        #expect(product.productTerminal == .failed(message: protocolFailure.message))
+    }
+
     @Test func threadStartDispatchAdmissionRejectsDirectDuplicate() async throws {
         let admission = ReviewStartAdmission(closePolicy: controlledClosePolicy(gate: AsyncGate()))
         let startGate = AsyncGate()
-        let startTask = await admission.start { _ in
+        let startTask = try await registerAndActivateStart(admission) { _ in
             await startGate.waitIgnoringCancellation()
             return .init(run: canonicalRun)
         }
@@ -501,7 +657,7 @@ struct ReviewAttemptProcessorTests {
     @Test func threadStartDispatchAdmissionAllowsVerifiedRejectionRetry() async throws {
         let admission = ReviewStartAdmission(closePolicy: controlledClosePolicy(gate: AsyncGate()))
         let startGate = AsyncGate()
-        let startTask = await admission.start { _ in
+        let startTask = try await registerAndActivateStart(admission) { _ in
             await startGate.waitIgnoringCancellation()
             return .init(run: canonicalRun)
         }
@@ -518,7 +674,7 @@ struct ReviewAttemptProcessorTests {
     @Test func reviewStartDispatchAdmissionRejectsDirectDuplicate() async throws {
         let admission = ReviewStartAdmission(closePolicy: controlledClosePolicy(gate: AsyncGate()))
         let startGate = AsyncGate()
-        let startTask = await admission.start { _ in
+        let startTask = try await registerAndActivateStart(admission) { _ in
             await startGate.waitIgnoringCancellation()
             return .init(run: canonicalRun)
         }
@@ -535,7 +691,7 @@ struct ReviewAttemptProcessorTests {
     @Test func generalStartFailureEndsAdmissionWaiters() async throws {
         let failure = ReviewAttemptContractFailure(message: "Start failed")
         let admission = ReviewStartAdmission(closePolicy: controlledClosePolicy(gate: AsyncGate()))
-        let startTask = await admission.start { _ in
+        let startTask = try await registerAndActivateStart(admission) { _ in
             throw failure
         }
 
@@ -550,7 +706,7 @@ struct ReviewAttemptProcessorTests {
         let admission = ReviewStartAdmission(closePolicy: controlledClosePolicy(gate: AsyncGate()))
         let entered = InvocationProbe()
         let dispatchGate = AsyncGate()
-        let startTask = await admission.start { admission in
+        let startTask = try await registerAndActivateStart(admission) { admission in
             await entered.record()
             await dispatchGate.wait()
             try Task.checkCancellation()
@@ -581,7 +737,7 @@ struct ReviewAttemptProcessorTests {
         let admission = ReviewStartAdmission(closePolicy: controlledClosePolicy(gate: graceGate))
         let threadDispatched = InvocationProbe()
         let threadResponseGate = AsyncGate()
-        let startTask = await admission.start { admission in
+        let startTask = try await registerAndActivateStart(admission) { admission in
             #expect(await admission.admitThreadStartDispatch())
             await threadDispatched.record()
             await threadResponseGate.waitIgnoringCancellation()
@@ -620,7 +776,7 @@ struct ReviewAttemptProcessorTests {
         let threadResponseGate = AsyncGate()
         let forceClose = InvocationProbe()
         let connection = ReviewRuntimeCloseFailure.connection("Forced close")
-        let startTask = await admission.start { admission in
+        let startTask = try await registerAndActivateStart(admission) { admission in
             #expect(await admission.admitThreadStartDispatch())
             await threadDispatched.record()
             await threadResponseGate.wait()
@@ -636,7 +792,9 @@ struct ReviewAttemptProcessorTests {
                 interrupt: { _, _ in Issue.record("Thread-only attempt interrupted a turn.") },
                 forceClose: {
                     await forceClose.record()
-                    await admission.recordConnectionTerminal(connection)
+                    try await admission.recordStreamTerminal(
+                        .ownerForcedConnectionClose(connection)
+                    )
                 }
             )
         }
@@ -644,7 +802,9 @@ struct ReviewAttemptProcessorTests {
         await graceGate.open()
         await forceClose.waitForInvocation()
 
-        #expect(try await cancellation.value.terminal == .connection(connection))
+        #expect(try await cancellation.value.terminal == .stream(
+            .ownerForcedConnectionClose(connection)
+        ))
         await #expect(throws: CancellationError.self) {
             try await startTask.value
         }
@@ -654,7 +814,7 @@ struct ReviewAttemptProcessorTests {
         let admission = ReviewStartAdmission(closePolicy: controlledClosePolicy(gate: AsyncGate()))
         let prepared = InvocationProbe()
         let reviewDispatchGate = AsyncGate()
-        let startTask = await admission.start { admission in
+        let startTask = try await registerAndActivateStart(admission) { admission in
             #expect(await admission.admitThreadStartDispatch())
             await admission.recordPreparedThread(provisionalRun)
             await prepared.record()
@@ -691,7 +851,7 @@ struct ReviewAttemptProcessorTests {
         let reviewDispatched = InvocationProbe()
         let reviewResponseGate = AsyncGate()
         let interruptCalled = InvocationProbe()
-        let startTask = await admission.start { admission in
+        let startTask = try await registerAndActivateStart(admission) { admission in
             #expect(await admission.admitThreadStartDispatch())
             await admission.recordPreparedThread(provisionalRun)
             #expect(await admission.admitReviewStartDispatch(for: provisionalRun))
@@ -721,8 +881,7 @@ struct ReviewAttemptProcessorTests {
         )
 
         #expect(try await cancellation.value.terminal == .canonical(
-            run: canonicalRun,
-            terminal: .interrupted(.requested(.mcpClient(message: "Stop")))
+            .interrupted(.requested(.mcpClient(message: "Stop")))
         ))
     }
 
@@ -733,7 +892,7 @@ struct ReviewAttemptProcessorTests {
         let reviewResponseGate = AsyncGate()
         let forceClose = InvocationProbe()
         let connection = ReviewRuntimeCloseFailure.connection("Forced close")
-        let startTask = await admission.start { admission in
+        let startTask = try await registerAndActivateStart(admission) { admission in
             #expect(await admission.admitThreadStartDispatch())
             await admission.recordPreparedThread(provisionalRun)
             #expect(await admission.admitReviewStartDispatch(for: provisionalRun))
@@ -751,7 +910,9 @@ struct ReviewAttemptProcessorTests {
                 interrupt: { _, _ in Issue.record("Unresolved review request interrupted a turn.") },
                 forceClose: {
                     await forceClose.record()
-                    await admission.recordConnectionTerminal(connection)
+                    try await admission.recordStreamTerminal(
+                        .ownerForcedConnectionClose(connection)
+                    )
                 }
             )
         }
@@ -759,7 +920,9 @@ struct ReviewAttemptProcessorTests {
         await graceGate.open()
         await forceClose.waitForInvocation()
 
-        #expect(try await cancellation.value.terminal == .connection(connection))
+        #expect(try await cancellation.value.terminal == .stream(
+            .ownerForcedConnectionClose(connection)
+        ))
         await #expect(throws: CancellationError.self) {
             try await startTask.value
         }
@@ -810,7 +973,7 @@ private func makeActiveAdmission(
     let admission = ReviewStartAdmission(
         closePolicy: closePolicy ?? controlledClosePolicy(gate: AsyncGate())
     )
-    let startTask = await admission.start { admission in
+    let startTask = try await registerAndActivateStart(admission) { admission in
         #expect(await admission.admitThreadStartDispatch())
         await admission.recordPreparedThread(provisionalRun)
         #expect(await admission.admitReviewStartDispatch(for: provisionalRun))
@@ -819,6 +982,15 @@ private func makeActiveAdmission(
     }
     _ = try await startTask.value
     return (admission, canonicalRun)
+}
+
+private func registerAndActivateStart(
+    _ admission: ReviewStartAdmission,
+    operation: @escaping @Sendable (ReviewStartAdmission) async throws -> BackendReviewAttempt
+) async throws -> Task<BackendReviewAttempt, any Error> {
+    let registered = try await admission.registerStart(operation)
+    try await admission.activateStart(registered.id)
+    return registered.task
 }
 
 private func controlledClosePolicy(gate: AsyncGate) -> ReviewRuntimeClosePolicy {

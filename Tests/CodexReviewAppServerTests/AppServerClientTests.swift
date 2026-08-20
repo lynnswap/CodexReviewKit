@@ -11,8 +11,8 @@ private extension AppServerCodexReviewBackend {
         request: CodexReviewBackendModel.Review.Start,
         reason: CodexReviewBackendModel.CancellationReason
     ) async throws -> BackendReviewAttempt {
-        let token = try await beginReviewRecovery(run, reason: reason)
-        return try await resumeReviewRecovery(token, request: request)
+        let handoff = try await prepareReviewRecovery(run, reason: reason)
+        return try await resumeReviewRecovery(handoff, request: request)
     }
 
     func resumeReviewRecovery(
@@ -27,34 +27,35 @@ private extension AppServerCodexReviewBackend {
         try await interruptReview(attempt.run, reason: reason)
     }
 
-    func beginReviewRecovery(
+    func prepareReviewRecovery(
         _ attempt: BackendReviewAttempt,
         reason: CodexReviewBackendModel.CancellationReason
-    ) async throws -> CodexReviewBackendModel.Review.RecoveryToken {
-        try await beginReviewRecovery(attempt.run, reason: reason)
+    ) async throws -> ReviewRecoveryHandoff {
+        try await prepareReviewRecovery(attempt.run, reason: reason)
     }
 
-    func beginReviewRecovery(
+    func prepareReviewRecovery(
         _ run: CodexReviewBackendModel.Review.Run,
         reason: CodexReviewBackendModel.CancellationReason
-    ) async throws -> CodexReviewBackendModel.Review.RecoveryToken {
-        let barrier = try await makeRecoveryBarrier(backend: self, for: run, reason: reason)
-        return try await beginReviewRecovery(barrier)
+    ) async throws -> ReviewRecoveryHandoff {
+        let candidate = try await makeRecoveryCandidate(backend: self, for: run, reason: reason)
+        return try await prepareReviewRecovery(candidate)
     }
 
     func resumeReviewRecovery(
-        _ token: CodexReviewBackendModel.Review.RecoveryToken,
+        _ handoff: ReviewRecoveryHandoff,
         request: CodexReviewBackendModel.Review.Start
     ) async throws -> BackendReviewAttempt {
         let admission = ReviewStartAdmission()
-        let task = await admission.start { admission in
+        let registered = try await admission.registerStart { admission in
             try await self.resumeReviewRecovery(
-                token,
+                handoff,
                 request: request,
                 admission: admission
             )
         }
-        return try await task.value
+        try await admission.activateStart(registered.id)
+        return try await registered.task.value
     }
 
     func cleanupReview(_ attempt: BackendReviewAttempt) async throws {
@@ -62,13 +63,13 @@ private extension AppServerCodexReviewBackend {
     }
 }
 
-private func makeRecoveryBarrier(
+private func makeRecoveryCandidate(
     backend: AppServerCodexReviewBackend,
     for run: CodexReviewBackendModel.Review.Run,
     reason: CodexReviewBackendModel.CancellationReason
-) async throws -> ReviewAttemptRecoveryBarrier {
+) async throws -> ReviewRecoveryCandidate {
     let admission = ReviewStartAdmission()
-    let startTask = await admission.start { admission in
+    let registered = try await admission.registerStart { admission in
         #expect(await admission.admitThreadStartDispatch())
         let provisionalRun = CodexReviewBackendModel.Review.Run(
             attemptID: run.attemptID,
@@ -81,13 +82,13 @@ private func makeRecoveryBarrier(
         await admission.recordActiveRun(run)
         return .init(run: run)
     }
-    _ = try await startTask.value
+    try await admission.activateStart(registered.id)
+    _ = try await registered.task.value
 
     let requestOutcome = RecoveryRequestOutcomeProbe()
-    let cancellation = ReviewCancellation.system(message: reason.message)
     let recovery = Task {
-        try await admission.interruptForRecovery(
-            cancellation,
+        try await admission.beginRecovery(
+            trigger: .recoverableNetworkLoss,
             interrupt: { run, reason in
                 do {
                     try await backend.interruptReview(run, reason: reason)
@@ -102,11 +103,16 @@ private func makeRecoveryBarrier(
     }
     if case .success = await requestOutcome.wait() {
         try await admission.recordCanonicalTerminal(
-            .interrupted(.requested(cancellation)),
+            .interrupted(.server(message: reason.message)),
             for: run
         )
     }
-    return try await recovery.value
+    guard case .replacement(let candidate) = try await recovery.value else {
+        throw ReviewAttemptContractFailure(
+            message: "Test recovery helper expected one replacement candidate."
+        )
+    }
+    return candidate
 }
 
 private extension BackendReviewAttempt {
@@ -452,7 +458,7 @@ struct AppServerClientTests {
 
         let notifications = await transport.notificationStream()
         var iterator = notifications.makeAsyncIterator()
-        await #expect(throws: (any Error).self) {
+        await #expect(throws: JSONRPC.Error.transportTerminated(.ownerClose)) {
             _ = try await iterator.next()
         }
     }
@@ -528,6 +534,53 @@ struct AppServerClientTests {
             try await transport.close()
         }
         #expect(await closeCompletions.value() == 1)
+
+        let notifications = await transport.notificationStream()
+        var iterator = notifications.makeAsyncIterator()
+        await #expect(throws: JSONRPC.Error.transportTerminated(.processFailure(
+            failure.localizedDescription
+        ))) {
+            _ = try await iterator.next()
+        }
+    }
+
+    @Test func spontaneousProcessExitReplaysTypedCauseToLateSubscriber() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "codex-review-process-exit-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executable = directory.appending(path: "app-server-stub.sh")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let transport = try AppServerProcessTransport(configuration: .init(
+            executable: executable.path,
+            arguments: [],
+            environment: ["HOME": directory.path, "PATH": "/bin:/usr/bin"]
+        ))
+
+        let notifications = await transport.notificationStream()
+        var iterator = notifications.makeAsyncIterator()
+        do {
+            _ = try await iterator.next()
+            Issue.record("Expected a typed process-exit terminal.")
+        } catch let error as JSONRPC.Error {
+            guard case .transportTerminated(.processExit) = error else {
+                Issue.record("Expected processExit, received \(error).")
+                return
+            }
+        }
+
+        let replay = await transport.notificationStream()
+        var replayIterator = replay.makeAsyncIterator()
+        do {
+            _ = try await replayIterator.next()
+            Issue.record("Expected the recorded process-exit terminal.")
+        } catch let error as JSONRPC.Error {
+            guard case .transportTerminated(.processExit) = error else {
+                Issue.record("Expected replayed processExit, received \(error).")
+                return
+            }
+        }
     }
 
     @Test func processTransportProcessesChunkedStdoutBeforeEOF() async throws {
@@ -604,7 +657,9 @@ struct AppServerClientTests {
                 return
             }
         }
-        await #expect(throws: JSONRPC.Error.closed) {
+        await #expect(throws: JSONRPC.Error.invalidMessage(
+            "app-server emitted invalid JSON"
+        )) {
             try await transport.notify(.init(method: "initialized", params: Data("{}".utf8)))
         }
     }
@@ -1220,7 +1275,7 @@ struct AppServerClientTests {
         let admission = ReviewStartAdmission(
             closePolicy: controlledReviewClosePolicy(gate: AsyncGate())
         )
-        let startTask = await admission.start { admission in
+        let registeredStart = try await admission.registerStart { admission in
             try await backend.startReview(
                 .init(
                     jobID: "job-1",
@@ -1230,6 +1285,7 @@ struct AppServerClientTests {
                 admission: admission
             )
         }
+        try await admission.activateStart(registeredStart.id)
         await transport.waitForRequest(method: "initialize")
 
         let cancellation = Task {
@@ -1245,7 +1301,7 @@ struct AppServerClientTests {
             .mcpClient(message: "Stop")
         ))
         await #expect(throws: ReviewStartCancelledBeforeDispatch.self) {
-            try await startTask.value
+            try await registeredStart.task.value
         }
         #expect(await transport.recordedRequests().map(\.method) == ["initialize"])
     }
@@ -1267,7 +1323,7 @@ struct AppServerClientTests {
         let admission = ReviewStartAdmission(
             closePolicy: controlledReviewClosePolicy(gate: AsyncGate())
         )
-        let startTask = await admission.start { admission in
+        let registeredStart = try await admission.registerStart { admission in
             try await backend.startReview(
                 .init(
                     jobID: "job-1",
@@ -1277,6 +1333,7 @@ struct AppServerClientTests {
                 admission: admission
             )
         }
+        try await admission.activateStart(registeredStart.id)
         await transport.waitForRequest(method: "thread/start")
 
         let cancellation = Task {
@@ -1292,7 +1349,7 @@ struct AppServerClientTests {
             .mcpClient(message: "Stop")
         ))
         await #expect(throws: ReviewStartCancelledBeforeDispatch.self) {
-            try await startTask.value
+            try await registeredStart.task.value
         }
         let methods = await transport.recordedRequests().map(\.method)
         #expect(methods.contains("review/start") == false)
@@ -1321,7 +1378,7 @@ struct AppServerClientTests {
         let admission = ReviewStartAdmission(
             closePolicy: controlledReviewClosePolicy(gate: AsyncGate())
         )
-        let startTask = await admission.start { admission in
+        let registeredStart = try await admission.registerStart { admission in
             try await backend.startReview(
                 .init(
                     jobID: "job-1",
@@ -1331,6 +1388,7 @@ struct AppServerClientTests {
                 admission: admission
             )
         }
+        try await admission.activateStart(registeredStart.id)
         await transport.waitForRequest(method: "review/start")
 
         let cancellation = Task {
@@ -1345,7 +1403,7 @@ struct AppServerClientTests {
             )
         }
         await reviewGate.open()
-        let attempt = try await startTask.value
+        let attempt = try await registeredStart.task.value
         await transport.waitForResponseDelivery(method: "turn/interrupt")
         try await transport.emitServerNotification(
             method: "turn/completed",
@@ -1361,8 +1419,7 @@ struct AppServerClientTests {
         let resolution = try await cancellation.value
 
         #expect(resolution.terminal == .canonical(
-            run: attempt.run,
-            terminal: .interrupted(.requested(.mcpClient(message: "Stop")))
+            .interrupted(.requested(.mcpClient(message: "Stop")))
         ))
         let methods = await transport.recordedRequests().map(\.method)
         let reviewIndex = try #require(methods.firstIndex(of: "review/start"))
@@ -1767,10 +1824,53 @@ struct AppServerClientTests {
         #expect(routerStopped)
 
         var iterator = await eventSequence(backend, run).makeAsyncIterator()
-        await #expect(throws: BackendReviewEventMailboxError.self) {
+        await #expect(throws: ReviewAttemptStreamFailure.unexpectedConnection(
+            .connection(JSONRPC.Error.closed.localizedDescription)
+        )) {
             _ = try await iterator.next()
         }
         try await transport.close()
+    }
+
+    @Test func backendMapsTypedProcessTerminationWithoutRecoverableFallback() async throws {
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let run = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-1",
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "thread-1"
+        )
+        var iterator = await eventSequence(backend, run).makeAsyncIterator()
+        let message = "Codex app-server process exited."
+
+        await transport.finishNotificationStreams(
+            throwing: JSONRPC.Error.transportTerminated(.processExit(message))
+        )
+
+        await #expect(throws: ReviewAttemptStreamFailure.process(.process(message))) {
+            _ = try await iterator.next()
+        }
+    }
+
+    @Test func backendCorrelatesOwnerForcedCloseWithAdmittedCloseOperation() async throws {
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let run = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-1",
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "thread-1"
+        )
+        var iterator = await eventSequence(backend, run).makeAsyncIterator()
+
+        try await backend.forceCloseReviewConnection()
+
+        await #expect(throws: ReviewAttemptStreamFailure.ownerForcedConnectionClose(
+            .connection("Review connection was force-closed by its attempt owner.")
+        )) {
+            _ = try await iterator.next()
+        }
     }
 
     @Test func backendPreservesBufferedEventsBeforeNotificationStreamError() async throws {
@@ -1793,7 +1893,7 @@ struct AppServerClientTests {
         var iterator = events.makeAsyncIterator()
         #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
         #expect(try await iterator.next() == .messageDelta("partial review", itemID: "message-1"))
-        await #expect(throws: BackendReviewEventMailboxError.self) {
+        await #expect(throws: ReviewAttemptStreamFailure.self) {
             _ = try await iterator.next()
         }
     }
@@ -2068,10 +2168,10 @@ struct AppServerClientTests {
             params: TestErrorNotification(message: "App-server failed.", willRetry: false)
         )
 
-        await #expect(throws: BackendReviewEventMailboxError.self) {
+        await #expect(throws: ReviewAttemptStreamFailure.self) {
             _ = try await firstIterator.next()
         }
-        await #expect(throws: BackendReviewEventMailboxError.self) {
+        await #expect(throws: ReviewAttemptStreamFailure.self) {
             _ = try await secondIterator.next()
         }
         #expect(await backend.notificationRouterMetricsForTesting().connectionFailures == 1)
@@ -2287,7 +2387,7 @@ struct AppServerClientTests {
         let currentRun = startedRun
         let reason = CodexReviewBackendModel.CancellationReason(message: "Network unavailable; waiting to reconnect.")
 
-        let token = try await backend.beginReviewRecovery(currentRun, reason: reason)
+        let token = try await backend.prepareReviewRecovery(currentRun, reason: reason)
         let recovered = try await backend.resumeReviewRecovery(
             token,
             request: .init(
@@ -2411,7 +2511,7 @@ struct AppServerClientTests {
         let initialEvents = await eventSequence(backend, run)
         defer { withExtendedLifetime(initialEvents) {} }
 
-        let token = try await backend.beginReviewRecovery(
+        let token = try await backend.prepareReviewRecovery(
             run,
             reason: .init(message: "Network unavailable; waiting to reconnect.")
         )
@@ -2472,7 +2572,7 @@ struct AppServerClientTests {
         let events = await eventSequence(backend, run)
         var iterator = events.makeAsyncIterator()
 
-        _ = try await backend.beginReviewRecovery(
+        _ = try await backend.prepareReviewRecovery(
             run,
             reason: .init(message: "Network unavailable; waiting to reconnect.")
         )
@@ -2509,7 +2609,7 @@ struct AppServerClientTests {
         let events = await eventSequence(backend, run)
         var iterator = events.makeAsyncIterator()
 
-        _ = try await backend.beginReviewRecovery(
+        _ = try await backend.prepareReviewRecovery(
             run,
             reason: .init(message: "Network unavailable; waiting to reconnect.")
         )
@@ -2548,7 +2648,7 @@ struct AppServerClientTests {
         let events = await eventSequence(backend, run)
         var iterator = events.makeAsyncIterator()
 
-        async let recovery: CodexReviewBackendModel.Review.RecoveryToken = backend.beginReviewRecovery(
+        async let recovery: ReviewRecoveryHandoff = backend.prepareReviewRecovery(
             run,
             reason: .init(message: "Network unavailable; waiting to reconnect.")
         )
@@ -2606,7 +2706,7 @@ struct AppServerClientTests {
             code: -32602,
             message: "expected active turn id turn-old but found turn-active"
         ))) {
-            try await backend.beginReviewRecovery(
+            try await backend.prepareReviewRecovery(
                 run,
                 reason: .init(message: "Network unavailable; waiting to reconnect.")
             )
@@ -4889,7 +4989,7 @@ struct AppServerClientTests {
             replacesGroup: false,
             metadata: .init(sourceType: "commandExecution", title: "Command output", itemID: "cmd-1")
         ))
-        await #expect(throws: BackendReviewEventMailboxError.self) {
+        await #expect(throws: ReviewAttemptStreamFailure.self) {
             _ = try await iterator.next()
         }
     }

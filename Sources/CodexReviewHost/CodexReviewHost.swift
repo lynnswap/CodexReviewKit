@@ -251,18 +251,18 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
         try await backend.forceCloseReviewConnection()
     }
 
-    func beginReviewRecovery(
-        _ barrier: ReviewAttemptRecoveryBarrier
-    ) async throws -> CodexReviewBackendModel.Review.RecoveryToken {
-        try await backend.beginReviewRecovery(barrier)
+    func prepareReviewRecovery(
+        _ candidate: ReviewRecoveryCandidate
+    ) async throws -> ReviewRecoveryHandoff {
+        try await backend.prepareReviewRecovery(candidate)
     }
 
     func resumeReviewRecovery(
-        _ token: CodexReviewBackendModel.Review.RecoveryToken,
+        _ handoff: ReviewRecoveryHandoff,
         request: CodexReviewBackendModel.Review.Start,
         admission: ReviewStartAdmission
     ) async throws -> BackendReviewAttempt {
-        try await backend.resumeReviewRecovery(token, request: request, admission: admission)
+        try await backend.resumeReviewRecovery(handoff, request: request, admission: admission)
     }
 
     func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws {
