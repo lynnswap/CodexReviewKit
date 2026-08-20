@@ -119,6 +119,7 @@ The proposed Phase 2 gate now includes:
 | 2026-08-20 | Integrated recovery review disposition | Review `7E9107A3-...` reported only automatic import of `codexReview.runtimePreferences`. Disputed by the approved RecoveryV1/#108 contract: the legacy key/home are read-only source inputs and automatic reuse could mutate the only current-main state. The explicit quiescent copy/import wave owns validated settings migration. No code change made. |
 | 2026-08-20 | Wave 4 persistence slicing | Durable history is split sequentially into 4A schema/writer, 4B atomic query/projection, 4C Store/UI/MCP cutover, and 4D fail-closed/orphan/close insertion. The canonical design now fixes producer/worker join before query/DB close and a single optional preview bootstrap seam; independent re-gate reported zero blockers. Wave 4A remains gated on reviewed Wave 3C. |
 | 2026-08-20 | Wave 5 auth/executable design gate | Upstream and live environment evidence fixed nullable-email saved identity, a single API-key slot, crash-atomic RegistryV2/artifact/journal/runtime-lease ownership, finite ChatGPT/API-key reconciliation, Wave 3-owned activation ordering, and one deterministic executable resolver/test seam. Independent API/state-machine re-gate reported zero blockers; implementation remains gated on reviewed Wave 4D. |
+| 2026-08-20 | Wave 7 safe-cutover slicing | #108 is split into quiescent source snapshot, sanitized exact-ID source adapter, atomic Wave4 import, Wave5 auth/preferences conversion, and admission/rollback/live proof. Current-main DB/WAL/SHM/auth/UserDefaults inputs and deterministic outer-review mapping are pinned. Implementation remains gated on reviewed Wave 6 plus Wave4 import and Wave5 RegistryV2 seams. |
 
 ## Remaining decisions
 
@@ -141,6 +142,11 @@ The proposed Phase 2 gate now includes:
 | Wave 4B / #102 query | 24 hours; 8 production + 5 test files maximum | One atomic observation generation + stable projection registry | Pending reviewed Wave 4A |
 | Wave 4C / #100/#102/#110/#111 cutover | 40 hours; 31 production + 13 test/gate files maximum | Committed Store/UI/MCP history, duration, paging, reorder, delete | Pending reviewed Wave 4B |
 | Wave 4D / #102 lifecycle | 28 hours; 13 production + 9 test/gate files maximum | Fail-closed/orphan recovery + Wave 3 finish/close insertion | Pending reviewed Wave 4C |
+| Wave 7A / #108 snapshot | 18 hours; 7 production + 4 test files maximum | Current-main locator, lsof quiescence, manifest, DB/WAL/SHM staging | Pending reviewed Wave 6 |
+| Wave 7B1 / #108 source adapter | 28 hours; 9 production + 5 test files maximum | Sanitized exact-ID plain/zstd read + shared normalizer | Pending reviewed Wave 7A |
+| Wave 7B2 / #108 history import | 22 hours; 6 production + 5 test files maximum | Deterministic atomic Wave4 import/failure manifest | Pending reviewed Wave 7B1 |
+| Wave 7C / #108 auth/preferences | 26 hours; 8 production + 5 test files maximum | Numeric schema 0/1 → RegistryV2 typed import + preference allowlist | Pending reviewed Wave 7B2 |
+| Wave 7D / #108 cutover/live proof | 22 hours + live matrix; 7 production + 5 test/gate files maximum | Admission journal, rollback archive, final runtime matrix | Pending reviewed Wave 7C |
 
 The committed worker contract is
 [recovery-wave-0-1-task-brief-2026-08-20.md](recovery-wave-0-1-task-brief-2026-08-20.md).
@@ -148,3 +154,5 @@ Wave 2 uses
 [recovery-wave-2-task-brief-2026-08-20.md](recovery-wave-2-task-brief-2026-08-20.md).
 Wave 3 uses
 [recovery-wave-3-task-brief-2026-08-20.md](recovery-wave-3-task-brief-2026-08-20.md).
+Wave 7 uses
+[recovery-wave-7-task-brief-2026-08-20.md](recovery-wave-7-task-brief-2026-08-20.md).

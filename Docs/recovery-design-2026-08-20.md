@@ -343,7 +343,8 @@ The database contains seven tables:
    - current attempt and canonical outer/source/reviewer thread linkage;
    - model/account presentation metadata, last applied global revision, sort order,
      `lastCommittedAt` / `observedThroughAt`, duration accuracy, and startup-
-     recovery state.
+     recovery state; nullable `durationExactMs` preserves authoritative
+     duration-only inputs without inventing end time.
 4. `reviewAttempts`
    - stable attempt ID and parent review ID;
    - source/review/turn identities, model, start/end, and terminal reason.
@@ -999,14 +1000,21 @@ Startup order:
    source and construct an inert store with `ReviewHistoryConfiguration`.
 2. Construct the window/controllers against the inert store. The history shell
    renders `.loading`, not a successful empty list.
-3. `store.start()` opens SQLite, runs all versioned migrations and startup-
-   orphan recovery, then applies an optional preview/test bootstrap through the
-   writer only when the database was created empty.
-4. Start the history subscription, await its first atomic snapshot, and publish
+3. When `ReviewHistoryConfiguration.startupPreparation` is present,
+   `store.start()` invokes only that opaque CodexReview closure before
+   observation/runtime admission. The Host-owned coordinator behind it validates
+   an existing admission or performs snapshot/import/preferences/auth and returns
+   `.ready`, `.authenticationRequired`, or `.authenticationFailed`. A thrown or
+   non-history-admitted preparation starts no query, MCP, or app-server.
+4. For every returned disposition—including `.authenticationFailed`—run
+   startup-orphan recovery, apply optional preview/test bootstrap through
+   the writer only to a brand-new empty non-cutover DB, start the history
+   subscription, await its first atomic snapshot, and publish
    `.loaded` or a visible typed `.failed` state. A history failure does not
    start MCP or app-server.
 5. Resolve the Codex executable once for the app lifetime.
-6. Before primary runtime/MCP admission, recover authentication in this order:
+6. For `.ready`/`.authenticationRequired`, before primary runtime/MCP admission,
+   recover authentication in this order:
    migrate RegistryV0→V2; reject the invalid simultaneous old-lease+journal
    state; reconcile a leftover runtime lease; forward-complete an activation
    journal; reconcile pending authentication/staging; materialize exactly one
@@ -1014,6 +1022,8 @@ Startup order:
    validate exactly one un-published primary `PreparedRuntime` against that
    artifact. Journal completion uses this same prepared runtime and never
    recopies shared auth after it starts.
+   `.authenticationFailed` skips this step and retains the loaded history with a
+   visible auth error.
 7. Only after history and auth recovery are authoritative, atomically publish
    that prepared runtime, open MCP admission, and begin live ingestion. There is
    no second primary start. Auth recovery failure closes the un-published handle
@@ -1112,41 +1122,175 @@ the owner of async shutdown.
 The importer recognizes only pinned current-main inputs and never scans content
 heuristically for something that merely looks like a review.
 
+`CurrentMainSourceLocator` reproduces the pinned current-main root precedence in
+one versioned adapter. An absent old preference means `.defaults`; a present
+malformed preference is a typed migration refusal rather than a guessed root.
+Use a valid nonempty normalized legacy
+`codexReview.runtimePreferences.codexHomePath`, otherwise current-main
+`CODEX_HOME`, otherwise nonempty environment `HOME/.codex_review`, otherwise
+the FileManager user Application Support `CodexReviewMonitor` directory, and
+finally `homeDirectoryForCurrentUser/.codex_review`. Every resolved custom root,
+not only the default, enters the RecoveryV1 source/destination rejection
+boundary.
+
+The snapshot allowlist is exact. Unknown `*.sqlite*` means a newer unsupported
+layout and fails closed.
+
+```text
+installation_id
+review-thread-retention.json
+sessions/**/rollout-*.jsonl[.zst]
+archived_sessions/**/rollout-*.jsonl[.zst]
+sqlite/state_5.sqlite[-wal|-shm]
+sqlite/logs_2.sqlite[-wal|-shm]
+sqlite/goals_1.sqlite[-wal|-shm]
+sqlite/memories_1.sqlite[-wal|-shm]
+sqlite/queue_1.sqlite[-wal|-shm]
+sqlite/thread_history_1.sqlite[-wal|-shm]
+accounts/registry.json
+accounts/mutation-journal.json
+accounts/reconciliation-debt.json
+accounts/temporary-home-cleanup-debt.json
+provider-filtered accounts/<encoded-key>/auth.json
+provider-filtered accounts/<encoded-key>/revisions/<revision>.json
+provider-filtered shared auth.json
+```
+
+Review semantics come only from `state_5`, `thread_history_1`, and referenced
+rollouts; the other database cohorts are copied for snapshot/rollback integrity
+and never interpreted as reviews. Account registry/debt JSON is copied exactly.
+After decoding provider metadata, only ChatGPT/Bedrock opaque artifact paths are
+admitted; API-key shared/account/revision paths are excluded before any open,
+copy, read, or hash. There is no recursive source-root/accounts copy. Credential
+files are handled only by the typed auth adapter below. UserDefaults
+input is limited to bundle-domain values `codexReview.runtimePreferences`
+(`Data`) and `CodexReviewKit.ReviewMonitor.sidebarReviewChatFilter` (`String`);
+the full plist and existing window frame are not copied.
+
 Import preflight requires a quiescent source. The current-main ReviewMonitor,
 its app-server, and all known source-database writers must be stopped; the
 importer verifies that no writer holds the source database/home. It then copies
-the source root, account registry/auth files, rollout/log inputs, relevant
-preferences blob, and every SQLite database together with its WAL/SHM at one
-verified quiescent boundary (or uses SQLite online backup for a live-readable
-database). It records before and after manifests and admits parsing only when
+only the exact allowlisted/provider-filtered files, relevant preference values,
+and every SQLite database together with its WAL/SHM at one verified quiescent
+boundary. It records before and after manifests and admits parsing only when
 they match. Journal/debt recovery and SQLite validation run on the staging copy,
 never the source. An active or changing source produces a typed refusal with no
 destination mutation. It never guesses that a directory copy taken during
 writes is consistent.
 
-- Source fingerprint: SHA-256 of the source installation ID, account-registry
-  schema version, and canonical source-root identity; no credential bytes enter
-  the fingerprint or manifest.
-- Eligible review: a non-subagent outer thread with a canonical review marker,
-  stable outer thread/turn IDs, and typed entered/exited-review-mode evidence.
-  The human `exitedReviewMode.review` value is the result. Reviewer child,
-  compact/spawn/other subagents, and thread-only rows without the canonical turn
-  evidence are skipped with a manifest reason.
-- Deterministic ID: `legacy-v1:` plus SHA-256 of source fingerprint, outer
-  thread ID, and review turn ID. Re-running the importer addresses the same row
-  without content-based identity.
-- Duration: import exact upstream start/completion/duration metadata when
-  present; otherwise import lower-bound/unavailable accuracy without guessing.
+`CurrentMainSourceSnapshotter` rejects another
+`lynnpd.CodexReviewMonitor` process and uses `/usr/sbin/lsof` machine-readable
+output twice (preflight and post-copy): any open FD on a known SQLite/WAL/SHM or
+any writable FD on another allowlisted source is a typed refusal including PID
+and command. App-server ownership is proved by the actual legacy files it
+holds, not process-name matching. Old UserDefaults values are exact-compared
+before/after. The importer never opens source SQLite because even a read can
+mutate WAL shared memory.
+
+For each quiescent SQLite cohort it byte-copies main/WAL/SHM into raw staging,
+verifies the complete before/after source manifest, then runs `sqlite3_backup`
+and `quick_check` on the staging copy. Direct online backup from the source is
+not an approved active-writer/read path. The canonical sorted manifest records
+relative path, file type/mode/size, non-secret SHA-256, sidecar existence,
+preference hashes, and adapter/importer version. Credential digests never enter
+the source fingerprint or cutover manifest; API-key artifact bytes are not
+copied, read, or hashed.
+
+- Source fingerprint: SHA-256 of a length-prefixed tuple containing
+  `"current-main-source-v1"`, lowercase installation UUID, account schema token
+  `absent|0|1`, and symlink-resolved absolute legacy root; no credential bytes
+  enter the fingerprint or manifest.
+- Eligible review: `thread_source == user`, non-SubAgent/internal source, stable
+  outer thread/turn identity, same-pair stable `enteredReviewMode` and
+  `exitedReviewMode`, matching typed turn terminal, and one nonempty canonical
+  `exitedReviewMode.review`. Reviewer/compact/spawn/memory/other subagents are
+  excluded by metadata before content inspection. Thread-only, missing/cross-
+  turn/multiple marker rows are typed skip/failure manifest entries.
+- Deterministic IDs use canonical length-prefixed tuples. `reviewDigest` is
+  SHA-256 of source fingerprint + outer thread ID + review turn ID;
+  `ReviewID = legacy-v1:<hex>` and
+  `ReviewAttemptID = legacy-attempt-v1:<hex>`. Effective log IDs add upstream
+  item ID and semantic subindex. Content, email, and process handle are never
+  identity. Re-running addresses the same rows.
+- Duration precedence is nonnegative upstream `durationMs` exact, valid
+  start/completion exact, start→last committed event lower bound, otherwise
+  unavailable. Wave 4 stores an exact-duration scalar when timestamps are
+  absent; it never back-calculates `endedAt` or substitutes thread recency.
 - Logs: normalize eligible outer-turn events through the same pinned reducer as
   live ingestion. Never import reviewer child JSON as user content.
-- ChatGPT credentials: copy bytes only into the recovery-owned Codex home with
-  owner-only permissions, never decode/log them, then validate through current
-  app-server account read. Invalid credentials require normal sign-in.
-- API-key credentials: do not copy a raw key from the legacy home. Import only
-  non-secret account metadata as requiring reauthentication and let #97 receive
-  a newly entered key through its single-use owner.
-- Preferences: import only validated user choices; old home/database/path and
-  MCP test-port values are not copied into the recovery environment.
+- Auth: the #108 adapter accepts current-main numeric account schema 0/1 and
+  produces typed ChatGPT/API-key/Bedrock inputs, never a source path. ChatGPT/
+  Bedrock opaque artifacts enter Wave 5 immutable revision/RegistryV2 import;
+  active ChatGPT materializes only through the activation journal and current
+  app-server read. Invalid/expired artifacts require normal sign-in without
+  discarding imported history. API-key bytes are never copied/read/hashed; only
+  non-secret “reauthentication required” metadata enters the cutover manifest,
+  no placeholder RegistryV2 account is created, and a legacy active API key
+  starts signed out for #97 single-use input. External cleanup debt is a typed
+  refusal and never authorizes deleting the legacy path.
+- The adapter submits one ordered `CurrentMainSavedAccountBatchImport` with
+  source fingerprint/schema/legacy active key. The Wave 5 registry actor alone
+  assigns crash-stable saved IDs, writes its migration journal, maps active key,
+  and commits the batch. Missing/invalid ChatGPT/Bedrock credentials use the
+  reauthentication case and create no ready RegistryV2 record; their sanitized
+  metadata remains in the cutover manifest. `VerifiedOpaqueArtifact` can only
+  be constructed by the snapshotter beside its fileprivate initializer after
+  path/permission/hash validation. Cutover crash resume asks that snapshotter to
+  revalidate the verified snapshot and reconstruct the in-memory value; secret
+  digests are not persisted in the cutover manifest and Wave 5 has no second
+  factory.
+- Preferences: validate and import only MCP host/persisted port/path, Codex
+  executable path, and the sidebar filter mapping `all|running|latestFinished`
+  from the old key to the new key. Do not import Codex home/history/source paths
+  or process-only test port. Legacy values remain unchanged; a different
+  existing destination value is a conflict, never an automatic merge.
+
+`ReviewCreation` imports canonical outer cwd as workspace (missing/invalid is a
+failure), a non-authorizing audit session ID
+`legacy-session-v1:<source-fingerprint-prefix>`, the entered-review text as
+target display summary without guessing a git target, optional model from outer
+metadata, no email/account binding, and default recency/manual order from
+terminal or observed-through time plus `ReviewID`. Terminal summary/result come
+from the typed reducer, not creation. Wave 4 `reviewRuns` includes nullable
+`durationExactMs` alongside start/end/observed-through and accuracy so a valid
+duration-only import is representable.
+
+Live and import share one extracted current-v2 item/terminal normalizer and Wave
+4 writer primitive; there is no import-only reducer. Stable completed items are
+fed in source rollout/event ordinal and original turn-item order, with semantic
+subindex only inside one source item; they are never sorted by item ID. Canonical marker/companion
+suppression, grouped replacement, and 256 KiB policy run once in the writer.
+Reviewer child JSON never enters the reducer.
+
+Compressed `.jsonl.zst` is required. The standard adapter creates a sanitized
+home from the verified snapshot. An original rollout path is rewritten only
+when its canonical source path is inside the legacy root and maps to the exact
+manifest-copied relative staging file; every other/outside path is rejected,
+never heuristically rebased. The adapter omits source auth/config/AGENTS,
+launches the single Wave 5-resolved pinned Codex executable, and performs exact-
+ID `thread/read { threadId, includeTurns: true }` only for outer IDs enumerated
+from staging state DB—not `thread/list`. Initialize uses client name
+`codex_review_import` plus importer version and requires response `codexHome` to
+equal the sanitized root, platform family/OS to be `unix`/`macos`, and parsed
+user-agent CLI version to equal the pinned resolved executable version. It
+awaits process/readers/writers on close. The first
+Wave 7B1 gate must prove auth-free exact reads for plain/compressed and legacy/
+paginated fixtures. Failure is a topology gate for a zstd dependency or Rust
+helper, not permission to ignore compressed history.
+
+`legacyKey = outer-review-v1:<hex(reviewDigest)>`. `sourceContentHash` is
+SHA-256 of a length-prefixed canonical semantic source tuple: importer schema,
+outer IDs/source metadata, ordered rollout event ordinal + method + stable item
+ID + sorted-key JSON payload, typed terminal, and raw duration/timestamp inputs.
+It excludes filesystem staging paths, initialize/user-agent text, field order,
+and other volatile app-server response data. The same verified source therefore
+hashes identically across replay and compressed/plain adapter paths.
+
+Clearly non-review metadata (subagent/internal source or no entered-review
+evidence) is an ineligible skip. Once same-pair entered-review evidence exists,
+missing exit/terminal, cross-turn or multiple markers, invalid result, or other
+ownership conflict is an eligible import failure and blocks admission; it is
+never downgraded to a skip.
 
 Each legacy review imports in one SQLite transaction with a unique
 `(sourceFingerprint, legacyKey, importerVersion)` manifest row. Identical
@@ -1158,6 +1302,57 @@ deterministic key, source hash, importer/schema version, and typed failure—nev
 partial review rows. Source files remain unchanged. The original source and its
 preflight hash manifest are the rollback point, so deleting the recovery
 destination and rerunning import is always possible.
+An identical failure row remains retryable; a same-key/different-hash failure is
+still a no-write conflict. If even the sanitized failure transaction fails, one
+typed error retains primary import and secondary recording failures and cutover
+admission stays closed. Any unresolved eligible review failure prevents final
+admission; documented ineligible skips do not.
+
+The cutover journal enumerates every destination leaf it may create or replace:
+
+```text
+MigrationSnapshots/current-main-v1/<snapshot-id>/
+review-history.sqlite[-wal|-shm]
+SavedAccounts/ RegistryV2 artifacts/journals
+CodexHome/auth.json
+codexReview.recoveryV1.runtimePreferences
+CodexReviewKit.ReviewMonitor.sidebarJobFilter
+cutover-journal.json
+cutover-admission.json
+snapshotVerified → historyImported → preferencesCommitted
+                 → authConverted | authenticationRequired | authFailed
+                 → historyAdmitted(authDisposition)
+                 → runtimeAdmitted  // only converted/required
+```
+
+Admission is the final fsynced atomic rename. An identical completed source/
+snapshot resumes normally; an incomplete same-snapshot journal resumes
+idempotently. A different source, untracked destination history/RegistryV2, or
+different preexisting destination preference is a typed conflict. Import
+finishes before the first history query snapshot. History remains readable on
+auth failure; `.authenticationFailed` still permits the first history query but
+MCP/primary app-server remain closed. Recovery development data is never implicitly
+merged with legacy import.
+
+`RecoveryCutoverCoordinator` runs after RecoveryV1 path preparation but before
+the first history query/runtime admission. It snapshots first, opens/migrates
+the history writer for import without starting observation, commits history,
+preferences, and typed auth conversion, atomically writes admission, then lets
+the normal startup owner begin the first query snapshot and auth/runtime
+recovery. `authenticationRequired` is a history/runtime-admitted signed-out
+state; corruption/debt is `authenticationFailed`, history-admitted but never
+runtime-admitted until repaired.
+
+Before admission, rollback deletes only journal-enumerated destination leaves
+and restores a new preference only if its bytes still equal the migration write;
+the verified snapshot and legacy source remain. After admission/live use, the
+owner awaits UI/store/runtime/query/DB close and atomically renames RecoveryV1
+within the same parent directory to
+`RecoveryV1-Rollback-<UTC-timestamp>-<UUID>` before conditionally restoring
+preferences. Rename failure leaves RecoveryV1 and preferences unchanged and is
+typed; no copy/delete fallback crosses volumes.
+There is no reverse import or legacy-source write. Post-cutover reviews remain
+in the archive and can be used for a later forward cutover.
 
 ## 5. API-first sketch
 
@@ -1180,6 +1375,19 @@ package struct ReviewHistoryConfiguration: Sendable {
     package let databaseURL: URL
     package let initialTerminalReviewLimit: Int
     package let bootstrap: ReviewHistoryBootstrap?
+    package let startupPreparation: ReviewHistoryStartupPreparation?
+}
+
+package enum ReviewHistoryStartupDisposition: Sendable {
+    case ready
+    case authenticationRequired
+    case authenticationFailed(String)
+}
+
+package struct ReviewHistoryStartupPreparation: Sendable {
+    package let run: @Sendable (
+        ReviewHistoryStore
+    ) async throws -> ReviewHistoryStartupDisposition
 }
 
 package struct ReviewHistoryBootstrap: Sendable {
@@ -1230,6 +1438,70 @@ package enum ReviewHistoryMutation: Sendable {
     case requestCancellation(ReviewCancellation)
     case finish(attempt: ReviewAttemptID, terminal: ReviewTerminal)
     case deleteTerminalReview
+}
+
+package struct LegacyImportSource: Sendable {
+    package let fingerprint: String
+    package let importerVersion: Int
+    package init(fingerprint: String, importerVersion: Int)
+}
+
+package enum ReviewImportedDuration: Sendable {
+    case exact(milliseconds: Int64)
+    case lowerBound(startedAt: Date, observedThroughAt: Date)
+    case unavailable
+}
+
+package struct LegacyReviewImport: Sendable {
+    package let source: LegacyImportSource
+    package let outerThreadID: String
+    package let reviewTurnID: String
+    package let sourceContentHash: String
+    package let creation: ReviewCreation
+    package let events: [ReviewEvent]
+    package let terminal: ReviewTerminal
+    package let duration: ReviewImportedDuration
+    package init(
+        source: LegacyImportSource,
+        outerThreadID: String,
+        reviewTurnID: String,
+        sourceContentHash: String,
+        creation: ReviewCreation,
+        events: [ReviewEvent],
+        terminal: ReviewTerminal,
+        duration: ReviewImportedDuration
+    )
+}
+
+package enum LegacyReviewImportOutcome: Sendable {
+    case imported(ReviewHistoryCommit)
+    case alreadyImported(ReviewID)
+}
+
+package enum LegacyReviewImportError: LocalizedError, Sendable {
+    case conflictingSourceHash(ReviewID)
+    case importFailed(primary: String)
+    case importAndFailureRecordFailed(primary: String, secondary: String)
+}
+
+// CodexReviewHost owns the concrete cutover implementation and injects only
+// ReviewHistoryStartupPreparation into the lower CodexReview store.
+package struct RecoveryCutoverConfiguration: Sendable {
+    package let recoveryRootURL: URL
+    package let legacyPreferencesDomain: String
+    package let importerVersion: Int
+    package init(
+        recoveryRootURL: URL,
+        legacyPreferencesDomain: String,
+        importerVersion: Int
+    )
+}
+
+package actor RecoveryCutoverCoordinator {
+    package func startupPreparation(
+        configuration: RecoveryCutoverConfiguration
+    ) -> ReviewHistoryStartupPreparation
+    package func rollbackToCurrentMain() async throws -> URL
 }
 
 public enum ReviewTerminalKind: String, Codable, Sendable, Hashable {
@@ -1335,6 +1607,11 @@ package actor ReviewHistoryStore {
         _ mutation: ReviewHistoryMutation,
         to reviewID: ReviewID
     ) async throws -> ReviewHistoryCommit
+    // Owns the atomic success row and sanitized retryable failure-row
+    // transaction; callers never write reviewImports independently.
+    package func importLegacy(
+        _ value: LegacyReviewImport
+    ) async throws -> LegacyReviewImportOutcome
     package func close() async throws
 }
 
@@ -1551,6 +1828,58 @@ package struct PreparedAuthenticationCandidate: Sendable {
         artifactSHA256: String,
         artifactByteCount: Int
     )
+}
+
+// CodexReviewHost migration/auth contract.
+package struct LegacyAccountMetadata: Sendable {
+    package let sourceAccountKey: String?
+    package let lastKnownEmail: String?
+    package let planType: String?
+    package init(sourceAccountKey: String?, lastKnownEmail: String?, planType: String?)
+}
+
+package struct VerifiedOpaqueArtifact: Sendable {
+    package let stagingURL: URL
+    package let sha256: String
+    package let byteCount: Int
+    // Defined beside CurrentMainSourceSnapshotter; no package/public initializer.
+    fileprivate init(stagingURL: URL, sha256: String, byteCount: Int)
+}
+
+package enum CurrentMainCredentialImport: Sendable {
+    case verified(VerifiedOpaqueArtifact)
+    case reauthenticationRequired(reason: String)
+}
+
+package enum CurrentMainSavedAccountImport: Sendable {
+    case chatGPT(metadata: LegacyAccountMetadata, credential: CurrentMainCredentialImport)
+    case apiKeyReauthenticationRequired(metadata: LegacyAccountMetadata)
+    case amazonBedrock(metadata: LegacyAccountMetadata, credential: CurrentMainCredentialImport)
+}
+
+package struct CurrentMainSavedAccountBatchImport: Sendable {
+    package let sourceFingerprint: String
+    package let numericSchemaVersion: Int
+    package let entriesInSourceOrder: [CurrentMainSavedAccountImport]
+    package let legacyActiveAccountKey: String?
+    package init(
+        sourceFingerprint: String,
+        numericSchemaVersion: Int,
+        entriesInSourceOrder: [CurrentMainSavedAccountImport],
+        legacyActiveAccountKey: String?
+    )
+}
+
+package struct CurrentMainSavedAccountImportOutcome: Sendable {
+    package let importedAccountIDs: [SavedAccountID]
+    package let activeAccountID: SavedAccountID?
+    package let authenticationRequired: Bool
+}
+
+package actor SavedAccountRegistryStore {
+    package func importCurrentMainAccounts(
+        _ batch: CurrentMainSavedAccountBatchImport
+    ) async throws -> CurrentMainSavedAccountImportOutcome
 }
 
 package enum CodexReviewAuthenticationResult: Sendable {
@@ -2027,6 +2356,21 @@ Within the recovery branch:
 - Active-source import refusal, WAL/SHM quiescence, before/after manifest change,
   same-key/different-hash conflict, success rollback, and separate failure
   manifest transaction.
+- Exact custom/default legacy-root resolution, unknown SQLite refusal, lsof
+  process/FD ownership, raw main/WAL/SHM cohort copy, staging backup/quick-check,
+  UserDefaults before/after equality, and source zero-diff after every failure.
+- Plain/zstd + legacy/paginated exact-ID staging reads, sanitized auth-free
+  app-server, outer/reviewer-child eligibility matrix, deterministic review/
+  attempt/log ID goldens, and live/import normalizer equivalence.
+- Exact/lower-bound/unavailable imported duration including duration-only rows;
+  eligible count equals imported plus documented skips and eligible failure is
+  zero before admission.
+- Current-main numeric auth schema 0/1, ChatGPT/Bedrock opaque RegistryV2 import,
+  a trap proving API-key artifact bytes are never read/copied/hashed, preference
+  allowlist/conflict, debt refusal, and untouched legacy keys.
+- Cutover journal crash/resume at every state, runtime-before-admission refusal,
+  pre/post-admission rollback archive, current-main restart from untouched
+  source, and repeat forward cutover from the archive.
 - Initial active/recent window, paging, explicit terminal deletion, cascade, and
   large-history memory/latency (#111).
 - Anchor-based workspace/review reorder across filters, groups, hidden rows,
