@@ -814,6 +814,44 @@ domain/runtime lifetime authority. The application composition owner performs
 own render/selection tasks, and only then performs `try await store.close()`.
 The store does not reach upward to close ReviewUI.
 
+`closeAndWait()` quiesces UI tasks/observations but preserves the last rendered
+snapshot until the application termination decision. If `store.close()` throws,
+ReviewMonitor presents one explicit application-owned alert: **Cancel Quit** is
+the default and replies `false`, retaining the frozen last-good/error UI with
+all mutation admission closed; **Quit Anyway** replies `true` only after the
+user explicitly accepts the risk that the latest state/resource close was not
+confirmed. No close error silently becomes successful termination. Repeated
+Quit joins the recorded close result and presents the same decision rather than
+starting a second shutdown sequence.
+
+The existing nonthrowing lifecycle methods keep source compatibility after
+close: `start()` and `restart()` are documented no-ops once closing begins,
+`stop()` during close joins the runtime-stop portion and is a no-op after closed,
+and review/MCP mutations use their existing throwing surface to report the typed
+closed error. None of these methods reconstructs a second live owner after app-
+lifetime close.
+
+`CodexReviewStore` owns one app-lifetime state and one recorded close Task for
+both normal and failed-history shutdown:
+
+```text
+open(runtimeGeneration)
+  -> closing(invalidatedGeneration, closeTask)
+  -> closed(Result<Void, ReviewCloseError>)
+```
+
+The first `close()` installs `closing` and invalidates the runtime generation
+before its first suspension. Concurrent/repeated `close()` callers join that
+same Task/result; `stop()` during close joins the Task's runtime-stop stage.
+Every `start()`/`restart()` operation captures the open generation before an
+external await and revalidates it afterward. A stale late completion cannot
+publish runtime/history/observation state or start another generation; any
+resource it acquired is transferred to the installed close Task and awaited
+there. Normal and persistence-failed close are branches of this one authority,
+not separate caller-owned shutdown sequences. Wave 4 inserts durable terminal,
+query, and database stages into the same Task rather than adding another close
+owner.
+
 Store close order after UI close:
 
 1. Close MCP and review admission and reject new work with a typed closed error.
@@ -920,9 +958,15 @@ package enum ReviewPersistenceError: LocalizedError, Sendable {
     case close(String)
 }
 
+package enum ReviewClosePrimaryFailure: LocalizedError, Sendable {
+    case interruptRequest(ReviewInterruptRequestFailure)
+    case runtime(ReviewRuntimeCloseFailure)
+    case persistence(ReviewPersistenceError)
+}
+
 package struct ReviewCloseError: LocalizedError, Sendable {
-    package let primary: ReviewPersistenceError
-    package let physicalClose: ReviewPersistenceError?
+    package let primary: ReviewClosePrimaryFailure
+    package let secondaryPhysicalDatabaseClose: ReviewPersistenceError?
 }
 
 package struct ReviewHistoryPage: Sendable, Equatable {
@@ -1190,6 +1234,15 @@ public final class ReviewMonitorWindowController: NSWindowController {
     public func closeAndWait() async
 }
 ```
+
+`ReviewInterruptRequestFailure` retains the original request rejection or
+outcome-unknown category/code/message plus any secondary barrier diagnostic.
+`ReviewRuntimeCloseFailure` distinguishes connection, process, worker, and MCP
+handler-drain failures. `ReviewClosePrimaryFailure` therefore records normal
+runtime/protocol shutdown and persistence shutdown without erasing the original
+typed cause; the optional secondary field is only for an additional physical
+database-close failure. The same `ReviewCloseError` value is rethrown to every
+joined caller.
 
 No public or cross-target API names GRDB or `DatabaseWriter`.
 `ReviewHistoryConfiguration` is the only composition seam; the persistence
@@ -1578,6 +1631,13 @@ Within the recovery branch:
 - Runtime transition matrix coverage for explicit cancel, stop, same-account
   restart, account change/reconciliation, recoverable network loss,
   nonrecoverable protocol/process death, and application termination.
+- Application close failure preserves the last rendered error snapshot and
+  requires an explicit Cancel Quit / Quit Anyway decision; post-close
+  start/restart no-op and mutation rejection are deterministic.
+- Close racing an awaited start/restart invalidates that generation before the
+  await completes; late completion cannot publish and its acquired resource is
+  joined by the one close Task. Concurrent close/stop callers observe one
+  recorded result.
 - Framing/routing failure closes the connection; isolated malformed payload or
   conflicting event closes only its attempt; old-attempt events cannot mutate
   product state; no production external-input trap.
@@ -1652,7 +1712,9 @@ owner and removes the replaced path in the same slice.
 2. **Current event contract** — port notification normalization and canonical
    terminal result into the product-owned in-memory v0.6.2 flow (#104, #105).
 3. **Lifecycle/cancellation** — port the authoritative terminal barrier and
-   ordered runtime/app close semantics (#106).
+   ordered runtime/app close semantics (#106). This wave proves the in-memory
+   terminal-before-cleanup barrier; #106 remains open until Wave 4 places the
+   durable terminal commit at that same boundary.
 4. **History foundation and ownership cutover** — add GRDB,
    schema/migrations, commit/query owner, startup hydration, and replace mutable
    `jobs`/`workspaces` membership with committed history projections; add
