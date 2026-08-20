@@ -51,6 +51,8 @@ remove this transient ledger.
 - #107: current ChatGPT login lifecycle.
 - #108: recoverable local-state cutover.
 - #109: current-client MCP compatibility proof.
+- #110: anchor-based sidebar reorder and durable manual order.
+- #111: bounded history paging and explicit terminal deletion.
 - #101: closed as not planned by user decision.
 
 ## Recovery decision and remaining design gate
@@ -60,14 +62,16 @@ The selected architecture direction is:
 1. **Restore from v0.6.2:** retain the product-owned review/store/UI flow and reimplement required features.
 2. **Do not repair the current generic-chat architecture:** it admits internal reviewer children as product rows and changes row semantics when the process-local run owner disappears.
 
-Before migration implementation, the Phase 2 gate still must include:
+The proposed Phase 2 gate now includes:
 
-- current and desired owner maps for review identity, terminal result, persistence/replay, observation, selection, duration, and rendering;
-- a required-feature inventory with one issue per independent contract;
-- persisted-data and external MCP compatibility results;
-- deletion/cutover list;
-- characterization and runtime test plan;
-- finding-to-design mapping.
+- [x] current and desired owner maps for review identity, terminal result,
+  persistence/replay, observation, selection, duration, and rendering;
+- [x] a required-feature inventory with one issue per independent contract;
+- [x] persisted-data and external MCP compatibility policy;
+- [x] deletion/cutover list;
+- [x] characterization and runtime test plan;
+- [x] finding-to-design mapping;
+- [ ] explicit user approval of the concrete design gate before product edits.
 
 ## Evidence checklist
 
@@ -98,6 +102,11 @@ Before migration implementation, the Phase 2 gate still must include:
 | 2026-08-20 | Durable owner selected | #102 and the design contract make local SQLite review history the sidebar/detail/MCP source of truth. |
 | 2026-08-20 | Feature inventory complete | #104–#109 isolate current terminal, notification, cancellation, login, cutover, and MCP contracts; unreleased DataKit/SDK architecture is excluded. |
 | 2026-08-20 | Design checkpoint | `f2e9bd5` adds the proposed Phase 2 design; Codex review run `4C58E6B5-...` reported no findings. |
+| 2026-08-20 | Persistence dependency probe | SQLiteData 1.9.0 explicit-database probe passed 3 tests but planned about 807 build units; direct GRDB 7.11.1 (`b83108d...`) passed 2 tests with about 114 build units. Both used `swift test --build-system swiftbuild --no-parallel` in disposable `/tmp/codexreview-{sqlite,grdb}-probe` packages. Direct file-backed `DatabasePool` is selected. |
+| 2026-08-20 | History interaction scope complete | #110 restores stable before-anchor reorder; #111 defines a monotonic loaded-ID window, keyset paging, and explicit terminal deletion. |
+| 2026-08-20 | Adversarial design audit | Independent persistence/recovery critics drove atomic cross-table observation, attempt isolation, awaited forced close, quiescent import, exact public/API-key/terminal/executable contracts, and per-wave compatibility gates into the design. |
+| 2026-08-20 | Phase 2 gate converged | Persistence, recovery-contract, and lifecycle/source-of-truth critics independently reported zero implementation blockers after fail-closed persistence, trigger-specific runtime semantics, typed ingestion containment, one final-result owner, bounded final output, and failed-state close were fixed. |
+| 2026-08-20 | Final self-review | Review MCP run `35CF35A6-03DF-4460-8DDF-736C7D8215E4` completed with zero findings: the docs-only recovery contracts were internally consistent and introduced no definite correctness issue. |
 
 ## Open decisions
 
