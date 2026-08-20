@@ -27,5 +27,14 @@ file; the checker never rewrites it.
 - Capture revision: `0948f454b05c9a190deffb6707ee4b6416217e67`
 - Recovery design acceptance: [`18499aa795d6af7716a5d94c92d4c7210fc3b821`](https://github.com/lynnswap/CodexReviewKit/commit/18499aa795d6af7716a5d94c92d4c7210fc3b821)
 
+### v0.6.2 current-v2 review terminal addition
+
+- Reviewed contract change: additive `ReviewTerminalKind`,
+  `ReviewInterruptionCause`, `ReviewTerminalRecord`, and read-only
+  `ReviewJobCore.Lifecycle.terminal`
+- Capture revision: `d6b877752f8d5b101aa36382ba64d7d6fe786d71`
+- Replacement baseline SHA-256: `465956e4233ae545980a42dd03bd34a4de2bedea93c4ce735f15b68a37ded17d`
+- Accepted baseline update: [`f377ba37dee59eace8237f28661a27c121707d16`](https://github.com/lynnswap/CodexReviewKit/commit/f377ba37dee59eace8237f28661a27c121707d16)
+
 Future entries must identify the reviewed contract change, the replacement
 baseline checksum, and the commit that accepted both.
