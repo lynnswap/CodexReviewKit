@@ -159,6 +159,7 @@ package actor ReviewStartAdmission {
     private var forceCloseTask: Task<Void, Never>?
     private var cleanupTasksByAttemptID: [String: Task<Void, any Error>] = [:]
     private var terminal: ReviewAttemptBarrierTerminal?
+    private var startFailed = false
     private var requestResult: Result<Void, ReviewInterruptRequestFailure>?
     private var forceCloseResult: Result<Void, ReviewRuntimeCloseFailure>?
     private var cancellationResult: Result<ReviewAttemptCancellationResolution, any Error>?
@@ -198,12 +199,30 @@ package actor ReviewStartAdmission {
             return false
         }
         switch phase {
-        case .preparingThread:
+        case .preparingThread(.notSent):
             phase = .preparingThread(.outcomeUnknown)
             return true
-        case .queued, .startingReview, .active, .interrupting, .finishing, .terminal:
+        case .queued, .preparingThread(.outcomeUnknown), .startingReview,
+             .active, .interrupting, .finishing, .terminal:
             return false
         }
+    }
+
+    package func recordThreadStartRejectedForRetry() throws {
+        if let requestedCancellation {
+            throw ReviewStartCancelledBeforeDispatch(cancellation: requestedCancellation)
+        }
+        guard terminal == nil else {
+            throw ReviewAttemptContractFailure(
+                message: "Thread start retry cannot follow an attempt terminal."
+            )
+        }
+        guard case .preparingThread(.outcomeUnknown) = phase else {
+            throw ReviewAttemptContractFailure(
+                message: "Thread start retry requires one rejected dispatched request."
+            )
+        }
+        phase = .preparingThread(.notSent)
     }
 
     package func recordPreparedThread(_ run: CodexReviewBackendModel.Review.Run) {
@@ -219,7 +238,7 @@ package actor ReviewStartAdmission {
         guard requestedCancellation == nil else {
             return false
         }
-        guard case .startingReview(let currentRun, _) = phase,
+        guard case .startingReview(let currentRun, .notSent) = phase,
               currentRun.attemptID == preparedRun.attemptID
         else {
             return false
@@ -317,10 +336,13 @@ package actor ReviewStartAdmission {
         if terminal != nil {
             return nil
         }
+        if startFailed {
+            return nil
+        }
         return await withCheckedContinuation { continuation in
             if let activeRun {
                 continuation.resume(returning: activeRun)
-            } else if terminal != nil {
+            } else if terminal != nil || startFailed {
                 continuation.resume(returning: nil)
             } else {
                 activeRunWaiters.append(continuation)
@@ -339,10 +361,13 @@ package actor ReviewStartAdmission {
         if terminal != nil {
             return nil
         }
+        if startFailed {
+            return nil
+        }
         return await withCheckedContinuation { continuation in
             if let requestedCancellation {
                 continuation.resume(returning: requestedCancellation)
-            } else if terminal != nil {
+            } else if terminal != nil || startFailed {
                 continuation.resume(returning: nil)
             } else {
                 cancellationAdmissionWaiters.append(continuation)
@@ -369,6 +394,7 @@ package actor ReviewStartAdmission {
                 resumeActiveRunWaiters(returning: attempt.run)
             }
         case .failure(let error):
+            startFailed = true
             if let cancellation = (error as? ReviewStartCancelledBeforeDispatch)?.cancellation {
                 receiveTerminal(.localCancellation(cancellation))
             } else if error is CancellationError,
@@ -376,6 +402,8 @@ package actor ReviewStartAdmission {
                       case .preparingThread(.notSent) = phase {
                 receiveTerminal(.localCancellation(requestedCancellation))
             }
+            resumeActiveRunWaiters(returning: nil)
+            resumeCancellationAdmissionWaiters(returning: nil)
         }
     }
 
