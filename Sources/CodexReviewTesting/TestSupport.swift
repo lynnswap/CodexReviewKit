@@ -873,6 +873,53 @@ package struct StoreJobSnapshot: Sendable {
 }
 
 @MainActor
+package final class TestingRuntimeLifecycleHandle: RuntimeLifecycleHandle {
+    package private(set) var activateCallCount = 0
+    package private(set) var closeAdmissionCallCount = 0
+    package private(set) var closeCallCount = 0
+    package private(set) var waitUntilClosedCallCount = 0
+
+    private let onActivate: @MainActor @Sendable () -> Void
+    private let onClose: @MainActor @Sendable () -> Void
+    private var didClose = false
+
+    package init(
+        onActivate: @escaping @MainActor @Sendable () -> Void = {},
+        onClose: @escaping @MainActor @Sendable () -> Void = {}
+    ) {
+        self.onActivate = onActivate
+        self.onClose = onClose
+    }
+
+    package func activate() async throws {
+        activateCallCount += 1
+        onActivate()
+    }
+
+    package func closeAdmission() async {
+        closeAdmissionCallCount += 1
+    }
+
+    package func close(purpose _: ReviewRuntimeTransitionPurpose) async throws {
+        closeCallCount += 1
+        guard didClose == false else {
+            return
+        }
+        didClose = true
+        onClose()
+    }
+
+    package func waitUntilClosed() async throws {
+        waitUntilClosedCallCount += 1
+        guard didClose else {
+            throw ReviewLifecycleResourceFailure.client(
+                "Testing runtime wait began before close."
+            )
+        }
+    }
+}
+
+@MainActor
 package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     package let reviewBackend: FakeCodexReviewBackend
     package let seed: CodexReviewStoreSeed
@@ -881,7 +928,12 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     package private(set) var startRequests: [Bool] = []
     package private(set) var reviewStartOwnershipSnapshots: [StoreAttemptSnapshot?] = []
     package private(set) var recoveryResumeOwnershipSnapshots: [StoreAttemptSnapshot?] = []
+    package let mcpServerLifecycle: any MCPServerLifecycleOwner = NoMCPServerLifecycleOwner()
+    package private(set) var lastPreparedRuntimeHandle: TestingRuntimeLifecycleHandle?
     private weak var store: CodexReviewStore?
+    private var runtimePreparationGate: AsyncGate?
+    private let runtimePreparationStartedGate = AsyncGate()
+    private let runtimePreparationCancellationGate = AsyncGate()
 
     package init(
         reviewBackend: FakeCodexReviewBackend,
@@ -900,10 +952,45 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         self.store = store
     }
 
-    package func start(store: CodexReviewStore, forceRestartIfNeeded: Bool) async {
-        startRequests.append(forceRestartIfNeeded)
-        isActive = true
-        store.transitionToRunning(serverURL: nil)
+    package func holdRuntimePreparation(with gate: AsyncGate) {
+        runtimePreparationGate = gate
+    }
+
+    package func waitForRuntimePreparation() async {
+        await runtimePreparationStartedGate.wait()
+    }
+
+    package func waitForRuntimePreparationCancellation() async {
+        await runtimePreparationCancellationGate.wait()
+    }
+
+    package func prepareRuntime(
+        generation _: ReviewRuntimeGeneration,
+        purpose: ReviewRuntimeTransitionPurpose
+    ) async throws -> PreparedRuntime {
+        startRequests.append(purpose == .restartSameAccount)
+        let handle = TestingRuntimeLifecycleHandle(
+            onActivate: { [weak self] in self?.isActive = true },
+            onClose: { [weak self] in self?.isActive = false }
+        )
+        lastPreparedRuntimeHandle = handle
+        await runtimePreparationStartedGate.open()
+        if let runtimePreparationGate {
+            let runtimePreparationCancellationGate = runtimePreparationCancellationGate
+            await withTaskCancellationHandler {
+                await runtimePreparationGate.waitIgnoringCancellation()
+            } onCancel: {
+                Task { await runtimePreparationCancellationGate.open() }
+            }
+            self.runtimePreparationGate = nil
+        }
+        return PreparedRuntime(
+            snapshot: .init(
+                authentication: try await reviewBackend.readAuth(),
+                settings: try await monitoredSettingsSnapshot()
+            ),
+            handle: handle
+        )
     }
 
     package func stop(store _: CodexReviewStore) async {
@@ -1056,15 +1143,19 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     package func refreshSettings() async throws -> CodexReviewSettings.Snapshot {
+        currentSettingsSnapshot = try await monitoredSettingsSnapshot()
+        return currentSettingsSnapshot
+    }
+
+    private func monitoredSettingsSnapshot() async throws -> CodexReviewSettings.Snapshot {
         let snapshot = try await reviewBackend.readSettings()
-        currentSettingsSnapshot = .init(
+        return .init(
             model: snapshot.model,
             fallbackModel: snapshot.fallbackModel,
             reasoningEffort: snapshot.reasoningEffort.flatMap(CodexReviewSettings.ReasoningEffort.init(rawValue:)),
             serviceTier: snapshot.serviceTier.flatMap(CodexReviewSettings.ServiceTier.init(rawValue:)),
             models: snapshot.models
         )
-        return currentSettingsSnapshot
     }
 
     package func updateSettingsModel(

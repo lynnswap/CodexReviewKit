@@ -54,6 +54,14 @@ extension CodexReviewStore {
         sessionID: String,
         request: CodexReviewAPI.Start.Request
     ) async throws -> String {
+        switch runtimeState {
+        case .acquiring, .transitioning:
+            throw CodexReviewAPI.Error.io(
+                "Review runtime transition is in progress."
+            )
+        case .stopped, .running:
+            break
+        }
         guard closedSessions.contains(sessionID) == false else {
             throw CodexReviewAPI.Error.invalidArguments("Review session \(sessionID) is closed.")
         }

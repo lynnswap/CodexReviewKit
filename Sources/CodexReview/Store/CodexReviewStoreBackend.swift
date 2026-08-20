@@ -28,9 +28,13 @@ package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend, Sendable {
     var seed: CodexReviewStoreSeed { get }
     var isActive: Bool { get }
     var handlesActiveReviewStopCleanup: Bool { get }
+    var mcpServerLifecycle: any MCPServerLifecycleOwner { get }
 
     func attachStore(_ store: CodexReviewStore)
-    func start(store: CodexReviewStore, forceRestartIfNeeded: Bool) async
+    func prepareRuntime(
+        generation: ReviewRuntimeGeneration,
+        purpose: ReviewRuntimeTransitionPurpose
+    ) async throws -> PreparedRuntime
     func stop(store: CodexReviewStore) async
     func waitUntilStopped() async
     func refreshAuth(auth: CodexReviewAuthModel) async

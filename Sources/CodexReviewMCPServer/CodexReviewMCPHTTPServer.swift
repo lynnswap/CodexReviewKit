@@ -122,6 +122,9 @@ package actor CodexReviewMCPHTTPServer {
     private var sessions: [String: SessionContext] = [:]
     private var cleanupTask: Task<Void, Never>?
     private var boundURL: URL?
+    private var acceptsRequests = false
+    private var admittedRequestCount = 0
+    private var admittedRequestDrainWaiters: [CheckedContinuation<Void, Never>] = []
 
     package init(
         adapter: CodexReviewMCPServer,
@@ -194,6 +197,7 @@ package actor CodexReviewMCPHTTPServer {
             ).get()
             self.eventLoopGroup = group
             self.channel = channel
+            acceptsRequests = true
             let actualPort = channel.localAddress?.port
             boundURL = configuration.url(boundPort: actualPort)
             cleanupTask = Task { [weak self] in
@@ -210,11 +214,12 @@ package actor CodexReviewMCPHTTPServer {
     }
 
     package func stop() async {
+        await closeAdmission()
         cleanupTask?.cancel()
+        await cleanupTask?.value
         cleanupTask = nil
         await closeAllSessions()
-        try? await channel?.close()
-        channel = nil
+        await waitForAdmittedHandlers()
         if let eventLoopGroup {
             try? await eventLoopGroup.shutdownGracefully()
         }
@@ -223,11 +228,46 @@ package actor CodexReviewMCPHTTPServer {
         logger.info("MCP Streamable HTTP server stopped")
     }
 
+    package func closeAdmission() async {
+        guard acceptsRequests || channel != nil else {
+            return
+        }
+        acceptsRequests = false
+        try? await channel?.close()
+        channel = nil
+    }
+
+    package func waitForAdmittedHandlers() async {
+        guard admittedRequestCount > 0 else {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            if admittedRequestCount == 0 {
+                continuation.resume()
+            } else {
+                admittedRequestDrainWaiters.append(continuation)
+            }
+        }
+    }
+
     package func handleHTTPRequest(_ request: HTTPRequest) async -> HTTPResponse {
-        await handleTrackedHTTPRequest(request).response
+        await performTrackedHTTPRequest(request).response
     }
 
     fileprivate func handleTrackedHTTPRequest(_ request: HTTPRequest) async -> TrackedHTTPResponse {
+        guard acceptsRequests else {
+            return .init(response: .error(
+                statusCode: 503,
+                .internalError("MCP server is not accepting requests.")
+            ))
+        }
+        admittedRequestCount += 1
+        let tracked = await performTrackedHTTPRequest(request)
+        finishAdmittedRequest()
+        return tracked
+    }
+
+    private func performTrackedHTTPRequest(_ request: HTTPRequest) async -> TrackedHTTPResponse {
         let sessionID = request.header(HTTPHeaderName.sessionID)
 
         if let sessionID, var session = sessions[sessionID] {
@@ -258,6 +298,22 @@ package actor CodexReviewMCPHTTPServer {
                 .invalidRequest("Bad Request: Missing \(HTTPHeaderName.sessionID) header")
             )
         )
+    }
+
+    private func finishAdmittedRequest() {
+        precondition(
+            admittedRequestCount > 0,
+            "CodexReviewMCPHTTPServer owns one completion per admitted request."
+        )
+        admittedRequestCount -= 1
+        guard admittedRequestCount == 0 else {
+            return
+        }
+        let waiters = admittedRequestDrainWaiters
+        admittedRequestDrainWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
     }
 
     private func createSessionAndHandle(_ request: HTTPRequest) async -> TrackedHTTPResponse {

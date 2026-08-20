@@ -232,6 +232,57 @@ struct CodexReviewHostTests {
         #expect(capturedConfiguration?.port == 54321)
         #expect(capturedConfiguration?.endpoint == "/custom-mcp")
         #expect(serverURL.path == "/custom-mcp")
+        #expect(serverURL.port != 0)
+        await store.stop()
+    }
+
+    @Test func liveStoreStopThenStartRebindsMCPWithStableOwner() async throws {
+        let homeURL = try temporaryHome()
+        let firstTransport = FakeJSONRPCTransport()
+        let secondTransport = FakeJSONRPCTransport()
+        for transport in [firstTransport, secondTransport] {
+            try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+            try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
+            try await transport.enqueue(
+                AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+                for: "config/read"
+            )
+            try await transport.enqueue(
+                AppServerAPI.Model.List.Response(data: []),
+                for: "model/list"
+            )
+        }
+        var transports = [firstTransport, secondTransport]
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            mcpHTTPServerFactory: { store, configuration in
+                CodexReviewMCPHTTPServer(
+                    adapter: CodexReviewMCPServer(store: store),
+                    configuration: .init(
+                        host: configuration.host,
+                        port: 0,
+                        endpoint: configuration.endpoint
+                    )
+                )
+            },
+            mcpHTTPServerBindChecker: { _ in },
+            transportFactory: { _ in transports.removeFirst() }
+        )
+
+        await store.start()
+        let firstURL = try #require(store.serverURL)
+        #expect(firstURL.port != 0)
+
+        await store.stop()
+        #expect(store.serverState == .stopped)
+
+        await store.start()
+        let secondURL = try #require(store.serverURL)
+        #expect(secondURL.port != 0)
+        #expect(store.serverState == .running)
+        #expect(transports.isEmpty)
+
         await store.stop()
     }
 

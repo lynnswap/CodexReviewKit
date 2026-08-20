@@ -60,6 +60,7 @@ package final class CodexReviewHost {
 @MainActor
 private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
     let seed = CodexReviewStoreSeed()
+    let mcpServerLifecycle: any MCPServerLifecycleOwner = NoMCPServerLifecycleOwner()
     private let backend: any CodexReviewBackend
     private var currentSettingsSnapshot = CodexReviewSettings.Snapshot()
     private var loginChallenge: CodexReviewBackendModel.Login.Challenge?
@@ -79,8 +80,23 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     func attachStore(_: CodexReviewStore) {}
 
-    func start(store _: CodexReviewStore, forceRestartIfNeeded _: Bool) async {
-        active = true
+    func prepareRuntime(
+        generation _: ReviewRuntimeGeneration,
+        purpose _: ReviewRuntimeTransitionPurpose
+    ) async throws -> PreparedRuntime {
+        let authentication = try await backend.readAuth()
+        let settings = try await Self.monitorSettings(from: backend.readSettings())
+        let handle = DirectRuntimeLifecycleHandle(
+            onActivate: { [weak self] in self?.active = true },
+            onClose: { [weak self] in self?.active = false }
+        )
+        return .init(
+            snapshot: .init(
+                authentication: authentication,
+                settings: settings
+            ),
+            handle: handle
+        )
     }
 
     func stop(store _: CodexReviewStore) async {
@@ -313,6 +329,41 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
         } else {
             auth.selectPersistedAccount(nil)
             auth.updatePhase(.signedOut)
+        }
+    }
+}
+
+@MainActor
+private final class DirectRuntimeLifecycleHandle: RuntimeLifecycleHandle {
+    private let onActivate: @MainActor @Sendable () -> Void
+    private let onClose: @MainActor @Sendable () -> Void
+    private var didClose = false
+
+    init(
+        onActivate: @escaping @MainActor @Sendable () -> Void,
+        onClose: @escaping @MainActor @Sendable () -> Void
+    ) {
+        self.onActivate = onActivate
+        self.onClose = onClose
+    }
+
+    func activate() async throws {
+        onActivate()
+    }
+
+    func closeAdmission() async {}
+
+    func close(purpose _: ReviewRuntimeTransitionPurpose) async throws {
+        guard didClose == false else { return }
+        didClose = true
+        onClose()
+    }
+
+    func waitUntilClosed() async throws {
+        guard didClose else {
+            throw ReviewLifecycleResourceFailure.client(
+                "Direct runtime wait began before close."
+            )
         }
     }
 }

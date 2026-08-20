@@ -36,6 +36,9 @@ public final class CodexReviewStore {
     @ObservationIgnored package var reviewTerminalWaiters: [String: [ReviewTerminalWaiter]] = [:]
     @ObservationIgnored package var closedSessions: Set<String> = []
     @ObservationIgnored package var accountRateLimitAutoRefreshDriver: CodexReviewStoreRateLimitAutoRefreshDriver?
+    @ObservationIgnored package var runtimeState: ReviewStoreRuntimeState = .stopped(
+        .init(rawValue: 0)
+    )
 
     package init(
         backend: any CodexReviewStoreBackend = PreviewCodexReviewStoreBackend(),
@@ -79,6 +82,12 @@ public final class CodexReviewStore {
 
     isolated deinit {
         accountRateLimitAutoRefreshDriver?.cancel()
+        switch runtimeState {
+        case .acquiring(_, let task), .transitioning(_, let task):
+            task.cancel()
+        case .stopped, .running:
+            break
+        }
         for task in reviewWorkerTasks.values {
             task.cancel()
         }
@@ -129,25 +138,91 @@ public final class CodexReviewStore {
     }
 
     public func start(forceRestartIfNeeded: Bool = false) async {
-        switch serverState {
-        case .stopped, .failed:
-            break
-        case .starting:
+        switch runtimeState {
+        case .acquiring, .transitioning:
             return
         case .running where forceRestartIfNeeded == false:
             return
         case .running:
+            await stop()
+        case .stopped:
             break
         }
+        let purpose: ReviewRuntimeTransitionPurpose = forceRestartIfNeeded
+            ? .restartSameAccount
+            : .stop
+        await startRuntime(purpose: purpose)
+    }
+
+    private func startRuntime(purpose: ReviewRuntimeTransitionPurpose) async {
+        guard case .stopped(let previousGeneration) = runtimeState else {
+            return
+        }
+        let generation = previousGeneration.successor()
         serverState = .starting
         serverURL = nil
         writeDiagnosticsIfNeeded()
-        await backend.start(store: self, forceRestartIfNeeded: forceRestartIfNeeded)
-        await settingsService.refreshIfRunning(serverState: serverState)
-        startAccountRateLimitAutoRefresh()
+        let task = Task<Void, Never> { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performRuntimeAcquisition(
+                generation: generation,
+                purpose: purpose
+            )
+        }
+        runtimeState = .acquiring(generation: generation, task: task)
+        await task.value
     }
 
     public func stop() async {
+        let previousState = runtimeState
+        switch previousState {
+        case .stopped:
+            transitionToStopped()
+            return
+        case .transitioning(_, let task):
+            await task.value
+            return
+        case .acquiring, .running:
+            break
+        }
+        let invalidatedGeneration = previousState.generation.successor()
+        let task = Task<Void, Never> { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performRuntimeStop(
+                previousState: previousState,
+                invalidatedGeneration: invalidatedGeneration
+            )
+        }
+        runtimeState = .transitioning(
+            generation: invalidatedGeneration,
+            task: task
+        )
+        await task.value
+    }
+
+    private func performRuntimeStop(
+        previousState: ReviewStoreRuntimeState,
+        invalidatedGeneration: ReviewRuntimeGeneration
+    ) async {
+        switch previousState {
+        case .acquiring(_, let task):
+            task.cancel()
+            await task.value
+        case .running(_, let runtime, _):
+            await stopPublishedRuntime(runtime)
+        case .stopped, .transitioning:
+            break
+        }
+        guard case .transitioning(let currentGeneration, _) = runtimeState,
+              currentGeneration == invalidatedGeneration
+        else {
+            return
+        }
+        runtimeState = .stopped(invalidatedGeneration)
+        transitionToStopped()
+    }
+
+    private func stopPublishedRuntime(_ runtime: PreparedRuntime) async {
         let locallyCancelledJobIDs: [String]
         if backend.handlesActiveReviewStopCleanup {
             locallyCancelledJobIDs = []
@@ -163,16 +238,206 @@ public final class CodexReviewStore {
         cancelAndDetachReviewWorkersForRuntimeStop(
             jobIDs: Array(Set(locallyCancelledJobIDs + remainingLocallyCancelledJobIDs))
         )
-        transitionToStopped()
+        await runtime.handle.closeAdmission()
+        do {
+            try await backend.mcpServerLifecycle.stop()
+        } catch {
+            writeDiagnosticsIfNeeded()
+        }
+        do {
+            try await backend.mcpServerLifecycle.waitUntilStopped()
+        } catch {
+            writeDiagnosticsIfNeeded()
+        }
+        do {
+            try await runtime.handle.close(purpose: .stop)
+        } catch {
+            writeDiagnosticsIfNeeded()
+        }
+        do {
+            try await runtime.handle.waitUntilClosed()
+        } catch {
+            writeDiagnosticsIfNeeded()
+        }
     }
 
     public func restart() async {
-        await stop()
         await start(forceRestartIfNeeded: true)
     }
 
     public func waitUntilStopped() async {
+        if case .transitioning(_, let task) = runtimeState {
+            await task.value
+        }
         await backend.waitUntilStopped()
+        try? await backend.mcpServerLifecycle.waitUntilStopped()
+    }
+
+    private func performRuntimeAcquisition(
+        generation: ReviewRuntimeGeneration,
+        purpose: ReviewRuntimeTransitionPurpose
+    ) async {
+        var preparedMCPServer: PreparedMCPServer?
+        var preparedRuntime: PreparedRuntime?
+        do {
+            let mcpServer = try await backend.mcpServerLifecycle.prepare()
+            preparedMCPServer = mcpServer
+
+            let runtime = try await backend.prepareRuntime(
+                generation: generation,
+                purpose: purpose
+            )
+            preparedRuntime = runtime
+            guard isCurrentAcquisition(generation) else {
+                await closeStaleRuntime(
+                    runtime,
+                    mcpServerWasPrepared: true,
+                    purpose: purpose
+                )
+                return
+            }
+
+            try await runtime.handle.activate()
+            guard isCurrentAcquisition(generation) else {
+                await closeStaleRuntime(
+                    runtime,
+                    mcpServerWasPrepared: true,
+                    purpose: purpose
+                )
+                return
+            }
+            publishRuntimeSnapshot(runtime.snapshot)
+
+            let mcpSnapshot = try await backend.mcpServerLifecycle.activate(
+                mcpServer.generation
+            )
+            guard isCurrentAcquisition(generation) else {
+                await closeStaleRuntime(
+                    runtime,
+                    mcpServerWasPrepared: true,
+                    purpose: purpose
+                )
+                return
+            }
+
+            runtimeState = .running(
+                generation: generation,
+                runtime: runtime,
+                mcpGeneration: mcpServer.generation
+            )
+            publishMCPServer(serverURL: mcpSnapshot.serverURL)
+        } catch {
+            if let preparedRuntime {
+                await closeStaleRuntime(
+                    preparedRuntime,
+                    mcpServerWasPrepared: preparedMCPServer != nil,
+                    purpose: purpose
+                )
+            } else if preparedMCPServer != nil {
+                await stopPreparedMCPServer()
+            }
+            guard isCurrentAcquisition(generation) else {
+                return
+            }
+            runtimeState = .stopped(generation)
+            transitionToFailed(error.localizedDescription)
+        }
+    }
+
+    private func isCurrentAcquisition(
+        _ generation: ReviewRuntimeGeneration
+    ) -> Bool {
+        guard case .acquiring(let currentGeneration, _) = runtimeState else {
+            return false
+        }
+        return currentGeneration == generation
+    }
+
+    private func closeStaleRuntime(
+        _ runtime: PreparedRuntime,
+        mcpServerWasPrepared: Bool,
+        purpose: ReviewRuntimeTransitionPurpose
+    ) async {
+        await runtime.handle.closeAdmission()
+        do {
+            try await runtime.handle.close(purpose: purpose)
+        } catch {
+            writeDiagnosticsIfNeeded()
+        }
+        do {
+            try await runtime.handle.waitUntilClosed()
+        } catch {
+            writeDiagnosticsIfNeeded()
+        }
+        if mcpServerWasPrepared {
+            await stopPreparedMCPServer()
+        }
+    }
+
+    private func stopPreparedMCPServer() async {
+        do {
+            try await backend.mcpServerLifecycle.stop()
+        } catch {
+            writeDiagnosticsIfNeeded()
+        }
+        do {
+            try await backend.mcpServerLifecycle.waitUntilStopped()
+        } catch {
+            writeDiagnosticsIfNeeded()
+        }
+    }
+
+    private func publishRuntimeSnapshot(_ snapshot: RuntimePublicationSnapshot) {
+        settings.apply(snapshot: snapshot.settings)
+        applyRuntimeAuthenticationSnapshot(snapshot.authentication)
+    }
+
+    private func publishMCPServer(serverURL: URL?) {
+        transitionToRunning(serverURL: serverURL)
+        startAccountRateLimitAutoRefresh()
+    }
+
+    private func applyRuntimeAuthenticationSnapshot(
+        _ snapshot: CodexReviewBackendModel.Auth.Snapshot
+    ) {
+        let observedAccounts = snapshot.accounts.compactMap { account -> CodexAccount? in
+            let label = account.label.trimmingCharacters(in: .whitespacesAndNewlines)
+            let accountKey = CodexAccount.normalizedEmail(account.id.rawValue)
+            guard label.isEmpty == false, accountKey.isEmpty == false else {
+                return nil
+            }
+            return CodexAccount(
+                accountKey: accountKey,
+                email: label,
+                planType: account.planType,
+                kind: account.kind,
+                capabilities: account.capabilities
+            )
+        }
+        let activeAccountKey = snapshot.activeAccountID.map {
+            CodexAccount.normalizedEmail($0.rawValue)
+        }
+        var accounts = auth.persistedAccounts
+        for observedAccount in observedAccounts {
+            if let index = accounts.firstIndex(where: {
+                $0.accountKey == observedAccount.accountKey
+            }) {
+                accounts[index].updateEmail(observedAccount.email)
+                accounts[index].updateKind(
+                    observedAccount.kind,
+                    capabilities: observedAccount.capabilities
+                )
+                accounts[index].updatePlanType(observedAccount.planType)
+            } else {
+                accounts.insert(observedAccount, at: 0)
+            }
+        }
+        auth.applyPersistedAccountStates(
+            accounts.map(savedAccountPayload(from:)),
+            activeAccountKey: activeAccountKey
+        )
+        auth.selectPersistedAccount(activeAccountKey)
+        auth.updatePhase(.signedOut)
     }
 
     public func refreshAuthentication() async {
