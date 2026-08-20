@@ -2,7 +2,7 @@
 
 | Item | Value |
 |---|---|
-| Status | **Internally approved — explicit user approval pending** |
+| Status | **Approved — Phase 3 migration in progress** |
 | Recovery base | `v0.6.2` / `82bddbcb1310a091eff742b36ab90781a4cbee5a` |
 | Current-main evidence | `26c8f7b49e4afb356698d3c49e5107e96477b2ca` |
 | Upstream Codex contract | `3b45c29062ff0e76e71c91b6753290400e7fa8da` |
