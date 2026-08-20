@@ -21,7 +21,7 @@ only from the reviewed combined Wave 3A+B HEAD.
 | Issue | #106 cancellation terminal barrier |
 | Motivating review evidence | PR #117 P1 at `d90be363162692ca34b55cd9c2da77109ec852cf` |
 | Upstream contract | `openai/codex@3b45c29062ff0e76e71c91b6753290400e7fa8da` |
-| Budget | 48 hours total: 3A at most 17 production + 10 test/gate files; 3B only the exact 12 production + 10 test/gate paths below; 3C at most 12 production + 7 test/gate files |
+| Budget | 48 hours total: 3A at most 17 production + 10 test/gate files; 3B only the exact 13 production + 11 test/gate paths below; 3C at most 12 production + 7 test/gate files |
 
 Wave 3 replaces acknowledgement-as-completion, timeout detachment, and
 caller-owned shutdown with one attempt cancellation processor and one
@@ -337,7 +337,7 @@ open(
     | acquiring(ownedTask)
     | running(preparedRuntime)
     | transitioning(purpose, ownedTask, forcedSiblingAttemptIDs)
-    | failed(ReviewRuntimeCloseFailureAggregate, admission: closed),
+    | failed(ReviewLifecycleResourceFailureAggregate, admission: closed),
   mcpServerOwner: one stable app-lifetime owner identity
 )
   -> closing(invalidatedAppServerGeneration, closeTask)
@@ -410,6 +410,20 @@ The ownership split is exact:
 No lifecycle handle owns a Store worker/rate-limit/cleanup Task, and no
 `PreparedRuntime` or AppServer handle can reach the MCP listener.
 
+`AppServerCodexReviewBackend` remains the semantic owner of its private
+`notificationRouterTask` and review-event sessions; Host cannot prove their
+completion by reading a Bool. Wave 3B adds one package lifecycle seam on that
+actor. AppServer generation admission is already closed, so the set is finite.
+Before its first await the seam captures the exact router Task and current
+sessions in lifecycle-only registration ordinal, invokes the existing throwing
+client close, then—regardless of that result—directly awaits the captured Task
+and finishes/awaits the captured sessions. It returns only after all are
+semantically closed and normalizes every
+resource failure to `ReviewLifecycleResourceFailureAggregate`. It never polls
+`notificationRouterTask != nil`, loops on a testing Bool, or uses `Task.yield()`
+as completion proof. Decoder/reducer/routing policy and the Wave 3A attempt
+processor are unchanged.
+
 Only the Store may:
 
 1. register the acquisition Task before its first external await;
@@ -464,7 +478,8 @@ Wave 3 normal-terminal close order is exact:
    and Store attempt/cleanup Task;
 7. only after Store cleanup, call the throwing AppServer
    `RuntimeLifecycleHandle.close(purpose:)`; its one recorded Task issues the
-   client/process close signal before any Host completion wait. The method may
+   client/process close signal through the backend owner seam before directly
+   awaiting its captured router/session handles. The method may
    then join physical client/process/reader plus Host auth/router/event-session
    completion before returning or throwing, matching the existing AppServer
    client/transport contract;
@@ -508,8 +523,10 @@ all affected review-worker Tasks. No second timeout detaches them.
 `JSONRPC.Transport.close()` becomes a throwing package contract (with updated
 process, fake, preview, and testing conformances) so force-close/process failure
 cannot be erased by a nonthrowing adapter. `AppServerClient` and Host preserve
-that typed value through `ReviewRuntimeCloseFailure`; callers never recover it
-from log text.
+the Wave 3A attempt force-close value through unchanged
+`ReviewRuntimeCloseFailure`. Wave 3B application/runtime lifecycle seams map
+their own client/router/session failures to `ReviewLifecycleResourceFailure`;
+callers never recover either category from log text.
 
 The Store close Task is the only error assembler. It appends every typed failure
 in the selected branch's declared order—the numbered normal order above or the
@@ -519,6 +536,9 @@ The nonempty `ReviewCloseFailureAggregate` retains `first` plus every
 `additionalInLifecycleOrder`. No failure prevents a later close/wait stage, and
 cleanup, force-close, MCP handler-drain/listener, rate-limit, Host observation/
 reader/router/session, client, and process failures are never reduced to logs.
+Store review-worker/attempt-cleanup failures retain the existing Wave 3A
+`ReviewRuntimeCloseFailure`; Wave 3B MCP/rate-limit/Host lifecycle failures use
+only `ReviewLifecycleResourceFailureAggregate`.
 Wave 3 does not generate `.persistence`, so
 `secondaryPhysicalDatabaseClose` is always `nil`. Wave 4 keeps an original
 persistence failure in the aggregate and uses the secondary field only for an
@@ -638,9 +658,9 @@ package protocol RuntimeLifecycleHandle: Sendable {
     // cannot reach an MCP listener or any Store-owned Task.
     func activate() async throws
     func closeAdmission() async
-    // Installs one recorded Task. Its first physical operation sends the
-    // client/process close signal; it then joins all Host auth/reader/router/
-    // session/client/process completion before returning/throwing.
+    // Installs one recorded Task. Through the AppServer owner seam it sends the
+    // client/process close signal, then directly joins captured router/session
+    // handles plus all Host completion before returning/throwing.
     func close(purpose: ReviewRuntimeTransitionPurpose) async throws
     // Idempotently joins/replays that exact recorded close completion; it never
     // initiates close or adds a second failure.
@@ -650,6 +670,13 @@ package protocol RuntimeLifecycleHandle: Sendable {
 package struct PreparedRuntime: Sendable {
     package let snapshot: RuntimePublicationSnapshot
     package let handle: any RuntimeLifecycleHandle
+}
+
+// CodexReviewAppServer owner seam. The implementation captures Task/session
+// handles in registration order, calls client.close(), and directly joins them
+// without Bool polling. Failures are ReviewLifecycleResourceFailureAggregate.
+package extension AppServerCodexReviewBackend {
+    package func closeAndWaitForOwnedLifecycle() async throws
 }
 
 package protocol MCPServerLifecycleOwner: Sendable {
@@ -781,24 +808,31 @@ package struct ReviewInterruptRequestFailure: LocalizedError, Sendable {
     package let secondaryBarrierDiagnostic: String?
 }
 
-package enum ReviewRuntimeCloseFailure: LocalizedError, Sendable {
+// Wave 3A declaration in ReviewAttemptProcessor.swift. Wave 3B does not edit it.
+package enum ReviewRuntimeCloseFailure: LocalizedError, Equatable, Sendable {
     case connection(String)
+    case process(String)
+    case worker(String)
+    case cleanup(String)
+    case mcpHandlerDrain(String)
+}
+
+// Wave 3B declaration in ReviewRuntimeLifecycle.swift.
+package enum ReviewLifecycleResourceFailure: LocalizedError, Equatable, Sendable {
     case client(String)
     case process(String)
     case authenticationObservation(String)
     case reader(String)
     case router(String)
     case session(String)
-    case worker(String)
     case rateLimit(String)
-    case cleanup(String)
     case mcpHandlerDrain(String)
     case mcpServer(String)
 }
 
-package struct ReviewRuntimeCloseFailureAggregate: LocalizedError, Sendable {
-    package let first: ReviewRuntimeCloseFailure
-    package let additionalInLifecycleOrder: [ReviewRuntimeCloseFailure]
+package struct ReviewLifecycleResourceFailureAggregate: LocalizedError, Sendable {
+    package let first: ReviewLifecycleResourceFailure
+    package let additionalInLifecycleOrder: [ReviewLifecycleResourceFailure]
 }
 
 package enum ReviewPersistenceError: LocalizedError, Sendable {
@@ -811,7 +845,8 @@ package enum ReviewPersistenceError: LocalizedError, Sendable {
 
 package enum ReviewClosePrimaryFailure: LocalizedError, Sendable {
     case interruptRequest(ReviewInterruptRequestFailure)
-    case runtime(ReviewRuntimeCloseFailure)
+    case attemptRuntime(ReviewRuntimeCloseFailure)
+    case lifecycleResources(ReviewLifecycleResourceFailureAggregate)
     case persistence(ReviewPersistenceError)
 }
 
@@ -962,9 +997,12 @@ registry before disposing listener/session resources. `restartSameAccount` and
 same owner.
 
 Both lifecycle owners normalize multiple failures from one close/wait method to
-`ReviewRuntimeCloseFailureAggregate`. The Store flattens those values into
-`ReviewCloseFailureAggregate` at the method's fixed lifecycle position; it never
-keeps only the thrown `first` value.
+`ReviewLifecycleResourceFailureAggregate`. The Store carries each nonempty
+aggregate as `.lifecycleResources(...)` at the method's fixed position inside
+`ReviewCloseFailureAggregate`; it never keeps only the thrown `first` value.
+Existing Wave 3A attempt close failures enter separately as
+`.attemptRuntime(ReviewRuntimeCloseFailure)` without changing that type or
+`ReviewAttemptProcessor.swift`.
 
 `ReviewAttemptOwnership` is the value of the Store's sole per-review attempt
 registry. Do not retain parallel `activeRuns`, admission, recovery-token, or
@@ -1173,7 +1211,7 @@ This is the exact allowed write set. It is a ceiling, not a requirement to edit
 every path. Any required production/test change outside it is a design blocker
 and must be reported before editing.
 
-Production — 12 paths:
+Production — 13 paths:
 
 1. `Sources/CodexReview/ReviewRuntimeLifecycle.swift` — new
 2. `Sources/CodexReview/Store/CodexReviewStore.swift`
@@ -1184,22 +1222,24 @@ Production — 12 paths:
 7. `Sources/CodexReview/Store/CodexReviewStoreRateLimitAutoRefresh.swift`
 8. `Sources/CodexReview/Store/PreviewCodexReviewStoreBackend.swift`
 9. `Sources/CodexReviewTesting/TestSupport.swift`
-10. `Sources/CodexReviewHost/LiveCodexReviewStoreBackend.swift`
-11. `Sources/CodexReviewHost/CodexReviewHost.swift`
-12. `Sources/CodexReviewMCPServer/CodexReviewMCPHTTPServer.swift`
+10. `Sources/CodexReviewAppServer/AppServerCodexReviewBackend.swift` — lifecycle seam only
+11. `Sources/CodexReviewHost/LiveCodexReviewStoreBackend.swift`
+12. `Sources/CodexReviewHost/CodexReviewHost.swift`
+13. `Sources/CodexReviewMCPServer/CodexReviewMCPHTTPServer.swift`
 
-Test/gate — 10 paths:
+Test/gate — 11 paths:
 
 1. `Tests/CodexReviewTests/CodexReviewStoreLifecycleTests.swift` — new
 2. `Tests/CodexReviewTests/CodexReviewStoreCommandTests.swift`
 3. `Tests/CodexReviewTests/CodexReviewStoreRateLimitAutoRefreshTests.swift`
-4. `Tests/CodexReviewHostTests/CodexReviewHostTests.swift`
-5. `Tests/CodexReviewMCPServerTests/CodexReviewMCPHTTPServerTests.swift`
-6. `Tests/ReviewUITests/ReviewUITests.swift` — backend compile seam only
-7. `Fixtures/CodexReviewKitProductConsumer/Sources/CodexReviewKitProductConsumer/main.swift`
-8. `scripts/compatibility-baselines/README.md`
-9. `scripts/compatibility-baselines/v0.6.2/public-api.json`
-10. `scripts/compatibility-baselines/v0.6.2/metadata.json`
+4. `Tests/CodexReviewAppServerTests/AppServerClientTests.swift` — backend lifecycle seam only
+5. `Tests/CodexReviewHostTests/CodexReviewHostTests.swift`
+6. `Tests/CodexReviewMCPServerTests/CodexReviewMCPHTTPServerTests.swift`
+7. `Tests/ReviewUITests/ReviewUITests.swift` — backend compile seam only
+8. `Fixtures/CodexReviewKitProductConsumer/Sources/CodexReviewKitProductConsumer/main.swift`
+9. `scripts/compatibility-baselines/README.md`
+10. `scripts/compatibility-baselines/v0.6.2/public-api.json`
+11. `scripts/compatibility-baselines/v0.6.2/metadata.json`
 
 Wave 3B consumes the reviewed 3A barrier and throwing cleanup/close contract; it
 does not redesign the attempt processor. The Store close Task directly owns and
@@ -1217,8 +1257,13 @@ does not change auth provider, credential, registry, login, or wire semantics.
 
 Explicitly excluded from Wave 3B are:
 
-- `Sources/CodexReviewAppServer/**` and any Wave 3A redesign of
-  `ReviewAttemptProcessor.swift`;
+- every `Sources/CodexReviewAppServer/**` edit except the exact
+  `AppServerCodexReviewBackend.swift` lifecycle seam above; decoder, reducer,
+  routing classification, wire behavior, and review-control semantics remain
+  unchanged;
+- `Sources/CodexReview/ReviewAttemptProcessor.swift`; its Wave 3A
+  `ReviewRuntimeCloseFailure` and attempt state machine remain byte-for-byte
+  unchanged;
 - `Sources/ReviewUI/**` and `Tools/ReviewMonitor/**` Wave 3C behavior;
 - GRDB/history/schema/migration code and package dependencies;
 - descriptor/environment preparation and executable capability redesign;
@@ -1335,9 +1380,13 @@ prove these current failures:
 22. the timeout-detach cases in `CodexReviewStoreCommandTests` return while an
     owned worker is still unfinished;
 23. current stop/close cannot prove Store worker/rate-limit/cleanup completion
-    separately from Host reader/router/session/process completion; and
+    separately from Host reader/router/session/process completion;
 24. multiple failures from later shutdown stages are logged or overwritten
-    after the first error instead of retained in deterministic order.
+    after the first error instead of retained in deterministic order; and
+25. client close is not a semantic proof that the AppServer backend's private
+    `notificationRouterTask` and review-event sessions have finished; Host has
+    no direct Task/session handle and Bool/`Task.yield()` observation is not a
+    valid wait seam.
 
 Then commit green checkpoints:
 
@@ -1438,6 +1487,19 @@ Then commit green checkpoints:
 - application close terminalizes the MCP owner; MCP rejects requests after
   network admission close, awaits all previously admitted handlers, and then
   signals/awaits listener/session disposal;
+- `AppServerClientTests.swift` holds the backend notification router and event
+  sessions at controlled gates: `closeAndWaitForOwnedLifecycle()` first invokes
+  client close, remains incomplete until the captured Task/session handles
+  finish, and completes without polling `notificationRouterIsRunningForTesting`
+  or calling `Task.yield()`;
+- client-close failure still drains the captured router/session handles and
+  returns one `ReviewLifecycleResourceFailureAggregate` ordered by router stage
+  then session registration ordinal; Host runtime
+  close consumes this package seam rather than trying to inspect private state;
+- Wave 3A `ReviewRuntimeCloseFailure` equality/cases and
+  `ReviewAttemptProcessor.swift` remain unchanged; new lifecycle resource
+  aggregates reach `ReviewClosePrimaryFailure.lifecycleResources` independently
+  of existing `.attemptRuntime` failures;
 - controlled owner gates prove Store review workers/rate-limit/cleanup finish
   before AppServer `close()` begins; that combined close sends the client/
   process signal before its physical-completion gate, and Store close remains
@@ -1449,8 +1511,8 @@ Then commit green checkpoints:
 - inject failures into MCP drain/stop/wait, Store worker/rate-limit/cleanup,
   AppServer combined close, and Host idempotent wait together; repeated close
   replays one `first` plus every `additionalInLifecycleOrder`, with registration
-  ordinal inside concurrent stages, no duplicate of the handle's replayed aggregate,
-  and no log-only loss;
+  ordinal inside concurrent stages, no duplicate of the handle's replayed
+  aggregate, and no log-only loss;
 - no callback, event, process, request, or observation after close completion;
 - UI render Task is cancelled and awaited before store close;
 - Cancel Quit replies `false`; Quit Anyway replies `true`; success replies
