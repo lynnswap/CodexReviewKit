@@ -1779,7 +1779,7 @@ struct ReviewUITests {
         #expect(job.core.lifecycle.endedAt != nil)
     }
 
-    @Test func cancellationFailureUpdatesJobErrorState() async {
+    @Test func cancellationFailureUpdatesJobErrorState() async throws {
         let job = makeJob(
             id: "job-running",
             cwd: "/tmp/workspace-alpha",
@@ -1792,6 +1792,14 @@ struct ReviewUITests {
             serverState: .running,
             content: makeSidebarContent(from: [job])
         )
+        let run = CodexReviewBackendModel.Review.Run(
+            threadID: try #require(job.core.run.threadID),
+            turnID: job.core.run.turnID,
+            reviewThreadID: job.core.run.reviewThreadID
+        )
+        let admission = ReviewStartAdmission()
+        await admission.recordActiveRun(run)
+        store.reviewStartAdmissions[job.id] = admission
         let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
@@ -6787,7 +6795,9 @@ final class FailingCancellationBackend: PreviewCodexReviewStoreBackend {
     override func waitUntilStopped() async {}
 
     override func interruptReview(_: CodexReviewBackendModel.Review.Run, reason _: CodexReviewBackendModel.CancellationReason) async throws {
-        throw CodexReviewAPI.Error.io("Cancellation failed.")
+        throw ReviewInterruptRequestFailure(
+            outcome: .rejected(code: nil, message: "Cancellation failed.")
+        )
     }
 
 }
