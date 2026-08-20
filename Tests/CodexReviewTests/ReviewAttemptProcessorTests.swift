@@ -491,16 +491,20 @@ struct ReviewAttemptProcessorTests {
         let cleanupStarted = InvocationProbe()
         let cleanupGate = AsyncGate()
 
-        async let first: Void = admission.cleanup(run: run) {
-            await cleanupStarted.record()
-            await cleanupGate.waitIgnoringCancellation()
-        }
-        async let second: Void = admission.cleanup(run: run) {
-            Issue.record("Duplicate cleanup caller installed a second cleanup Task.")
+        let first = Task {
+            try await admission.cleanup(run: run) {
+                await cleanupStarted.record()
+                await cleanupGate.waitIgnoringCancellation()
+            }
         }
         await cleanupStarted.waitForInvocation()
+        let second = Task {
+            try await admission.cleanup(run: run) {
+                Issue.record("Duplicate cleanup caller installed a second cleanup Task.")
+            }
+        }
         await cleanupGate.open()
-        _ = try await (first, second)
+        _ = try await (first.value, second.value)
 
         #expect(await cleanupStarted.invocationCount() == 1)
     }
