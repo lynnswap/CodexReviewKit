@@ -292,6 +292,11 @@ foreign keys and WAL explicitly enabled for production and temporary-file
 integration tests. Focused
 in-memory/migration unit tests may use `DatabaseQueue`; no runtime code selects
 between them. Tests inject a temporary URL/configuration through the same seam.
+The configuration may carry a package-only immutable `ReviewHistoryBootstrap`
+for preview/test content. Live configurations always set it to `nil`. Bootstrap
+is applied through normal writer transactions only after migration and startup-
+orphan recovery, and only when the opened database is brand new and empty; it
+never overwrites existing history or bypasses the query/publication path.
 
 ## 4. Owner map and lifecycle
 
@@ -791,12 +796,21 @@ Startup order:
    source and construct an inert store with `ReviewHistoryConfiguration`.
 2. Construct the window/controllers against the inert store. The history shell
    renders `.loading`, not a successful empty list.
-3. `store.start()` opens SQLite, runs all versioned migrations, starts history
-   subscriptions, and hydrates the stable projections.
-4. Publish history `.loaded` or a visible typed `.failed` state. A history
-   failure does not start MCP or app-server.
+3. `store.start()` opens SQLite, runs all versioned migrations and startup-
+   orphan recovery, then applies an optional preview/test bootstrap through the
+   writer only when the database was created empty.
+4. Start the history subscription, await its first atomic snapshot, and publish
+   `.loaded` or a visible typed `.failed` state. A history failure does not
+   start MCP or app-server.
 5. Only after history is loaded, open MCP admission and start app-server live
    ingestion.
+
+Preview/XCTest compositions that intentionally keep the embedded runtime inert
+still execute steps 1–4 against a unique temporary database. Their synchronous
+factory returns an inert `.loading` store; component/app lifecycle owns the
+async `start()` Task and selects seeded content only after the first query
+snapshot. There is no direct preview mutation of `jobs`/`workspaces` and no
+global/default preview database.
 
 History visibility is independent of transport and authentication gates.
 `serverState` controls command availability/status, and authentication controls
@@ -859,8 +873,11 @@ Store close order after UI close:
 3. Wait for authoritative turn terminal or a typed connection terminal.
 4. Commit final/incomplete lifecycle state and await all history writes.
 5. Await already-admitted MCP handlers, then stop the MCP HTTP/protocol server.
-6. Close the store-owned history query subscriptions.
-7. Stop authentication/runtime consumers and app-server.
+6. Stop authentication/runtime consumers and app-server, and await every
+   acquisition, reader, router, event-session, review-worker, process, and
+   cleanup Task so no producer can publish another commit.
+7. Invalidate the query generation and close the store-owned history query
+   subscriptions.
 8. Close the database and release the owner.
 
 Step 3 uses an injected `ReviewRuntimeClosePolicy.terminalGrace` (production default
@@ -948,6 +965,16 @@ package struct ReviewHistoryCommit: Sendable {
 package struct ReviewHistoryConfiguration: Sendable {
     package let databaseURL: URL
     package let initialTerminalReviewLimit: Int
+    package let bootstrap: ReviewHistoryBootstrap?
+}
+
+package struct ReviewHistoryBootstrap: Sendable {
+    package let mutations: [ReviewBootstrapMutation]
+}
+
+package struct ReviewBootstrapMutation: Sendable {
+    package let reviewID: ReviewID
+    package let mutation: ReviewHistoryMutation
 }
 
 package enum ReviewPersistenceError: LocalizedError, Sendable {

@@ -117,6 +117,7 @@ The proposed Phase 2 gate now includes:
 | 2026-08-20 | Wave 3 design gate | `370e431` defines three sequential cancellation/close slices: AppServer barrier, Store/Host/MCP close authority, then ReviewUI/application termination. Independent semantic and API/concurrency re-gates reported zero blockers; after the integration review fix, Wave 3A is pinned to `287795d`. |
 | 2026-08-20 | Integrated recovery review fix | Branch review `93B08469-...` found repeated synthetic `.started` events caused by an ungrouped `||`; `287795d` restores the session-owned one-shot invariant and adds a multi-event regression test. The focused AppServer suite passed 161 tests. |
 | 2026-08-20 | Integrated recovery review disposition | Review `7E9107A3-...` reported only automatic import of `codexReview.runtimePreferences`. Disputed by the approved RecoveryV1/#108 contract: the legacy key/home are read-only source inputs and automatic reuse could mutate the only current-main state. The explicit quiescent copy/import wave owns validated settings migration. No code change made. |
+| 2026-08-20 | Wave 4 persistence slicing | Durable history is split sequentially into 4A schema/writer, 4B atomic query/projection, 4C Store/UI/MCP cutover, and 4D fail-closed/orphan/close insertion. The canonical design now fixes producer/worker join before query/DB close and a single optional preview bootstrap seam; independent re-gate reported zero blockers. Wave 4A remains gated on reviewed Wave 3C. |
 
 ## Remaining decisions
 
@@ -135,6 +136,10 @@ The proposed Phase 2 gate now includes:
 | Wave 3A / #106 interrupt barrier | 17 production + 10 test/gate files maximum | attempt start/cancel + AppServer interrupt/connection terminal owner | Authorized at base `287795d` |
 | Wave 3B / #106 runtime close | 18 production + 10 test/gate files maximum | Store runtime generation + Host/MCP public close | Pending reviewed Wave 3A |
 | Wave 3C / #106 native close | 12 production + 7 test/gate files maximum | ReviewUI lifecycle + ReviewMonitor termination | Pending reviewed Wave 3B |
+| Wave 4A / #102 schema + writer | 24 hours; 12 production/dependency + 4 test files maximum | GRDB database/schema/transaction/global-revision owner | Pending reviewed Wave 3C |
+| Wave 4B / #102 query | 24 hours; 8 production + 5 test files maximum | One atomic observation generation + stable projection registry | Pending reviewed Wave 4A |
+| Wave 4C / #100/#102/#110/#111 cutover | 40 hours; 31 production + 13 test/gate files maximum | Committed Store/UI/MCP history, duration, paging, reorder, delete | Pending reviewed Wave 4B |
+| Wave 4D / #102 lifecycle | 28 hours; 13 production + 9 test/gate files maximum | Fail-closed/orphan recovery + Wave 3 finish/close insertion | Pending reviewed Wave 4C |
 
 The committed worker contract is
 [recovery-wave-0-1-task-brief-2026-08-20.md](recovery-wave-0-1-task-brief-2026-08-20.md).
