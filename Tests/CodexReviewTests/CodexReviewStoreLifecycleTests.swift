@@ -20,7 +20,8 @@ struct CodexReviewStoreLifecycleTests {
             purpose: .stop,
             task: transitionTask,
             record: ReviewRuntimeTransitionRecord(),
-            sourceRuntime: nil
+            sourceRuntime: nil,
+            recoveryReplacement: nil
         )
 
         await store.performRuntimeAcquisitionForTesting(
@@ -150,7 +151,7 @@ struct CodexReviewStoreLifecycleTests {
         await backend.waitForRuntimePreparation()
 
         let ownsReplacementTask: Bool
-        if case .transitioning(_, .restartSameAccount, _, _, _) = store.runtimeState {
+        if case .transitioning(_, .restartSameAccount, _, _, _, _) = store.runtimeState {
             ownsReplacementTask = true
         } else {
             ownsReplacementTask = false
@@ -181,6 +182,95 @@ struct CodexReviewStoreLifecycleTests {
             return
         }
         #expect(retainedMCPGeneration == firstMCPGeneration)
+
+        await store.stop()
+    }
+
+    @Test func graceForceCloseCancelsTargetAndResumesSiblingOnOneReplacement() async throws {
+        let targetRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-target",
+            threadID: "thread-target",
+            turnID: "turn-target",
+            reviewThreadID: "review-target"
+        )
+        let siblingRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-sibling",
+            threadID: "thread-sibling",
+            turnID: "turn-sibling",
+            reviewThreadID: "review-sibling"
+        )
+        let recoveredSiblingRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-sibling-recovered",
+            threadID: "thread-sibling",
+            turnID: "turn-sibling-recovered",
+            reviewThreadID: "review-sibling"
+        )
+        let reviewBackend = FakeCodexReviewBackend(nextRun: targetRun)
+        await reviewBackend.enqueueRun(siblingRun)
+        await reviewBackend.enqueueRecoveredRun(recoveredSiblingRun)
+        let mcpOwner = TestingMCPServerLifecycleOwner(
+            serverURL: URL(string: "http://127.0.0.1:19431/mcp")
+        )
+        let backend = TestingCodexReviewStoreBackend(
+            reviewBackend: reviewBackend,
+            mcpServerLifecycle: mcpOwner
+        )
+        let jobIDs = SequentialJobIDs(["job-target", "job-sibling"])
+        let store = CodexReviewStore.makeTestingStore(
+            backend: backend,
+            idGenerator: .init(next: { jobIDs.next() }),
+            reviewRuntimeClosePolicy: .init(
+                terminalGrace: .seconds(10),
+                sleep: { _ in }
+            )
+        )
+        await store.start()
+        let sourceRuntime = try #require(backend.lastPreparedRuntimeHandle)
+        _ = try await store.startReview(
+            sessionID: "session-target",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+            waitTimeout: .milliseconds(20)
+        )
+        _ = try await store.startReview(
+            sessionID: "session-sibling",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+            waitTimeout: .milliseconds(20)
+        )
+
+        let cancellation = Task { @MainActor in
+            try await store.cancelReview(
+                jobID: "job-target",
+                cancellation: .mcpClient(message: "Stop target")
+            )
+        }
+        await reviewBackend.waitForResumeReviewRecovery()
+        await reviewBackend.yield(
+            .completed(summary: "Done", result: "sibling result"),
+            for: recoveredSiblingRun
+        )
+        let targetCancellation = try await cancellation.value
+        let sibling = try await store.awaitReview(
+            sessionID: "session-sibling",
+            jobID: "job-sibling"
+        )
+
+        #expect(targetCancellation.cancelled)
+        #expect(try store.readReview(jobID: "job-target").core.lifecycle.terminal == .interrupted(
+            .requested(.mcpClient(message: "Stop target"))
+        ))
+        #expect(sibling.core.lifecycle.status == .succeeded)
+        #expect(sibling.core.run.turnID == "turn-sibling-recovered")
+        #expect(sourceRuntime.closeCallCount == 1)
+        #expect(sourceRuntime.waitUntilClosedCallCount == 1)
+        #expect(sourceRuntime.closePurposes == [.recoveryReplacement])
+        #expect(backend.startRequests == [false, false])
+        #expect(mcpOwner.prepareCallCount == 1)
+        #expect(mcpOwner.activateCallCount == 1)
+        #expect(mcpOwner.stopCallCount == 0)
+        let commands = await reviewBackend.recordedCommands()
+        #expect(commands.filter { if case .forceCloseReviewConnection = $0 { true } else { false } }.count == 1)
+        #expect(commands.filter { if case .prepareReviewRecovery = $0 { true } else { false } }.count == 1)
+        #expect(commands.filter { if case .resumeReviewRecovery = $0 { true } else { false } }.count == 1)
 
         await store.stop()
     }
@@ -816,5 +906,20 @@ private actor StoreCloseCompletion {
 
     func isComplete() -> Bool {
         completeValue
+    }
+}
+
+private final class SequentialJobIDs: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String]
+
+    init(_ values: [String]) {
+        self.values = values
+    }
+
+    func next() -> String {
+        lock.withLock {
+            values.removeFirst()
+        }
     }
 }

@@ -596,7 +596,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         let closeTask: Task<Void, any Error>
         switch lifecycleState {
         case .open:
-            if purpose == .recoveryReplacement {
+            if purpose == .recoveryReplacement || purpose == .restartSameAccount {
                 connectionStreamFailure = .ownerForcedConnectionClose(
                     .connection("Review connection was force-closed by its runtime owner.")
                 )

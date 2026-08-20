@@ -143,7 +143,8 @@ extension CodexReviewStore {
         launchReviewWorker(
             jobID: jobID,
             startRequest: startRequest,
-            registeredStart: registered
+            registeredStart: registered,
+            runtimeGeneration: runtimeGeneration
         )
         return jobID
     }
@@ -166,14 +167,16 @@ extension CodexReviewStore {
     private func launchReviewWorker(
         jobID: String,
         startRequest: CodexReviewBackendModel.Review.Start,
-        registeredStart: ReviewRegisteredStart
+        registeredStart: ReviewRegisteredStart,
+        runtimeGeneration: ReviewRuntimeGeneration
     ) {
         reviewWorkerTasks[jobID]?.cancel()
         reviewWorkerTasks[jobID] = Task { [weak self] in
             await self?.runReviewWorker(
                 jobID: jobID,
                 startRequest: startRequest,
-                registeredStart: registeredStart
+                registeredStart: registeredStart,
+                runtimeGeneration: runtimeGeneration
             )
         }
     }
@@ -181,7 +184,8 @@ extension CodexReviewStore {
     private func runReviewWorker(
         jobID: String,
         startRequest: CodexReviewBackendModel.Review.Start,
-        registeredStart: ReviewRegisteredStart
+        registeredStart: ReviewRegisteredStart,
+        runtimeGeneration: ReviewRuntimeGeneration
     ) async {
         guard let job = job(id: jobID) else {
             reviewAttemptOwnerships.removeValue(forKey: jobID)
@@ -212,7 +216,8 @@ extension CodexReviewStore {
                 let completion = try await consumeReviewEvents(
                     for: backendAttempt,
                     job: job,
-                    startRequest: startRequest
+                    startRequest: startRequest,
+                    runtimeGeneration: runtimeGeneration
                 )
                 cleanupAttempt = completion.cleanupAttempt
             }
@@ -347,7 +352,9 @@ extension CodexReviewStore {
 
     private func reviewWorkerInputs(
         for attempt: BackendReviewAttempt,
-        owner: ReviewActiveAttempt
+        owner: ReviewActiveAttempt,
+        jobID: String,
+        runtimeGeneration: ReviewRuntimeGeneration
     ) async -> ReviewWorkerInputs {
         let networkMonitor = self.networkMonitor
         let policy = self.networkRecoveryPolicy
@@ -361,6 +368,12 @@ extension CodexReviewStore {
         )
         let eventSource = ReviewWorkerEventSource(queue: queue)
         let recoveryInterruptionSource = ReviewWorkerRecoveryInterruptionSource(queue: queue)
+        let runtimeReplacementRegistrationID = runtimeReplacementCoordinator.register(
+            jobID: jobID,
+            attemptID: owner.run.attemptID,
+            runtimeGeneration: runtimeGeneration,
+            recoverySource: recoveryInterruptionSource
+        )
         let networkTask = Task {
             for await snapshot in snapshots {
                 await signalCoordinator.observe(snapshot)
@@ -375,6 +388,10 @@ extension CodexReviewStore {
             networkStatusTracker: tracker,
             eventSource: eventSource,
             recoveryInterruptionSource: recoveryInterruptionSource,
+            runtimeReplacementCoordinator: runtimeReplacementCoordinator,
+            runtimeReplacementRegistrationID: runtimeReplacementRegistrationID,
+            jobID: jobID,
+            initialRuntimeGeneration: runtimeGeneration,
             initialEventSubscriptionID: initialEventSubscriptionID,
             networkTask: networkTask,
             signalCoordinator: signalCoordinator
@@ -643,36 +660,167 @@ extension CodexReviewStore {
                         "Review Store was released before runtime force-close."
                     )
                 }
-                try await self.forceCloseCurrentRuntimeForAttempt(jobID: jobID)
+                try await self.forceCloseCurrentRuntimeForAttempt(
+                    jobID: jobID,
+                    trigger: .explicitCancellation(targetJobID: jobID)
+                )
             }
         )
     }
 
-    private func forceCloseCurrentRuntimeForAttempt(jobID: String) async throws {
-        let generation: ReviewRuntimeGeneration
+    package func makeRuntimeRecoveryReplacement(
+        sourceGeneration: ReviewRuntimeGeneration,
+        replacementGeneration: ReviewRuntimeGeneration,
+        sourceRuntime: PreparedRuntime?,
+        retainedMCPGeneration: MCPServerGeneration,
+        retainedServerURL: URL?,
+        trigger: ReviewRuntimeRecoveryReplacement.Trigger
+    ) -> ReviewRuntimeRecoveryReplacement {
+        let participants: [ReviewRuntimeReplacementParticipant] = reviewRegistrationOrder.compactMap { jobID in
+            guard jobID != trigger.targetJobID,
+                  let job = job(id: jobID),
+                  job.isTerminal == false,
+                  job.cancellationRequested == false
+            else {
+                return nil
+            }
+            let active: ReviewActiveAttempt
+            switch reviewAttemptOwnerships[jobID] {
+            case .active(let current):
+                active = current
+            case .resolvingRecovery(let current):
+                guard case .recoverableNetwork(let initiatingJobID) = trigger,
+                      initiatingJobID == jobID
+                else {
+                    return nil
+                }
+                active = current
+            case .initialStart, .recoveryDisposition, .preparingRecovery,
+                 .waitingForRecovery, .replacementStart, .terminal, nil:
+                return nil
+            }
+            return runtimeReplacementCoordinator.participant(
+                jobID: jobID,
+                attemptID: active.run.attemptID,
+                sourceGeneration: sourceGeneration
+            )
+        }
+        let replacement = ReviewRuntimeRecoveryReplacement(
+            sourceGeneration: sourceGeneration,
+            replacementGeneration: replacementGeneration,
+            sourceRuntime: sourceRuntime,
+            retainedMCPGeneration: retainedMCPGeneration,
+            retainedServerURL: retainedServerURL,
+            trigger: trigger,
+            participants: participants
+        )
+        runtimeReplacementCoordinator.install(replacement)
+        return replacement
+    }
+
+    package func enrollRuntimeReplacementParticipants(
+        _ replacement: ReviewRuntimeRecoveryReplacement
+    ) async {
+        let backend = self.backend
+        for participant in replacement.participants {
+            guard let job = job(id: participant.jobID),
+                  job.isTerminal == false,
+                  job.cancellationRequested == false
+            else {
+                replacement.suppressParticipant(jobID: participant.jobID)
+                continue
+            }
+            let active: ReviewActiveAttempt
+            switch reviewAttemptOwnerships[participant.jobID] {
+            case .active(let current) where current.run.attemptID == participant.attemptID:
+                active = current
+                reviewAttemptOwnerships[participant.jobID] = .resolvingRecovery(current)
+            case .resolvingRecovery(let current) where current.run.attemptID == participant.attemptID:
+                active = current
+            default:
+                replacement.suppressParticipant(jobID: participant.jobID)
+                continue
+            }
+            let recoveryTrigger: ReviewAttemptRecoveryTrigger = if case .recoverableNetwork(
+                let initiatingJobID
+            ) = replacement.trigger, initiatingJobID == participant.jobID {
+                .recoverableNetworkLoss
+            } else {
+                .sameAccountRestart
+            }
+            let didInstall = await runtimeReplacementCoordinator.beginRecovery(
+                participant: participant,
+                owner: active,
+                trigger: recoveryTrigger,
+                interrupt: { run, reason in
+                    try await backend.interruptReview(run, reason: reason)
+                },
+                forceClose: {
+                    try await replacement.waitForSourceClose().get()
+                }
+            )
+            if didInstall == false {
+                if case .resolvingRecovery(let current) = reviewAttemptOwnerships[participant.jobID],
+                   sameAttempt(current, active) {
+                    reviewAttemptOwnerships[participant.jobID] = .active(active)
+                }
+                replacement.suppressParticipant(jobID: participant.jobID)
+            }
+        }
+    }
+
+    private func forceCloseCurrentRuntimeForAttempt(
+        jobID: String,
+        trigger: ReviewRuntimeRecoveryReplacement.Trigger
+    ) async throws {
+        if case .open = lifetimeState,
+           case .running(
+            let generation,
+            let runtime,
+            let mcpGeneration
+           ) = runtimeState {
+            serverState = .starting
+            writeDiagnosticsIfNeeded()
+            let (replacement, _) = installRuntimeReplacement(
+                previousGeneration: generation,
+                sourceRuntime: runtime,
+                retainedMCPGeneration: mcpGeneration,
+                retainedServerURL: serverURL,
+                trigger: trigger,
+                purpose: .recoveryReplacement
+            )
+            let sourceCloseResult = await replacement.waitForSourceClose()
+            await runtimeForceCloseReceiptRecordedForTesting?()
+            try sourceCloseResult.get()
+            return
+        }
+
+        if case .transitioning(
+            _,
+            let purpose,
+            _,
+            _,
+            _,
+            let replacement?
+        ) = runtimeState,
+           purpose == .recoveryReplacement || purpose == .restartSameAccount {
+            if case .explicitCancellation = trigger {
+                replacement.suppressParticipant(jobID: jobID)
+            }
+            let sourceCloseResult = await replacement.waitForSourceClose()
+            await runtimeForceCloseReceiptRecordedForTesting?()
+            try sourceCloseResult.get()
+            return
+        }
+
         let runtime: PreparedRuntime
-        let mcpGeneration: MCPServerGeneration?
         let record: ReviewRuntimeTransitionRecord
         switch runtimeState {
-        case .running(
-            let runningGeneration,
-            let runningRuntime,
-            let runningMCPGeneration
-        ):
-            generation = runningGeneration
+        case .running(_, let runningRuntime, _):
             runtime = runningRuntime
-            mcpGeneration = runningMCPGeneration
             record = ReviewRuntimeTransitionRecord()
-        case .transitioning(
-            let transitionGeneration,
-            _,
-            _,
-            let transitionRecord,
-            let sourceRuntime?
-        ):
-            generation = transitionGeneration
+        case .transitioning(_, _, _, let transitionRecord, let sourceRuntime?, _):
             runtime = sourceRuntime
-            mcpGeneration = nil
             record = transitionRecord
         case .stopped, .acquiring, .failed, .transitioning:
             throw ReviewRuntimeCloseFailure.connection(
@@ -692,16 +840,6 @@ extension CodexReviewStore {
             )
         } else {
             record.recordForceCloseFailures(consumedFailures, jobID: jobID)
-        }
-        if let mcpGeneration, closeResult.installedClose {
-            if applicationCloseFailureLedger == nil {
-                lastRuntimeTransitionRecord = record
-            }
-            runtimeState = .failed(
-                generation: generation.successor(),
-                retainedMCPGeneration: mcpGeneration,
-                serverURL: serverURL
-            )
         }
         await runtimeForceCloseReceiptRecordedForTesting?()
         if let firstFailure = closeResult.failures.first {
@@ -984,7 +1122,8 @@ extension CodexReviewStore {
     private func consumeReviewEvents(
         for initialAttempt: BackendReviewAttempt,
         job: CodexReviewJob,
-        startRequest: CodexReviewBackendModel.Review.Start
+        startRequest: CodexReviewBackendModel.Review.Start,
+        runtimeGeneration: ReviewRuntimeGeneration
     ) async throws -> ReviewWorkerAttemptCompletion {
         guard case .active(let initialActive) = reviewAttemptOwnerships[job.id],
               sameAttempt(initialActive, run: initialAttempt.run)
@@ -993,7 +1132,12 @@ extension CodexReviewStore {
                 message: "Initial event subscription requires the published active attempt."
             )
         }
-        let inputs = await reviewWorkerInputs(for: initialAttempt, owner: initialActive)
+        let inputs = await reviewWorkerInputs(
+            for: initialAttempt,
+            owner: initialActive,
+            jobID: job.id,
+            runtimeGeneration: runtimeGeneration
+        )
         guard case .active(let revalidatedActive) = reviewAttemptOwnerships[job.id],
               sameAttempt(revalidatedActive, initialActive)
         else {
@@ -1031,6 +1175,7 @@ extension CodexReviewStore {
         var recoverySignals = ReviewNetworkRecoverySignals()
         var activeEventSubscriptionID: Int? = inputs.initialEventSubscriptionID
         var cleanupAttempt = initialCleanupAttempt
+        var activeRuntimeGeneration = inputs.initialRuntimeGeneration
         while let input = await inputs.next() {
             if job.isTerminal {
                 return .init(cleanupAttempt: cleanupAttempt)
@@ -1169,6 +1314,46 @@ extension CodexReviewStore {
                             message: "Recovery handoff changed while detaching the old subscription."
                         )
                     }
+                    if candidate.trigger == .sameAccountRestart {
+                        switch try await restartReviewAfterRuntimeRecovery(
+                            job: job,
+                            startRequest: startRequest,
+                            inputs: inputs,
+                            handoff: handoff,
+                            sourceRuntimeGeneration: activeRuntimeGeneration
+                        ) {
+                        case .continueWaiting:
+                            throw ReviewAttemptContractFailure(
+                                message: "Same-account recovery unexpectedly waited for network restoration."
+                            )
+                        case .finished:
+                            return .init(cleanupAttempt: cleanupAttempt)
+                        case .recovered(
+                            let recoveredAttempt,
+                            let active,
+                            let runtimeGeneration
+                        ):
+                            cleanupAttempt = active
+                            let subscriptionID = await inputs.subscribe(
+                                to: recoveredAttempt,
+                                owner: active
+                            )
+                            guard case .active(let current) = reviewAttemptOwnerships[job.id],
+                                  sameAttempt(current, active)
+                            else {
+                                await inputs.cancelActiveEventSubscription()
+                                if job.isTerminal {
+                                    return .init(cleanupAttempt: cleanupAttempt)
+                                }
+                                throw ReviewAttemptContractFailure(
+                                    message: "Recovered subscription completed after its active attempt changed."
+                                )
+                            }
+                            activeEventSubscriptionID = subscriptionID
+                            activeRuntimeGeneration = runtimeGeneration
+                            recoverySignals.markRecovered()
+                        }
+                    }
                 }
             case .networkSnapshot(let snapshot, let recoveryGeneration):
                 if let pendingFailure = recoverySignals
@@ -1200,17 +1385,25 @@ extension CodexReviewStore {
                       ) else {
                     continue
                 }
-                switch try await restartReviewAfterNetworkRestore(
+                runtimeReplacementCoordinator.recordNetworkRestoration(
+                    sourceGeneration: activeRuntimeGeneration
+                )
+                switch try await restartReviewAfterRuntimeRecovery(
                     job: job,
                     startRequest: startRequest,
                     inputs: inputs,
-                    handoff: handoff
+                    handoff: handoff,
+                    sourceRuntimeGeneration: activeRuntimeGeneration
                 ) {
                 case .continueWaiting:
                     continue
                 case .finished:
                     return .init(cleanupAttempt: cleanupAttempt)
-                case .recovered(let recoveredAttempt, let active):
+                case .recovered(
+                    let recoveredAttempt,
+                    let active,
+                    let runtimeGeneration
+                ):
                     cleanupAttempt = active
                     let subscriptionID = await inputs.subscribe(
                         to: recoveredAttempt,
@@ -1228,6 +1421,7 @@ extension CodexReviewStore {
                         )
                     }
                     activeEventSubscriptionID = subscriptionID
+                    activeRuntimeGeneration = runtimeGeneration
                     recoverySignals.markRecovered()
                 }
             case .networkOutageConfirmed:
@@ -1244,14 +1438,22 @@ extension CodexReviewStore {
                         attemptID: active.run.attemptID
                     )
                 let backend = self.backend
-                await inputs.beginRecoveryInterruption(for: active) {
+                await inputs.beginRecoveryInterruption(for: active) { [self] in
                     try await active.admission.beginRecovery(
                         trigger: .recoverableNetworkLoss,
                         interrupt: { run, reason in
                             try await backend.interruptReview(run, reason: reason)
                         },
-                        forceClose: {
-                            try await backend.forceCloseReviewConnection()
+                        forceClose: { @MainActor [weak self] in
+                            guard let self else {
+                                throw ReviewRuntimeCloseFailure.connection(
+                                    "Review Store was released before network runtime replacement."
+                                )
+                            }
+                            try await self.forceCloseCurrentRuntimeForAttempt(
+                                jobID: job.id,
+                                trigger: .recoverableNetwork(initiatingJobID: job.id)
+                            )
                         }
                     )
                 }
@@ -1370,11 +1572,12 @@ extension CodexReviewStore {
             && lhs.admission === rhs.admission
     }
 
-    private func restartReviewAfterNetworkRestore(
+    private func restartReviewAfterRuntimeRecovery(
         job: CodexReviewJob,
         startRequest: CodexReviewBackendModel.Review.Start,
         inputs: ReviewWorkerInputs,
-        handoff: ReviewRecoveryHandoff
+        handoff: ReviewRecoveryHandoff,
+        sourceRuntimeGeneration: ReviewRuntimeGeneration
     ) async throws -> NetworkRestoreRestartResult {
         guard case .waitingForRecovery(let currentHandoff) = reviewAttemptOwnerships[job.id],
               currentHandoff == handoff
@@ -1389,8 +1592,43 @@ extension CodexReviewStore {
         if Task.isCancelled || job.isTerminal {
             return .finished
         }
-        guard await inputs.networkStatusTracker.currentStatus() == .satisfied else {
+        if handoff.candidate.trigger == .recoverableNetworkLoss,
+           await inputs.networkStatusTracker.currentStatus() != .satisfied {
             return .continueWaiting
+        }
+        let destinationRuntimeGeneration: ReviewRuntimeGeneration
+        if let replacement = inputs.runtimeReplacementCoordinator.replacement(
+            sourceGeneration: sourceRuntimeGeneration
+        ) {
+            var outcomes = replacement.replacementOutcomes().makeAsyncIterator()
+            guard let outcome = await outcomes.next() else {
+                return .finished
+            }
+            switch outcome {
+            case .running(let generation):
+                destinationRuntimeGeneration = generation
+            case .failed(let failure):
+                markReviewFailed(job, message: failure.localizedDescription)
+                reviewAttemptOwnerships[job.id] = .terminal
+                inputs.runtimeReplacementCoordinator.finishParticipant(
+                    jobID: job.id,
+                    sourceGeneration: sourceRuntimeGeneration
+                )
+                return .finished
+            case .superseded:
+                inputs.runtimeReplacementCoordinator.finishParticipant(
+                    jobID: job.id,
+                    sourceGeneration: sourceRuntimeGeneration
+                )
+                throw CancellationError()
+            }
+        } else {
+            guard handoff.candidate.trigger == .recoverableNetworkLoss else {
+                throw ReviewAttemptContractFailure(
+                    message: "Same-account recovery lost its runtime replacement owner."
+                )
+            }
+            destinationRuntimeGeneration = sourceRuntimeGeneration
         }
         let recoveredAdmission = ReviewStartAdmission(closePolicy: reviewRuntimeClosePolicy)
         let backend = self.backend
@@ -1430,13 +1668,40 @@ extension CodexReviewStore {
             )
         }
         let recoveredAttempt = try result.get()
+        if destinationRuntimeGeneration != sourceRuntimeGeneration {
+            guard case .running(let currentGeneration, _, _) = runtimeState,
+                  currentGeneration == destinationRuntimeGeneration,
+                  case .open = lifetimeState
+            else {
+                _ = try? await recoveredAdmission.cancel(
+                    job.core.lifecycle.cancellation ?? .system(),
+                    interrupt: { _, _ in },
+                    forceClose: {}
+                )
+                return .finished
+            }
+        }
         let active = ReviewActiveAttempt(
             run: recoveredAttempt.run,
             admission: recoveredAdmission
         )
         reviewAttemptOwnerships[job.id] = .active(active)
         applyBackendRun(recoveredAttempt.run, to: job)
-        return .recovered(recoveredAttempt, active)
+        inputs.runtimeReplacementCoordinator.update(
+            registrationID: inputs.runtimeReplacementRegistrationID,
+            jobID: job.id,
+            attemptID: recoveredAttempt.run.attemptID,
+            runtimeGeneration: destinationRuntimeGeneration
+        )
+        inputs.runtimeReplacementCoordinator.finishParticipant(
+            jobID: job.id,
+            sourceGeneration: sourceRuntimeGeneration
+        )
+        return .recovered(
+            recoveredAttempt,
+            active,
+            destinationRuntimeGeneration
+        )
     }
 
     private func handleReviewEvent(
@@ -1876,7 +2141,11 @@ private struct ReviewWorkerRecoveryFailure: LocalizedError, @unchecked Sendable 
 private enum NetworkRestoreRestartResult {
     case continueWaiting
     case finished
-    case recovered(BackendReviewAttempt, ReviewActiveAttempt)
+    case recovered(
+        BackendReviewAttempt,
+        ReviewActiveAttempt,
+        ReviewRuntimeGeneration
+    )
 }
 
 private enum ReviewNetworkSnapshotEffect {
@@ -1976,6 +2245,10 @@ private struct ReviewWorkerInputs {
     var networkStatusTracker: ReviewNetworkStatusTracker
     var eventSource: ReviewWorkerEventSource
     var recoveryInterruptionSource: ReviewWorkerRecoveryInterruptionSource
+    var runtimeReplacementCoordinator: ReviewRuntimeReplacementCoordinator
+    var runtimeReplacementRegistrationID: UUID
+    var jobID: String
+    var initialRuntimeGeneration: ReviewRuntimeGeneration
     var initialEventSubscriptionID: Int
     var networkTask: Task<Void, Never>
     var signalCoordinator: ReviewNetworkSignalCoordinator
@@ -2009,6 +2282,14 @@ private struct ReviewWorkerInputs {
         await signalCoordinator.cancel()
         await networkTask.value
         await queue.finish()
+        await runtimeReplacementCoordinator.finishRegisteredParticipant(
+            registrationID: runtimeReplacementRegistrationID,
+            jobID: jobID
+        )
+        await runtimeReplacementCoordinator.unregister(
+            registrationID: runtimeReplacementRegistrationID,
+            jobID: jobID
+        )
     }
 }
 
@@ -2048,6 +2329,148 @@ private actor ReviewWorkerRecoveryInterruptionSource {
 
     private func finish() {
         task = nil
+    }
+}
+
+@MainActor
+package final class ReviewRuntimeReplacementCoordinator {
+    private struct WorkerRegistration {
+        let id: UUID
+        let jobID: String
+        var attemptID: String
+        var runtimeGeneration: ReviewRuntimeGeneration
+        let recoverySource: ReviewWorkerRecoveryInterruptionSource
+    }
+
+    private var workerRegistrationsByJobID: [String: WorkerRegistration] = [:]
+    private var replacementsBySourceGeneration: [
+        ReviewRuntimeGeneration: ReviewRuntimeRecoveryReplacement
+    ] = [:]
+
+    package init() {}
+
+    fileprivate func register(
+        jobID: String,
+        attemptID: String,
+        runtimeGeneration: ReviewRuntimeGeneration,
+        recoverySource: ReviewWorkerRecoveryInterruptionSource
+    ) -> UUID {
+        let registration = WorkerRegistration(
+            id: UUID(),
+            jobID: jobID,
+            attemptID: attemptID,
+            runtimeGeneration: runtimeGeneration,
+            recoverySource: recoverySource
+        )
+        workerRegistrationsByJobID[jobID] = registration
+        return registration.id
+    }
+
+    fileprivate func update(
+        registrationID: UUID,
+        jobID: String,
+        attemptID: String,
+        runtimeGeneration: ReviewRuntimeGeneration
+    ) {
+        guard var registration = workerRegistrationsByJobID[jobID],
+              registration.id == registrationID
+        else {
+            return
+        }
+        registration.attemptID = attemptID
+        registration.runtimeGeneration = runtimeGeneration
+        workerRegistrationsByJobID[jobID] = registration
+    }
+
+    fileprivate func unregister(registrationID: UUID, jobID: String) {
+        guard workerRegistrationsByJobID[jobID]?.id == registrationID else {
+            return
+        }
+        workerRegistrationsByJobID.removeValue(forKey: jobID)
+    }
+
+    fileprivate func participant(
+        jobID: String,
+        attemptID: String,
+        sourceGeneration: ReviewRuntimeGeneration
+    ) -> ReviewRuntimeReplacementParticipant? {
+        guard let registration = workerRegistrationsByJobID[jobID],
+              registration.attemptID == attemptID,
+              registration.runtimeGeneration == sourceGeneration
+        else {
+            return nil
+        }
+        return .init(jobID: jobID, attemptID: attemptID)
+    }
+
+    fileprivate func install(_ replacement: ReviewRuntimeRecoveryReplacement) {
+        replacementsBySourceGeneration[replacement.sourceGeneration] = replacement
+    }
+
+    fileprivate func replacement(
+        sourceGeneration: ReviewRuntimeGeneration
+    ) -> ReviewRuntimeRecoveryReplacement? {
+        replacementsBySourceGeneration[sourceGeneration]
+    }
+
+    fileprivate func beginRecovery(
+        participant: ReviewRuntimeReplacementParticipant,
+        owner: ReviewActiveAttempt,
+        trigger: ReviewAttemptRecoveryTrigger,
+        interrupt: @escaping @Sendable (
+            CodexReviewBackendModel.Review.Run,
+            CodexReviewBackendModel.CancellationReason
+        ) async throws -> Void,
+        forceClose: @escaping @Sendable () async throws -> Void
+    ) async -> Bool {
+        guard let registration = workerRegistrationsByJobID[participant.jobID],
+              registration.attemptID == participant.attemptID
+        else {
+            return false
+        }
+        await registration.recoverySource.start(for: owner) {
+            try await owner.admission.beginRecovery(
+                trigger: trigger,
+                interrupt: interrupt,
+                forceClose: forceClose
+            )
+        }
+        return await owner.admission.waitForInterruptionAdmission()
+            == .recoverableTransition(trigger)
+    }
+
+    fileprivate func recordNetworkRestoration(
+        sourceGeneration: ReviewRuntimeGeneration
+    ) {
+        replacementsBySourceGeneration[sourceGeneration]?.recordNetworkRestoration()
+    }
+
+    fileprivate func finishParticipant(
+        jobID: String,
+        sourceGeneration: ReviewRuntimeGeneration
+    ) {
+        guard let replacement = replacementsBySourceGeneration[sourceGeneration] else {
+            return
+        }
+        replacement.finishParticipant(jobID: jobID)
+        if replacement.hasRemainingParticipants == false {
+            replacementsBySourceGeneration.removeValue(forKey: sourceGeneration)
+        }
+    }
+
+    fileprivate func finishRegisteredParticipant(
+        registrationID: UUID,
+        jobID: String
+    ) {
+        guard let registration = workerRegistrationsByJobID[jobID],
+              registration.id == registrationID
+        else {
+            return
+        }
+        finishParticipant(
+            jobID: jobID,
+            sourceGeneration: registration.runtimeGeneration
+        )
     }
 }
 

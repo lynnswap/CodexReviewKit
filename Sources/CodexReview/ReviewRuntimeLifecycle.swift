@@ -256,6 +256,173 @@ package struct ReviewRuntimePreparationFailure: LocalizedError, Sendable {
     }
 }
 
+package struct ReviewRuntimeReplacementParticipant: Equatable, Sendable {
+    package let jobID: String
+    package let attemptID: String
+
+    package init(jobID: String, attemptID: String) {
+        self.jobID = jobID
+        self.attemptID = attemptID
+    }
+}
+
+package struct ReviewRuntimeReplacementFailure: LocalizedError, Sendable {
+    package let resources: ReviewLifecycleResourceFailureAggregate
+
+    package init(resources: ReviewLifecycleResourceFailureAggregate) {
+        self.resources = resources
+    }
+
+    package init(_ failure: ReviewLifecycleResourceFailure) {
+        self.resources = .init(first: failure)
+    }
+
+    package var errorDescription: String? {
+        resources.localizedDescription
+    }
+}
+
+@MainActor
+package final class ReviewRuntimeRecoveryReplacement {
+    package enum Trigger: Equatable, Sendable {
+        case explicitCancellation(targetJobID: String)
+        case sameAccountRestart
+        case recoverableNetwork(initiatingJobID: String)
+
+        package var targetJobID: String? {
+            guard case .explicitCancellation(let targetJobID) = self else {
+                return nil
+            }
+            return targetJobID
+        }
+
+        package var requiresNetworkRestoration: Bool {
+            if case .recoverableNetwork = self { true } else { false }
+        }
+    }
+
+    package enum Outcome: Sendable {
+        case running(ReviewRuntimeGeneration)
+        case failed(ReviewRuntimeReplacementFailure)
+        case superseded(ReviewRuntimeTransitionPurpose)
+    }
+
+    package let sourceGeneration: ReviewRuntimeGeneration
+    package let replacementGeneration: ReviewRuntimeGeneration
+    package let sourceRuntime: PreparedRuntime?
+    package let retainedMCPGeneration: MCPServerGeneration
+    package let retainedServerURL: URL?
+    package let trigger: Trigger
+    package private(set) var participants: [ReviewRuntimeReplacementParticipant]
+
+    private var sourceCloseResult: Result<Void, ReviewRuntimeCloseFailure>?
+    private var sourceCloseWaiters: [CheckedContinuation<Result<Void, ReviewRuntimeCloseFailure>, Never>] = []
+    private var outcome: Outcome?
+    private var outcomeContinuations: [AsyncStream<Outcome>.Continuation] = []
+    private var networkRestorationWasRecorded = false
+    private var networkRestorationContinuations: [AsyncStream<Void>.Continuation] = []
+    private var remainingParticipantJobIDs: Set<String>
+
+    package init(
+        sourceGeneration: ReviewRuntimeGeneration,
+        replacementGeneration: ReviewRuntimeGeneration,
+        sourceRuntime: PreparedRuntime?,
+        retainedMCPGeneration: MCPServerGeneration,
+        retainedServerURL: URL?,
+        trigger: Trigger,
+        participants: [ReviewRuntimeReplacementParticipant]
+    ) {
+        self.sourceGeneration = sourceGeneration
+        self.replacementGeneration = replacementGeneration
+        self.sourceRuntime = sourceRuntime
+        self.retainedMCPGeneration = retainedMCPGeneration
+        self.retainedServerURL = retainedServerURL
+        self.trigger = trigger
+        self.participants = participants
+        self.remainingParticipantJobIDs = Set(participants.map(\.jobID))
+    }
+
+    package func suppressParticipant(jobID: String) {
+        participants.removeAll { $0.jobID == jobID }
+        remainingParticipantJobIDs.remove(jobID)
+    }
+
+    package func finishParticipant(jobID: String) {
+        remainingParticipantJobIDs.remove(jobID)
+    }
+
+    package var hasRemainingParticipants: Bool {
+        remainingParticipantJobIDs.isEmpty == false
+    }
+
+    package func finishSourceClose(
+        _ result: Result<Void, ReviewRuntimeCloseFailure>
+    ) {
+        guard sourceCloseResult == nil else { return }
+        sourceCloseResult = result
+        let waiters = sourceCloseWaiters
+        sourceCloseWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume(returning: result)
+        }
+    }
+
+    package func waitForSourceClose() async -> Result<Void, ReviewRuntimeCloseFailure> {
+        if let sourceCloseResult { return sourceCloseResult }
+        return await withCheckedContinuation { continuation in
+            if let sourceCloseResult {
+                continuation.resume(returning: sourceCloseResult)
+            } else {
+                sourceCloseWaiters.append(continuation)
+            }
+        }
+    }
+
+    package func replacementOutcomes() -> AsyncStream<Outcome> {
+        AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            if let outcome {
+                continuation.yield(outcome)
+                continuation.finish()
+            } else {
+                outcomeContinuations.append(continuation)
+            }
+        }
+    }
+
+    package func finish(_ outcome: Outcome) {
+        guard self.outcome == nil else { return }
+        self.outcome = outcome
+        let continuations = outcomeContinuations
+        outcomeContinuations.removeAll(keepingCapacity: false)
+        for continuation in continuations {
+            continuation.yield(outcome)
+            continuation.finish()
+        }
+    }
+
+    package func recordNetworkRestoration() {
+        guard networkRestorationWasRecorded == false else { return }
+        networkRestorationWasRecorded = true
+        let continuations = networkRestorationContinuations
+        networkRestorationContinuations.removeAll(keepingCapacity: false)
+        for continuation in continuations {
+            continuation.yield(())
+            continuation.finish()
+        }
+    }
+
+    package func networkRestorations() -> AsyncStream<Void> {
+        AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            if trigger.requiresNetworkRestoration == false || networkRestorationWasRecorded {
+                continuation.yield(())
+                continuation.finish()
+            } else {
+                networkRestorationContinuations.append(continuation)
+            }
+        }
+    }
+}
+
 package enum ReviewStoreRuntimeState {
     case stopped(ReviewRuntimeGeneration)
     case acquiring(
@@ -273,12 +440,14 @@ package enum ReviewStoreRuntimeState {
         purpose: ReviewRuntimeTransitionPurpose,
         task: Task<Void, Never>,
         record: ReviewRuntimeTransitionRecord,
-        sourceRuntime: PreparedRuntime?
+        sourceRuntime: PreparedRuntime?,
+        recoveryReplacement: ReviewRuntimeRecoveryReplacement?
     )
     case failed(
         generation: ReviewRuntimeGeneration,
         retainedMCPGeneration: MCPServerGeneration,
-        serverURL: URL?
+        serverURL: URL?,
+        replacementFailure: ReviewRuntimeReplacementFailure?
     )
 
     package var generation: ReviewRuntimeGeneration {
@@ -286,8 +455,8 @@ package enum ReviewStoreRuntimeState {
         case .stopped(let generation),
              .acquiring(let generation, _, _),
              .running(let generation, _, _),
-             .transitioning(let generation, _, _, _, _),
-             .failed(let generation, _, _):
+             .transitioning(let generation, _, _, _, _, _),
+             .failed(let generation, _, _, _):
             generation
         }
     }
@@ -296,7 +465,7 @@ package enum ReviewStoreRuntimeState {
         switch self {
         case .running(_, let runtime, _):
             return runtime
-        case .transitioning(_, _, _, _, let sourceRuntime):
+        case .transitioning(_, _, _, _, let sourceRuntime, _):
             return sourceRuntime
         case .stopped, .acquiring, .failed:
             return nil

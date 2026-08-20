@@ -56,6 +56,7 @@ public final class CodexReviewStore {
         .init(rawValue: 0)
     )
     @ObservationIgnored package var lastRuntimeTransitionRecord: ReviewRuntimeTransitionRecord?
+    @ObservationIgnored package let runtimeReplacementCoordinator = ReviewRuntimeReplacementCoordinator()
 
     package init(
         backend: any CodexReviewStoreBackend = PreviewCodexReviewStoreBackend(),
@@ -103,7 +104,7 @@ public final class CodexReviewStore {
             task.cancel()
         }
         switch runtimeState {
-        case .acquiring(_, let task, _), .transitioning(_, _, let task, _, _):
+        case .acquiring(_, let task, _), .transitioning(_, _, let task, _, _, _):
             task.cancel()
         case .stopped, .running, .failed:
             break
@@ -170,7 +171,7 @@ public final class CodexReviewStore {
         switch runtimeState {
         case .acquiring:
             return
-        case .transitioning(_, _, let task, _, _):
+        case .transitioning(_, _, let task, _, _, _):
             await task.value
             return
         case .running where forceRestartIfNeeded == false:
@@ -183,7 +184,7 @@ public final class CodexReviewStore {
                 retainedServerURL: serverURL
             )
             return
-        case .failed(let generation, let mcpGeneration, let retainedServerURL):
+        case .failed(let generation, let mcpGeneration, let retainedServerURL, _):
             await startRuntimeReplacement(
                 previousGeneration: generation,
                 previousRuntime: nil,
@@ -231,28 +232,55 @@ public final class CodexReviewStore {
         retainedMCPGeneration: MCPServerGeneration,
         retainedServerURL: URL?
     ) async {
-        let generation = previousGeneration.successor()
-        let record = ReviewRuntimeTransitionRecord()
         serverState = .starting
         writeDiagnosticsIfNeeded()
+        let (_, task) = installRuntimeReplacement(
+            previousGeneration: previousGeneration,
+            sourceRuntime: previousRuntime,
+            retainedMCPGeneration: retainedMCPGeneration,
+            retainedServerURL: retainedServerURL,
+            trigger: .sameAccountRestart,
+            purpose: .restartSameAccount
+        )
+        await task.value
+    }
+
+    @discardableResult
+    package func installRuntimeReplacement(
+        previousGeneration: ReviewRuntimeGeneration,
+        sourceRuntime: PreparedRuntime?,
+        retainedMCPGeneration: MCPServerGeneration,
+        retainedServerURL: URL?,
+        trigger: ReviewRuntimeRecoveryReplacement.Trigger,
+        purpose: ReviewRuntimeTransitionPurpose
+    ) -> (ReviewRuntimeRecoveryReplacement, Task<Void, Never>) {
+        let generation = previousGeneration.successor()
+        let record = ReviewRuntimeTransitionRecord()
+        let replacement = makeRuntimeRecoveryReplacement(
+            sourceGeneration: previousGeneration,
+            replacementGeneration: generation,
+            sourceRuntime: sourceRuntime,
+            retainedMCPGeneration: retainedMCPGeneration,
+            retainedServerURL: retainedServerURL,
+            trigger: trigger
+        )
         let task = Task<Void, Never> { @MainActor [weak self] in
             guard let self else { return }
             await self.performRuntimeReplacement(
-                generation: generation,
-                previousRuntime: previousRuntime,
-                retainedMCPGeneration: retainedMCPGeneration,
-                retainedServerURL: retainedServerURL,
+                replacement,
+                purpose: purpose,
                 record: record
             )
         }
         runtimeState = .transitioning(
             generation: generation,
-            purpose: .restartSameAccount,
+            purpose: purpose,
             task: task,
             record: record,
-            sourceRuntime: previousRuntime
+            sourceRuntime: sourceRuntime,
+            recoveryReplacement: replacement
         )
-        await task.value
+        return (replacement, task)
     }
 
     public func stop() async {
@@ -270,11 +298,15 @@ public final class CodexReviewStore {
         case .stopped:
             transitionToStopped()
             return
-        case .transitioning(_, .stop, let task, _, _):
+        case .transitioning(_, .stop, let task, _, _, _):
             await task.value
             return
         case .acquiring, .running, .transitioning, .failed:
             break
+        }
+        if case .transitioning(_, _, _, _, _, let replacement) = previousState {
+            replacement?.finish(.superseded(.stop))
+            replacement?.recordNetworkRestoration()
         }
         let invalidatedGeneration = previousState.generation.successor()
         let record = ReviewRuntimeTransitionRecord()
@@ -291,7 +323,8 @@ public final class CodexReviewStore {
             purpose: .stop,
             task: task,
             record: record,
-            sourceRuntime: previousState.runtimeForClose
+            sourceRuntime: previousState.runtimeForClose,
+            recoveryReplacement: nil
         )
         await task.value
     }
@@ -410,6 +443,10 @@ public final class CodexReviewStore {
         failureLedger: ReviewCloseFailureLedger
     ) async -> Result<Void, ReviewCloseError> {
         let runningRuntime = previousRuntimeState.runtimeForClose
+        if case .transitioning(_, _, _, _, _, let replacement) = previousRuntimeState {
+            replacement?.finish(.superseded(.applicationClose))
+            replacement?.recordNetworkRestoration()
+        }
         if let lastRuntimeTransitionRecord {
             failureLedger.importReceipts(from: lastRuntimeTransitionRecord)
         }
@@ -475,8 +512,13 @@ public final class CodexReviewStore {
 
         await cancelAccountRateLimitAutoRefreshAndWait()
         switch previousRuntimeState {
-        case .acquiring(_, let task, let record),
-             .transitioning(_, _, let task, let record, _):
+        case .acquiring(_, let task, let record):
+            task.cancel()
+            await task.value
+            failureLedger.merge(record)
+        case .transitioning(_, _, let task, let record, _, let replacement):
+            replacement?.finish(.superseded(.applicationClose))
+            replacement?.recordNetworkRestoration()
             task.cancel()
             await task.value
             failureLedger.merge(record)
@@ -576,7 +618,9 @@ public final class CodexReviewStore {
             record.merge(previousRecord)
         case .running(_, let runtime, _):
             await stopPublishedRuntime(runtime, record: record)
-        case .transitioning(_, _, let task, let previousRecord, _):
+        case .transitioning(_, _, let task, let previousRecord, _, let replacement):
+            replacement?.finish(.superseded(.stop))
+            replacement?.recordNetworkRestoration()
             task.cancel()
             await task.value
             record.merge(previousRecord)
@@ -586,7 +630,7 @@ public final class CodexReviewStore {
         case .stopped:
             break
         }
-        guard case .transitioning(let currentGeneration, .stop, _, _, _) = runtimeState,
+        guard case .transitioning(let currentGeneration, .stop, _, _, _, _) = runtimeState,
               currentGeneration == invalidatedGeneration
         else {
             return
@@ -658,7 +702,7 @@ public final class CodexReviewStore {
     }
 
     public func waitUntilStopped() async {
-        if case .transitioning(_, _, let task, _, _) = runtimeState {
+        if case .transitioning(_, _, let task, _, _, _) = runtimeState {
             await task.value
         }
         await backend.waitUntilStopped()
@@ -771,81 +815,180 @@ public final class CodexReviewStore {
     }
 
     private func performRuntimeReplacement(
-        generation: ReviewRuntimeGeneration,
-        previousRuntime: PreparedRuntime?,
-        retainedMCPGeneration: MCPServerGeneration,
-        retainedServerURL: URL?,
+        _ replacement: ReviewRuntimeRecoveryReplacement,
+        purpose: ReviewRuntimeTransitionPurpose,
         record: ReviewRuntimeTransitionRecord
     ) async {
         defer { lastRuntimeTransitionRecord = record }
         var preparedRuntime: PreparedRuntime?
-        if let previousRuntime {
-            await performPublishedRuntimeSemanticStop(record: record)
-            await previousRuntime.handle.closeAdmission()
-            await closeAppServerRuntime(
-                previousRuntime,
-                purpose: .restartSameAccount,
-                record: record
+        await enrollRuntimeReplacementParticipants(replacement)
+        if let sourceRuntime = replacement.sourceRuntime {
+            await sourceRuntime.handle.closeAdmission()
+            let closeResult = await sourceRuntime.closeRecord.closeAndWait(
+                handle: sourceRuntime.handle,
+                purpose: purpose
             )
+            let consumedFailures = sourceRuntime.closeRecord.consumeFailures()
+            if let targetJobID = replacement.trigger.targetJobID {
+                record.recordForceCloseFailures(
+                    consumedFailures,
+                    jobID: targetJobID
+                )
+            } else {
+                record.record(contentsOf: consumedFailures)
+            }
+            if let firstFailure = closeResult.failures.first {
+                replacement.finishSourceClose(.failure(
+                    reviewRuntimeCloseFailure(from: firstFailure)
+                ))
+            } else {
+                replacement.finishSourceClose(.success(()))
+            }
+        } else {
+            replacement.finishSourceClose(.success(()))
         }
-        guard isCurrentTransition(generation, purpose: .restartSameAccount) else {
+        guard isCurrentRuntimeReplacement(replacement, purpose: purpose) else {
+            replacement.finish(.superseded(currentSupersedingPurpose))
             return
+        }
+        if replacement.trigger.requiresNetworkRestoration {
+            var iterator = replacement.networkRestorations().makeAsyncIterator()
+            guard await iterator.next() != nil,
+                  isCurrentRuntimeReplacement(replacement, purpose: purpose)
+            else {
+                replacement.finish(.superseded(currentSupersedingPurpose))
+                return
+            }
         }
         do {
             let runtime = try await backend.prepareRuntime(
-                generation: generation,
-                purpose: .restartSameAccount
+                generation: replacement.replacementGeneration,
+                purpose: purpose
             )
             preparedRuntime = runtime
-            guard isCurrentTransition(generation, purpose: .restartSameAccount) else {
+            guard isCurrentRuntimeReplacement(replacement, purpose: purpose) else {
                 await closeStaleRuntime(
                     runtime,
                     mcpServerWasPrepared: false,
-                    purpose: .restartSameAccount,
+                    purpose: purpose,
                     record: record
                 )
+                replacement.finish(.superseded(currentSupersedingPurpose))
                 return
             }
 
             try await runtime.handle.activate()
-            guard isCurrentTransition(generation, purpose: .restartSameAccount) else {
+            guard isCurrentRuntimeReplacement(replacement, purpose: purpose) else {
                 await closeStaleRuntime(
                     runtime,
                     mcpServerWasPrepared: false,
-                    purpose: .restartSameAccount,
+                    purpose: purpose,
                     record: record
                 )
+                replacement.finish(.superseded(currentSupersedingPurpose))
                 return
             }
 
             publishRuntimeSnapshot(runtime.snapshot)
             runtimeState = .running(
-                generation: generation,
+                generation: replacement.replacementGeneration,
                 runtime: runtime,
-                mcpGeneration: retainedMCPGeneration
+                mcpGeneration: replacement.retainedMCPGeneration
             )
-            publishMCPServer(serverURL: retainedServerURL)
+            publishMCPServer(serverURL: replacement.retainedServerURL)
+            replacement.finish(.running(replacement.replacementGeneration))
         } catch {
             if let preparedRuntime {
                 await closeStaleRuntime(
                     preparedRuntime,
                     mcpServerWasPrepared: false,
-                    purpose: .restartSameAccount,
+                    purpose: purpose,
                     record: record
                 )
             }
-            guard isCurrentTransition(generation, purpose: .restartSameAccount) else {
+            guard isCurrentRuntimeReplacement(replacement, purpose: purpose) else {
+                replacement.finish(.superseded(currentSupersedingPurpose))
                 return
             }
+            let failure = runtimeReplacementFailure(from: error)
+            record.record(.lifecycleResources(failure.resources))
             runtimeState = .failed(
-                generation: generation,
-                retainedMCPGeneration: retainedMCPGeneration,
-                serverURL: retainedServerURL
+                generation: replacement.replacementGeneration,
+                retainedMCPGeneration: replacement.retainedMCPGeneration,
+                serverURL: replacement.retainedServerURL,
+                replacementFailure: failure
             )
-            serverURL = retainedServerURL
-            serverState = .failed(error.localizedDescription)
+            serverURL = replacement.retainedServerURL
+            serverState = .failed(failure.localizedDescription)
             writeDiagnosticsIfNeeded()
+            replacement.finish(.failed(failure))
         }
+    }
+
+    private func isCurrentRuntimeReplacement(
+        _ replacement: ReviewRuntimeRecoveryReplacement,
+        purpose: ReviewRuntimeTransitionPurpose
+    ) -> Bool {
+        guard case .open = lifetimeState,
+              case .transitioning(
+                let generation,
+                let currentPurpose,
+                _,
+                _,
+                _,
+                let currentReplacement
+              ) = runtimeState
+        else {
+            return false
+        }
+        return generation == replacement.replacementGeneration
+            && currentPurpose == purpose
+            && currentReplacement === replacement
+    }
+
+    private var currentSupersedingPurpose: ReviewRuntimeTransitionPurpose {
+        if case .closing = lifetimeState { return .applicationClose }
+        if case .transitioning(_, let purpose, _, _, _, _) = runtimeState {
+            return purpose
+        }
+        return .stop
+    }
+
+    private func reviewRuntimeCloseFailure(
+        from failure: ReviewClosePrimaryFailure
+    ) -> ReviewRuntimeCloseFailure {
+        switch failure {
+        case .attemptRuntime(let failure):
+            return failure
+        case .lifecycleResources(let failure):
+            return .connection(failure.localizedDescription)
+        case .interruptRequest(let failure):
+            return .connection(failure.localizedDescription)
+        case .persistence(let failure):
+            return .connection(failure.localizedDescription)
+        }
+    }
+
+    private func runtimeReplacementFailure(
+        from error: any Error
+    ) -> ReviewRuntimeReplacementFailure {
+        if let failure = error as? ReviewRuntimeReplacementFailure {
+            return failure
+        }
+        if let failure = error as? ReviewRuntimePreparationFailure {
+            return .init(resources: .init(
+                first: .client(failure.preparationDescription),
+                additionalInLifecycleOrder: [failure.cleanupFailures.first]
+                    + failure.cleanupFailures.additionalInLifecycleOrder
+            ))
+        }
+        if let failure = error as? ReviewLifecycleResourceFailureAggregate {
+            return .init(resources: failure)
+        }
+        if let failure = error as? ReviewLifecycleResourceFailure {
+            return .init(failure)
+        }
+        return .init(.client(error.localizedDescription))
     }
 
     private func isCurrentAcquisition(
@@ -872,6 +1015,7 @@ public final class CodexReviewStore {
             let currentPurpose,
             _,
             _,
+            _,
             _
         ) = runtimeState else {
             return false
@@ -886,7 +1030,7 @@ public final class CodexReviewStore {
         case .open:
             break
         }
-        guard case .transitioning(_, let purpose, _, _, _) = runtimeState else {
+        guard case .transitioning(_, let purpose, _, _, _, _) = runtimeState else {
             return false
         }
         return purpose == .stop || purpose == .applicationClose

@@ -193,6 +193,8 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     private var commands: [Command] = []
     private var nextRun: CodexReviewBackendModel.Review.Run
     private var nextRecoveredRun: CodexReviewBackendModel.Review.Run?
+    private var queuedRuns: [CodexReviewBackendModel.Review.Run] = []
+    private var queuedRecoveredRuns: [CodexReviewBackendModel.Review.Run] = []
     private var interruptFailureMessage: String?
     private var recoveryFailureMessage: String?
     private var cleanupFailure: ReviewRuntimeCloseFailure?
@@ -234,6 +236,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         self.settings = settings
         self.auth = auth
         self.nextRun = nextRun
+        self.queuedRuns = [nextRun]
     }
 
     package func recordedCommands() -> [Command] {
@@ -282,6 +285,14 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
 
     package func setNextRecoveredRun(_ run: CodexReviewBackendModel.Review.Run) {
         nextRecoveredRun = run
+    }
+
+    package func enqueueRun(_ run: CodexReviewBackendModel.Review.Run) {
+        queuedRuns.append(run)
+    }
+
+    package func enqueueRecoveredRun(_ run: CodexReviewBackendModel.Review.Run) {
+        queuedRecoveredRuns.append(run)
     }
 
     package func waitForStartReview() async {
@@ -524,6 +535,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         _ request: CodexReviewBackendModel.Review.Start,
         admission: ReviewStartAdmission
     ) async throws -> BackendReviewAttempt {
+        let run = queuedRuns.isEmpty ? nextRun : queuedRuns.removeFirst()
         try await admission.admitThreadStartDispatch()
         commands.append(.startReview(request))
         let waiters = Array(startReviewWaiters.values)
@@ -532,10 +544,10 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
             waiter.resume()
         }
         let provisionalRun = CodexReviewBackendModel.Review.Run(
-            attemptID: nextRun.attemptID,
-            threadID: nextRun.threadID,
-            reviewThreadID: nextRun.threadID,
-            model: nextRun.model
+            attemptID: run.attemptID,
+            threadID: run.threadID,
+            reviewThreadID: run.threadID,
+            model: run.model
         )
         await admission.recordPreparedThread(provisionalRun)
         do {
@@ -547,8 +559,8 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         if let startReviewGate {
             await startReviewGate.wait()
         }
-        await admission.recordActiveRun(nextRun)
-        return .init(run: nextRun, events: eventMailbox(for: nextRun))
+        await admission.recordActiveRun(run)
+        return .init(run: run, events: eventMailbox(for: run))
     }
 
     package func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws {
@@ -624,7 +636,9 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     ) async throws -> BackendReviewAttempt {
         let token = handoff.token
         let run = token.interruptedRun
-        let recoveredRun = nextRecoveredRun ?? .init(
+        let recoveredRun = queuedRecoveredRuns.isEmpty == false
+            ? queuedRecoveredRuns.removeFirst()
+            : nextRecoveredRun ?? .init(
             attemptID: "attempt-recovered",
             threadID: run.threadID,
             turnID: "turn-recovered",
@@ -1232,7 +1246,7 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
             onClose: { [weak self] purpose in
                 guard let self else { return }
                 self.isActive = false
-                if purpose == .recoveryReplacement {
+                if purpose == .recoveryReplacement || purpose == .restartSameAccount {
                     try? await self.reviewBackend.forceCloseReviewConnection()
                 }
                 await self.runtimeCloseOperation()

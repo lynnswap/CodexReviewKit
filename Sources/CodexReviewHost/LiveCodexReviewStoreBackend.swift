@@ -161,6 +161,16 @@ public extension CodexReviewStore {
 
 @MainActor
 private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
+    private struct AttemptRoute {
+        let generation: ReviewRuntimeGeneration
+        let runtime: LiveRuntimeLifecycleHandle
+    }
+
+    private struct RecoveryRoute {
+        let handoff: ReviewRecoveryHandoff
+        let source: AttemptRoute
+    }
+
     typealias MCPHTTPServerFactory = @MainActor @Sendable (
         CodexReviewStore,
         CodexReviewMCPHTTPServer.Configuration
@@ -169,8 +179,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     let seed: CodexReviewStoreSeed
 
     private var client: AppServerClient?
-    private var appServerBackend: AppServerCodexReviewBackend?
     private var activeRuntimeHandle: LiveRuntimeLifecycleHandle?
+    private var attemptRoutesByAttemptID: [String: AttemptRoute] = [:]
+    private var recoveryRoutesByAttemptID: [String: RecoveryRoute] = [:]
     private var acceptsRuntimeRequests = false
     private var loginChallenge: CodexReviewBackendModel.Login.Challenge?
     private var loginBackend: AppServerCodexReviewBackend?
@@ -196,6 +207,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     private let mcpLifecycleOwner: LiveMCPServerLifecycleOwner
     private let appServerRuntimeFactory: AppServerRuntimeFactory
     private weak var attachedStore: CodexReviewStore?
+
+    private var appServerBackend: AppServerCodexReviewBackend? {
+        activeRuntimeHandle?.backend
+    }
 
     init(
         environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -378,7 +393,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     func prepareRuntime(
-        generation _: ReviewRuntimeGeneration,
+        generation: ReviewRuntimeGeneration,
         purpose _: ReviewRuntimeTransitionPurpose
     ) async throws -> PreparedRuntime {
         logger.info("Preparing review runtime")
@@ -388,6 +403,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             let settings = try await Self.monitorSettings(from: runtime.backend.readSettings())
             let handle = LiveRuntimeLifecycleHandle(
                 owner: self,
+                generation: generation,
                 client: runtime.client,
                 backend: runtime.backend,
                 snapshot: .init(
@@ -436,7 +452,6 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         activeRuntimeHandle = handle
         acceptsRuntimeRequests = true
         client = handle.client
-        appServerBackend = handle.backend
         settingsSnapshot = handle.snapshot.settings
         observeAuthNotifications(
             client: handle.client,
@@ -1014,17 +1029,22 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         _ request: CodexReviewBackendModel.Review.Start,
         admission: ReviewStartAdmission
     ) async throws -> BackendReviewAttempt {
-        guard acceptsRuntimeRequests, let appServerBackend else {
+        guard acceptsRuntimeRequests, let runtime = activeRuntimeHandle else {
             throw CodexReviewAPI.Error.io("Review runtime is not running.")
         }
-        return try await appServerBackend.startReview(request, admission: admission)
+        let attempt = try await runtime.backend.startReview(request, admission: admission)
+        attemptRoutesByAttemptID[attempt.run.attemptID] = .init(
+            generation: runtime.generation,
+            runtime: runtime
+        )
+        return attempt
     }
 
     func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws {
-        guard acceptsRuntimeRequests, let appServerBackend else {
-            throw CodexReviewAPI.Error.io("Review runtime is not running.")
+        guard let route = attemptRoutesByAttemptID[run.attemptID] else {
+            throw CodexReviewAPI.Error.io("Review attempt route is unavailable.")
         }
-        try await appServerBackend.interruptReview(run, reason: reason)
+        try await route.runtime.backend.interruptReview(run, reason: reason)
     }
 
     func forceCloseReviewConnection() async throws {
@@ -1037,10 +1057,16 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     func prepareReviewRecovery(
         _ candidate: ReviewRecoveryCandidate
     ) async throws -> ReviewRecoveryHandoff {
-        guard let appServerBackend else {
-            throw CodexReviewAPI.Error.io("Review runtime is not running.")
+        let attemptID = candidate.resolved.run.attemptID
+        guard let source = attemptRoutesByAttemptID[attemptID] else {
+            throw CodexReviewAPI.Error.io("Review recovery source route is unavailable.")
         }
-        return try await appServerBackend.prepareReviewRecovery(candidate)
+        let handoff = try await source.runtime.backend.prepareReviewRecovery(candidate)
+        recoveryRoutesByAttemptID[attemptID] = .init(
+            handoff: handoff,
+            source: source
+        )
+        return handoff
     }
 
     func resumeReviewRecovery(
@@ -1048,21 +1074,46 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         request: CodexReviewBackendModel.Review.Start,
         admission: ReviewStartAdmission
     ) async throws -> BackendReviewAttempt {
-        guard acceptsRuntimeRequests, let appServerBackend else {
+        let sourceAttemptID = handoff.candidate.resolved.run.attemptID
+        guard let source = recoveryRoutesByAttemptID[sourceAttemptID],
+              source.handoff == handoff
+        else {
+            throw CodexReviewAPI.Error.io("Review recovery handoff route is unavailable.")
+        }
+        guard acceptsRuntimeRequests, let destination = activeRuntimeHandle else {
             throw CodexReviewAPI.Error.io("Review runtime is not running.")
         }
-        return try await appServerBackend.resumeReviewRecovery(
+        if handoff.candidate.trigger == .sameAccountRestart,
+           destination.generation == source.source.generation {
+            throw CodexReviewAPI.Error.io(
+                "Same-account recovery requires a replacement runtime generation."
+            )
+        }
+        let attempt = try await destination.backend.resumeReviewRecovery(
             handoff,
             request: request,
             admission: admission
         )
+        attemptRoutesByAttemptID.removeValue(forKey: sourceAttemptID)
+        recoveryRoutesByAttemptID.removeValue(forKey: sourceAttemptID)
+        attemptRoutesByAttemptID[attempt.run.attemptID] = .init(
+            generation: destination.generation,
+            runtime: destination
+        )
+        return attempt
     }
 
     func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws {
-        guard let appServerBackend else {
-            throw ReviewRuntimeCloseFailure.cleanup("Review runtime is not running.")
+        guard let route = attemptRoutesByAttemptID[run.attemptID] else {
+            throw ReviewRuntimeCloseFailure.cleanup("Review attempt route is unavailable.")
         }
-        try await appServerBackend.cleanupReview(run)
+        defer {
+            if attemptRoutesByAttemptID[run.attemptID]?.runtime === route.runtime {
+                attemptRoutesByAttemptID.removeValue(forKey: run.attemptID)
+                recoveryRoutesByAttemptID.removeValue(forKey: run.attemptID)
+            }
+        }
+        try await route.runtime.backend.cleanupReview(run)
     }
 
     @discardableResult
@@ -1717,6 +1768,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 
 @MainActor
 private final class LiveRuntimeLifecycleHandle: RuntimeLifecycleHandle {
+    fileprivate let generation: ReviewRuntimeGeneration
     fileprivate let client: AppServerClient
     fileprivate let backend: AppServerCodexReviewBackend
     fileprivate let snapshot: RuntimePublicationSnapshot
@@ -1727,11 +1779,13 @@ private final class LiveRuntimeLifecycleHandle: RuntimeLifecycleHandle {
 
     init(
         owner: LiveCodexReviewStoreBackend,
+        generation: ReviewRuntimeGeneration,
         client: AppServerClient,
         backend: AppServerCodexReviewBackend,
         snapshot: RuntimePublicationSnapshot
     ) {
         self.owner = owner
+        self.generation = generation
         self.client = client
         self.backend = backend
         self.snapshot = snapshot
