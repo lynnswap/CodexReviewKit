@@ -199,7 +199,8 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     private var interruptReviewGate: AsyncGate?
     private var interruptReviewWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var matchingInterruptReviewWaiters: [UUID: MatchingInterruptWaiter] = [:]
-    private var beginReviewRecoveryWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+    private var prepareReviewRecoveryWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+    private var prepareReviewRecoveryGate: AsyncGate?
     private var startReviewGate: AsyncGate?
     private var startReviewWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var resumeReviewRecoveryGate: AsyncGate?
@@ -258,6 +259,10 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
 
     package func holdResumeReviewRecovery(with gate: AsyncGate) {
         resumeReviewRecoveryGate = gate
+    }
+
+    package func holdPrepareReviewRecovery(with gate: AsyncGate) {
+        prepareReviewRecoveryGate = gate
     }
 
     package func setNextRecoveredRun(_ run: CodexReviewBackendModel.Review.Run) {
@@ -377,7 +382,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         }
     }
 
-    package func waitForBeginReviewRecovery() async {
+    package func waitForPrepareReviewRecovery() async {
         if commands.contains(where: {
             if case .prepareReviewRecovery = $0 {
                 true
@@ -399,19 +404,19 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
                 }) {
                     continuation.resume()
                 } else {
-                    beginReviewRecoveryWaiters[waiterID] = continuation
+                    prepareReviewRecoveryWaiters[waiterID] = continuation
                 }
             }
         } onCancel: {
             Task {
-                await self.cancelBeginReviewRecoveryWaiter(id: waiterID)
+                await self.cancelPrepareReviewRecoveryWaiter(id: waiterID)
             }
         }
     }
 
-    package func waitForBeginReviewRecovery(timeout: Duration = .seconds(2)) async throws {
-        try await withFakeBackendTimeout(operation: "beginReviewRecovery", timeout: timeout) {
-            await self.waitForBeginReviewRecovery()
+    package func waitForPrepareReviewRecovery(timeout: Duration = .seconds(2)) async throws {
+        try await withFakeBackendTimeout(operation: "prepareReviewRecovery", timeout: timeout) {
+            await self.waitForPrepareReviewRecovery()
         }
     }
 
@@ -571,6 +576,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     package func releaseHeldOperationsForCleanup() async {
         await startReviewGate?.open()
         await interruptReviewGate?.open()
+        await prepareReviewRecoveryGate?.open()
         await resumeReviewRecoveryGate?.open()
     }
 
@@ -578,10 +584,14 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         _ candidate: ReviewRecoveryCandidate
     ) async throws -> ReviewRecoveryHandoff {
         commands.append(.prepareReviewRecovery(candidate))
-        let waiters = Array(beginReviewRecoveryWaiters.values)
-        beginReviewRecoveryWaiters.removeAll(keepingCapacity: false)
+        let waiters = Array(prepareReviewRecoveryWaiters.values)
+        prepareReviewRecoveryWaiters.removeAll(keepingCapacity: false)
         for waiter in waiters {
             waiter.resume()
+        }
+        if let prepareReviewRecoveryGate {
+            await prepareReviewRecoveryGate.wait()
+            try Task.checkCancellation()
         }
         let run = candidate.resolved.run
         return .init(
@@ -692,8 +702,8 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         matchingInterruptReviewWaiters.removeValue(forKey: id)?.continuation.resume()
     }
 
-    private func cancelBeginReviewRecoveryWaiter(id: UUID) {
-        beginReviewRecoveryWaiters.removeValue(forKey: id)?.resume()
+    private func cancelPrepareReviewRecoveryWaiter(id: UUID) {
+        prepareReviewRecoveryWaiters.removeValue(forKey: id)?.resume()
     }
 
     private func cancelResumeReviewRecoveryWaiter(id: UUID) {
@@ -726,7 +736,9 @@ package final class StoreSnapshotProbe {
                     lastAgentMessage: job.core.output.lastAgentMessage,
                     logs: job.logEntries,
                     run: job.core.run,
-                    activeRun: store.activeRuns[job.id],
+                    attempt: attemptSnapshot(
+                        from: store.reviewAttemptOwnerships[job.id]
+                    ),
                     cancellationRequested: job.cancellationRequested
                 )
             }
@@ -762,7 +774,8 @@ package final class StoreSnapshotProbe {
         timeout: Duration = .seconds(2)
     ) async -> StoreSnapshot? {
         await waitUntil(timeout: timeout) { snapshot in
-            snapshot.job(jobID)?.activeRun?.attemptID == attemptID
+            snapshot.job(jobID)?.attempt?.phase == .active
+                && snapshot.job(jobID)?.attempt?.attemptID == attemptID
         }
     }
 
@@ -783,6 +796,66 @@ package final class StoreSnapshotProbe {
             try? await Task.sleep(for: .milliseconds(10))
         }
     }
+
+}
+
+@MainActor
+private func attemptSnapshot(
+    from ownership: ReviewAttemptOwnership?
+) -> StoreAttemptSnapshot? {
+    switch ownership {
+    case .initialStart(let start):
+        .init(phase: .initialStart, startID: start.id, attemptID: nil)
+    case .active(let active):
+        .init(phase: .active, startID: nil, attemptID: active.run.attemptID)
+    case .resolvingRecovery(let active):
+        .init(phase: .resolvingRecovery, startID: nil, attemptID: active.run.attemptID)
+    case .recoveryDisposition(let disposition):
+        .init(
+            phase: .recoveryDisposition,
+            startID: nil,
+            attemptID: disposition.resolvedAttempt.run.attemptID
+        )
+    case .preparingRecovery(let candidate, _):
+        .init(
+            phase: .preparingRecovery,
+            startID: nil,
+            attemptID: candidate.resolved.run.attemptID
+        )
+    case .waitingForRecovery(let handoff):
+        .init(
+            phase: .waitingForRecovery,
+            startID: nil,
+            attemptID: handoff.candidate.resolved.run.attemptID
+        )
+    case .replacementStart(let handoff, let start):
+        .init(
+            phase: .replacementStart,
+            startID: start.id,
+            attemptID: handoff.candidate.resolved.run.attemptID
+        )
+    case .terminal:
+        .init(phase: .terminal, startID: nil, attemptID: nil)
+    case nil:
+        nil
+    }
+}
+
+package enum StoreAttemptPhase: Equatable, Sendable {
+    case initialStart
+    case active
+    case resolvingRecovery
+    case recoveryDisposition
+    case preparingRecovery
+    case waitingForRecovery
+    case replacementStart
+    case terminal
+}
+
+package struct StoreAttemptSnapshot: Equatable, Sendable {
+    package var phase: StoreAttemptPhase
+    package var startID: ReviewStartHandleID?
+    package var attemptID: String?
 }
 
 package struct StoreSnapshot: Sendable {
@@ -803,7 +876,7 @@ package struct StoreJobSnapshot: Sendable {
     package var lastAgentMessage: String?
     package var logs: [ReviewLogEntry]
     package var run: ReviewJobCore.Run
-    package var activeRun: CodexReviewBackendModel.Review.Run?
+    package var attempt: StoreAttemptSnapshot?
     package var cancellationRequested: Bool
 }
 
@@ -814,6 +887,9 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     package var currentSettingsSnapshot: CodexReviewSettings.Snapshot
     package private(set) var isActive = false
     package private(set) var startRequests: [Bool] = []
+    package private(set) var reviewStartOwnershipSnapshots: [StoreAttemptSnapshot?] = []
+    package private(set) var recoveryResumeOwnershipSnapshots: [StoreAttemptSnapshot?] = []
+    private weak var store: CodexReviewStore?
 
     package init(
         reviewBackend: FakeCodexReviewBackend,
@@ -828,7 +904,9 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         currentSettingsSnapshot
     }
 
-    package func attachStore(_: CodexReviewStore) {}
+    package func attachStore(_ store: CodexReviewStore) {
+        self.store = store
+    }
 
     package func start(store: CodexReviewStore, forceRestartIfNeeded: Bool) async {
         startRequests.append(forceRestartIfNeeded)
@@ -943,7 +1021,10 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         _ request: CodexReviewBackendModel.Review.Start,
         admission: ReviewStartAdmission
     ) async throws -> BackendReviewAttempt {
-        try await reviewBackend.startReview(request, admission: admission)
+        reviewStartOwnershipSnapshots.append(attemptSnapshot(
+            from: store?.reviewAttemptOwnerships[request.jobID]
+        ))
+        return try await reviewBackend.startReview(request, admission: admission)
     }
 
     package func interruptReview(
@@ -968,7 +1049,10 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         request: CodexReviewBackendModel.Review.Start,
         admission: ReviewStartAdmission
     ) async throws -> BackendReviewAttempt {
-        try await reviewBackend.resumeReviewRecovery(
+        recoveryResumeOwnershipSnapshots.append(attemptSnapshot(
+            from: store?.reviewAttemptOwnerships[request.jobID]
+        ))
+        return try await reviewBackend.resumeReviewRecovery(
             handoff,
             request: request,
             admission: admission

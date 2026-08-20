@@ -540,6 +540,25 @@ struct ReviewAttemptProcessorTests {
         #expect(await backendWrite.invocationCount() == 0)
     }
 
+    @Test func streamTerminalBeforeRegistrationSurvivesRegistrationWithoutWrite() async throws {
+        let admission = ReviewStartAdmission(closePolicy: controlledClosePolicy(gate: AsyncGate()))
+        let failure = ReviewAttemptStreamFailure.unexpectedConnection(
+            .connection("Connection ended")
+        )
+        try await admission.recordStreamTerminal(failure)
+        let backendWrite = InvocationProbe()
+
+        let registered = try await admission.registerStart { _ in
+            await backendWrite.record()
+            return .init(run: canonicalRun)
+        }
+
+        await #expect(throws: failure) {
+            _ = try await registered.task.value
+        }
+        #expect(await backendWrite.invocationCount() == 0)
+    }
+
     @Test func activationIsIdempotentForLiveHandleAndRejectsWrongHandle() async throws {
         let admission = ReviewStartAdmission(closePolicy: controlledClosePolicy(gate: AsyncGate()))
         let operationGate = AsyncGate()
@@ -556,6 +575,9 @@ struct ReviewAttemptProcessorTests {
         try await admission.activateStart(registered.id)
         await operationGate.open()
         _ = try await registered.task.value
+        await #expect(throws: ReviewAttemptContractFailure.self) {
+            try await admission.activateStart(registered.id)
+        }
     }
 
     @Test func joinedExplicitCancellationInstallsProductDispositionBeforeRecoveryPreparation() async throws {
@@ -596,6 +618,48 @@ struct ReviewAttemptProcessorTests {
         #expect(product.productTerminal == .interrupted(.requested(.mcpClient(message: "Stop"))))
         _ = try await cancellation.value
         #expect(await requestStarted.invocationCount() == 1)
+    }
+
+    @Test func joinedCancellationOutcomeUnknownConnectionRetainsTransportProduct() async throws {
+        let (admission, run) = try await makeActiveAdmission()
+        let requestFailed = InvocationProbe()
+        let requestFailure = ReviewInterruptRequestFailure(
+            outcome: .outcomeUnknown(message: "Response lost")
+        )
+        let connection = ReviewRuntimeCloseFailure.connection("Connection ended")
+        let recovery = Task {
+            try await admission.beginRecovery(
+                trigger: .recoverableNetworkLoss,
+                interrupt: { _, _ in
+                    await requestFailed.record()
+                    throw requestFailure
+                },
+                forceClose: {}
+            )
+        }
+        await requestFailed.waitForInvocation()
+        let cancellation = Task {
+            try await admission.cancel(
+                .mcpClient(message: "Stop"),
+                interrupt: { _, _ in Issue.record("Joined cancellation sent a second request.") },
+                forceClose: {}
+            )
+        }
+        #expect(await admission.waitForCancellationAdmission() == .mcpClient(message: "Stop"))
+        try await admission.recordStreamTerminal(.recoverableNetwork(connection))
+
+        guard case .productTerminal(let product) = try await recovery.value else {
+            Issue.record("Outcome-unknown connection plus joined cancel must terminalize product.")
+            return
+        }
+        #expect(product.resolved.run == run)
+        #expect(product.resolved.requestFailure?.outcome == requestFailure.outcome)
+        #expect(product.productTerminal == .interrupted(.transport(
+            message: connection.localizedDescription
+        )))
+        await #expect(throws: ReviewInterruptRequestFailure.self) {
+            _ = try await cancellation.value
+        }
     }
 
     @Test func recoveryClassifiesTypedStreamFailureBeforeTokenization() async throws {

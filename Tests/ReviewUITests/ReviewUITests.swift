@@ -1765,6 +1765,13 @@ struct ReviewUITests {
             serverState: .running,
             content: makeSidebarContent(from: [job])
         )
+        let admission = ReviewStartAdmission()
+        let registered = try await admission.registerStart { _ in
+            throw ReviewAttemptContractFailure(
+                message: "Sidebar cancellation fixture must remain backend-inert."
+            )
+        }
+        store.reviewAttemptOwnerships[job.id] = .initialStart(registered)
         let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
@@ -1799,7 +1806,10 @@ struct ReviewUITests {
         )
         let admission = ReviewStartAdmission()
         await admission.recordActiveRun(run)
-        store.reviewStartAdmissions[job.id] = admission
+        store.reviewAttemptOwnerships[job.id] = .active(.init(
+            run: run,
+            admission: admission
+        ))
         let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 

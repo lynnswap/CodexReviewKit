@@ -29,9 +29,7 @@ public final class CodexReviewStore {
     @ObservationIgnored package var previewSupportRetainer: AnyObject?
     @ObservationIgnored package let clock: CodexReviewClock
     @ObservationIgnored package let idGenerator: CodexReviewIDGenerator
-    @ObservationIgnored package var activeRuns: [String: CodexReviewBackendModel.Review.Run] = [:]
-    @ObservationIgnored package var reviewRecoveryWaitingJobIDs: Set<String> = []
-    @ObservationIgnored package var reviewStartAdmissions: [String: ReviewStartAdmission] = [:]
+    @ObservationIgnored package var reviewAttemptOwnerships: [String: ReviewAttemptOwnership] = [:]
     @ObservationIgnored package var reviewCleanupFailures: [String: ReviewRuntimeCloseFailure] = [:]
     @ObservationIgnored package var reviewWorkerTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored package var runtimeStopDetachedReviewWorkerTasks: [String: Task<Void, Never>] = [:]
