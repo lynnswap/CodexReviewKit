@@ -382,6 +382,47 @@ struct AppServerClientTests {
         #expect(object["value"] as? String == "done")
     }
 
+    @Test func processTransportClosesConnectionOnInvalidJSONRPCFraming() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "codex-review-invalid-framing-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let executable = directory.appending(path: "app-server-stub.sh")
+        let script = """
+        #!/bin/sh
+        printf 'not-json\\n'
+        sleep 10
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let transport = try AppServerProcessTransport(configuration: .init(
+            executable: executable.path,
+            arguments: [],
+            environment: [
+                "HOME": directory.path,
+                "PATH": "/bin:/usr/bin",
+            ]
+        ))
+        let notifications = await transport.notificationStream()
+        var iterator = notifications.makeAsyncIterator()
+
+        do {
+            _ = try await iterator.next()
+            Issue.record("Expected invalid framing to terminate the connection")
+        } catch let error as JSONRPC.Error {
+            guard case .invalidMessage = error else {
+                Issue.record("Expected invalidMessage, got \(error)")
+                return
+            }
+        }
+        await #expect(throws: JSONRPC.Error.closed) {
+            try await transport.notify(.init(method: "initialized", params: Data("{}".utf8)))
+        }
+    }
+
     @Test func processTransportWritesCodexJSONRPCLiteMessages() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appending(path: "codex-review-jsonrpc-lite-\(UUID().uuidString)")
@@ -1170,20 +1211,20 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "turn/started",
             params: TestTurnNotification(
-                threadID: "parent-thread",
-                turn: .init(id: "turn-new"),
+                threadID: "review-thread",
+                turn: .init(id: "turn-old"),
                 reviewThreadID: "review-thread"
             )
         )
         var iterator = events.makeAsyncIterator()
-        #expect(try await iterator.next() == .started(turnID: "turn-new", reviewThreadID: "review-thread", model: nil))
+        #expect(try await iterator.next() == .started(turnID: "turn-old", reviewThreadID: "review-thread", model: nil))
 
         try await backend.interruptReview(run, reason: .init())
 
         let request = try #require(await transport.recordedRequests().last)
         let params = try JSONDecoder().decode(AppServerAPI.Turn.Interrupt.Params.self, from: request.params)
-        #expect(params.threadID == "parent-thread")
-        #expect(params.turnID == "turn-new")
+        #expect(params.threadID == "review-thread")
+        #expect(params.turnID == "turn-old")
     }
 
     @Test func backendInterruptUsesDetachedReviewThreadBeforeStartedNotification() async throws {
@@ -1225,14 +1266,14 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
-                threadID: "parent-thread",
-                turnID: "turn-new",
+                threadID: "review-thread",
+                turnID: "turn-old",
                 item: .init(type: "enteredReviewMode", id: "review-item-1", review: "current changes")
             )
         )
 
         var iterator = events.makeAsyncIterator()
-        #expect(try await iterator.next() == .started(turnID: "turn-new", reviewThreadID: "review-thread", model: nil))
+        #expect(try await iterator.next() == .started(turnID: "turn-old", reviewThreadID: "review-thread", model: nil))
         #expect(try await iterator.next() == .logEntry(
             kind: .progress,
             text: "Reviewing current changes",
@@ -1260,7 +1301,7 @@ struct AppServerClientTests {
             method: "turn/started",
             params: TestTurnNotification(
                 threadID: "review-thread",
-                turn: .init(id: "turn-new"),
+                turn: .init(id: "turn-old"),
                 reviewThreadID: "review-thread"
             )
         )
@@ -1268,13 +1309,13 @@ struct AppServerClientTests {
             method: "item/agentMessage/delta",
             params: TestDeltaNotification(
                 threadID: "review-thread",
-                turnID: "turn-new",
+                turnID: "turn-old",
                 itemID: "message-1",
                 delta: "review text"
             )
         )
 
-        #expect(try await iterator.next() == .started(turnID: "turn-new", reviewThreadID: "review-thread", model: nil))
+        #expect(try await iterator.next() == .started(turnID: "turn-old", reviewThreadID: "review-thread", model: nil))
         #expect(try await iterator.next() == .messageDelta("review text", itemID: "message-1"))
         #expect(await backend.reviewEventSessionMetricsForTesting(threadID: "review-thread")?.routed == 2)
 
@@ -1283,7 +1324,7 @@ struct AppServerClientTests {
         #expect(interruptRequest.method == "turn/interrupt")
         let interruptParams = try JSONDecoder().decode(AppServerAPI.Turn.Interrupt.Params.self, from: interruptRequest.params)
         #expect(interruptParams.threadID == "review-thread")
-        #expect(interruptParams.turnID == "turn-new")
+        #expect(interruptParams.turnID == "turn-old")
     }
 
     @Test func backendBuffersNotificationsBeforeAttemptMailboxRead() async throws {
@@ -1363,7 +1404,11 @@ struct AppServerClientTests {
         let transport = FakeJSONRPCTransport()
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
-        let run = CodexReviewBackendModel.Review.Run(threadID: "parent-thread", reviewThreadID: "review-thread")
+        let run = CodexReviewBackendModel.Review.Run(
+            threadID: "parent-thread",
+            turnID: "turn-new",
+            reviewThreadID: "review-thread"
+        )
         var iterator = await eventSequence(backend, run).makeAsyncIterator()
 
         try await transport.emitServerNotification(
@@ -1407,7 +1452,7 @@ struct AppServerClientTests {
             method: "turn/started",
             params: TestTurnNotification(
                 threadID: "review-thread",
-                turn: .init(id: "turn-new"),
+                turn: .init(id: "turn-old"),
                 reviewThreadID: "review-thread"
             )
         )
@@ -1420,14 +1465,14 @@ struct AppServerClientTests {
         let run = try await started
         var iterator = await eventSequence(backend, run).makeAsyncIterator()
 
-        #expect(try await iterator.next() == .started(turnID: "turn-new", reviewThreadID: "review-thread", model: nil))
+        #expect(try await iterator.next() == .started(turnID: "turn-old", reviewThreadID: "review-thread", model: nil))
         #expect(await backend.reviewEventSessionMetricsForTesting(threadID: "review-thread")?.routed == 1)
         try await backend.interruptReview(run, reason: .init(message: "Stop"))
         let interruptRequest = try #require(await transport.recordedRequests().last)
         #expect(interruptRequest.method == "turn/interrupt")
         let interruptParams = try JSONDecoder().decode(AppServerAPI.Turn.Interrupt.Params.self, from: interruptRequest.params)
         #expect(interruptParams.threadID == "review-thread")
-        #expect(interruptParams.turnID == "turn-new")
+        #expect(interruptParams.turnID == "turn-old")
     }
 
     @Test func backendBuffersParentThreadNotificationsDuringReviewStartUntilRunIsFinalized() async throws {
@@ -1450,7 +1495,7 @@ struct AppServerClientTests {
             method: "turn/started",
             params: TestTurnNotification(
                 threadID: "thread-1",
-                turn: .init(id: "turn-new"),
+                turn: .init(id: "turn-response"),
                 reviewThreadID: "thread-1"
             )
         )
@@ -1463,13 +1508,13 @@ struct AppServerClientTests {
         let run = try await started
         var iterator = await eventSequence(backend, run).makeAsyncIterator()
 
-        #expect(try await iterator.next() == .started(turnID: "turn-new", reviewThreadID: "thread-1", model: nil))
+        #expect(try await iterator.next() == .started(turnID: "turn-response", reviewThreadID: "thread-1", model: nil))
         try await backend.interruptReview(run, reason: .init(message: "Stop"))
         let interruptRequest = try #require(await transport.recordedRequests().last)
         #expect(interruptRequest.method == "turn/interrupt")
         let interruptParams = try JSONDecoder().decode(AppServerAPI.Turn.Interrupt.Params.self, from: interruptRequest.params)
         #expect(interruptParams.threadID == "thread-1")
-        #expect(interruptParams.turnID == "turn-new")
+        #expect(interruptParams.turnID == "turn-response")
     }
 
     @Test func backendUsesSingleNotificationRouterForConcurrentReviews() async throws {
@@ -1639,7 +1684,9 @@ struct AppServerClientTests {
         let run = try await started
 
         var iterator = await eventSequence(backend, run).makeAsyncIterator()
-        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: nil))
+        #expect(try await iterator.next() == .failed(
+            ReviewIngestionError.missingFinalReview.localizedDescription
+        ))
     }
 
     @Test func backendBuffersCancellationBeforeEventStreamRegistration() async throws {
@@ -1755,7 +1802,7 @@ struct AppServerClientTests {
         #expect(restartParams.target == .baseBranch("main"))
     }
 
-    @Test func backendRecoverReviewRollsBackInterruptedDetachedReviewThread() async throws {
+    @Test func backendRecoverReviewRollsBackCanonicalDetachedReviewThread() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "parent-thread", model: "gpt-5"), for: "thread/start")
@@ -1774,21 +1821,16 @@ struct AppServerClientTests {
             method: "turn/started",
             params: TestTurnNotification(
                 threadID: "review-thread",
-                turn: .init(id: "turn-new"),
+                turn: .init(id: "turn-old"),
                 reviewThreadID: "review-thread"
             )
         )
         #expect(try await iterator.next() == .started(
-            turnID: "turn-new",
+            turnID: "turn-old",
             reviewThreadID: "review-thread",
             model: nil
         ))
-        let currentRun = CodexReviewBackendModel.Review.Run(
-            threadID: "parent-thread",
-            turnID: "turn-new",
-            reviewThreadID: "review-thread",
-            model: "gpt-5"
-        )
+        let currentRun = startedRun
         let reason = CodexReviewBackendModel.CancellationReason(message: "Network unavailable; waiting to reconnect.")
 
         let token = try await backend.beginReviewRecovery(currentRun, reason: reason)
@@ -1810,7 +1852,7 @@ struct AppServerClientTests {
             .filter { $0.method == "turn/interrupt" }
             .map { try JSONDecoder().decode(AppServerAPI.Turn.Interrupt.Params.self, from: $0.params) }
         #expect(interruptParams == [
-            .init(threadID: "review-thread", turnID: "turn-new"),
+            .init(threadID: "review-thread", turnID: "turn-old"),
         ])
         let rollback = try #require(requests.first { $0.method == "thread/rollback" })
         let rollbackParams = try JSONDecoder().decode(AppServerAPI.Thread.Rollback.Params.self, from: rollback.params)
@@ -2216,7 +2258,9 @@ struct AppServerClientTests {
         #expect(recoveredRun.turnID == "turn-2")
         let recoveredEvents = await eventSequence(backend, recoveredRun)
         var iterator = recoveredEvents.makeAsyncIterator()
-        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: nil))
+        #expect(try await iterator.next() == .failed(
+            ReviewIngestionError.missingFinalReview.localizedDescription
+        ))
     }
 
     @Test func backendIgnoresStaleTerminalWhileRecoveryInterruptIsInFlight() async throws {
@@ -2284,7 +2328,9 @@ struct AppServerClientTests {
             method: "turn/completed",
             params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-2", status: "completed"))
         )
-        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: nil))
+        #expect(try await iterator.next() == .failed(
+            ReviewIngestionError.missingFinalReview.localizedDescription
+        ))
     }
 
     @Test func backendIgnoresStaleInterruptedTurnNotificationsWhileRollbackIsInFlight() async throws {
@@ -2504,7 +2550,9 @@ struct AppServerClientTests {
             method: "turn/completed",
             params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-2", status: "completed"))
         )
-        #expect(try await recoveredIterator.next() == .completed(summary: "Succeeded.", result: nil))
+        #expect(try await recoveredIterator.next() == .failed(
+            ReviewIngestionError.missingFinalReview.localizedDescription
+        ))
     }
 
     @Test func backendCleanupDeletesAllRecoveryReviewThreads() async throws {
@@ -2545,11 +2593,11 @@ struct AppServerClientTests {
         ])
     }
 
-    @Test func backendTracksActualStartedTurnAndStreamsReviewItems() async throws {
+    @Test func backendStreamsItemsForCanonicalResponseTurn() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
-        try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-response", reviewThreadID: "thread-1"), for: "review/start")
+        try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-new", reviewThreadID: "thread-1"), for: "review/start")
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
 
         let run = try await backend.startReview(.init(
@@ -2572,16 +2620,16 @@ struct AppServerClientTests {
             params: TestDeltaNotification(threadID: "thread-1", turnID: "turn-new", itemID: "message-1", delta: " hello")
         )
         try await transport.emitServerNotification(
-            method: "turn/completed",
-            params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-new", status: "completed"))
-        )
-        try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
                 threadID: "thread-1",
                 turnID: "turn-new",
                 item: .init(type: "exitedReviewMode", id: "review-item-1", review: "final review text")
             )
+        )
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-new", status: "completed"))
         )
 
         var iterator = events.makeAsyncIterator()
@@ -2606,7 +2654,7 @@ struct AppServerClientTests {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
-        try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-old", reviewThreadID: "thread-1"), for: "review/start")
+        try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-new", reviewThreadID: "thread-1"), for: "review/start")
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
 
         let run = try await backend.startReview(.init(
@@ -2636,16 +2684,16 @@ struct AppServerClientTests {
             params: TestDeltaNotification(threadID: "thread-1", turnID: "turn-new", itemID: "message-1", delta: " current")
         )
         try await transport.emitServerNotification(
-            method: "turn/completed",
-            params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-new", status: "completed"))
-        )
-        try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
                 threadID: "thread-1",
                 turnID: "turn-new",
                 item: .init(type: "exitedReviewMode", id: "review-item-1", review: "final review text")
             )
+        )
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-new", status: "completed"))
         )
 
         var iterator = events.makeAsyncIterator()
@@ -2670,7 +2718,7 @@ struct AppServerClientTests {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
-        try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-response", reviewThreadID: "thread-1"), for: "review/start")
+        try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-new", reviewThreadID: "thread-1"), for: "review/start")
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
 
         let run = try await backend.startReview(.init(
@@ -2698,16 +2746,16 @@ struct AppServerClientTests {
             )
         )
         try await transport.emitServerNotification(
-            method: "turn/completed",
-            params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-new", status: "completed"))
-        )
-        try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
                 threadID: "thread-1",
                 turnID: "turn-new",
                 item: .init(type: "exitedReviewMode", id: "review-item-1", review: "final review text")
             )
+        )
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-new", status: "completed"))
         )
 
         var iterator = events.makeAsyncIterator()
@@ -2747,7 +2795,9 @@ struct AppServerClientTests {
         )
 
         var iterator = events.makeAsyncIterator()
-        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: nil))
+        #expect(try await iterator.next() == .failed(
+            ReviewIngestionError.missingFinalReview.localizedDescription
+        ))
         #expect(try await iterator.next() == nil)
     }
 
@@ -3065,7 +3115,7 @@ struct AppServerClientTests {
         #expect(try await iterator.next() == .log("Continuing."))
     }
 
-    @Test func backendRebindsObservedTurnAndInterruptsLatestTurn() async throws {
+    @Test func backendIgnoresAuxiliaryTurnAndInterruptsCanonicalTurn() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
@@ -3095,22 +3145,15 @@ struct AppServerClientTests {
 
         var iterator = events.makeAsyncIterator()
         #expect(try await iterator.next() == .started(turnID: "turn-old", reviewThreadID: "thread-1", model: nil))
-        #expect(try await iterator.next() == .started(turnID: "turn-new", reviewThreadID: "thread-1", model: nil))
-        #expect(try await iterator.next() == .logEntry(
-            kind: .progress,
-            text: "Reviewing current changes",
-            groupID: "review-item-1",
-            replacesGroup: true
-        ))
 
         try await backend.interruptReview(run, reason: .init())
 
         let request = try #require(await transport.recordedRequests().last)
         let params = try JSONDecoder().decode(AppServerAPI.Turn.Interrupt.Params.self, from: request.params)
-        #expect(params.turnID == "turn-new")
+        #expect(params.turnID == "turn-old")
     }
 
-    @Test func backendKeepsReviewModeCompletionAfterTurnRebind() async throws {
+    @Test func backendKeepsCanonicalReviewCompletionWhenAuxiliaryTurnStarts() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
@@ -3137,10 +3180,6 @@ struct AppServerClientTests {
             params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-new"))
         )
         try await transport.emitServerNotification(
-            method: "turn/completed",
-            params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-old", status: "completed"))
-        )
-        try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
                 threadID: "thread-1",
@@ -3150,7 +3189,7 @@ struct AppServerClientTests {
         )
         try await transport.emitServerNotification(
             method: "turn/completed",
-            params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-new", status: "completed"))
+            params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-old", status: "completed"))
         )
 
         var iterator = events.makeAsyncIterator()
@@ -3161,7 +3200,6 @@ struct AppServerClientTests {
             groupID: "review-item-1",
             replacesGroup: true
         ))
-        #expect(try await iterator.next() == .started(turnID: "turn-new", reviewThreadID: "thread-1", model: nil))
         #expect(try await iterator.next() == .logEntry(
             kind: .agentMessage,
             text: "final review text",
@@ -3171,7 +3209,7 @@ struct AppServerClientTests {
         #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "final review text"))
     }
 
-    @Test func backendBindsActualTurnFromFirstReviewItemWhenStartedNotificationIsMissing() async throws {
+    @Test func backendUsesCanonicalResponseTurnWhenStartedNotificationIsMissing() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
@@ -3189,7 +3227,7 @@ struct AppServerClientTests {
             method: "item/started",
             params: TestItemNotification(
                 threadID: "thread-1",
-                turnID: "turn-new",
+                turnID: "turn-old",
                 item: .init(type: "enteredReviewMode", id: "review-item-1", review: "current changes")
             )
         )
@@ -3197,26 +3235,26 @@ struct AppServerClientTests {
             method: "item/reasoning/summaryTextDelta",
             params: TestDeltaNotification(
                 threadID: "thread-1",
-                turnID: "turn-new",
+                turnID: "turn-old",
                 itemID: "reasoning-1",
                 delta: " Checking diff"
             )
         )
         try await transport.emitServerNotification(
-            method: "turn/completed",
-            params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-new", status: "completed"))
-        )
-        try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
                 threadID: "thread-1",
-                turnID: "turn-new",
+                turnID: "turn-old",
                 item: .init(type: "exitedReviewMode", id: "review-item-1", review: "final review text")
             )
         )
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-old", status: "completed"))
+        )
 
         var iterator = events.makeAsyncIterator()
-        #expect(try await iterator.next() == .started(turnID: "turn-new", reviewThreadID: "thread-1", model: nil))
+        #expect(try await iterator.next() == .started(turnID: "turn-old", reviewThreadID: "thread-1", model: nil))
         #expect(try await iterator.next() == .logEntry(
             kind: .progress,
             text: "Reviewing current changes",
@@ -3283,7 +3321,6 @@ struct AppServerClientTests {
             groupID: "review-item-1",
             replacesGroup: true
         ))
-        #expect(try await iterator.next() == .started(turnID: "active-turn", reviewThreadID: "thread-1", model: nil))
         #expect(try await iterator.next() == .messageDelta("review output", itemID: "message-1"))
 
         try await backend.interruptReview(run, reason: .init())
@@ -3292,7 +3329,7 @@ struct AppServerClientTests {
             AppServerAPI.Turn.Interrupt.Params.self,
             from: try #require(await transport.recordedRequests().last?.params)
         )
-        #expect(params.turnID == "active-turn")
+        #expect(params.turnID == "review-turn")
     }
 
     @Test func backendMapsReviewItemAndDiagnosticNotificationsToLogEntries() async throws {
@@ -3658,7 +3695,9 @@ struct AppServerClientTests {
             replacesGroup: true,
             metadata: .init(sourceType: "contextCompaction", status: "completed", itemID: "compact-1")
         ))
-        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: nil))
+        #expect(try await iterator.next() == .failed(
+            ReviewIngestionError.missingFinalReview.localizedDescription
+        ))
     }
 
     @Test func backendMapsExitedReviewModeItemToFinalAgentMessage() async throws {
@@ -4263,6 +4302,13 @@ struct AppServerClientTests {
                 item: .init(type: "exitedReviewMode", id: "review-item-1", review: "final review text")
             )
         )
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: "thread-1",
+                turn: .init(id: "turn-1", status: "completed")
+            )
+        )
 
         var iterator = events.makeAsyncIterator()
         #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
@@ -4377,6 +4423,13 @@ struct AppServerClientTests {
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "exitedReviewMode", id: "review-item-1", review: "final review text")
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: "thread-1",
+                turn: .init(id: "turn-1", status: "completed")
             )
         )
 
@@ -4676,7 +4729,7 @@ struct AppServerClientTests {
         ))
     }
 
-    @Test func backendWaitsForFinalReviewItemAfterTurnCompletes() async throws {
+    @Test func backendRejectsObsoleteTerminalBeforeFinalMarkerOrdering() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
@@ -4719,13 +4772,9 @@ struct AppServerClientTests {
             groupID: "review-item-1",
             replacesGroup: true
         ))
-        #expect(try await iterator.next() == .logEntry(
-            kind: .agentMessage,
-            text: "final review text",
-            groupID: "review-item-1",
-            replacesGroup: true
+        #expect(try await iterator.next() == .failed(
+            ReviewIngestionError.missingFinalReview.localizedDescription
         ))
-        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "final review text"))
     }
 
     @Test func backendReplaysBufferedReviewLifecycleNotifications() async throws {
@@ -4828,7 +4877,7 @@ struct AppServerClientTests {
         )
 
         var failedWithoutMessageIterator = failedWithoutMessageEvents.makeAsyncIterator()
-        #expect(try await failedWithoutMessageIterator.next() == .failed("Failed."))
+        #expect(try await failedWithoutMessageIterator.next() == .failed(nil))
 
         let cancelledWithoutMessageRun = CodexReviewBackendModel.Review.Run(threadID: "thread-5", turnID: "turn-5")
         let cancelledWithoutMessageTransport = FakeJSONRPCTransport()
@@ -4844,7 +4893,7 @@ struct AppServerClientTests {
         )
 
         var cancelledWithoutMessageIterator = cancelledWithoutMessageEvents.makeAsyncIterator()
-        #expect(try await cancelledWithoutMessageIterator.next() == .cancelled("Cancellation requested."))
+        #expect(try await cancelledWithoutMessageIterator.next() == .cancelled(nil))
 
         let retryingRun = CodexReviewBackendModel.Review.Run(threadID: "thread-3", turnID: "turn-3")
         let retryingTransport = FakeJSONRPCTransport()
@@ -4868,7 +4917,9 @@ struct AppServerClientTests {
             groupID: "turn-3",
             replacesGroup: false
         ))
-        #expect(try await retryingIterator.next() == .completed(summary: "Succeeded.", result: nil))
+        #expect(try await retryingIterator.next() == .failed(
+            ReviewIngestionError.missingFinalReview.localizedDescription
+        ))
     }
 
     @Test func backendIgnoresUnrelatedNotificationsBeforeReviewPayloadDecode() async throws {
@@ -4888,7 +4939,7 @@ struct AppServerClientTests {
 
         var iterator = events.makeAsyncIterator()
         let event = try await iterator.next()
-        #expect(event == .completed(summary: "Succeeded.", result: nil))
+        #expect(event == .failed(ReviewIngestionError.missingFinalReview.localizedDescription))
     }
 
     @Test func backendCleansThreadWhenReviewStartFailsAfterThreadStart() async throws {
@@ -4974,6 +5025,28 @@ private struct TestTurnNotification: Encodable, Sendable {
         case reviewThreadID = "reviewThreadId"
         case result
     }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(threadID, forKey: .threadID)
+        try container.encode(CurrentTurn(
+            id: turn.id,
+            items: [],
+            itemsView: "notLoaded",
+            status: turn.status ?? "inProgress",
+            error: turn.error
+        ), forKey: .turn)
+        try container.encodeIfPresent(reviewThreadID, forKey: .reviewThreadID)
+        try container.encodeIfPresent(result, forKey: .result)
+    }
+
+    private struct CurrentTurn: Encodable {
+        var id: String
+        var items: [TestItem]
+        var itemsView: String
+        var status: String
+        var error: AppServerAPI.Turn.Error?
+    }
 }
 
 private struct TestPartialTurnNotification: Encodable, Sendable {
@@ -4990,6 +5063,8 @@ private struct TestPartialTurn: Encodable, Sendable {
     var id: String
     var status: String
     var error: TestPartialTurnError
+    var items: [TestItem] = []
+    var itemsView: String = "notLoaded"
 }
 
 private struct TestPartialTurnError: Encodable, Sendable {}

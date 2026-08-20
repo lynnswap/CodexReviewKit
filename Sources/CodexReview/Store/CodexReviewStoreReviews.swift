@@ -189,6 +189,12 @@ extension CodexReviewStore {
                     sessionID: job.sessionID,
                     cancellation: startupCancellation
                 )
+            } else if job.isTerminal == false,
+                      let transportFailure = error as? ReviewWorkerInputQueueError {
+                markReviewInterrupted(
+                    job,
+                    cause: .transport(message: transportFailure.message)
+                )
             } else if job.isTerminal == false {
                 markReviewFailed(job, message: error.localizedDescription)
             }
@@ -556,20 +562,47 @@ extension CodexReviewStore {
         writeDiagnosticsIfNeeded()
     }
 
-    private func markReviewFailed(_ job: CodexReviewJob, message: String) {
+    private func markReviewFailed(
+        _ job: CodexReviewJob,
+        message: String?,
+        terminal: ReviewTerminalRecord? = nil
+    ) {
         guard job.isTerminal == false else {
             return
         }
+        let displayMessage = message?.nilIfEmpty ?? "Review failed."
         let endedAt = clock.now()
         job.closeActiveCommandLogEntries(status: "failed", completedAt: endedAt)
+        job.core.lifecycle.terminal = terminal ?? .failed(message: message?.nilIfEmpty)
         job.core.lifecycle.status = .failed
         job.core.lifecycle.endedAt = endedAt
-        job.core.lifecycle.errorMessage = message
-        job.core.output.summary = message
-        job.appendLogEntry(.init(kind: .error, text: message, timestamp: endedAt))
+        job.core.lifecycle.errorMessage = message?.nilIfEmpty
+        job.core.output.summary = displayMessage
+        job.appendLogEntry(.init(kind: .error, text: displayMessage, timestamp: endedAt))
         job.applyReviewLogLimit()
         writeDiagnosticsIfNeeded()
         resumeReviewWaiters(for: job.id)
+    }
+
+    private func markReviewInterrupted(
+        _ job: CodexReviewJob,
+        cause: ReviewInterruptionCause
+    ) {
+        let message: String? = switch cause {
+        case .requested(let cancellation):
+            cancellation.message
+        case .server(let message):
+            message
+        case .transport(let message):
+            message
+        case .previousProcessExit:
+            "The previous review process exited before completion."
+        }
+        markReviewFailed(
+            job,
+            message: message,
+            terminal: .interrupted(cause)
+        )
     }
 
     private func consumeReviewEvents(
@@ -696,10 +729,9 @@ extension CodexReviewStore {
             if completePendingCancellationIfNeeded(for: job) {
                 return recoveryState.currentRun
             }
-            completeReview(
+            markReviewFailed(
                 job,
-                summary: job.core.output.summary,
-                result: job.core.output.lastAgentMessage
+                message: ReviewIngestionError.streamEndedWithoutTerminal.localizedDescription
             )
         }
         return recoveryState.currentRun
@@ -721,10 +753,9 @@ extension CodexReviewStore {
             if completePendingCancellationIfNeeded(for: job) {
                 return true
             }
-            completeReview(
+            markReviewFailed(
                 job,
-                summary: job.core.output.summary,
-                result: job.core.output.lastAgentMessage
+                message: ReviewIngestionError.streamEndedWithoutTerminal.localizedDescription
             )
         }
         return true
@@ -832,16 +863,9 @@ extension CodexReviewStore {
             writeDiagnosticsIfNeeded()
             return currentRun
         }
-        var updatedRun = currentRun
+        let updatedRun = currentRun
         switch event {
-        case .started(let turnID, let reviewThreadID, let model):
-            job.core.run.turnID = turnID
-            job.core.run.reviewThreadID = reviewThreadID ?? job.core.run.reviewThreadID
-            job.core.run.model = model ?? job.core.run.model
-            updatedRun.turnID = turnID
-            updatedRun.reviewThreadID = reviewThreadID ?? updatedRun.reviewThreadID
-            updatedRun.model = model ?? updatedRun.model
-            activeRuns[job.id] = updatedRun
+        case .started:
             job.core.output.summary = "Review started."
         case .message(let text):
             job.core.output.lastAgentMessage = text
@@ -862,6 +886,16 @@ extension CodexReviewStore {
         case .log(let text):
             job.appendLogEntry(.init(kind: .progress, text: text, timestamp: clock.now()))
         case .logEntry(let kind, let text, let groupID, let replacesGroup, let metadata):
+            if metadata?.sourceType == "suppressedFinalReviewCompanion",
+               let groupID {
+                job.replaceLogEntries(job.logEntries.filter {
+                    !($0.kind == .agentMessage && $0.groupID == groupID)
+                })
+                job.agentMessagesByItemID.removeValue(forKey: groupID)
+                job.completedAgentMessageItemIDs.remove(groupID)
+                writeDiagnosticsIfNeeded()
+                return updatedRun
+            }
             if kind == .agentMessage {
                 if let groupID, replacesGroup {
                     job.noteCompletedAgentMessage(itemID: groupID, text: text)
@@ -882,12 +916,18 @@ extension CodexReviewStore {
         case .failed(let message):
             markReviewFailed(job, message: message)
         case .cancelled(let message):
-            let cancellation = job.core.lifecycle.cancellation ?? .system(message: message)
-            try? completeCancellationLocally(
-                jobID: job.id,
-                sessionID: job.sessionID,
-                cancellation: cancellation
-            )
+            if let cancellation = job.core.lifecycle.cancellation {
+                try? completeCancellationLocally(
+                    jobID: job.id,
+                    sessionID: job.sessionID,
+                    cancellation: cancellation
+                )
+            } else {
+                markReviewInterrupted(
+                    job,
+                    cause: .server(message: message?.nilIfEmpty)
+                )
+            }
         }
         writeDiagnosticsIfNeeded()
         return updatedRun
@@ -914,20 +954,42 @@ extension CodexReviewStore {
         guard job.isTerminal == false else {
             return
         }
+        let finalResult: ReviewFinalResult
+        do {
+            guard let result else {
+                throw ReviewIngestionError.missingFinalReview
+            }
+            finalResult = try ReviewFinalResult(
+                validating: result,
+                source: .backendProvided
+            )
+        } catch {
+            markReviewFailed(job, message: error.localizedDescription)
+            return
+        }
         let endedAt = clock.now()
-        let previousAgentMessage = job.core.output.lastAgentMessage?.nilIfEmpty
-        let resultText = result?.nilIfEmpty
-        let finalReviewText = resultText ?? previousAgentMessage
         job.closeActiveCommandLogEntries(status: "completed", completedAt: endedAt)
+        job.core.lifecycle.terminal = .completed
         job.core.lifecycle.status = .succeeded
         job.core.lifecycle.endedAt = endedAt
         job.core.output.summary = summary
-        job.core.output.lastAgentMessage = finalReviewText ?? summary
-        job.core.output.hasFinalReview = finalReviewText != nil
-        job.core.output.reviewResult = ParsedReviewResult.parse(finalReviewText: finalReviewText)
-        if let result = resultText,
-           result != previousAgentMessage {
-            job.appendLogEntry(.init(kind: .agentMessage, text: result, timestamp: endedAt))
+        job.core.output.lastAgentMessage = finalResult.text
+        job.core.output.hasFinalReview = true
+        job.core.output.reviewResult = ParsedReviewResult.parse(finalReviewText: finalResult.text)
+        let hasCanonicalResultRow = job.logEntries.contains { entry in
+            guard entry.kind == .agentMessage else {
+                return false
+            }
+            return entry.metadata?.sourceType == "exitedReviewMode"
+                || entry.metadata?.sourceType == "canonicalReviewResult"
+        }
+        if hasCanonicalResultRow == false {
+            job.appendLogEntry(.init(
+                kind: .agentMessage,
+                text: finalResult.text,
+                metadata: .init(sourceType: "canonicalReviewResult"),
+                timestamp: endedAt
+            ))
         }
         job.applyReviewLogLimit()
         writeDiagnosticsIfNeeded()
