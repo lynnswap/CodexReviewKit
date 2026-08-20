@@ -8,9 +8,19 @@ import TextTransitions
 @MainActor
 struct CodexReviewKitProductConsumer {
     static func main() {
+        let lifecycleInitializer: (
+            ReviewJobState,
+            Int?,
+            Date?,
+            Date?,
+            ReviewCancellation?,
+            String?
+        ) -> ReviewJobCore.Lifecycle = ReviewJobCore.Lifecycle.init(
+            status:exitCode:startedAt:endedAt:cancellation:errorMessage:
+        )
         let parsedResult = ParsedReviewResult.parse(finalReviewText: "No findings.")
         let core = ReviewJobCore(
-            lifecycle: .init(status: .succeeded),
+            lifecycle: lifecycleInitializer(.succeeded, nil, nil, nil, nil, nil),
             output: .init(
                 summary: "Review completed.",
                 hasFinalReview: true,
@@ -23,6 +33,15 @@ struct CodexReviewKitProductConsumer {
               parsedResult.state == .noFindings
         else {
             fatalError("CodexReview public review result contract drifted.")
+        }
+        guard core.lifecycle.terminal == nil,
+              ReviewTerminalRecord.completed.kind == .completed,
+              ReviewTerminalRecord.failed(message: nil).kind == .failed,
+              ReviewTerminalRecord.interrupted(
+                .requested(.mcpClient(message: "Stop"))
+              ).kind == .interrupted
+        else {
+            fatalError("CodexReview public terminal contract drifted.")
         }
 
         let preferences = CodexReviewRuntime.Preferences(

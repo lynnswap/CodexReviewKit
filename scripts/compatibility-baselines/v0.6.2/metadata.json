@@ -1,8 +1,8 @@
 {
   "architecture": "arm64",
   "baseline": "v0.6.2 public Swift products",
-  "baselineSHA256": "d2d7ac2c8999d8c7d78a61ee4313e81c506df8ad436b3bea68206ccb2d68caf2",
-  "captureRevision": "0948f454b05c9a190deffb6707ee4b6416217e67",
+  "baselineSHA256": "465956e4233ae545980a42dd03bd34a4de2bedea93c4ce735f15b68a37ded17d",
+  "captureRevision": "d6b877752f8d5b101aa36382ba64d7d6fe786d71",
   "digesterInvocation": "xcrun swift-api-digester -dump-sdk -module CodexReview -module CodexReviewHost -module ReviewUI -module TextTransitions -swift-only -avoid-location -avoid-tool-args -abort-on-module-fail -sdk <xcrun macosx SDK> -target arm64-apple-macosx26.0 -swift-version 6 <SwiftPM module search paths>",
   "macOSSDKVersion": "27.0",
   "modules": [
@@ -12,7 +12,7 @@
     "TextTransitions"
   ],
   "publishedReleaseRevision": "82bddbcb1310a091eff742b36ab90781a4cbee5a",
-  "recoveryDesignRevision": "b47d83c117e11bdf244d4dba2a6ab07ef92b3ce6",
+  "recoveryDesignRevision": "f906075adba3cbc8eec3c7ba59ca504643f50873",
   "swiftPMBuildSystem": "swiftbuild",
   "swiftAPIDigesterSHA256": "63f3ca45b1cc6ee81ccf2b6a11e9de3e7deeef85438915403ad5fa0bd5bccde8",
   "swiftVersion": "swift-driver version: 1.168.5 Apple Swift version 6.4 (swiftlang-6.4.0.27.1 clang-2100.3.27.1)|Target: arm64-apple-macosx27.0.0",

@@ -8895,9 +8895,6 @@
                         "usr": "s:11CodexReview0B8JobStateO"
                       }
                     ],
-                    "declAttributes": [
-                      "Transparent"
-                    ],
                     "declKind": "Accessor",
                     "implicit": true,
                     "kind": "Accessor",
@@ -9138,9 +9135,6 @@
                         "usr": "s:Sq"
                       }
                     ],
-                    "declAttributes": [
-                      "Transparent"
-                    ],
                     "declKind": "Accessor",
                     "implicit": true,
                     "kind": "Accessor",
@@ -9201,9 +9195,6 @@
                         "usr": "s:Sq"
                       }
                     ],
-                    "declAttributes": [
-                      "Transparent"
-                    ],
                     "declKind": "Accessor",
                     "implicit": true,
                     "kind": "Accessor",
@@ -9243,6 +9234,69 @@
                 "name": "errorMessage",
                 "printedName": "errorMessage",
                 "usr": "s:11CodexReview0B7JobCoreV9LifecycleV12errorMessageSSSgvp"
+              },
+              {
+                "accessors": [
+                  {
+                    "accessorKind": "get",
+                    "children": [
+                      {
+                        "children": [
+                          {
+                            "kind": "TypeNominal",
+                            "name": "ReviewTerminalRecord",
+                            "printedName": "CodexReview.ReviewTerminalRecord",
+                            "usr": "s:11CodexReview0B14TerminalRecordO"
+                          }
+                        ],
+                        "kind": "TypeNominal",
+                        "name": "Optional",
+                        "printedName": "CodexReview.ReviewTerminalRecord?",
+                        "usr": "s:Sq"
+                      }
+                    ],
+                    "declAttributes": [
+                      "Transparent"
+                    ],
+                    "declKind": "Accessor",
+                    "implicit": true,
+                    "kind": "Accessor",
+                    "mangledName": "$s11CodexReview0B7JobCoreV9LifecycleV8terminalAA0B14TerminalRecordOSgvg",
+                    "moduleName": "CodexReview",
+                    "name": "Get",
+                    "printedName": "Get()",
+                    "usr": "s:11CodexReview0B7JobCoreV9LifecycleV8terminalAA0B14TerminalRecordOSgvg"
+                  }
+                ],
+                "children": [
+                  {
+                    "children": [
+                      {
+                        "kind": "TypeNominal",
+                        "name": "ReviewTerminalRecord",
+                        "printedName": "CodexReview.ReviewTerminalRecord",
+                        "usr": "s:11CodexReview0B14TerminalRecordO"
+                      }
+                    ],
+                    "kind": "TypeNominal",
+                    "name": "Optional",
+                    "printedName": "CodexReview.ReviewTerminalRecord?",
+                    "usr": "s:Sq"
+                  }
+                ],
+                "declAttributes": [
+                  "HasInitialValue",
+                  "SetterAccess",
+                  "HasStorage"
+                ],
+                "declKind": "Var",
+                "hasStorage": true,
+                "kind": "Var",
+                "mangledName": "$s11CodexReview0B7JobCoreV9LifecycleV8terminalAA0B14TerminalRecordOSgvp",
+                "moduleName": "CodexReview",
+                "name": "terminal",
+                "printedName": "terminal",
+                "usr": "s:11CodexReview0B7JobCoreV9LifecycleV8terminalAA0B14TerminalRecordOSgvp"
               },
               {
                 "children": [
@@ -9347,6 +9401,55 @@
                 "children": [
                   {
                     "kind": "TypeNominal",
+                    "name": "Lifecycle",
+                    "printedName": "CodexReview.ReviewJobCore.Lifecycle",
+                    "usr": "s:11CodexReview0B7JobCoreV9LifecycleV"
+                  },
+                  {
+                    "kind": "TypeNominal",
+                    "name": "Decoder",
+                    "printedName": "any Swift.Decoder",
+                    "usr": "s:s7DecoderP"
+                  }
+                ],
+                "declKind": "Constructor",
+                "init_kind": "Designated",
+                "kind": "Constructor",
+                "mangledName": "$s11CodexReview0B7JobCoreV9LifecycleV4fromAEs7Decoder_p_tKcfc",
+                "moduleName": "CodexReview",
+                "name": "init",
+                "printedName": "init(from:)",
+                "throwing": true,
+                "usr": "s:11CodexReview0B7JobCoreV9LifecycleV4fromAEs7Decoder_p_tKcfc"
+              },
+              {
+                "children": [
+                  {
+                    "kind": "TypeNominal",
+                    "name": "Void",
+                    "printedName": "()"
+                  },
+                  {
+                    "kind": "TypeNominal",
+                    "name": "Encoder",
+                    "printedName": "any Swift.Encoder",
+                    "usr": "s:s7EncoderP"
+                  }
+                ],
+                "declKind": "Func",
+                "funcSelfKind": "NonMutating",
+                "kind": "Function",
+                "mangledName": "$s11CodexReview0B7JobCoreV9LifecycleV6encode2toys7Encoder_p_tKF",
+                "moduleName": "CodexReview",
+                "name": "encode",
+                "printedName": "encode(to:)",
+                "throwing": true,
+                "usr": "s:11CodexReview0B7JobCoreV9LifecycleV6encode2toys7Encoder_p_tKF"
+              },
+              {
+                "children": [
+                  {
+                    "kind": "TypeNominal",
                     "name": "Bool",
                     "printedName": "Swift.Bool",
                     "usr": "s:Sb"
@@ -9377,31 +9480,6 @@
                 "printedName": "__derived_struct_equals(_:_:)",
                 "static": true,
                 "usr": "s:11CodexReview0B7JobCoreV9LifecycleV23__derived_struct_equalsySbAE_AEtFZ"
-              },
-              {
-                "children": [
-                  {
-                    "kind": "TypeNominal",
-                    "name": "Void",
-                    "printedName": "()"
-                  },
-                  {
-                    "kind": "TypeNominal",
-                    "name": "Encoder",
-                    "printedName": "any Swift.Encoder",
-                    "usr": "s:s7EncoderP"
-                  }
-                ],
-                "declKind": "Func",
-                "funcSelfKind": "NonMutating",
-                "implicit": true,
-                "kind": "Function",
-                "mangledName": "$s11CodexReview0B7JobCoreV9LifecycleV6encode2toys7Encoder_p_tKF",
-                "moduleName": "CodexReview",
-                "name": "encode",
-                "printedName": "encode(to:)",
-                "throwing": true,
-                "usr": "s:11CodexReview0B7JobCoreV9LifecycleV6encode2toys7Encoder_p_tKF"
               },
               {
                 "children": [
@@ -9466,32 +9544,6 @@
                 "name": "hashValue",
                 "printedName": "hashValue",
                 "usr": "s:11CodexReview0B7JobCoreV9LifecycleV9hashValueSivp"
-              },
-              {
-                "children": [
-                  {
-                    "kind": "TypeNominal",
-                    "name": "Lifecycle",
-                    "printedName": "CodexReview.ReviewJobCore.Lifecycle",
-                    "usr": "s:11CodexReview0B7JobCoreV9LifecycleV"
-                  },
-                  {
-                    "kind": "TypeNominal",
-                    "name": "Decoder",
-                    "printedName": "any Swift.Decoder",
-                    "usr": "s:s7DecoderP"
-                  }
-                ],
-                "declKind": "Constructor",
-                "implicit": true,
-                "init_kind": "Designated",
-                "kind": "Constructor",
-                "mangledName": "$s11CodexReview0B7JobCoreV9LifecycleV4fromAEs7Decoder_p_tKcfc",
-                "moduleName": "CodexReview",
-                "name": "init",
-                "printedName": "init(from:)",
-                "throwing": true,
-                "usr": "s:11CodexReview0B7JobCoreV9LifecycleV4fromAEs7Decoder_p_tKcfc"
               }
             ],
             "conformances": [
@@ -15082,6 +15134,1146 @@
         "name": "ReviewLogEntry",
         "printedName": "ReviewLogEntry",
         "usr": "s:11CodexReview0B8LogEntryV"
+      },
+      {
+        "children": [
+          {
+            "children": [
+              {
+                "children": [
+                  {
+                    "kind": "TypeNominal",
+                    "name": "ReviewTerminalKind",
+                    "printedName": "CodexReview.ReviewTerminalKind",
+                    "usr": "s:11CodexReview0B12TerminalKindO"
+                  },
+                  {
+                    "children": [
+                      {
+                        "kind": "TypeNominal",
+                        "name": "ReviewTerminalKind",
+                        "printedName": "CodexReview.ReviewTerminalKind",
+                        "usr": "s:11CodexReview0B12TerminalKindO"
+                      }
+                    ],
+                    "kind": "TypeNominal",
+                    "name": "Metatype",
+                    "printedName": "CodexReview.ReviewTerminalKind.Type"
+                  }
+                ],
+                "kind": "TypeFunc",
+                "name": "Function",
+                "printedName": "(CodexReview.ReviewTerminalKind.Type) -> CodexReview.ReviewTerminalKind"
+              }
+            ],
+            "declKind": "EnumElement",
+            "kind": "Var",
+            "mangledName": "$s11CodexReview0B12TerminalKindO9completedyA2CmF",
+            "moduleName": "CodexReview",
+            "name": "completed",
+            "printedName": "completed",
+            "usr": "s:11CodexReview0B12TerminalKindO9completedyA2CmF"
+          },
+          {
+            "children": [
+              {
+                "children": [
+                  {
+                    "kind": "TypeNominal",
+                    "name": "ReviewTerminalKind",
+                    "printedName": "CodexReview.ReviewTerminalKind",
+                    "usr": "s:11CodexReview0B12TerminalKindO"
+                  },
+                  {
+                    "children": [
+                      {
+                        "kind": "TypeNominal",
+                        "name": "ReviewTerminalKind",
+                        "printedName": "CodexReview.ReviewTerminalKind",
+                        "usr": "s:11CodexReview0B12TerminalKindO"
+                      }
+                    ],
+                    "kind": "TypeNominal",
+                    "name": "Metatype",
+                    "printedName": "CodexReview.ReviewTerminalKind.Type"
+                  }
+                ],
+                "kind": "TypeFunc",
+                "name": "Function",
+                "printedName": "(CodexReview.ReviewTerminalKind.Type) -> CodexReview.ReviewTerminalKind"
+              }
+            ],
+            "declKind": "EnumElement",
+            "kind": "Var",
+            "mangledName": "$s11CodexReview0B12TerminalKindO11interruptedyA2CmF",
+            "moduleName": "CodexReview",
+            "name": "interrupted",
+            "printedName": "interrupted",
+            "usr": "s:11CodexReview0B12TerminalKindO11interruptedyA2CmF"
+          },
+          {
+            "children": [
+              {
+                "children": [
+                  {
+                    "kind": "TypeNominal",
+                    "name": "ReviewTerminalKind",
+                    "printedName": "CodexReview.ReviewTerminalKind",
+                    "usr": "s:11CodexReview0B12TerminalKindO"
+                  },
+                  {
+                    "children": [
+                      {
+                        "kind": "TypeNominal",
+                        "name": "ReviewTerminalKind",
+                        "printedName": "CodexReview.ReviewTerminalKind",
+                        "usr": "s:11CodexReview0B12TerminalKindO"
+                      }
+                    ],
+                    "kind": "TypeNominal",
+                    "name": "Metatype",
+                    "printedName": "CodexReview.ReviewTerminalKind.Type"
+                  }
+                ],
+                "kind": "TypeFunc",
+                "name": "Function",
+                "printedName": "(CodexReview.ReviewTerminalKind.Type) -> CodexReview.ReviewTerminalKind"
+              }
+            ],
+            "declKind": "EnumElement",
+            "kind": "Var",
+            "mangledName": "$s11CodexReview0B12TerminalKindO6failedyA2CmF",
+            "moduleName": "CodexReview",
+            "name": "failed",
+            "printedName": "failed",
+            "usr": "s:11CodexReview0B12TerminalKindO6failedyA2CmF"
+          },
+          {
+            "children": [
+              {
+                "children": [
+                  {
+                    "kind": "TypeNominal",
+                    "name": "ReviewTerminalKind",
+                    "printedName": "CodexReview.ReviewTerminalKind",
+                    "usr": "s:11CodexReview0B12TerminalKindO"
+                  }
+                ],
+                "kind": "TypeNominal",
+                "name": "Optional",
+                "printedName": "CodexReview.ReviewTerminalKind?",
+                "usr": "s:Sq"
+              },
+              {
+                "kind": "TypeNominal",
+                "name": "String",
+                "printedName": "Swift.String",
+                "usr": "s:SS"
+              }
+            ],
+            "declAttributes": [
+              "Inlinable"
+            ],
+            "declKind": "Constructor",
+            "implicit": true,
+            "init_kind": "Designated",
+            "kind": "Constructor",
+            "mangledName": "$s11CodexReview0B12TerminalKindO8rawValueACSgSS_tcfc",
+            "moduleName": "CodexReview",
+            "name": "init",
+            "printedName": "init(rawValue:)",
+            "usr": "s:11CodexReview0B12TerminalKindO8rawValueACSgSS_tcfc"
+          },
+          {
+            "children": [
+              {
+                "kind": "TypeNominal",
+                "name": "String",
+                "printedName": "Swift.String",
+                "usr": "s:SS"
+              }
+            ],
+            "declKind": "TypeAlias",
+            "implicit": true,
+            "kind": "TypeAlias",
+            "mangledName": "$s11CodexReview0B12TerminalKindO8RawValuea",
+            "moduleName": "CodexReview",
+            "name": "RawValue",
+            "printedName": "RawValue",
+            "usr": "s:11CodexReview0B12TerminalKindO8RawValuea"
+          },
+          {
+            "accessors": [
+              {
+                "accessorKind": "get",
+                "children": [
+                  {
+                    "kind": "TypeNominal",
+                    "name": "String",
+                    "printedName": "Swift.String",
+                    "usr": "s:SS"
+                  }
+                ],
+                "declAttributes": [
+                  "Inlinable"
+                ],
+                "declKind": "Accessor",
+                "implicit": true,
+                "kind": "Accessor",
+                "mangledName": "$s11CodexReview0B12TerminalKindO8rawValueSSvg",
+                "moduleName": "CodexReview",
+                "name": "Get",
+                "printedName": "Get()",
+                "usr": "s:11CodexReview0B12TerminalKindO8rawValueSSvg"
+              }
+            ],
+            "children": [
+              {
+                "kind": "TypeNominal",
+                "name": "String",
+                "printedName": "Swift.String",
+                "usr": "s:SS"
+              }
+            ],
+            "declKind": "Var",
+            "implicit": true,
+            "kind": "Var",
+            "mangledName": "$s11CodexReview0B12TerminalKindO8rawValueSSvp",
+            "moduleName": "CodexReview",
+            "name": "rawValue",
+            "printedName": "rawValue",
+            "usr": "s:11CodexReview0B12TerminalKindO8rawValueSSvp"
+          }
+        ],
+        "conformances": [
+          {
+            "kind": "Conformance",
+            "mangledName": "$ss8CopyableP",
+            "name": "Copyable",
+            "printedName": "Copyable",
+            "usr": "s:s8CopyableP"
+          },
+          {
+            "kind": "Conformance",
+            "mangledName": "$sSe",
+            "name": "Decodable",
+            "printedName": "Decodable",
+            "usr": "s:Se"
+          },
+          {
+            "kind": "Conformance",
+            "mangledName": "$sSE",
+            "name": "Encodable",
+            "printedName": "Encodable",
+            "usr": "s:SE"
+          },
+          {
+            "kind": "Conformance",
+            "mangledName": "$sSQ",
+            "name": "Equatable",
+            "printedName": "Equatable",
+            "usr": "s:SQ"
+          },
+          {
+            "kind": "Conformance",
+            "mangledName": "$ss9EscapableP",
+            "name": "Escapable",
+            "printedName": "Escapable",
+            "usr": "s:s9EscapableP"
+          },
+          {
+            "kind": "Conformance",
+            "mangledName": "$sSH",
+            "name": "Hashable",
+            "printedName": "Hashable",
+            "usr": "s:SH"
+          },
+          {
+            "children": [
+              {
+                "children": [
+                  {
+                    "kind": "TypeNominal",
+                    "name": "String",
+                    "printedName": "Swift.String",
+                    "usr": "s:SS"
+                  }
+                ],
+                "kind": "TypeWitness",
+                "name": "RawValue",
+                "printedName": "RawValue"
+              }
+            ],
+            "kind": "Conformance",
+            "mangledName": "$sSY",
+            "name": "RawRepresentable",
+            "printedName": "RawRepresentable",
+            "usr": "s:SY"
+          },
+          {
+            "kind": "Conformance",
+            "mangledName": "$ss8SendableP",
+            "name": "Sendable",
+            "printedName": "Sendable",
+            "usr": "s:s8SendableP"
+          },
+          {
+            "kind": "Conformance",
+            "mangledName": "$ss16SendableMetatypeP",
+            "name": "SendableMetatype",
+            "printedName": "SendableMetatype",
+            "usr": "s:s16SendableMetatypeP"
+          }
+        ],
+        "declKind": "Enum",
+        "enumRawTypeName": "String",
+        "isEnumExhaustive": true,
+        "kind": "TypeDecl",
+        "mangledName": "$s11CodexReview0B12TerminalKindO",
+        "moduleName": "CodexReview",
+        "name": "ReviewTerminalKind",
+        "printedName": "ReviewTerminalKind",
+        "usr": "s:11CodexReview0B12TerminalKindO"
+      },
+      {
+        "children": [
+          {
+            "children": [
+              {
+                "children": [
+                  {
+                    "children": [
+                      {
+                        "kind": "TypeNominal",
+                        "name": "ReviewInterruptionCause",
+                        "printedName": "CodexReview.ReviewInterruptionCause",
+                        "usr": "s:11CodexReview0B17InterruptionCauseO"
+                      },
+                      {
+                        "kind": "TypeNominal",
+                        "name": "ReviewCancellation",
+                        "printedName": "CodexReview.ReviewCancellation",
+                        "usr": "s:11CodexReview0B12CancellationV"
+                      }
+                    ],
+                    "kind": "TypeFunc",
+                    "name": "Function",
+                    "printedName": "(CodexReview.ReviewCancellation) -> CodexReview.ReviewInterruptionCause"
+                  },
+                  {
+                    "children": [
+                      {
+                        "kind": "TypeNominal",
+                        "name": "ReviewInterruptionCause",
+                        "printedName": "CodexReview.ReviewInterruptionCause",
+                        "usr": "s:11CodexReview0B17InterruptionCauseO"
+                      }
+                    ],
+                    "kind": "TypeNominal",
+                    "name": "Metatype",
+                    "printedName": "CodexReview.ReviewInterruptionCause.Type"
+                  }
+                ],
+                "kind": "TypeFunc",
+                "name": "Function",
+                "printedName": "(CodexReview.ReviewInterruptionCause.Type) -> (CodexReview.ReviewCancellation) -> CodexReview.ReviewInterruptionCause"
+              }
+            ],
+            "declKind": "EnumElement",
+            "kind": "Var",
+            "mangledName": "$s11CodexReview0B17InterruptionCauseO9requestedyAcA0B12CancellationVcACmF",
+            "moduleName": "CodexReview",
+            "name": "requested",
+            "printedName": "requested",
+            "usr": "s:11CodexReview0B17InterruptionCauseO9requestedyAcA0B12CancellationVcACmF"
+          },
+          {
+            "children": [
+              {
+                "children": [
+                  {
+                    "children": [
+                      {
+                        "kind": "TypeNominal",
+                        "name": "ReviewInterruptionCause",
+                        "printedName": "CodexReview.ReviewInterruptionCause",
+                        "usr": "s:11CodexReview0B17InterruptionCauseO"
+                      },
+                      {
+                        "children": [
+                          {
+                            "children": [
+                              {
+                                "kind": "TypeNominal",
+                                "name": "String",
+                                "printedName": "Swift.String",
+                                "usr": "s:SS"
+                              }
+                            ],
+                            "kind": "TypeNominal",
+                            "name": "Optional",
+                            "printedName": "Swift.String?",
+                            "usr": "s:Sq"
+                          }
+                        ],
+                        "kind": "TypeNominal",
+                        "name": "Tuple",
+                        "printedName": "(message: Swift.String?)"
+                      }
+                    ],
+                    "kind": "TypeFunc",
+                    "name": "Function",
+                    "printedName": "(Swift.String?) -> CodexReview.ReviewInterruptionCause"
+                  },
+                  {
+                    "children": [
+                      {
+                        "kind": "TypeNominal",
+                        "name": "ReviewInterruptionCause",
+                        "printedName": "CodexReview.ReviewInterruptionCause",
+                        "usr": "s:11CodexReview0B17InterruptionCauseO"
+                      }
+                    ],
+                    "kind": "TypeNominal",
+                    "name": "Metatype",
+                    "printedName": "CodexReview.ReviewInterruptionCause.Type"
+                  }
+                ],
+                "kind": "TypeFunc",
+                "name": "Function",
+                "printedName": "(CodexReview.ReviewInterruptionCause.Type) -> (Swift.String?) -> CodexReview.ReviewInterruptionCause"
+              }
+            ],
+            "declKind": "EnumElement",
+            "kind": "Var",
+            "mangledName": "$s11CodexReview0B17InterruptionCauseO6serveryACSSSg_tcACmF",
+            "moduleName": "CodexReview",
+            "name": "server",
+            "printedName": "server",
+            "usr": "s:11CodexReview0B17InterruptionCauseO6serveryACSSSg_tcACmF"
+          },
+          {
+            "children": [
+              {
+                "children": [
+                  {
+                    "children": [
+                      {
+                        "kind": "TypeNominal",
+                        "name": "ReviewInterruptionCause",
+                        "printedName": "CodexReview.ReviewInterruptionCause",
+                        "usr": "s:11CodexReview0B17InterruptionCauseO"
+                      },
+                      {
+                        "children": [
+                          {
+                            "kind": "TypeNominal",
+                            "name": "String",
+                            "printedName": "Swift.String",
+                            "usr": "s:SS"
+                          }
+                        ],
+                        "kind": "TypeNominal",
+                        "name": "Tuple",
+                        "printedName": "(message: Swift.String)"
+                      }
+                    ],
+                    "kind": "TypeFunc",
+                    "name": "Function",
+                    "printedName": "(Swift.String) -> CodexReview.ReviewInterruptionCause"
+                  },
+                  {
+                    "children": [
+                      {
+                        "kind": "TypeNominal",
+                        "name": "ReviewInterruptionCause",
+                        "printedName": "CodexReview.ReviewInterruptionCause",
+                        "usr": "s:11CodexReview0B17InterruptionCauseO"
+                      }
+                    ],
+                    "kind": "TypeNominal",
+                    "name": "Metatype",
+                    "printedName": "CodexReview.ReviewInterruptionCause.Type"
+                  }
+                ],
+                "kind": "TypeFunc",
+                "name": "Function",
+                "printedName": "(CodexReview.ReviewInterruptionCause.Type) -> (Swift.String) -> CodexReview.ReviewInterruptionCause"
+              }
+            ],
+            "declKind": "EnumElement",
+            "kind": "Var",
+            "mangledName": "$s11CodexReview0B17InterruptionCauseO9transportyACSS_tcACmF",
+            "moduleName": "CodexReview",
+            "name": "transport",
+            "printedName": "transport",
+            "usr": "s:11CodexReview0B17InterruptionCauseO9transportyACSS_tcACmF"
+          },
+          {
+            "children": [
+              {
+                "children": [
+                  {
+                    "kind": "TypeNominal",
+                    "name": "ReviewInterruptionCause",
+                    "printedName": "CodexReview.ReviewInterruptionCause",
+                    "usr": "s:11CodexReview0B17InterruptionCauseO"
+                  },
+                  {
+                    "children": [
+                      {
+                        "kind": "TypeNominal",
+                        "name": "ReviewInterruptionCause",
+                        "printedName": "CodexReview.ReviewInterruptionCause",
+                        "usr": "s:11CodexReview0B17InterruptionCauseO"
+                      }
+                    ],
+                    "kind": "TypeNominal",
+                    "name": "Metatype",
+                    "printedName": "CodexReview.ReviewInterruptionCause.Type"
+                  }
+                ],
+                "kind": "TypeFunc",
+                "name": "Function",
+                "printedName": "(CodexReview.ReviewInterruptionCause.Type) -> CodexReview.ReviewInterruptionCause"
+              }
+            ],
+            "declKind": "EnumElement",
+            "kind": "Var",
+            "mangledName": "$s11CodexReview0B17InterruptionCauseO19previousProcessExityA2CmF",
+            "moduleName": "CodexReview",
+            "name": "previousProcessExit",
+            "printedName": "previousProcessExit",
+            "usr": "s:11CodexReview0B17InterruptionCauseO19previousProcessExityA2CmF"
+          },
+          {
+            "children": [
+              {
+                "kind": "TypeNominal",
+                "name": "Bool",
+                "printedName": "Swift.Bool",
+                "usr": "s:Sb"
+              },
+              {
+                "kind": "TypeNominal",
+                "name": "ReviewInterruptionCause",
+                "printedName": "CodexReview.ReviewInterruptionCause",
+                "usr": "s:11CodexReview0B17InterruptionCauseO"
+              },
+              {
+                "kind": "TypeNominal",
+                "name": "ReviewInterruptionCause",
+                "printedName": "CodexReview.ReviewInterruptionCause",
+                "usr": "s:11CodexReview0B17InterruptionCauseO"
+              }
+            ],
+            "declAttributes": [
+              "Implements",
+              "Semantics"
+            ],
+            "declKind": "Func",
+            "funcSelfKind": "NonMutating",
+            "implicit": true,
+            "kind": "Function",
+            "mangledName": "$s11CodexReview0B17InterruptionCauseO21__derived_enum_equalsySbAC_ACtFZ",
+            "moduleName": "CodexReview",
+            "name": "__derived_enum_equals",
+            "printedName": "__derived_enum_equals(_:_:)",
+            "static": true,
+            "usr": "s:11CodexReview0B17InterruptionCauseO21__derived_enum_equalsySbAC_ACtFZ"
+          },
+          {
+            "children": [
+              {
+                "kind": "TypeNominal",
+                "name": "Void",
+                "printedName": "()"
+              },
+              {
+                "kind": "TypeNominal",
+                "name": "Encoder",
+                "printedName": "any Swift.Encoder",
+                "usr": "s:s7EncoderP"
+              }
+            ],
+            "declKind": "Func",
+            "funcSelfKind": "NonMutating",
+            "implicit": true,
+            "kind": "Function",
+            "mangledName": "$s11CodexReview0B17InterruptionCauseO6encode2toys7Encoder_p_tKF",
+            "moduleName": "CodexReview",
+            "name": "encode",
+            "printedName": "encode(to:)",
+            "throwing": true,
+            "usr": "s:11CodexReview0B17InterruptionCauseO6encode2toys7Encoder_p_tKF"
+          },
+          {
+            "children": [
+              {
+                "kind": "TypeNominal",
+                "name": "Void",
+                "printedName": "()"
+              },
+              {
+                "kind": "TypeNominal",
+                "name": "Hasher",
+                "paramValueOwnership": "InOut",
+                "printedName": "Swift.Hasher",
+                "usr": "s:s6HasherV"
+              }
+            ],
+            "declKind": "Func",
+            "funcSelfKind": "NonMutating",
+            "implicit": true,
+            "kind": "Function",
+            "mangledName": "$s11CodexReview0B17InterruptionCauseO4hash4intoys6HasherVz_tF",
+            "moduleName": "CodexReview",
+            "name": "hash",
+            "printedName": "hash(into:)",
+            "usr": "s:11CodexReview0B17InterruptionCauseO4hash4intoys6HasherVz_tF"
+          },
+          {
+            "accessors": [
+              {
+                "accessorKind": "get",
+                "children": [
+                  {
+                    "kind": "TypeNominal",
+                    "name": "Int",
+                    "printedName": "Swift.Int",
+                    "usr": "s:Si"
+                  }
+                ],
+                "declKind": "Accessor",
+                "implicit": true,
+                "kind": "Accessor",
+                "mangledName": "$s11CodexReview0B17InterruptionCauseO9hashValueSivg",
+                "moduleName": "CodexReview",
+                "name": "Get",
+                "printedName": "Get()",
+                "usr": "s:11CodexReview0B17InterruptionCauseO9hashValueSivg"
+              }
+            ],
+            "children": [
+              {
+                "kind": "TypeNominal",
+                "name": "Int",
+                "printedName": "Swift.Int",
+                "usr": "s:Si"
+              }
+            ],
+            "declKind": "Var",
+            "implicit": true,
+            "kind": "Var",
+            "mangledName": "$s11CodexReview0B17InterruptionCauseO9hashValueSivp",
+            "moduleName": "CodexReview",
+            "name": "hashValue",
+            "printedName": "hashValue",
+            "usr": "s:11CodexReview0B17InterruptionCauseO9hashValueSivp"
+          },
+          {
+            "children": [
+              {
+                "kind": "TypeNominal",
+                "name": "ReviewInterruptionCause",
+                "printedName": "CodexReview.ReviewInterruptionCause",
+                "usr": "s:11CodexReview0B17InterruptionCauseO"
+              },
+              {
+                "kind": "TypeNominal",
+                "name": "Decoder",
+                "printedName": "any Swift.Decoder",
+                "usr": "s:s7DecoderP"
+              }
+            ],
+            "declKind": "Constructor",
+            "implicit": true,
+            "init_kind": "Designated",
+            "kind": "Constructor",
+            "mangledName": "$s11CodexReview0B17InterruptionCauseO4fromACs7Decoder_p_tKcfc",
+            "moduleName": "CodexReview",
+            "name": "init",
+            "printedName": "init(from:)",
+            "throwing": true,
+            "usr": "s:11CodexReview0B17InterruptionCauseO4fromACs7Decoder_p_tKcfc"
+          }
+        ],
+        "conformances": [
+          {
+            "kind": "Conformance",
+            "mangledName": "$ss8CopyableP",
+            "name": "Copyable",
+            "printedName": "Copyable",
+            "usr": "s:s8CopyableP"
+          },
+          {
+            "kind": "Conformance",
+            "mangledName": "$sSe",
+            "name": "Decodable",
+            "printedName": "Decodable",
+            "usr": "s:Se"
+          },
+          {
+            "kind": "Conformance",
+            "mangledName": "$sSE",
+            "name": "Encodable",
+            "printedName": "Encodable",
+            "usr": "s:SE"
+          },
+          {
+            "kind": "Conformance",
+            "mangledName": "$sSQ",
+            "name": "Equatable",
+            "printedName": "Equatable",
+            "usr": "s:SQ"
+          },
+          {
+            "kind": "Conformance",
+            "mangledName": "$ss9EscapableP",
+            "name": "Escapable",
+            "printedName": "Escapable",
+            "usr": "s:s9EscapableP"
+          },
+          {
+            "kind": "Conformance",
+            "mangledName": "$sSH",
+            "name": "Hashable",
+            "printedName": "Hashable",
+            "usr": "s:SH"
+          },
+          {
+            "kind": "Conformance",
+            "mangledName": "$ss8SendableP",
+            "name": "Sendable",
+            "printedName": "Sendable",
+            "usr": "s:s8SendableP"
+          },
+          {
+            "kind": "Conformance",
+            "mangledName": "$ss16SendableMetatypeP",
+            "name": "SendableMetatype",
+            "printedName": "SendableMetatype",
+            "usr": "s:s16SendableMetatypeP"
+          }
+        ],
+        "declKind": "Enum",
+        "isEnumExhaustive": true,
+        "kind": "TypeDecl",
+        "mangledName": "$s11CodexReview0B17InterruptionCauseO",
+        "moduleName": "CodexReview",
+        "name": "ReviewInterruptionCause",
+        "printedName": "ReviewInterruptionCause",
+        "usr": "s:11CodexReview0B17InterruptionCauseO"
+      },
+      {
+        "children": [
+          {
+            "children": [
+              {
+                "children": [
+                  {
+                    "kind": "TypeNominal",
+                    "name": "ReviewTerminalRecord",
+                    "printedName": "CodexReview.ReviewTerminalRecord",
+                    "usr": "s:11CodexReview0B14TerminalRecordO"
+                  },
+                  {
+                    "children": [
+                      {
+                        "kind": "TypeNominal",
+                        "name": "ReviewTerminalRecord",
+                        "printedName": "CodexReview.ReviewTerminalRecord",
+                        "usr": "s:11CodexReview0B14TerminalRecordO"
+                      }
+                    ],
+                    "kind": "TypeNominal",
+                    "name": "Metatype",
+                    "printedName": "CodexReview.ReviewTerminalRecord.Type"
+                  }
+                ],
+                "kind": "TypeFunc",
+                "name": "Function",
+                "printedName": "(CodexReview.ReviewTerminalRecord.Type) -> CodexReview.ReviewTerminalRecord"
+              }
+            ],
+            "declKind": "EnumElement",
+            "kind": "Var",
+            "mangledName": "$s11CodexReview0B14TerminalRecordO9completedyA2CmF",
+            "moduleName": "CodexReview",
+            "name": "completed",
+            "printedName": "completed",
+            "usr": "s:11CodexReview0B14TerminalRecordO9completedyA2CmF"
+          },
+          {
+            "children": [
+              {
+                "children": [
+                  {
+                    "children": [
+                      {
+                        "kind": "TypeNominal",
+                        "name": "ReviewTerminalRecord",
+                        "printedName": "CodexReview.ReviewTerminalRecord",
+                        "usr": "s:11CodexReview0B14TerminalRecordO"
+                      },
+                      {
+                        "kind": "TypeNominal",
+                        "name": "ReviewInterruptionCause",
+                        "printedName": "CodexReview.ReviewInterruptionCause",
+                        "usr": "s:11CodexReview0B17InterruptionCauseO"
+                      }
+                    ],
+                    "kind": "TypeFunc",
+                    "name": "Function",
+                    "printedName": "(CodexReview.ReviewInterruptionCause) -> CodexReview.ReviewTerminalRecord"
+                  },
+                  {
+                    "children": [
+                      {
+                        "kind": "TypeNominal",
+                        "name": "ReviewTerminalRecord",
+                        "printedName": "CodexReview.ReviewTerminalRecord",
+                        "usr": "s:11CodexReview0B14TerminalRecordO"
+                      }
+                    ],
+                    "kind": "TypeNominal",
+                    "name": "Metatype",
+                    "printedName": "CodexReview.ReviewTerminalRecord.Type"
+                  }
+                ],
+                "kind": "TypeFunc",
+                "name": "Function",
+                "printedName": "(CodexReview.ReviewTerminalRecord.Type) -> (CodexReview.ReviewInterruptionCause) -> CodexReview.ReviewTerminalRecord"
+              }
+            ],
+            "declKind": "EnumElement",
+            "kind": "Var",
+            "mangledName": "$s11CodexReview0B14TerminalRecordO11interruptedyAcA0B17InterruptionCauseOcACmF",
+            "moduleName": "CodexReview",
+            "name": "interrupted",
+            "printedName": "interrupted",
+            "usr": "s:11CodexReview0B14TerminalRecordO11interruptedyAcA0B17InterruptionCauseOcACmF"
+          },
+          {
+            "children": [
+              {
+                "children": [
+                  {
+                    "children": [
+                      {
+                        "kind": "TypeNominal",
+                        "name": "ReviewTerminalRecord",
+                        "printedName": "CodexReview.ReviewTerminalRecord",
+                        "usr": "s:11CodexReview0B14TerminalRecordO"
+                      },
+                      {
+                        "children": [
+                          {
+                            "children": [
+                              {
+                                "kind": "TypeNominal",
+                                "name": "String",
+                                "printedName": "Swift.String",
+                                "usr": "s:SS"
+                              }
+                            ],
+                            "kind": "TypeNominal",
+                            "name": "Optional",
+                            "printedName": "Swift.String?",
+                            "usr": "s:Sq"
+                          }
+                        ],
+                        "kind": "TypeNominal",
+                        "name": "Tuple",
+                        "printedName": "(message: Swift.String?)"
+                      }
+                    ],
+                    "kind": "TypeFunc",
+                    "name": "Function",
+                    "printedName": "(Swift.String?) -> CodexReview.ReviewTerminalRecord"
+                  },
+                  {
+                    "children": [
+                      {
+                        "kind": "TypeNominal",
+                        "name": "ReviewTerminalRecord",
+                        "printedName": "CodexReview.ReviewTerminalRecord",
+                        "usr": "s:11CodexReview0B14TerminalRecordO"
+                      }
+                    ],
+                    "kind": "TypeNominal",
+                    "name": "Metatype",
+                    "printedName": "CodexReview.ReviewTerminalRecord.Type"
+                  }
+                ],
+                "kind": "TypeFunc",
+                "name": "Function",
+                "printedName": "(CodexReview.ReviewTerminalRecord.Type) -> (Swift.String?) -> CodexReview.ReviewTerminalRecord"
+              }
+            ],
+            "declKind": "EnumElement",
+            "kind": "Var",
+            "mangledName": "$s11CodexReview0B14TerminalRecordO6failedyACSSSg_tcACmF",
+            "moduleName": "CodexReview",
+            "name": "failed",
+            "printedName": "failed",
+            "usr": "s:11CodexReview0B14TerminalRecordO6failedyACSSSg_tcACmF"
+          },
+          {
+            "accessors": [
+              {
+                "accessorKind": "get",
+                "children": [
+                  {
+                    "kind": "TypeNominal",
+                    "name": "ReviewTerminalKind",
+                    "printedName": "CodexReview.ReviewTerminalKind",
+                    "usr": "s:11CodexReview0B12TerminalKindO"
+                  }
+                ],
+                "declKind": "Accessor",
+                "kind": "Accessor",
+                "mangledName": "$s11CodexReview0B14TerminalRecordO4kindAA0bC4KindOvg",
+                "moduleName": "CodexReview",
+                "name": "Get",
+                "printedName": "Get()",
+                "usr": "s:11CodexReview0B14TerminalRecordO4kindAA0bC4KindOvg"
+              }
+            ],
+            "children": [
+              {
+                "kind": "TypeNominal",
+                "name": "ReviewTerminalKind",
+                "printedName": "CodexReview.ReviewTerminalKind",
+                "usr": "s:11CodexReview0B12TerminalKindO"
+              }
+            ],
+            "declKind": "Var",
+            "kind": "Var",
+            "mangledName": "$s11CodexReview0B14TerminalRecordO4kindAA0bC4KindOvp",
+            "moduleName": "CodexReview",
+            "name": "kind",
+            "printedName": "kind",
+            "usr": "s:11CodexReview0B14TerminalRecordO4kindAA0bC4KindOvp"
+          },
+          {
+            "children": [
+              {
+                "kind": "TypeNominal",
+                "name": "Bool",
+                "printedName": "Swift.Bool",
+                "usr": "s:Sb"
+              },
+              {
+                "kind": "TypeNominal",
+                "name": "ReviewTerminalRecord",
+                "printedName": "CodexReview.ReviewTerminalRecord",
+                "usr": "s:11CodexReview0B14TerminalRecordO"
+              },
+              {
+                "kind": "TypeNominal",
+                "name": "ReviewTerminalRecord",
+                "printedName": "CodexReview.ReviewTerminalRecord",
+                "usr": "s:11CodexReview0B14TerminalRecordO"
+              }
+            ],
+            "declAttributes": [
+              "Implements",
+              "Semantics"
+            ],
+            "declKind": "Func",
+            "funcSelfKind": "NonMutating",
+            "implicit": true,
+            "kind": "Function",
+            "mangledName": "$s11CodexReview0B14TerminalRecordO21__derived_enum_equalsySbAC_ACtFZ",
+            "moduleName": "CodexReview",
+            "name": "__derived_enum_equals",
+            "printedName": "__derived_enum_equals(_:_:)",
+            "static": true,
+            "usr": "s:11CodexReview0B14TerminalRecordO21__derived_enum_equalsySbAC_ACtFZ"
+          },
+          {
+            "children": [
+              {
+                "kind": "TypeNominal",
+                "name": "Void",
+                "printedName": "()"
+              },
+              {
+                "kind": "TypeNominal",
+                "name": "Encoder",
+                "printedName": "any Swift.Encoder",
+                "usr": "s:s7EncoderP"
+              }
+            ],
+            "declKind": "Func",
+            "funcSelfKind": "NonMutating",
+            "implicit": true,
+            "kind": "Function",
+            "mangledName": "$s11CodexReview0B14TerminalRecordO6encode2toys7Encoder_p_tKF",
+            "moduleName": "CodexReview",
+            "name": "encode",
+            "printedName": "encode(to:)",
+            "throwing": true,
+            "usr": "s:11CodexReview0B14TerminalRecordO6encode2toys7Encoder_p_tKF"
+          },
+          {
+            "children": [
+              {
+                "kind": "TypeNominal",
+                "name": "Void",
+                "printedName": "()"
+              },
+              {
+                "kind": "TypeNominal",
+                "name": "Hasher",
+                "paramValueOwnership": "InOut",
+                "printedName": "Swift.Hasher",
+                "usr": "s:s6HasherV"
+              }
+            ],
+            "declKind": "Func",
+            "funcSelfKind": "NonMutating",
+            "implicit": true,
+            "kind": "Function",
+            "mangledName": "$s11CodexReview0B14TerminalRecordO4hash4intoys6HasherVz_tF",
+            "moduleName": "CodexReview",
+            "name": "hash",
+            "printedName": "hash(into:)",
+            "usr": "s:11CodexReview0B14TerminalRecordO4hash4intoys6HasherVz_tF"
+          },
+          {
+            "accessors": [
+              {
+                "accessorKind": "get",
+                "children": [
+                  {
+                    "kind": "TypeNominal",
+                    "name": "Int",
+                    "printedName": "Swift.Int",
+                    "usr": "s:Si"
+                  }
+                ],
+                "declKind": "Accessor",
+                "implicit": true,
+                "kind": "Accessor",
+                "mangledName": "$s11CodexReview0B14TerminalRecordO9hashValueSivg",
+                "moduleName": "CodexReview",
+                "name": "Get",
+                "printedName": "Get()",
+                "usr": "s:11CodexReview0B14TerminalRecordO9hashValueSivg"
+              }
+            ],
+            "children": [
+              {
+                "kind": "TypeNominal",
+                "name": "Int",
+                "printedName": "Swift.Int",
+                "usr": "s:Si"
+              }
+            ],
+            "declKind": "Var",
+            "implicit": true,
+            "kind": "Var",
+            "mangledName": "$s11CodexReview0B14TerminalRecordO9hashValueSivp",
+            "moduleName": "CodexReview",
+            "name": "hashValue",
+            "printedName": "hashValue",
+            "usr": "s:11CodexReview0B14TerminalRecordO9hashValueSivp"
+          },
+          {
+            "children": [
+              {
+                "kind": "TypeNominal",
+                "name": "ReviewTerminalRecord",
+                "printedName": "CodexReview.ReviewTerminalRecord",
+                "usr": "s:11CodexReview0B14TerminalRecordO"
+              },
+              {
+                "kind": "TypeNominal",
+                "name": "Decoder",
+                "printedName": "any Swift.Decoder",
+                "usr": "s:s7DecoderP"
+              }
+            ],
+            "declKind": "Constructor",
+            "implicit": true,
+            "init_kind": "Designated",
+            "kind": "Constructor",
+            "mangledName": "$s11CodexReview0B14TerminalRecordO4fromACs7Decoder_p_tKcfc",
+            "moduleName": "CodexReview",
+            "name": "init",
+            "printedName": "init(from:)",
+            "throwing": true,
+            "usr": "s:11CodexReview0B14TerminalRecordO4fromACs7Decoder_p_tKcfc"
+          }
+        ],
+        "conformances": [
+          {
+            "kind": "Conformance",
+            "mangledName": "$ss8CopyableP",
+            "name": "Copyable",
+            "printedName": "Copyable",
+            "usr": "s:s8CopyableP"
+          },
+          {
+            "kind": "Conformance",
+            "mangledName": "$sSe",
+            "name": "Decodable",
+            "printedName": "Decodable",
+            "usr": "s:Se"
+          },
+          {
+            "kind": "Conformance",
+            "mangledName": "$sSE",
+            "name": "Encodable",
+            "printedName": "Encodable",
+            "usr": "s:SE"
+          },
+          {
+            "kind": "Conformance",
+            "mangledName": "$sSQ",
+            "name": "Equatable",
+            "printedName": "Equatable",
+            "usr": "s:SQ"
+          },
+          {
+            "kind": "Conformance",
+            "mangledName": "$ss9EscapableP",
+            "name": "Escapable",
+            "printedName": "Escapable",
+            "usr": "s:s9EscapableP"
+          },
+          {
+            "kind": "Conformance",
+            "mangledName": "$sSH",
+            "name": "Hashable",
+            "printedName": "Hashable",
+            "usr": "s:SH"
+          },
+          {
+            "kind": "Conformance",
+            "mangledName": "$ss8SendableP",
+            "name": "Sendable",
+            "printedName": "Sendable",
+            "usr": "s:s8SendableP"
+          },
+          {
+            "kind": "Conformance",
+            "mangledName": "$ss16SendableMetatypeP",
+            "name": "SendableMetatype",
+            "printedName": "SendableMetatype",
+            "usr": "s:s16SendableMetatypeP"
+          }
+        ],
+        "declKind": "Enum",
+        "isEnumExhaustive": true,
+        "kind": "TypeDecl",
+        "mangledName": "$s11CodexReview0B14TerminalRecordO",
+        "moduleName": "CodexReview",
+        "name": "ReviewTerminalRecord",
+        "printedName": "ReviewTerminalRecord",
+        "usr": "s:11CodexReview0B14TerminalRecordO"
       },
       {
         "children": [
