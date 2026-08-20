@@ -210,12 +210,14 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         } catch let error as JSONRPC.Error where Self.shouldRetryThreadStartWithLegacySandbox(error) {
             // Deprecated compatibility: some builds accept the permissions field shape
             // without registering the danger-full-access built-in profile.
+            try await admission.recordThreadStartRejectedForRetry()
             return try await sendThreadStart(AppServerAPI.Thread.Start.Request(
                 params: threadStartParamsWithLegacySandbox(request)
             ), admission: admission)
         } catch let error as JSONRPC.Error where Self.shouldRetryThreadStartWithObjectPermissions(error) {
             // Deprecated compatibility: installed Codex builds can require object-shaped
             // permissions while the latest local app-server source accepts a profile ID string.
+            try await admission.recordThreadStartRejectedForRetry()
             return try await startReviewThreadWithProfileSelectionPermissions(request, admission: admission)
         }
     }
@@ -248,6 +250,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         {
             // Deprecated compatibility: installed Codex builds can know the permissions
             // object shape without registering the danger-full-access built-in profile.
+            try await admission.recordThreadStartRejectedForRetry()
             return try await sendThreadStart(AppServerAPI.Thread.Start.Request(
                 params: threadStartParamsWithLegacySandbox(request)
             ), admission: admission)

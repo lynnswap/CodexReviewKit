@@ -345,6 +345,69 @@ struct ReviewAttemptProcessorTests {
         #expect(resolution.terminal == .localCancellation(.mcpClient(message: "Stop")))
     }
 
+    @Test func threadStartDispatchAdmissionRejectsDirectDuplicate() async throws {
+        let admission = ReviewStartAdmission(closePolicy: controlledClosePolicy(gate: AsyncGate()))
+        let startGate = AsyncGate()
+        let startTask = await admission.start { _ in
+            await startGate.waitIgnoringCancellation()
+            return .init(run: canonicalRun)
+        }
+
+        #expect(await admission.admitThreadStartDispatch())
+        #expect(await admission.admitThreadStartDispatch() == false)
+
+        await startGate.open()
+        _ = try await startTask.value
+    }
+
+    @Test func threadStartDispatchAdmissionAllowsVerifiedRejectionRetry() async throws {
+        let admission = ReviewStartAdmission(closePolicy: controlledClosePolicy(gate: AsyncGate()))
+        let startGate = AsyncGate()
+        let startTask = await admission.start { _ in
+            await startGate.waitIgnoringCancellation()
+            return .init(run: canonicalRun)
+        }
+
+        #expect(await admission.admitThreadStartDispatch())
+        try await admission.recordThreadStartRejectedForRetry()
+        #expect(await admission.admitThreadStartDispatch())
+        #expect(await admission.admitThreadStartDispatch() == false)
+
+        await startGate.open()
+        _ = try await startTask.value
+    }
+
+    @Test func reviewStartDispatchAdmissionRejectsDirectDuplicate() async throws {
+        let admission = ReviewStartAdmission(closePolicy: controlledClosePolicy(gate: AsyncGate()))
+        let startGate = AsyncGate()
+        let startTask = await admission.start { _ in
+            await startGate.waitIgnoringCancellation()
+            return .init(run: canonicalRun)
+        }
+        #expect(await admission.admitThreadStartDispatch())
+        await admission.recordPreparedThread(provisionalRun)
+
+        #expect(await admission.admitReviewStartDispatch(for: provisionalRun))
+        #expect(await admission.admitReviewStartDispatch(for: provisionalRun) == false)
+
+        await startGate.open()
+        _ = try await startTask.value
+    }
+
+    @Test func generalStartFailureEndsAdmissionWaiters() async throws {
+        let failure = ReviewAttemptContractFailure(message: "Start failed")
+        let admission = ReviewStartAdmission(closePolicy: controlledClosePolicy(gate: AsyncGate()))
+        let startTask = await admission.start { _ in
+            throw failure
+        }
+
+        await #expect(throws: failure) {
+            try await startTask.value
+        }
+        #expect(await admission.waitForActiveRun() == nil)
+        #expect(await admission.waitForCancellationAdmission() == nil)
+    }
+
     @Test func cancellationBeforeThreadDispatchRefusesWrite() async throws {
         let admission = ReviewStartAdmission(closePolicy: controlledClosePolicy(gate: AsyncGate()))
         let entered = InvocationProbe()
