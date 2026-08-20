@@ -41,6 +41,20 @@ struct CodexReviewMonitorCITests {
         )
     }
 
+    @Test func hostedUnitTestExplicitIntegrationOverrideAdmitsEmbeddedServer() {
+        let environment = [
+            ReviewMonitorLaunchEnvironment.xctestBundlePathKey: "/tmp/HostedUnitTests.xctest",
+            ReviewMonitorLaunchEnvironment.testPortKey: "50104",
+        ]
+        let context = ReviewMonitorLaunchContext(
+            environment: environment,
+            arguments: []
+        )
+
+        #expect(context.launchMode == .application)
+        #expect(context.shouldStartEmbeddedServer)
+    }
+
     @Test func lifecycleUsesInjectedStoreWithoutTimingDelays() async {
         let store = FakeLifecycleStore()
         let lifecycle = ReviewMonitorLifecycleController(store: store)
@@ -311,6 +325,24 @@ struct CodexReviewMonitorCITests {
         await store.startSignal.wait()
 
         #expect(store.startArguments == [true])
+    }
+
+    @Test func liveCompositionKeepsHostedXCTestLifecycleInert() {
+        let store = FakeLifecycleStore()
+        let context = ReviewMonitorLaunchContext(
+            environment: [
+                ReviewMonitorLaunchEnvironment.xctestBundlePathKey: "/tmp/HostedUnitTests.xctest",
+            ],
+            arguments: []
+        )
+        let lifecycle = ReviewMonitorAppComposition.live().makeLifecycleController(
+            store,
+            context
+        )
+
+        lifecycle.applicationDidFinishLaunching(launchMode: context.launchMode)
+
+        #expect(store.startArguments.isEmpty)
     }
 
     @Test func settingsWindowUsesAppKitPreferenceShell() {

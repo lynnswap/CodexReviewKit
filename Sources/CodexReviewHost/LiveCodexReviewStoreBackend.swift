@@ -110,6 +110,7 @@ public extension CodexReviewStore {
         webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory = CodexReviewNativeAuthentication.WebSessions.system
     ) -> CodexReviewStore {
         CodexReviewStore(backend: LiveCodexReviewStoreBackend(
+            recoveryEnvironment: .production,
             runtimePreferences: runtimePreferences,
             nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
             webAuthenticationSessionFactory: webAuthenticationSessionFactory
@@ -118,6 +119,7 @@ public extension CodexReviewStore {
 
     package static func makeLiveStoreForTesting(
         environment: [String: String],
+        recoveryEnvironment: CodexReviewRecoveryEnvironment,
         runtimePreferences: CodexReviewRuntime.Preferences = .defaults,
         nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration? = nil,
         webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory,
@@ -131,6 +133,7 @@ public extension CodexReviewStore {
     ) -> CodexReviewStore {
         makeLiveStoreForTesting(
             environment: environment,
+            recoveryEnvironment: recoveryEnvironment,
             runtimePreferences: runtimePreferences,
             nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
             webAuthenticationSessionFactory: webAuthenticationSessionFactory,
@@ -146,6 +149,7 @@ public extension CodexReviewStore {
 
     package static func makeLiveStoreForTesting(
         environment: [String: String],
+        recoveryEnvironment: CodexReviewRecoveryEnvironment,
         runtimePreferences: CodexReviewRuntime.Preferences = .defaults,
         nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration? = nil,
         webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory,
@@ -164,6 +168,7 @@ public extension CodexReviewStore {
         CodexReviewStore(
             backend: LiveCodexReviewStoreBackend(
                 environment: environment,
+                recoveryEnvironment: recoveryEnvironment,
                 runtimePreferences: runtimePreferences,
                 nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
                 webAuthenticationSessionFactory: webAuthenticationSessionFactory,
@@ -209,7 +214,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     private var authNotificationTask: Task<Void, Never>?
     private var loginNotificationTask: Task<Void, Never>?
     private var settingsSnapshot = CodexReviewSettings.Snapshot()
-    private let codexHomeURL: URL
+    private let recoveryEnvironment: CodexReviewRecoveryEnvironment
     private let mcpHTTPServerConfiguration: CodexReviewMCPHTTPServer.Configuration
     private let nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration?
     private let webAuthenticationSessionFactory: CodexReviewNativeAuthentication.WebSessionFactory
@@ -221,8 +226,13 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     private let shutdownCleanupTimeout: Duration
     private weak var attachedStore: CodexReviewStore?
 
+    private var codexHomeURL: URL {
+        recoveryEnvironment.codexHomeURL
+    }
+
     init(
         environment: [String: String] = ProcessInfo.processInfo.environment,
+        recoveryEnvironment: CodexReviewRecoveryEnvironment,
         runtimePreferences: CodexReviewRuntime.Preferences = .defaults,
         nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration? = nil,
         webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory = CodexReviewNativeAuthentication.WebSessions.system,
@@ -239,10 +249,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         appServerRuntimeFactory: AppServerRuntimeFactory? = nil
     ) {
         let runtimePreferences = runtimePreferences.normalized
-        codexHomeURL = Self.codexHomeURL(
-            runtimePreferences: runtimePreferences,
-            environment: environment
+        let recoveryEnvironment = recoveryEnvironment.configured(
+            codexHomePath: runtimePreferences.codexHomePath
         )
+        self.recoveryEnvironment = recoveryEnvironment
         self.mcpHTTPServerConfiguration = .init(
             host: runtimePreferences.mcpHost,
             port: runtimePreferences.mcpPort,
@@ -256,10 +266,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         self.mcpHTTPServerBindChecker = mcpHTTPServerBindChecker ?? Self.defaultMCPHTTPServerBindChecker
         self.shutdownCleanupTimeout = shutdownCleanupTimeout
         self.appServerRuntimeFactory = appServerRuntimeFactory ?? Self.makeAppServerRuntimeFactory(
-            codexExecutablePath: runtimePreferences.codexExecutablePath
+            codexExecutablePath: runtimePreferences.codexExecutablePath,
+            environment: environment
         )
         let registry = CodexReviewAccountRegistry.load(
-            codexHomeURL: codexHomeURL
+            environment: recoveryEnvironment
         )
         seed = CodexReviewStoreSeed(
             shouldAutoStartEmbeddedServer: true,
@@ -278,16 +289,6 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     var initialSettingsSnapshot: CodexReviewSettings.Snapshot {
         settingsSnapshot
-    }
-
-    private static func codexHomeURL(
-        runtimePreferences: CodexReviewRuntime.Preferences,
-        environment: [String: String]
-    ) -> URL {
-        if let codexHomePath = runtimePreferences.codexHomePath {
-            return URL(fileURLWithPath: codexHomePath, isDirectory: true)
-        }
-        return AppServerCodexHome.url(environment: environment)
     }
 
     private static func defaultMCPPortOwnerResolver(
@@ -365,13 +366,15 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     private static func makeAppServerRuntimeFactory(
-        codexExecutablePath: String?
+        codexExecutablePath: String?,
+        environment: [String: String]
     ) -> AppServerRuntimeFactory {
         { codexHomeURL in
             let processRuntime = try await Task.detached(priority: .userInitiated) {
                 // The configuration probe can wait on `codex app-server --help`; keep it off the MainActor.
                 let configuration = AppServerProcessTransport.Configuration(
                     executable: codexExecutablePath,
+                    environment: environment,
                     codexHomeURL: codexHomeURL
                 )
                 let transport = try AppServerProcessTransport(configuration: configuration)
@@ -409,10 +412,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         var startedClient: AppServerClient?
         var startedHTTPServer: (any CodexReviewMCPHTTPServing)?
         do {
+            try await recoveryEnvironment.prepare()
             if mcpHTTPServerFactory != nil {
                 try await mcpHTTPServerBindChecker(mcpHTTPServerConfiguration)
             }
-            let runtime = try await appServerRuntimeFactory(codexHomeURL)
+            let runtime = try await appServerRuntimeFactory(recoveryEnvironment.codexHomeURL)
             let client = runtime.client
             let backend = runtime.backend
             startedClient = client
@@ -652,7 +656,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         try CodexReviewAccountRegistry.activateAccount(
             accountKey,
             accounts: auth.persistedAccounts,
-            codexHomeURL: codexHomeURL
+            environment: recoveryEnvironment
         )
         auth.applyPersistedAccountStates(
             auth.persistedAccounts.map(savedAccountPayload(from:)),
@@ -681,14 +685,14 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         try CodexReviewAccountRegistry.saveAccounts(
             remaining,
             activeAccountKey: activeAccountKey,
-            codexHomeURL: codexHomeURL
+            environment: recoveryEnvironment
         )
         try CodexReviewAccountRegistry.removeSavedAccountDirectory(
             accountKey: accountKey,
-            codexHomeURL: codexHomeURL
+            environment: recoveryEnvironment
         )
         if removedActiveAccount {
-            try? CodexReviewAccountRegistry.removeSharedAuth(codexHomeURL: codexHomeURL)
+            try? CodexReviewAccountRegistry.removeSharedAuth(environment: recoveryEnvironment)
         }
         auth.applyPersistedAccountStates(
             remaining.map(savedAccountPayload(from:)),
@@ -724,7 +728,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         try CodexReviewAccountRegistry.saveAccounts(
             accounts,
             activeAccountKey: auth.persistedActiveAccountKey,
-            codexHomeURL: codexHomeURL
+            environment: recoveryEnvironment
         )
         auth.applyPersistedAccountStates(accounts.map(savedAccountPayload(from:)))
     }
@@ -746,13 +750,13 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         try CodexReviewAccountRegistry.saveAccounts(
             remaining,
             activeAccountKey: nil,
-            codexHomeURL: codexHomeURL
+            environment: recoveryEnvironment
         )
         try CodexReviewAccountRegistry.removeSavedAccountDirectory(
             accountKey: account.accountKey,
-            codexHomeURL: codexHomeURL
+            environment: recoveryEnvironment
         )
-        try? CodexReviewAccountRegistry.removeSharedAuth(codexHomeURL: codexHomeURL)
+        try? CodexReviewAccountRegistry.removeSharedAuth(environment: recoveryEnvironment)
         auth.updatePhase(.signedOut)
         auth.selectPersistedAccount(nil)
         auth.applyPersistedAccountStates(remaining.map(savedAccountPayload(from:)), activeAccountKey: nil)
@@ -989,8 +993,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 usesPrimaryRuntime: true
             )
         case .preserveActiveAccount:
-            let temporaryCodexHomeURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent("codex-review-auth-\(UUID().uuidString)", isDirectory: true)
+            let temporaryCodexHomeURL = try await recoveryEnvironment
+                .prepareLoginStagingCodexHome(sessionID: UUID())
             let runtime = try await appServerRuntimeFactory(temporaryCodexHomeURL)
             return .init(
                 client: runtime.client,
@@ -1110,20 +1114,20 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         try? CodexReviewAccountRegistry.saveAccounts(
             persistedAccounts,
             activeAccountKey: activeAccountKey,
-            codexHomeURL: codexHomeURL
+            environment: recoveryEnvironment
         )
         switch activation {
         case .activateAuthenticatedAccount:
             try? CodexReviewAccountRegistry.saveSharedAuth(
                 for: account,
-                codexHomeURL: codexHomeURL
+                environment: recoveryEnvironment
             )
         case .preserveActiveAccount:
             if let authSourceCodexHomeURL {
                 try? CodexReviewAccountRegistry.saveSharedAuth(
                     from: authSourceCodexHomeURL,
                     for: account,
-                    codexHomeURL: codexHomeURL
+                    environment: recoveryEnvironment
                 )
             }
         }
@@ -1391,7 +1395,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             )
             try? CodexReviewAccountRegistry.updateCachedRateLimits(
                 from: selectedAccount,
-                codexHomeURL: codexHomeURL
+                environment: recoveryEnvironment
             )
         } catch {
             logger.error("Failed to decode account rate limit update: \(error.localizedDescription, privacy: .public)")
@@ -1423,12 +1427,17 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     private func refreshSavedAccountRateLimits(for account: CodexAccount) async {
-        let temporaryCodexHomeURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("codex-review-rate-limits-\(UUID().uuidString)", isDirectory: true)
+        let stagingSessionID = UUID()
+        let temporaryCodexHomeURL = recoveryEnvironment.loginStagingCodexHomeURL(
+            sessionID: stagingSessionID
+        )
         do {
+            _ = try await recoveryEnvironment.prepareLoginStagingCodexHome(
+                sessionID: stagingSessionID
+            )
             guard try CodexReviewAccountRegistry.copySavedAuth(
                 accountKey: account.accountKey,
-                from: codexHomeURL,
+                environment: recoveryEnvironment,
                 to: temporaryCodexHomeURL
             ) else {
                 account.markRateLimitReauthenticationRequired(
@@ -1437,7 +1446,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 )
                 try? CodexReviewAccountRegistry.updateCachedRateLimits(
                     from: account,
-                    codexHomeURL: codexHomeURL
+                    environment: recoveryEnvironment
                 )
                 return
             }
@@ -1448,7 +1457,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                     try CodexReviewAccountRegistry.saveSharedAuth(
                         from: temporaryCodexHomeURL,
                         for: account,
-                        codexHomeURL: codexHomeURL
+                        environment: recoveryEnvironment
                     )
                 }
             } catch {
@@ -1457,11 +1466,17 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             }
             await closeIsolatedLoginRuntime(client: runtime.client, codexHomeURL: temporaryCodexHomeURL)
         } catch {
-            try? FileManager.default.removeItem(at: temporaryCodexHomeURL)
+            do {
+                try await recoveryEnvironment.removeLoginStagingCodexHome(
+                    at: temporaryCodexHomeURL
+                )
+            } catch {
+                logger.error("Failed to remove rate-limit staging home: \(error.localizedDescription, privacy: .public)")
+            }
             account.updateRateLimitFetchMetadata(fetchedAt: Date(), error: error.localizedDescription)
             try? CodexReviewAccountRegistry.updateCachedRateLimits(
                 from: account,
-                codexHomeURL: codexHomeURL
+                environment: recoveryEnvironment
             )
         }
     }
@@ -1489,14 +1504,14 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             )
             try? CodexReviewAccountRegistry.updateCachedRateLimits(
                 from: account,
-                codexHomeURL: codexHomeURL
+                environment: recoveryEnvironment
             )
             return true
         } catch {
             recordRateLimitRefreshFailure(error, account: account)
             try? CodexReviewAccountRegistry.updateCachedRateLimits(
                 from: account,
-                codexHomeURL: codexHomeURL
+                environment: recoveryEnvironment
             )
             return false
         }
@@ -1543,7 +1558,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             return
         }
         await client?.close()
-        try? FileManager.default.removeItem(at: codexHomeURL)
+        do {
+            try await recoveryEnvironment.removeLoginStagingCodexHome(at: codexHomeURL)
+        } catch {
+            logger.error("Failed to remove login staging home: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     private func takeLoginRuntimeForCleanup() -> PendingLoginRuntimeCleanup {
@@ -1594,7 +1613,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         try? CodexReviewAccountRegistry.saveSharedAuth(
             from: sourceCodexHomeURL,
             for: account,
-            codexHomeURL: codexHomeURL
+            environment: recoveryEnvironment
         )
     }
 
@@ -1833,8 +1852,10 @@ private enum CodexReviewAccountRegistry {
         }
     }
 
-    static func load(codexHomeURL: URL) -> (accounts: [CodexAccount], activeAccountKey: String?) {
-        let registry = loadRegistry(codexHomeURL: codexHomeURL)
+    static func load(
+        environment: CodexReviewRecoveryEnvironment
+    ) -> (accounts: [CodexAccount], activeAccountKey: String?) {
+        let registry = loadRegistry(environment: environment)
         let accounts = registry.accounts.compactMap(makeAccount(from:))
         let activeAccountKey = registry.activeAccountKey
             .map(CodexAccount.normalizedEmail)
@@ -1848,9 +1869,9 @@ private enum CodexReviewAccountRegistry {
     static func saveAccounts(
         _ accounts: [CodexAccount],
         activeAccountKey: String?,
-        codexHomeURL: URL
+        environment: CodexReviewRecoveryEnvironment
     ) throws {
-        let existing = loadRegistry(codexHomeURL: codexHomeURL)
+        let existing = loadRegistry(environment: environment)
         let existingByAccountKey = Dictionary(uniqueKeysWithValues: existing.accounts.compactMap { entry in
             normalizedAccountKey(from: entry).map { ($0, entry) }
         })
@@ -1890,19 +1911,19 @@ private enum CodexReviewAccountRegistry {
         }
         try saveRegistry(
             .init(activeAccountKey: normalizedActiveAccountKey, accounts: records),
-            codexHomeURL: codexHomeURL
+            environment: environment
         )
     }
 
     static func activateAccount(
         _ accountKey: String,
         accounts: [CodexAccount],
-        codexHomeURL: URL
+        environment: CodexReviewRecoveryEnvironment
     ) throws {
         let normalizedAccountKey = CodexAccount.normalizedEmail(accountKey)
         let savedAuthURL = savedAccountAuthURL(
             accountKey: normalizedAccountKey,
-            codexHomeURL: codexHomeURL
+            environment: environment
         )
         guard FileManager.default.fileExists(atPath: savedAuthURL.path) else {
             throw CodexReviewAPI.Error.io("Saved authentication is missing for account \(normalizedAccountKey).")
@@ -1910,16 +1931,16 @@ private enum CodexReviewAccountRegistry {
         try saveAccounts(
             accounts,
             activeAccountKey: normalizedAccountKey,
-            codexHomeURL: codexHomeURL
+            environment: environment
         )
-        try copyAuth(from: savedAuthURL, to: sharedAuthURL(codexHomeURL: codexHomeURL))
+        try copyAuth(from: savedAuthURL, to: sharedAuthURL(codexHomeURL: environment.codexHomeURL))
     }
 
     static func updateCachedRateLimits(
         from account: CodexAccount,
-        codexHomeURL: URL
+        environment: CodexReviewRecoveryEnvironment
     ) throws {
-        var registry = loadRegistry(codexHomeURL: codexHomeURL)
+        var registry = loadRegistry(environment: environment)
         guard let index = registry.accounts.firstIndex(where: {
             normalizedAccountKey(from: $0) == account.accountKey
         }) else {
@@ -1935,24 +1956,24 @@ private enum CodexReviewAccountRegistry {
         }
         registry.accounts[index].lastRateLimitFetchAt = account.lastRateLimitFetchAt
         registry.accounts[index].lastRateLimitError = account.lastRateLimitError
-        try saveRegistry(registry, codexHomeURL: codexHomeURL)
+        try saveRegistry(registry, environment: environment)
     }
 
     static func saveSharedAuth(
         for account: CodexAccount,
-        codexHomeURL: URL
+        environment: CodexReviewRecoveryEnvironment
     ) throws {
         try saveSharedAuth(
-            from: codexHomeURL,
+            from: environment.codexHomeURL,
             for: account,
-            codexHomeURL: codexHomeURL
+            environment: environment
         )
     }
 
     static func saveSharedAuth(
         from sourceCodexHomeURL: URL,
         for account: CodexAccount,
-        codexHomeURL: URL
+        environment: CodexReviewRecoveryEnvironment
     ) throws {
         let sourceURL = sharedAuthURL(codexHomeURL: sourceCodexHomeURL)
         guard FileManager.default.fileExists(atPath: sourceURL.path) else {
@@ -1960,12 +1981,12 @@ private enum CodexReviewAccountRegistry {
         }
         try copyAuth(
             from: sourceURL,
-            to: savedAccountAuthURL(accountKey: account.accountKey, codexHomeURL: codexHomeURL)
+            to: savedAccountAuthURL(accountKey: account.accountKey, environment: environment)
         )
     }
 
-    static func removeSharedAuth(codexHomeURL: URL) throws {
-        let url = sharedAuthURL(codexHomeURL: codexHomeURL)
+    static func removeSharedAuth(environment: CodexReviewRecoveryEnvironment) throws {
+        let url = sharedAuthURL(codexHomeURL: environment.codexHomeURL)
         guard FileManager.default.fileExists(atPath: url.path) else {
             return
         }
@@ -1974,9 +1995,12 @@ private enum CodexReviewAccountRegistry {
 
     static func removeSavedAccountDirectory(
         accountKey: String,
-        codexHomeURL: URL
+        environment: CodexReviewRecoveryEnvironment
     ) throws {
-        let directoryURL = savedAccountDirectoryURL(accountKey: accountKey, codexHomeURL: codexHomeURL)
+        let directoryURL = savedAccountDirectoryURL(
+            accountKey: accountKey,
+            environment: environment
+        )
         guard FileManager.default.fileExists(atPath: directoryURL.path) else {
             return
         }
@@ -1985,13 +2009,13 @@ private enum CodexReviewAccountRegistry {
 
     static func copySavedAuth(
         accountKey: String,
-        from sourceCodexHomeURL: URL,
+        environment: CodexReviewRecoveryEnvironment,
         to destinationCodexHomeURL: URL
     ) throws -> Bool {
         let normalizedAccountKey = CodexAccount.normalizedEmail(accountKey)
         let sourceURL = savedAccountAuthURL(
             accountKey: normalizedAccountKey,
-            codexHomeURL: sourceCodexHomeURL
+            environment: environment
         )
         guard FileManager.default.fileExists(atPath: sourceURL.path) else {
             return false
@@ -2027,8 +2051,8 @@ private enum CodexReviewAccountRegistry {
         return account
     }
 
-    private static func loadRegistry(codexHomeURL: URL) -> Registry {
-        let url = registryURL(codexHomeURL: codexHomeURL)
+    private static func loadRegistry(environment: CodexReviewRecoveryEnvironment) -> Registry {
+        let url = registryURL(environment: environment)
         guard let data = try? Data(contentsOf: url),
               let registry = try? JSONDecoder().decode(Registry.self, from: data)
         else {
@@ -2039,12 +2063,11 @@ private enum CodexReviewAccountRegistry {
 
     private static func saveRegistry(
         _ registry: Registry,
-        codexHomeURL: URL
+        environment: CodexReviewRecoveryEnvironment
     ) throws {
-        let url = registryURL(codexHomeURL: codexHomeURL)
-        try FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(),
-            withIntermediateDirectories: true
+        let url = registryURL(environment: environment)
+        try CodexReviewRecoveryEnvironment.prepareOwnerOnlyDirectory(
+            at: url.deletingLastPathComponent()
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -2053,9 +2076,8 @@ private enum CodexReviewAccountRegistry {
 
     private static func copyAuth(from sourceURL: URL, to destinationURL: URL) throws {
         let destinationDirectoryURL = destinationURL.deletingLastPathComponent()
-        try FileManager.default.createDirectory(
-            at: destinationDirectoryURL,
-            withIntermediateDirectories: true
+        try CodexReviewRecoveryEnvironment.prepareOwnerOnlyDirectory(
+            at: destinationDirectoryURL
         )
         let replacementURL = destinationDirectoryURL
             .appendingPathComponent(".\(destinationURL.lastPathComponent).replacement-\(UUID().uuidString)")
@@ -2086,27 +2108,28 @@ private enum CodexReviewAccountRegistry {
             ?? (normalizedEmail.isEmpty ? nil : normalizedEmail)
     }
 
-    private static func registryURL(codexHomeURL: URL) -> URL {
-        accountsDirectoryURL(codexHomeURL: codexHomeURL)
-            .appendingPathComponent("registry.json")
+    private static func registryURL(environment: CodexReviewRecoveryEnvironment) -> URL {
+        environment.savedAccountsDirectoryURL.appendingPathComponent("registry.json")
     }
 
     private static func sharedAuthURL(codexHomeURL: URL) -> URL {
         codexHomeURL.appendingPathComponent("auth.json")
     }
 
-    private static func savedAccountAuthURL(accountKey: String, codexHomeURL: URL) -> URL {
-        savedAccountDirectoryURL(accountKey: accountKey, codexHomeURL: codexHomeURL)
+    private static func savedAccountAuthURL(
+        accountKey: String,
+        environment: CodexReviewRecoveryEnvironment
+    ) -> URL {
+        savedAccountDirectoryURL(accountKey: accountKey, environment: environment)
             .appendingPathComponent("auth.json")
     }
 
-    private static func savedAccountDirectoryURL(accountKey: String, codexHomeURL: URL) -> URL {
-        accountsDirectoryURL(codexHomeURL: codexHomeURL)
+    private static func savedAccountDirectoryURL(
+        accountKey: String,
+        environment: CodexReviewRecoveryEnvironment
+    ) -> URL {
+        environment.savedAccountsDirectoryURL
             .appendingPathComponent(pathComponent(forAccountKey: accountKey), isDirectory: true)
-    }
-
-    private static func accountsDirectoryURL(codexHomeURL: URL) -> URL {
-        codexHomeURL.appendingPathComponent("accounts", isDirectory: true)
     }
 
     private static func pathComponent(forAccountKey accountKey: String) -> String {
