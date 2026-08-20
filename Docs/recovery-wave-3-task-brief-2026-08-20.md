@@ -6,7 +6,7 @@ slice SHA.
 | Item | Value |
 |---|---|
 | Integration branch | `codex/v0-6-2-recovery` |
-| Wave 3A base | `51354e8c01ce04e1992bce252f6e778dca7edd98` |
+| Wave 3A base | `287795d587823335e160d5e682407539c28a11af` |
 | Wave 3B base | Reviewed Wave 3A HEAD; record before dispatch |
 | Wave 3C base | Reviewed Wave 3B HEAD; record before dispatch |
 | Approved design | `Docs/recovery-design-2026-08-20.md` |

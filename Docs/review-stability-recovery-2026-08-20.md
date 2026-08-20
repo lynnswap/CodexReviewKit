@@ -114,7 +114,9 @@ The proposed Phase 2 gate now includes:
 | 2026-08-20 | Wave 0/1 branch review | Review MCP run `83224844-0A69-44C7-B703-6C12D4F74294` reviewed the complete `v0.6.2...HEAD` diff and reported zero findings. |
 | 2026-08-20 | Wave 2 source mapping | Upstream `3b45c290` proves review command deltas carry thread/turn/item identity while standalone command/process deltas carry only connection-scoped handles. Wave 2 excludes unregistered standalone traffic instead of porting historical string-equality correlation. |
 | 2026-08-20 | Wave 2 / #104 + #105 integrated | `3996456`–`51354e8` pin the current-v2 wire, centralize method/item schema and fault containment, fix canonical outer terminal/result ownership, preserve one visible final row, and expose typed MCP terminal data without changing tool input/schema names. Worker gates passed 604 package tests, 17 app tests, compatibility consumer/API/MCP goldens, and Review MCP run `E8453E0E-...` with zero findings. |
-| 2026-08-20 | Wave 3 design gate | `370e431` defines three sequential cancellation/close slices: AppServer barrier, Store/Host/MCP close authority, then ReviewUI/application termination. Independent semantic and API/concurrency re-gates reported zero blockers; Wave 3A is pinned to integrated Wave 2 HEAD `51354e8`. |
+| 2026-08-20 | Wave 3 design gate | `370e431` defines three sequential cancellation/close slices: AppServer barrier, Store/Host/MCP close authority, then ReviewUI/application termination. Independent semantic and API/concurrency re-gates reported zero blockers; after the integration review fix, Wave 3A is pinned to `287795d`. |
+| 2026-08-20 | Integrated recovery review fix | Branch review `93B08469-...` found repeated synthetic `.started` events caused by an ungrouped `||`; `287795d` restores the session-owned one-shot invariant and adds a multi-event regression test. The focused AppServer suite passed 161 tests. |
+| 2026-08-20 | Integrated recovery review disposition | Review `7E9107A3-...` reported only automatic import of `codexReview.runtimePreferences`. Disputed by the approved RecoveryV1/#108 contract: the legacy key/home are read-only source inputs and automatic reuse could mutate the only current-main state. The explicit quiescent copy/import wave owns validated settings migration. No code change made. |
 
 ## Remaining decisions
 
@@ -130,7 +132,7 @@ The proposed Phase 2 gate now includes:
 | Wave 1 / #103 log viewport | 3 hours; 2 production + 2 test files | ReviewUI native scroll/layout | Integrated at `03bf36e` |
 | Wave 1 / compatibility gates | 5 hours; 10 files | external consumer/API/MCP contract tests | Integrated at `3801200` |
 | Wave 2 / #104 + #105 event contract | 18 hours; 10 production + 7 test/gate files | attempt-scoped current-v2 decoder/terminal reducer | Integrated at `3996456`–`51354e8` |
-| Wave 3A / #106 interrupt barrier | 17 production + 10 test/gate files maximum | attempt start/cancel + AppServer interrupt/connection terminal owner | Authorized at base `51354e8` |
+| Wave 3A / #106 interrupt barrier | 17 production + 10 test/gate files maximum | attempt start/cancel + AppServer interrupt/connection terminal owner | Authorized at base `287795d` |
 | Wave 3B / #106 runtime close | 18 production + 10 test/gate files maximum | Store runtime generation + Host/MCP public close | Pending reviewed Wave 3A |
 | Wave 3C / #106 native close | 12 production + 7 test/gate files maximum | ReviewUI lifecycle + ReviewMonitor termination | Pending reviewed Wave 3B |
 
