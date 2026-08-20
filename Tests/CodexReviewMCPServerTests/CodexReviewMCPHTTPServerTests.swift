@@ -868,6 +868,7 @@ struct CodexReviewMCPHTTPServerTests {
                 workspaces: [.init(cwd: "/tmp/project")],
                 jobs: [completed, running]
             )
+            try await seedQueuedAttemptOwnership(in: store, for: running)
 
             let response = try await postJSONRPC(
                 endpoint: await server.url,
@@ -976,6 +977,7 @@ struct CodexReviewMCPHTTPServerTests {
                 workspaces: [.init(cwd: "/tmp/project")],
                 jobs: [running]
             )
+            try await seedQueuedAttemptOwnership(in: store, for: running)
 
             let response = try await postJSONRPC(
                 endpoint: await server.url,
@@ -1192,6 +1194,7 @@ struct CodexReviewMCPHTTPServerTests {
                 workspaces: [.init(cwd: "/tmp/project")],
                 jobs: [running]
             )
+            try await seedQueuedAttemptOwnership(in: store, for: running)
 
             let response = try await deleteSession(endpoint: await server.url, sessionID: sessionID)
 
@@ -1490,6 +1493,19 @@ struct CodexReviewMCPHTTPServerTests {
             try? await Task.sleep(for: .milliseconds(50))
         }
         return true
+    }
+
+    private func seedQueuedAttemptOwnership(
+        in store: CodexReviewStore,
+        for job: CodexReviewJob
+    ) async throws {
+        let admission = ReviewStartAdmission()
+        let registered = try await admission.registerStart { _ in
+            throw ReviewAttemptContractFailure(
+                message: "An MCP cancellation fixture must remain backend-inert."
+            )
+        }
+        store.reviewAttemptOwnerships[job.id] = .initialStart(registered)
     }
 }
 
