@@ -29,7 +29,7 @@ jobs:
       XCODE_MAJOR: '26'
     steps:
       - name: Check out repository
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Resolve latest stable Xcode
         run: |
@@ -77,3 +77,20 @@ jobs:
             -destination 'platform=macOS,arch=arm64' \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO
+
+  published-compatibility:
+    name: Published Compatibility (Xcode 27)
+    # GitHub-hosted preview image: actions/runner-images#14404.
+    runs-on: xcode-27
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Show Xcode environment
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks
+
+      - name: Run published compatibility gates
+        run: scripts/check-compatibility.sh

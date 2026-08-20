@@ -1,0 +1,156 @@
+[
+  {
+    "description": "Start a Codex review.",
+    "inputSchema": {
+      "properties": {
+        "cwd": {
+          "type": "string"
+        },
+        "sessionID": {
+          "type": "string"
+        },
+        "target": {
+          "properties": {
+            "branch": {
+              "type": "string"
+            },
+            "instructions": {
+              "type": "string"
+            },
+            "sha": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "cwd",
+        "target"
+      ],
+      "type": "object"
+    },
+    "name": "review_start"
+  },
+  {
+    "description": "Wait for a running Codex review job.",
+    "inputSchema": {
+      "anyOf": [
+        {
+          "required": [
+            "jobId"
+          ]
+        },
+        {
+          "required": [
+            "jobID"
+          ]
+        }
+      ],
+      "properties": {
+        "jobID": {
+          "type": "string"
+        },
+        "jobId": {
+          "type": "string"
+        },
+        "sessionID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "review_await"
+  },
+  {
+    "description": "Read a Codex review job.",
+    "inputSchema": {
+      "properties": {
+        "jobID": {
+          "type": "string"
+        },
+        "jobId": {
+          "type": "string"
+        },
+        "logFilter": {
+          "enum": [
+            "default",
+            "all"
+          ],
+          "type": "string"
+        },
+        "logLimit": {
+          "maximum": 500,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "logOffset": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sessionID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "review_read"
+  },
+  {
+    "description": "List Codex review jobs.",
+    "inputSchema": {
+      "properties": {
+        "cwd": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "sessionID": {
+          "type": "string"
+        },
+        "statuses": {
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "name": "review_list"
+  },
+  {
+    "description": "Cancel a Codex review job.",
+    "inputSchema": {
+      "properties": {
+        "cwd": {
+          "type": "string"
+        },
+        "jobID": {
+          "type": "string"
+        },
+        "jobId": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "sessionID": {
+          "type": "string"
+        },
+        "statuses": {
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "name": "review_cancel"
+  }
+]
