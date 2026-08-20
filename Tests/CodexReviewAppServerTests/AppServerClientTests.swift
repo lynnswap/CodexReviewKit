@@ -2008,6 +2008,28 @@ struct AppServerClientTests {
         }
     }
 
+    @Test func backendLifecycleAdmissionCanCloseBeforePhysicalClientClose() async throws {
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(
+            client: AppServerClient(transport: transport)
+        )
+        let lifecycle = backend.runtimeOwnerLifecycleHandle
+
+        await lifecycle.closeAdmission()
+
+        await #expect(throws: JSONRPC.Error.closed) {
+            _ = try await backend.startReview(.init(
+                jobID: "job-1",
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            ))
+        }
+        #expect(await transport.closeCallCountForTesting() == 0)
+
+        try await lifecycle.closeAndWait()
+        #expect(await transport.closeCallCountForTesting() == 1)
+    }
+
     @Test func backendLifecycleCloseJoinsOwnedRouterAndEventSessions() async throws {
         let transport = DeferredNotificationCloseTransport()
         let backend = AppServerCodexReviewBackend(
@@ -2120,10 +2142,10 @@ struct AppServerClientTests {
         #expect(await completion.hasCompleted() == false)
         await transport.finishNotificationStream(throwing: JSONRPC.Error.closed)
 
-        await #expect(throws: closeFailure) {
+        await #expect(throws: ReviewLifecycleResourceFailureAggregate.self) {
             try await close.value
         }
-        await #expect(throws: closeFailure) {
+        await #expect(throws: ReviewLifecycleResourceFailureAggregate.self) {
             try await lifecycle.closeAndWait()
         }
         #expect(await transport.recordedCloseCallCount() == 1)

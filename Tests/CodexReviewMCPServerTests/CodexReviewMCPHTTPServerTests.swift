@@ -155,7 +155,7 @@ struct CodexReviewMCPHTTPServerTests {
             path: "/mcp"
         ))
         #expect(afterAdmissionClose.statusCode == 503)
-        await server.stop()
+        try await server.stop()
     }
 
     @Test func streamableHTTPClassifiesAddressInUseBindError() {
@@ -1115,7 +1115,7 @@ struct CodexReviewMCPHTTPServerTests {
 
         let stopFinished = CompletionFlag()
         let stopTask = Task {
-            await server.stop()
+            try await server.stop()
             await stopFinished.complete()
         }
         await server.waitForAdmittedHandlerDrainToBeginForTesting()
@@ -1128,7 +1128,7 @@ struct CodexReviewMCPHTTPServerTests {
         await requestGate.open()
         await backend.yield(.completed(summary: "Done", result: "review text"))
         _ = try? await requestTask.value
-        await stopTask.value
+        try await stopTask.value
 
         #expect(await stopFinished.isCompleted())
         #expect(await server.sessionActiveRequestCountForTesting(sessionID: sessionID) == nil)
@@ -1360,10 +1360,10 @@ struct CodexReviewMCPHTTPServerTests {
         try await server.start()
         do {
             let result = try await operation(server)
-            await server.stop()
+            try await server.stop()
             return result
         } catch {
-            await server.stop()
+            try? await server.stop()
             throw error
         }
     }

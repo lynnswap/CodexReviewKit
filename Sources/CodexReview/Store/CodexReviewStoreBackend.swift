@@ -27,7 +27,6 @@ package struct CodexReviewStoreSeed {
 package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend, Sendable {
     var seed: CodexReviewStoreSeed { get }
     var isActive: Bool { get }
-    var handlesActiveReviewStopCleanup: Bool { get }
     var mcpServerLifecycle: any MCPServerLifecycleOwner { get }
 
     func attachStore(_ store: CodexReviewStore)
@@ -35,7 +34,7 @@ package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend, Sendable {
         generation: ReviewRuntimeGeneration,
         purpose: ReviewRuntimeTransitionPurpose
     ) async throws -> PreparedRuntime
-    func stop(store: CodexReviewStore) async
+    func stop(store: CodexReviewStore) async throws
     func waitUntilStopped() async
     func refreshAuth(auth: CodexReviewAuthModel) async
     func signIn(auth: CodexReviewAuthModel) async
@@ -63,10 +62,4 @@ package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend, Sendable {
         admission: ReviewStartAdmission
     ) async throws -> BackendReviewAttempt
     func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws
-}
-
-extension CodexReviewStoreBackend {
-    package var handlesActiveReviewStopCleanup: Bool {
-        false
-    }
 }

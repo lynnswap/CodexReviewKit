@@ -223,10 +223,21 @@ private struct CodexReviewStoreRateLimitAutoRefreshAccountState {
 @MainActor
 extension CodexReviewStore {
     package func startAccountRateLimitAutoRefresh() {
+        guard case .open = lifetimeState else {
+            return
+        }
         if accountRateLimitAutoRefreshDriver == nil {
             accountRateLimitAutoRefreshDriver = CodexReviewStoreRateLimitAutoRefreshDriver(store: self)
         }
         accountRateLimitAutoRefreshDriver?.start()
+    }
+
+    package func cancelAccountRateLimitAutoRefreshAndWait() async {
+        guard let driver = accountRateLimitAutoRefreshDriver else {
+            return
+        }
+        accountRateLimitAutoRefreshDriver = nil
+        await driver.cancelAndWait()
     }
 
     package func accountRateLimitAutoRefreshTargets(now: Date) -> [CodexReviewStoreRateLimitAutoRefreshTarget] {
@@ -240,6 +251,9 @@ extension CodexReviewStore {
     }
 
     package func refreshDueAccountRateLimits(now: Date) {
+        guard case .open = lifetimeState else {
+            return
+        }
         startAccountRateLimitAutoRefresh()
         accountRateLimitAutoRefreshDriver?.refreshDueAccounts(now: now)
     }
@@ -312,6 +326,25 @@ package final class CodexReviewStoreRateLimitAutoRefreshDriver {
         scheduledWakeUp = nil
         accountStates.values.forEach { state in
             state.refreshTask?.cancel()
+        }
+        accountStates.removeAll(keepingCapacity: false)
+    }
+
+    func cancelAndWait() async {
+        observation?.cancel()
+        observation = nil
+        let wakeUpTask = scheduledWakeUp?.task
+        scheduledWakeUp = nil
+        let refreshTasks = accountStates.keys.sorted().compactMap {
+            accountStates[$0]?.refreshTask
+        }
+        wakeUpTask?.cancel()
+        for task in refreshTasks {
+            task.cancel()
+        }
+        await wakeUpTask?.value
+        for task in refreshTasks {
+            await task.value
         }
         accountStates.removeAll(keepingCapacity: false)
     }

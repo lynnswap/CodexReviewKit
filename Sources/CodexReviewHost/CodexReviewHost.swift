@@ -7,7 +7,6 @@ import CodexReviewMCPServer
 package final class CodexReviewHost {
     package let store: CodexReviewStore
     package let mcpServer: CodexReviewMCPServer
-    private let shutdown: @Sendable () async throws -> Void
     private var endpoint: URL?
 
     package init(
@@ -15,12 +14,16 @@ package final class CodexReviewHost {
         clock: CodexReviewClock = .init(),
         idGenerator: CodexReviewIDGenerator = .init(),
         endpoint: URL? = nil,
-        shutdown: @escaping @Sendable () async throws -> Void = {}
+        closeAdmission: @escaping @MainActor @Sendable () async -> Void = {},
+        shutdown: @escaping @MainActor @Sendable () async throws -> Void = {}
     ) {
-        self.shutdown = shutdown
         self.endpoint = endpoint
         let store = CodexReviewStore(
-            backend: DirectCodexReviewStoreBackend(backend: backend),
+            backend: DirectCodexReviewStoreBackend(
+                backend: backend,
+                closeAdmission: closeAdmission,
+                shutdown: shutdown
+            ),
             clock: clock,
             idGenerator: idGenerator
         )
@@ -37,8 +40,11 @@ package final class CodexReviewHost {
         self.init(
             backend: backend,
             endpoint: endpoint,
+            closeAdmission: {
+                await backend.runtimeOwnerLifecycleHandle.closeAdmission()
+            },
             shutdown: {
-                try await client.close()
+                try await backend.runtimeOwnerLifecycleHandle.closeAndWait()
             }
         )
     }
@@ -47,13 +53,18 @@ package final class CodexReviewHost {
         if let endpoint {
             self.endpoint = endpoint
         }
+        await store.start()
+        guard case .open = store.lifetimeState,
+              case .running = store.runtimeState
+        else {
+            return
+        }
         store.transitionToRunning(serverURL: self.endpoint)
         await store.refreshSettings()
     }
 
     package func stop() async throws {
         await store.stop()
-        try await shutdown()
     }
 }
 
@@ -62,6 +73,8 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
     let seed = CodexReviewStoreSeed()
     let mcpServerLifecycle: any MCPServerLifecycleOwner = NoMCPServerLifecycleOwner()
     private let backend: any CodexReviewBackend
+    private let closeAdmission: @MainActor @Sendable () async -> Void
+    private let shutdown: @MainActor @Sendable () async throws -> Void
     private var currentSettingsSnapshot = CodexReviewSettings.Snapshot()
     private var loginChallenge: CodexReviewBackendModel.Login.Challenge?
     private var active = false
@@ -74,8 +87,14 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
         currentSettingsSnapshot
     }
 
-    init(backend: any CodexReviewBackend) {
+    init(
+        backend: any CodexReviewBackend,
+        closeAdmission: @escaping @MainActor @Sendable () async -> Void,
+        shutdown: @escaping @MainActor @Sendable () async throws -> Void
+    ) {
         self.backend = backend
+        self.closeAdmission = closeAdmission
+        self.shutdown = shutdown
     }
 
     func attachStore(_: CodexReviewStore) {}
@@ -84,19 +103,57 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
         generation _: ReviewRuntimeGeneration,
         purpose _: ReviewRuntimeTransitionPurpose
     ) async throws -> PreparedRuntime {
-        let authentication = try await backend.readAuth()
-        let settings = try await Self.monitorSettings(from: backend.readSettings())
+        let shutdown = shutdown
         let handle = DirectRuntimeLifecycleHandle(
             onActivate: { [weak self] in self?.active = true },
-            onClose: { [weak self] in self?.active = false }
+            onCloseAdmission: closeAdmission,
+            onClose: { [weak self] in
+                defer { self?.active = false }
+                try await shutdown()
+            }
         )
-        return .init(
-            snapshot: .init(
-                authentication: authentication,
-                settings: settings
-            ),
-            handle: handle
-        )
+        let closeRecord = RuntimeCloseRecord()
+        do {
+            let authentication = try await backend.readAuth()
+            let settings = try await Self.monitorSettings(from: backend.readSettings())
+            return .init(
+                snapshot: .init(
+                    authentication: authentication,
+                    settings: settings
+                ),
+                handle: handle,
+                closeRecord: closeRecord
+            )
+        } catch {
+            await handle.closeAdmission()
+            _ = await closeRecord.closeAndWait(
+                handle: handle,
+                purpose: .stop
+            )
+            let cleanupFailures = closeRecord.consumeFailures().flatMap {
+                failure -> [ReviewLifecycleResourceFailure] in
+                switch failure {
+                case .lifecycleResources(let aggregate):
+                    return [aggregate.first] + aggregate.additionalInLifecycleOrder
+                case .attemptRuntime(let failure):
+                    return [.client(failure.localizedDescription)]
+                case .interruptRequest(let failure):
+                    return [.client(failure.localizedDescription)]
+                case .persistence(let failure):
+                    return [.client(failure.localizedDescription)]
+                }
+            }
+            if let first = cleanupFailures.first {
+                throw ReviewRuntimePreparationFailure(
+                    preparationError: error,
+                    cleanupFailures: .init(
+                        first: first,
+                        additionalInLifecycleOrder: Array(cleanupFailures.dropFirst())
+                    )
+                )
+            }
+            throw error
+        }
     }
 
     func stop(store _: CodexReviewStore) async {
@@ -336,14 +393,17 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
 @MainActor
 private final class DirectRuntimeLifecycleHandle: RuntimeLifecycleHandle {
     private let onActivate: @MainActor @Sendable () -> Void
-    private let onClose: @MainActor @Sendable () -> Void
-    private var didClose = false
+    private let onCloseAdmission: @MainActor @Sendable () async -> Void
+    private let onClose: @MainActor @Sendable () async throws -> Void
+    private var closeTask: Task<Result<Void, ReviewLifecycleResourceFailureAggregate>, Never>?
 
     init(
         onActivate: @escaping @MainActor @Sendable () -> Void,
-        onClose: @escaping @MainActor @Sendable () -> Void
+        onCloseAdmission: @escaping @MainActor @Sendable () async -> Void,
+        onClose: @escaping @MainActor @Sendable () async throws -> Void
     ) {
         self.onActivate = onActivate
+        self.onCloseAdmission = onCloseAdmission
         self.onClose = onClose
     }
 
@@ -351,20 +411,41 @@ private final class DirectRuntimeLifecycleHandle: RuntimeLifecycleHandle {
         onActivate()
     }
 
-    func closeAdmission() async {}
+    func closeAdmission() async {
+        await onCloseAdmission()
+    }
 
     func close(purpose _: ReviewRuntimeTransitionPurpose) async throws {
-        guard didClose == false else { return }
-        didClose = true
-        onClose()
+        let task: Task<Result<Void, ReviewLifecycleResourceFailureAggregate>, Never>
+        if let closeTask {
+            task = closeTask
+        } else {
+            let onClose = onClose
+            let newTask = Task<Result<Void, ReviewLifecycleResourceFailureAggregate>, Never> { @MainActor in
+                do {
+                    try await onClose()
+                    return .success(())
+                } catch let aggregate as ReviewLifecycleResourceFailureAggregate {
+                    return .failure(aggregate)
+                } catch let failure as ReviewLifecycleResourceFailure {
+                    return .failure(.init(first: failure))
+                } catch {
+                    return .failure(.init(first: .client(error.localizedDescription)))
+                }
+            }
+            closeTask = newTask
+            task = newTask
+        }
+        try await task.value.get()
     }
 
     func waitUntilClosed() async throws {
-        guard didClose else {
+        guard let closeTask else {
             throw ReviewLifecycleResourceFailure.client(
                 "Direct runtime wait began before close."
             )
         }
+        try await closeTask.value.get()
     }
 }
 

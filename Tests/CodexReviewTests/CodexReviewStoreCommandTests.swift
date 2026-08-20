@@ -1958,7 +1958,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func runtimeStopLocalCancellationDetachesWorker() async throws {
+    @Test func runtimeStopLocalCancellationAwaitsWorker() async throws {
         let run = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
             turnID: "turn-1",
@@ -1989,10 +1989,12 @@ struct CodexReviewStoreCommandTests {
             #expect(store.reviewWorkerTasks["job-1"] != nil)
             #expect(activeAttempt(in: store, jobID: "job-1")?.run == run)
 
-            store.cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
+            await store.cancelAndAwaitReviewWorkersForRuntimeStop(
+                jobIDs: locallyCancelledJobIDs
+            )
 
             #expect(store.reviewWorkerTasks["job-1"] == nil)
-            #expect(activeAttempt(in: store, jobID: "job-1")?.run == run)
+            #expect(store.reviewAttemptOwnerships["job-1"] == nil)
         }
     }
 
@@ -2039,7 +2041,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func runtimeStopDetachesNetworkRecoveryWaitingWorker() async throws {
+    @Test func runtimeStopAwaitsNetworkRecoveryWaitingWorker() async throws {
         let run = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
             turnID: "turn-1",
@@ -2069,14 +2071,16 @@ struct CodexReviewStoreCommandTests {
                 reason: .system(message: "Review runtime stopped."),
                 cancelWorkers: false
             )
-            store.cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
+            await store.cancelAndAwaitReviewWorkersForRuntimeStop(
+                jobIDs: locallyCancelledJobIDs
+            )
 
             #expect(store.reviewWorkerTasks["job-1"] == nil)
-            #expect(isWaitingForRecovery(in: store, jobID: "job-1"))
+            #expect(store.reviewAttemptOwnerships["job-1"] == nil)
         }
     }
 
-    @Test func runtimeStopCanDrainDetachedWorkerCleanup() async throws {
+    @Test func runtimeStopAwaitsWorkerCleanup() async throws {
         let run = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
             turnID: "turn-1",
@@ -2100,15 +2104,16 @@ struct CodexReviewStoreCommandTests {
                 reason: .system(message: "Review runtime stopped."),
                 cancelWorkers: false
             )
-            store.cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
+            await store.cancelAndAwaitReviewWorkersForRuntimeStop(
+                jobIDs: locallyCancelledJobIDs
+            )
 
-            #expect(await store.drainRuntimeStopDetachedReviewWorkers(timeout: .seconds(2)))
-            #expect(store.runtimeStopDetachedReviewWorkerTasks["job-1"] == nil)
+            #expect(store.reviewWorkerTasks["job-1"] == nil)
             #expect(await backend.recordedCommands().contains(.cleanupReview(run)))
         }
     }
 
-    @Test func runtimeStopDetachLetsStartReviewReturnWhenBackendStartIsStuck() async throws {
+    @Test func runtimeStopAwaitJoinsStartAfterBackendUnblocks() async throws {
         let backend = FakeCodexReviewBackend()
         let startReviewGate = AsyncGate()
         await backend.holdStartReview(with: startReviewGate)
@@ -2129,12 +2134,14 @@ struct CodexReviewStoreCommandTests {
                 reason: .system(message: "Review runtime stopped."),
                 cancelWorkers: false
             )
-            store.cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
-            let resultBeforeStartReviewUnblocked = try await waitForTaskValue(running, timeout: .seconds(1))
-            #expect(store.reviewAttemptOwnerships["job-1"] != nil)
+            let drainTask = Task { @MainActor in
+                await store.cancelAndAwaitReviewWorkersForRuntimeStop(
+                    jobIDs: locallyCancelledJobIDs
+                )
+            }
             await startReviewGate.open()
-            let result = try #require(resultBeforeStartReviewUnblocked)
-            #expect(await store.drainRuntimeStopDetachedReviewWorkers(timeout: .seconds(2)))
+            await drainTask.value
+            let result = try await running.value
 
             #expect(locallyCancelledJobIDs == ["job-1"])
             #expect(result.core.lifecycle.status == .cancelled)
@@ -2447,6 +2454,7 @@ struct CodexReviewStoreCommandTests {
                 }
             )
         )
+        await store.start()
         try await withStoreCommandTestCleanup(backend: backend, store: store) {
             async let result = store.startReview(
                 sessionID: "session-1",

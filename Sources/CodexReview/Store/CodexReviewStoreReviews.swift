@@ -54,6 +54,37 @@ extension CodexReviewStore {
         sessionID: String,
         request: CodexReviewAPI.Start.Request
     ) async throws -> String {
+        guard case .open = lifetimeState else {
+            throw CodexReviewAPI.Error.io("Review Store is closed.")
+        }
+        nextReviewMutationID &+= 1
+        let mutationID = nextReviewMutationID
+        let runtimeGeneration = runtimeState.generation
+        let task = Task<String, any Error> { @MainActor [weak self] in
+            guard let self else {
+                throw CodexReviewAPI.Error.io("Review Store was released.")
+            }
+            return try await self.performBeginReview(
+                sessionID: sessionID,
+                request: request,
+                runtimeGeneration: runtimeGeneration
+            )
+        }
+        reviewMutationTasks[mutationID] = task
+        defer {
+            reviewMutationTasks.removeValue(forKey: mutationID)
+        }
+        return try await task.value
+    }
+
+    private func performBeginReview(
+        sessionID: String,
+        request: CodexReviewAPI.Start.Request,
+        runtimeGeneration: ReviewRuntimeGeneration
+    ) async throws -> String {
+        guard case .open = lifetimeState else {
+            throw CodexReviewAPI.Error.io("Review Store is closed.")
+        }
         switch runtimeState {
         case .acquiring, .transitioning:
             throw CodexReviewAPI.Error.io(
@@ -91,8 +122,20 @@ extension CodexReviewStore {
             model: settings.effectiveModel
         )
         let backend = self.backend
+        await reviewMutationPreparationForTesting?()
         let registered = try await admission.registerStart { admission in
             try await backend.startReview(startRequest, admission: admission)
+        }
+        guard isReviewMutationCurrent(runtimeGeneration) else {
+            _ = try? await cancel(
+                admission: admission,
+                cancellation: .system(message: "Review Store closed."),
+                jobID: jobID
+            )
+            _ = await registered.task.result
+            throw CodexReviewAPI.Error.io(
+                "Review runtime changed before review publication."
+            )
         }
         insertReviewJob(job)
         markReviewRunning(job, startedAt: createdAt)
@@ -103,6 +146,21 @@ extension CodexReviewStore {
             registeredStart: registered
         )
         return jobID
+    }
+
+    private func isReviewMutationCurrent(
+        _ generation: ReviewRuntimeGeneration
+    ) -> Bool {
+        guard case .open = lifetimeState else {
+            return false
+        }
+        switch runtimeState {
+        case .stopped(let currentGeneration),
+             .running(let currentGeneration, _, _):
+            return currentGeneration == generation
+        case .acquiring, .transitioning, .failed:
+            return false
+        }
     }
 
     private func launchReviewWorker(
@@ -176,6 +234,9 @@ extension CodexReviewStore {
                 let failure = ReviewRuntimeCloseFailure.worker(
                     "Review worker was cancelled before a canonical terminal."
                 )
+                if job.isTerminal == false {
+                    retainCleanupFailure(failure, for: jobID)
+                }
                 do {
                     try await active.admission.recordStreamTerminal(.ownerCancellation)
                 } catch {
@@ -200,7 +261,8 @@ extension CodexReviewStore {
                         markReviewFailed(job, message: error.localizedDescription)
                     }
                 }
-                applyStreamProductTerminal(streamFailure, to: job)
+                await reviewTerminalPublicationPreparationForTesting?()
+                await applyStreamProductTerminal(streamFailure, to: job)
             } else if job.isTerminal == false {
                 markReviewFailed(job, message: error.localizedDescription)
             }
@@ -208,6 +270,7 @@ extension CodexReviewStore {
 
         reviewAttemptOwnerships[jobID] = .terminal
         if let cleanupAttempt {
+            await reviewCleanupPreparationForTesting?()
             do {
                 try await cleanupReview(
                     cleanupAttempt.run,
@@ -218,7 +281,6 @@ extension CodexReviewStore {
             }
         }
         reviewWorkerTasks.removeValue(forKey: jobID)
-        runtimeStopDetachedReviewWorkerTasks.removeValue(forKey: jobID)
         if case .terminal = reviewAttemptOwnerships[jobID] {
             reviewAttemptOwnerships.removeValue(forKey: jobID)
         }
@@ -475,7 +537,8 @@ extension CodexReviewStore {
         case .initialStart(let start):
             let resolution = try await cancel(
                 admission: start.admission,
-                cancellation: cancellation
+                cancellation: cancellation,
+                jobID: jobID
             )
             if case .localCancellation = resolution.terminal,
                job.isTerminal == false {
@@ -491,7 +554,8 @@ extension CodexReviewStore {
         case .active(let active):
             let resolution = try await cancel(
                 admission: active.admission,
-                cancellation: cancellation
+                cancellation: cancellation,
+                jobID: jobID
             )
             try commitAcknowledgedForcedCancellationIfNeeded(
                 resolution,
@@ -506,7 +570,8 @@ extension CodexReviewStore {
         case .resolvingRecovery(let active):
             _ = try await cancel(
                 admission: active.admission,
-                cancellation: cancellation
+                cancellation: cancellation,
+                jobID: jobID
             )
             if case .resolvingRecovery(let current) = reviewAttemptOwnerships[jobID],
                sameAttempt(current, active),
@@ -542,7 +607,8 @@ extension CodexReviewStore {
         case .replacementStart(_, let start):
             let resolution = try await cancel(
                 admission: start.admission,
-                cancellation: cancellation
+                cancellation: cancellation,
+                jobID: jobID
             )
             if case .localCancellation = resolution.terminal,
                job.isTerminal == false {
@@ -562,7 +628,8 @@ extension CodexReviewStore {
 
     private func cancel(
         admission: ReviewStartAdmission,
-        cancellation: ReviewCancellation
+        cancellation: ReviewCancellation,
+        jobID: String
     ) async throws -> ReviewAttemptCancellationResolution {
         let backend = self.backend
         return try await admission.cancel(
@@ -570,10 +637,85 @@ extension CodexReviewStore {
             interrupt: { run, reason in
                 try await backend.interruptReview(run, reason: reason)
             },
-            forceClose: {
-                try await backend.forceCloseReviewConnection()
+            forceClose: { @MainActor [weak self] in
+                guard let self else {
+                    throw ReviewRuntimeCloseFailure.connection(
+                        "Review Store was released before runtime force-close."
+                    )
+                }
+                try await self.forceCloseCurrentRuntimeForAttempt(jobID: jobID)
             }
         )
+    }
+
+    private func forceCloseCurrentRuntimeForAttempt(jobID: String) async throws {
+        let generation: ReviewRuntimeGeneration
+        let runtime: PreparedRuntime
+        let mcpGeneration: MCPServerGeneration?
+        let record: ReviewRuntimeTransitionRecord
+        switch runtimeState {
+        case .running(
+            let runningGeneration,
+            let runningRuntime,
+            let runningMCPGeneration
+        ):
+            generation = runningGeneration
+            runtime = runningRuntime
+            mcpGeneration = runningMCPGeneration
+            record = ReviewRuntimeTransitionRecord()
+        case .transitioning(
+            let transitionGeneration,
+            _,
+            _,
+            let transitionRecord,
+            let sourceRuntime?
+        ):
+            generation = transitionGeneration
+            runtime = sourceRuntime
+            mcpGeneration = nil
+            record = transitionRecord
+        case .stopped, .acquiring, .failed, .transitioning:
+            throw ReviewRuntimeCloseFailure.connection(
+                "Review runtime is not running."
+            )
+        }
+        await runtime.handle.closeAdmission()
+        let closeResult = await runtime.closeRecord.closeAndWait(
+            handle: runtime.handle,
+            purpose: .recoveryReplacement
+        )
+        let consumedFailures = runtime.closeRecord.consumeFailures()
+        if let applicationCloseFailureLedger {
+            applicationCloseFailureLedger.recordForceCloseFailures(
+                consumedFailures,
+                jobID: jobID
+            )
+        } else {
+            record.recordForceCloseFailures(consumedFailures, jobID: jobID)
+        }
+        if let mcpGeneration, closeResult.installedClose {
+            if applicationCloseFailureLedger == nil {
+                lastRuntimeTransitionRecord = record
+            }
+            runtimeState = .failed(
+                generation: generation.successor(),
+                retainedMCPGeneration: mcpGeneration,
+                serverURL: serverURL
+            )
+        }
+        await runtimeForceCloseReceiptRecordedForTesting?()
+        if let firstFailure = closeResult.failures.first {
+            switch firstFailure {
+            case .attemptRuntime(let failure):
+                throw failure
+            case .lifecycleResources(let failure):
+                throw failure
+            case .interruptRequest(let failure):
+                throw ReviewRuntimeCloseFailure.connection(failure.localizedDescription)
+            case .persistence(let failure):
+                throw ReviewRuntimeCloseFailure.connection(failure.localizedDescription)
+            }
+        }
     }
 
     private func suppressRecoverySuccessor(
@@ -603,7 +745,8 @@ extension CodexReviewStore {
         case .replacementStart(_, let start):
             let resolution = try await cancel(
                 admission: start.admission,
-                cancellation: cancellation
+                cancellation: cancellation,
+                jobID: job.id
             )
             if case .localCancellation = resolution.terminal,
                job.isTerminal == false {
@@ -614,7 +757,8 @@ extension CodexReviewStore {
         case .active(let active):
             let resolution = try await cancel(
                 admission: active.admission,
-                cancellation: cancellation
+                cancellation: cancellation,
+                jobID: job.id
             )
             try commitAcknowledgedForcedCancellationIfNeeded(
                 resolution,
@@ -625,7 +769,8 @@ extension CodexReviewStore {
         case .initialStart(let start):
             let resolution = try await cancel(
                 admission: start.admission,
-                cancellation: cancellation
+                cancellation: cancellation,
+                jobID: job.id
             )
             if case .localCancellation = resolution.terminal,
                job.isTerminal == false {
@@ -696,7 +841,6 @@ extension CodexReviewStore {
 
     private func removeTerminalOwnershipWithoutWorker(jobID: String) {
         guard reviewWorkerTasks[jobID] == nil,
-              runtimeStopDetachedReviewWorkerTasks[jobID] == nil,
               case .terminal = reviewAttemptOwnerships[jobID]
         else {
             return
@@ -781,6 +925,9 @@ extension CodexReviewStore {
             workspaces.insert(workspace)
         }
         jobs.insert(job)
+        if reviewRegistrationOrder.contains(job.id) == false {
+            reviewRegistrationOrder.append(job.id)
+        }
         writeDiagnosticsIfNeeded()
     }
 
@@ -931,11 +1078,12 @@ extension CodexReviewStore {
                     activeEventSubscriptionID = nil
                     continue
                 }
+                await reviewTerminalPublicationPreparationForTesting?()
                 if let productTerminal = await routed.active.admission
                     .terminalCancellationProductTerminal(for: failure) {
                     try applyRecoveryProductTerminal(productTerminal, to: job)
                 } else {
-                    applyStreamProductTerminal(failure, to: job)
+                    await applyStreamProductTerminal(failure, to: job)
                 }
                 return .init(cleanupAttempt: routed.active)
             case .reviewEventsFailed(let failedRun):
@@ -960,11 +1108,12 @@ extension CodexReviewStore {
                     continue
                 }
                 try await routed.active.admission.recordStreamTerminal(failedRun.failure)
+                await reviewTerminalPublicationPreparationForTesting?()
                 if let productTerminal = await routed.active.admission
                     .terminalCancellationProductTerminal(for: failedRun.failure) {
                     try applyRecoveryProductTerminal(productTerminal, to: job)
                 } else {
-                    applyStreamProductTerminal(failedRun.failure, to: job)
+                    await applyStreamProductTerminal(failedRun.failure, to: job)
                 }
                 return .init(cleanupAttempt: routed.active)
             case .recoveryBarrierResolved(let resolution):
@@ -1127,11 +1276,12 @@ extension CodexReviewStore {
                 message: ReviewIngestionError.streamEndedWithoutTerminal.localizedDescription
             ))
             try await active.admission.recordStreamTerminal(failure)
+            await reviewTerminalPublicationPreparationForTesting?()
             if let productTerminal = await active.admission
                 .terminalCancellationProductTerminal(for: failure) {
                 try applyRecoveryProductTerminal(productTerminal, to: job)
             } else {
-                applyStreamProductTerminal(failure, to: job)
+                await applyStreamProductTerminal(failure, to: job)
             }
             return .init(cleanupAttempt: active)
         }
@@ -1171,7 +1321,7 @@ extension CodexReviewStore {
     private func applyStreamProductTerminal(
         _ failure: ReviewAttemptStreamFailure,
         to job: CodexReviewJob
-    ) {
+    ) async {
         switch failure {
         case .process:
             markReviewInterrupted(job, cause: .previousProcessExit)
@@ -1479,6 +1629,18 @@ extension CodexReviewStore {
         for waiter in waiters {
             waiter.timeoutTask?.cancel()
             waiter.continuation.resume()
+        }
+    }
+
+    package func finishAllReviewWaitersForStoreClose() async {
+        let waiters = reviewTerminalWaiters.values.flatMap { $0 }
+        reviewTerminalWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.timeoutTask?.cancel()
+            waiter.continuation.resume()
+        }
+        for waiter in waiters {
+            await waiter.timeoutTask?.value
         }
     }
 

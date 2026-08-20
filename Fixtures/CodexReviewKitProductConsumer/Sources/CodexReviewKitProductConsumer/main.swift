@@ -7,7 +7,7 @@ import TextTransitions
 @main
 @MainActor
 struct CodexReviewKitProductConsumer {
-    static func main() {
+    static func main() async throws {
         let lifecycleInitializer: (
             ReviewJobState,
             Int?,
@@ -73,6 +73,7 @@ struct CodexReviewKitProductConsumer {
             fatalError("TextTransitions public rendering contract drifted.")
         }
 
+        try await store.close()
         withExtendedLifetime((store, windowController, transitionView)) {}
         print("CodexReviewKit public product consumer passed.")
     }

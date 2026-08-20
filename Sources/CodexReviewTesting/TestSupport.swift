@@ -196,6 +196,9 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     private var interruptFailureMessage: String?
     private var recoveryFailureMessage: String?
     private var cleanupFailure: ReviewRuntimeCloseFailure?
+    private var authReadFailureMessage: String?
+    private var cleanupReviewGate: AsyncGate?
+    private let cleanupReviewStartedGate = AsyncGate()
     private var interruptReviewGate: AsyncGate?
     private var interruptReviewWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var matchingInterruptReviewWaiters: [UUID: MatchingInterruptWaiter] = [:]
@@ -251,6 +254,18 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
 
     package func failCleanup(message: String) {
         cleanupFailure = .cleanup(message)
+    }
+
+    package func failAuthRead(message: String) {
+        authReadFailureMessage = message
+    }
+
+    package func holdCleanupReview(with gate: AsyncGate) {
+        cleanupReviewGate = gate
+    }
+
+    package func waitForCleanupReview() async {
+        await cleanupReviewStartedGate.wait()
     }
 
     package func holdInterruptReview(with gate: AsyncGate) {
@@ -477,6 +492,9 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
 
     package func readAuth() async throws -> CodexReviewBackendModel.Auth.Snapshot {
         commands.append(.readAuth)
+        if let authReadFailureMessage {
+            throw FakeCodexReviewBackendError(message: authReadFailureMessage)
+        }
         return auth
     }
 
@@ -640,6 +658,10 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
 
     package func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws {
         commands.append(.cleanupReview(run))
+        await cleanupReviewStartedGate.open()
+        if let cleanupReviewGate {
+            await cleanupReviewGate.waitIgnoringCancellation()
+        }
         if let cleanupFailure {
             throw cleanupFailure
         }
@@ -881,12 +903,16 @@ package final class TestingRuntimeLifecycleHandle: RuntimeLifecycleHandle {
     package private(set) var closePurposes: [ReviewRuntimeTransitionPurpose] = []
 
     private let onActivate: @MainActor @Sendable () -> Void
-    private let onClose: @MainActor @Sendable () -> Void
-    private var didClose = false
+    private let onClose: @MainActor @Sendable (ReviewRuntimeTransitionPurpose) async -> Void
+    private var closeAdmissionStartedGate = AsyncGate()
+    private var closeGate: AsyncGate?
+    private var closeStartedGate = AsyncGate()
+    private var closeFailure: ReviewLifecycleResourceFailureAggregate?
+    private var closeTask: Task<Result<Void, ReviewLifecycleResourceFailureAggregate>, Never>?
 
     package init(
         onActivate: @escaping @MainActor @Sendable () -> Void = {},
-        onClose: @escaping @MainActor @Sendable () -> Void = {}
+        onClose: @escaping @MainActor @Sendable (ReviewRuntimeTransitionPurpose) async -> Void = { _ in }
     ) {
         self.onActivate = onActivate
         self.onClose = onClose
@@ -899,25 +925,63 @@ package final class TestingRuntimeLifecycleHandle: RuntimeLifecycleHandle {
 
     package func closeAdmission() async {
         closeAdmissionCallCount += 1
+        await closeAdmissionStartedGate.open()
+    }
+
+    package func waitForCloseAdmission() async {
+        await closeAdmissionStartedGate.wait()
+    }
+
+    package func holdClose(with gate: AsyncGate) {
+        closeGate = gate
+        closeStartedGate = AsyncGate()
+    }
+
+    package func waitForClose() async {
+        await closeStartedGate.wait()
+    }
+
+    package func failClose(with failure: ReviewLifecycleResourceFailureAggregate) {
+        closeFailure = failure
     }
 
     package func close(purpose: ReviewRuntimeTransitionPurpose) async throws {
         closePurposes.append(purpose)
         closeCallCount += 1
-        guard didClose == false else {
-            return
+        let task: Task<Result<Void, ReviewLifecycleResourceFailureAggregate>, Never>
+        if let closeTask {
+            task = closeTask
+        } else {
+            let closeGate = closeGate
+            let closeStartedGate = closeStartedGate
+            let closeFailure = closeFailure
+            let onClose = onClose
+            let purpose = purpose
+            let newTask = Task<Result<Void, ReviewLifecycleResourceFailureAggregate>, Never> { @MainActor in
+                await closeStartedGate.open()
+                if let closeGate {
+                    await closeGate.waitIgnoringCancellation()
+                }
+                await onClose(purpose)
+                if let closeFailure {
+                    return .failure(closeFailure)
+                }
+                return .success(())
+            }
+            closeTask = newTask
+            task = newTask
         }
-        didClose = true
-        onClose()
+        try await task.value.get()
     }
 
     package func waitUntilClosed() async throws {
         waitUntilClosedCallCount += 1
-        guard didClose else {
+        guard let closeTask else {
             throw ReviewLifecycleResourceFailure.client(
                 "Testing runtime wait began before close."
             )
         }
+        try await closeTask.value.get()
     }
 }
 
@@ -927,6 +991,10 @@ package final class TestingMCPServerLifecycleOwner: MCPServerLifecycleOwner {
     package private(set) var activateCallCount = 0
     package private(set) var stopCallCount = 0
     package private(set) var waitUntilStoppedCallCount = 0
+    package private(set) var closeAdmissionCallCount = 0
+    package private(set) var drainAdmittedHandlersCallCount = 0
+    package private(set) var closeCallCount = 0
+    package private(set) var waitUntilClosedCallCount = 0
     package private(set) var preparedGenerations: [MCPServerGeneration] = []
     package private(set) var activatedGenerations: [MCPServerGeneration] = []
 
@@ -935,6 +1003,15 @@ package final class TestingMCPServerLifecycleOwner: MCPServerLifecycleOwner {
     private var preparationGate: AsyncGate?
     private let preparationStartedGate = AsyncGate()
     private let preparationCancellationGate = AsyncGate()
+    private var drainGate: AsyncGate?
+    private var drainStartedGate = AsyncGate()
+    private var closeGate: AsyncGate?
+    private var closeStartedGate = AsyncGate()
+    private var drainFailure: ReviewLifecycleResourceFailure?
+    private var closeFailure: ReviewLifecycleResourceFailure?
+    private var waitUntilClosedFailure: ReviewLifecycleResourceFailure?
+    private var closeTask: Task<Result<Void, ReviewLifecycleResourceFailure>, Never>?
+    private var isClosed = false
 
     package init(serverURL: URL? = nil) {
         self.serverURL = serverURL
@@ -953,6 +1030,9 @@ package final class TestingMCPServerLifecycleOwner: MCPServerLifecycleOwner {
     }
 
     package func prepare() async throws -> PreparedMCPServer {
+        guard isClosed == false else {
+            throw ReviewLifecycleResourceFailure.mcpServer("Testing MCP owner is closed.")
+        }
         prepareCallCount += 1
         nextGeneration &+= 1
         await preparationStartedGate.open()
@@ -978,9 +1058,33 @@ package final class TestingMCPServerLifecycleOwner: MCPServerLifecycleOwner {
         return .init(serverURL: serverURL)
     }
 
-    package func closeAdmission() async {}
+    package func closeAdmission() async {
+        closeAdmissionCallCount += 1
+    }
 
-    package func drainAdmittedHandlers() async throws {}
+    package func holdHandlerDrain(with gate: AsyncGate) {
+        drainGate = gate
+        drainStartedGate = AsyncGate()
+    }
+
+    package func waitForHandlerDrain() async {
+        await drainStartedGate.wait()
+    }
+
+    package func failHandlerDrain(with failure: ReviewLifecycleResourceFailure) {
+        drainFailure = failure
+    }
+
+    package func drainAdmittedHandlers() async throws {
+        drainAdmittedHandlersCallCount += 1
+        await drainStartedGate.open()
+        if let drainGate {
+            await drainGate.waitIgnoringCancellation()
+        }
+        if let drainFailure {
+            throw drainFailure
+        }
+    }
 
     package func stop() async throws {
         stopCallCount += 1
@@ -990,9 +1094,64 @@ package final class TestingMCPServerLifecycleOwner: MCPServerLifecycleOwner {
         waitUntilStoppedCallCount += 1
     }
 
-    package func close() async throws {}
+    package func holdClose(with gate: AsyncGate) {
+        closeGate = gate
+        closeStartedGate = AsyncGate()
+    }
 
-    package func waitUntilClosed() async throws {}
+    package func waitForClose() async {
+        await closeStartedGate.wait()
+    }
+
+    package func failClose(with failure: ReviewLifecycleResourceFailure) {
+        closeFailure = failure
+    }
+
+    package func failWaitUntilClosed(with failure: ReviewLifecycleResourceFailure) {
+        waitUntilClosedFailure = failure
+    }
+
+    package func close() async throws {
+        closeCallCount += 1
+        let task: Task<Result<Void, ReviewLifecycleResourceFailure>, Never>
+        if let closeTask {
+            task = closeTask
+        } else {
+            let closeGate = closeGate
+            let closeStartedGate = closeStartedGate
+            let closeFailure = closeFailure
+            let newTask = Task<Result<Void, ReviewLifecycleResourceFailure>, Never> { @MainActor in
+                await closeStartedGate.open()
+                if let closeGate {
+                    await closeGate.waitIgnoringCancellation()
+                }
+                if let closeFailure {
+                    return .failure(closeFailure)
+                }
+                return .success(())
+            }
+            closeTask = newTask
+            task = newTask
+        }
+        let result = await task.value
+        isClosed = true
+        try result.get()
+    }
+
+    package func waitUntilClosed() async throws {
+        waitUntilClosedCallCount += 1
+        guard let closeTask else {
+            throw ReviewLifecycleResourceFailure.mcpServer(
+                "Testing MCP completion wait began before close."
+            )
+        }
+        let result = await closeTask.value
+        isClosed = true
+        try result.get()
+        if let waitUntilClosedFailure {
+            throw waitUntilClosedFailure
+        }
+    }
 }
 
 @MainActor
@@ -1010,6 +1169,10 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     private var runtimePreparationGate: AsyncGate?
     private var runtimePreparationStartedGate = AsyncGate()
     private var runtimePreparationCancellationGate = AsyncGate()
+    private var runtimeCloseOperation: @MainActor @Sendable () async -> Void = {}
+    private var authRefreshGate: AsyncGate?
+    private var authRefreshStartedGate = AsyncGate()
+    package private(set) var authRefreshCallCount = 0
 
     package init(
         reviewBackend: FakeCodexReviewBackend,
@@ -1044,6 +1207,21 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         await runtimePreparationCancellationGate.wait()
     }
 
+    package func setRuntimeCloseOperation(
+        _ operation: @escaping @MainActor @Sendable () async -> Void
+    ) {
+        runtimeCloseOperation = operation
+    }
+
+    package func holdAuthRefresh(with gate: AsyncGate) {
+        authRefreshGate = gate
+        authRefreshStartedGate = AsyncGate()
+    }
+
+    package func waitForAuthRefresh() async {
+        await authRefreshStartedGate.wait()
+    }
+
     package func prepareRuntime(
         generation _: ReviewRuntimeGeneration,
         purpose: ReviewRuntimeTransitionPurpose
@@ -1051,7 +1229,14 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         startRequests.append(purpose == .restartSameAccount)
         let handle = TestingRuntimeLifecycleHandle(
             onActivate: { [weak self] in self?.isActive = true },
-            onClose: { [weak self] in self?.isActive = false }
+            onClose: { [weak self] purpose in
+                guard let self else { return }
+                self.isActive = false
+                if purpose == .recoveryReplacement {
+                    try? await self.reviewBackend.forceCloseReviewConnection()
+                }
+                await self.runtimeCloseOperation()
+            }
         )
         lastPreparedRuntimeHandle = handle
         await runtimePreparationStartedGate.open()
@@ -1080,6 +1265,11 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     package func waitUntilStopped() async {}
 
     package func refreshAuth(auth: CodexReviewAuthModel) async {
+        authRefreshCallCount += 1
+        await authRefreshStartedGate.open()
+        if let authRefreshGate {
+            await authRefreshGate.waitIgnoringCancellation()
+        }
         do {
             let snapshot = try await reviewBackend.readAuth()
             let accounts = snapshot.accounts.compactMap { account -> CodexAccount? in

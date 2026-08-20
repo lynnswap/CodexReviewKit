@@ -16,12 +16,19 @@ private func makeAppServerReviewAttemptID() -> String {
 }
 
 package struct AppServerRuntimeOwnerLifecycleHandle: Sendable {
+    private let closeAdmissionOperation: @Sendable () async -> Void
     private let closeAndWaitOperation: @Sendable () async throws -> Void
 
     fileprivate init(
+        closeAdmissionOperation: @escaping @Sendable () async -> Void,
         closeAndWaitOperation: @escaping @Sendable () async throws -> Void
     ) {
+        self.closeAdmissionOperation = closeAdmissionOperation
         self.closeAndWaitOperation = closeAndWaitOperation
+    }
+
+    package func closeAdmission() async {
+        await closeAdmissionOperation()
     }
 
     package func closeAndWait() async throws {
@@ -191,9 +198,18 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     package nonisolated var runtimeOwnerLifecycleHandle: AppServerRuntimeOwnerLifecycleHandle {
-        AppServerRuntimeOwnerLifecycleHandle { [self] in
-            try await closeFromRuntimeOwnerAndWait()
-        }
+        AppServerRuntimeOwnerLifecycleHandle(
+            closeAdmissionOperation: { [self] in
+                await closeAdmissionFromRuntimeOwner()
+            },
+            closeAndWaitOperation: { [self] in
+                try await closeFromRuntimeOwnerAndWait()
+            }
+        )
+    }
+
+    private func closeAdmissionFromRuntimeOwner() {
+        reviewOperationRegistry.closeAdmission()
     }
 
     private func admitReviewOperation() throws -> AdmittedReviewOperationID {
@@ -576,7 +592,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         let closeTask: Task<Void, any Error>
         switch lifecycleState {
         case .open:
-            reviewOperationRegistry.closeAdmission()
+            closeAdmissionFromRuntimeOwner()
             let client = client
             let task = Task<Void, any Error> {
                 let clientCloseTask = Task<Result<Void, any Error>, Never> {
@@ -597,7 +613,9 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                 for session in ownedLifecycle.sessions {
                     await session.finish(throwing: .ownerCancellation)
                 }
-                try clientCloseResult.get()
+                if case .failure(let error) = clientCloseResult {
+                    throw Self.lifecycleCloseFailure(for: error)
+                }
             }
             lifecycleState = .closing(task)
             closeTask = task
@@ -611,6 +629,24 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         let result = await closeTask.result
         lifecycleState = .closed(result)
         try result.get()
+    }
+
+    private static func lifecycleCloseFailure(
+        for error: any Error
+    ) -> ReviewLifecycleResourceFailureAggregate {
+        if let aggregate = error as? ReviewLifecycleResourceFailureAggregate {
+            return aggregate
+        }
+        if let failure = error as? ReviewLifecycleResourceFailure {
+            return .init(first: failure)
+        }
+        let resourceFailure: ReviewLifecycleResourceFailure
+        if case .process(let message) = reviewRuntimeCloseFailure(for: error) {
+            resourceFailure = .process(message)
+        } else {
+            resourceFailure = .client(error.localizedDescription)
+        }
+        return .init(first: resourceFailure)
     }
 
     package static func reviewRuntimeCloseFailure(

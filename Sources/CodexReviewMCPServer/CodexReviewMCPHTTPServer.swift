@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 import MCP
 import OSLog
+import CodexReview
 @preconcurrency import NIOCore
 @preconcurrency import NIOHTTP1
 @preconcurrency import NIOPosix
@@ -277,6 +278,8 @@ package actor CodexReviewMCPHTTPServer {
     private var sessions: [String: SessionContext] = [:]
     private var cleanupTask: Task<Void, Never>?
     private var boundURL: URL?
+    private var pendingCloseFailures: [ReviewLifecycleResourceFailure] = []
+    private var listenerCloseTask: Task<Result<Void, ReviewLifecycleResourceFailure>, Never>?
     private let admissionRegistry = MCPHTTPAdmissionRegistry()
     private let handlerEntryGate = MCPHTTPHandlerEntryGate()
     private var admittedHandlerDrainDidBegin = false
@@ -364,6 +367,8 @@ package actor CodexReviewMCPHTTPServer {
             }
             self.eventLoopGroup = group
             self.channel = channel
+            pendingCloseFailures.removeAll(keepingCapacity: false)
+            listenerCloseTask = nil
             admissionRegistry.open()
             admittedHandlerDrainDidBegin = false
             let actualPort = channel.localAddress?.port
@@ -381,7 +386,7 @@ package actor CodexReviewMCPHTTPServer {
         }
     }
 
-    package func stop() async {
+    package func stop() async throws {
         await closeAdmission()
         cleanupTask?.cancel()
         let cleanupTask = cleanupTask
@@ -389,20 +394,54 @@ package actor CodexReviewMCPHTTPServer {
         await waitForAdmittedHandlers()
         await cleanupTask?.value
         await closeAllSessions()
-        try? await channel?.close()
-        channel = nil
         if let eventLoopGroup {
-            try? await eventLoopGroup.shutdownGracefully()
+            do {
+                try await eventLoopGroup.shutdownGracefully()
+            } catch {
+                pendingCloseFailures.append(.mcpServer(error.localizedDescription))
+            }
         }
         eventLoopGroup = nil
         boundURL = nil
         logger.info("MCP Streamable HTTP server stopped")
+        if let first = pendingCloseFailures.first {
+            let aggregate = ReviewLifecycleResourceFailureAggregate(
+                first: first,
+                additionalInLifecycleOrder: Array(pendingCloseFailures.dropFirst())
+            )
+            pendingCloseFailures.removeAll(keepingCapacity: false)
+            throw aggregate
+        }
     }
 
     package func closeAdmission() async {
         admissionRegistry.close()
-        try? await channel?.close()
-        channel = nil
+        guard let channel else {
+            return
+        }
+        let task: Task<Result<Void, ReviewLifecycleResourceFailure>, Never>
+        if let listenerCloseTask {
+            task = listenerCloseTask
+        } else {
+            let newTask = Task<Result<Void, ReviewLifecycleResourceFailure>, Never> {
+                do {
+                    try await channel.close()
+                    return .success(())
+                } catch {
+                    return .failure(.mcpServer(error.localizedDescription))
+                }
+            }
+            listenerCloseTask = newTask
+            task = newTask
+        }
+        switch await task.value {
+        case .success:
+            self.channel = nil
+        case .failure(let failure):
+            if pendingCloseFailures.contains(failure) == false {
+                pendingCloseFailures.append(failure)
+            }
+        }
     }
 
     package func waitForAdmittedHandlers() async {
@@ -1058,21 +1097,35 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
 
         default:
             let body = response.bodyData
-            eventLoop.execute {
-                var head = HTTPResponseHead(version: version, status: status)
-                for (name, value) in headers {
-                    head.headers.add(name: name, value: value)
-                }
+            var head = HTTPResponseHead(version: version, status: status)
+            for (name, value) in headers {
+                head.headers.add(name: name, value: value)
+            }
+            if let body {
+                head.headers.add(name: "Content-Length", value: "\(body.count)")
+            }
+            do {
+                try await writeResponsePart(
+                    .head(head),
+                    context: context,
+                    eventLoop: eventLoop
+                )
                 if let body {
-                    head.headers.add(name: "Content-Length", value: "\(body.count)")
+                    try await writeResponseBody(
+                        body,
+                        context: context,
+                        eventLoop: eventLoop
+                    )
                 }
-                context.write(self.wrapOutboundOut(.head(head)), promise: nil)
-                if let body {
-                    var buffer = context.channel.allocator.buffer(capacity: body.count)
-                    buffer.writeBytes(body)
-                    context.write(self.wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
-                }
-                context.writeAndFlush(self.wrapOutboundOut(.end(nil)), promise: nil)
+                try await writeResponsePart(
+                    .end(nil),
+                    context: context,
+                    eventLoop: eventLoop
+                )
+            } catch {
+                logger.debug(
+                    "MCP HTTP response ended during connection shutdown: \(error.localizedDescription, privacy: .public)"
+                )
             }
         }
     }

@@ -40,7 +40,7 @@ struct CodexReviewHostTests {
         await backend.waitForStartReview()
 
         let commands = await backend.recordedCommands()
-        #expect(commands.first == .readSettings)
+        #expect(Array(commands.prefix(2)) == [.readAuth, .readSettings])
         let startReview = try #require(commands.compactMap { command -> CodexReviewBackendModel.Review.Start? in
             if case .startReview(let request) = command {
                 request
@@ -70,6 +70,121 @@ struct CodexReviewHostTests {
         #expect(host.store.auth.selectedAccount?.accountKey == "review@example.com")
         #expect(host.store.auth.selectedAccount?.email == "review@example.com")
         #expect(host.store.auth.persistedActiveAccountKey == "review@example.com")
+    }
+
+    @Test func hostStoreCloseOwnsDirectAppServerShutdown() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
+        try await transport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Model.List.Response(data: []),
+            for: "model/list"
+        )
+        let host = CodexReviewHost(appServerTransport: transport)
+
+        await host.start()
+        try await host.store.close()
+        try await host.store.close()
+        await host.start(endpoint: URL(string: "http://localhost:19425/mcp"))
+
+        #expect(await transport.closeCallCountForTesting() == 1)
+        #expect(host.store.serverState == .stopped)
+        #expect(host.store.serverURL == nil)
+    }
+
+    @Test func directPreparationFailureRetainsShutdownFailureForStoreClose() async throws {
+        let backend = FakeCodexReviewBackend()
+        await backend.failAuthRead(message: "auth read failed")
+        let host = CodexReviewHost(
+            backend: backend,
+            shutdown: {
+                throw ReviewLifecycleResourceFailure.client("direct shutdown failed")
+            }
+        )
+
+        await host.start()
+        let closeError = try #require(await captureStoreCloseError(host.store))
+
+        guard case .lifecycleResources(let lifecycle) = closeError.failures.first else {
+            Issue.record("Direct preparation cleanup must remain a lifecycle failure.")
+            return
+        }
+        #expect(lifecycle.first == .client("direct shutdown failed"))
+    }
+
+    @Test func liveStoreCloseReplaysAppServerOwnerFailureOnce() async throws {
+        let homeURL = try temporaryHome()
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
+        try await transport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Model.List.Response(data: []),
+            for: "model/list"
+        )
+        await transport.failClose(with: .connection("close failed"))
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            mcpHTTPServerFactory: nil,
+            transportFactory: { _ in transport }
+        )
+        await store.start()
+
+        let firstError = await captureStoreCloseError(store)
+        let secondError = await captureStoreCloseError(store)
+
+        #expect(firstError?.localizedDescription == secondError?.localizedDescription)
+        #expect(await transport.closeCallCountForTesting() == 1)
+        let closeError = try #require(firstError)
+        guard case .lifecycleResources(let lifecycle) = closeError.failures.first else {
+            Issue.record("AppServer owner close failure must remain a lifecycle failure.")
+            return
+        }
+        guard case .client(let message) = lifecycle.first else {
+            Issue.record("AppServer connection close must map to client lifecycle failure.")
+            return
+        }
+        #expect(message.contains("close failed"))
+    }
+
+    @Test func livePreparationFailureRetainsAppServerCleanupFailureForStoreClose() async throws {
+        let homeURL = try temporaryHome()
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        await transport.enqueueFailure(
+            .responseError(code: -32_000, message: "auth read failed"),
+            for: "account/read"
+        )
+        await transport.failClose(with: .connection("preparation cleanup failed"))
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            mcpHTTPServerFactory: nil,
+            transportFactory: { _ in transport }
+        )
+
+        await store.start()
+        let closeError = try #require(await captureStoreCloseError(store))
+
+        #expect(await transport.closeCallCountForTesting() == 1)
+        #expect(closeError.failures.additionalInLifecycleOrder.isEmpty)
+        guard case .lifecycleResources(let lifecycle) = closeError.failures.first else {
+            Issue.record("Live preparation cleanup must remain a lifecycle failure.")
+            return
+        }
+        guard case .client(let message) = lifecycle.first else {
+            Issue.record("Live preparation client close must retain its resource kind.")
+            return
+        }
+        #expect(message.contains("preparation cleanup failed"))
     }
 
     @Test func runtimePreferencesNormalizeInvalidValues() {
@@ -1856,6 +1971,8 @@ struct CodexReviewHostTests {
         #expect(await stopFinished.isCompleted() == false)
         await graceGate.open()
         await transport.waitForCloseCall()
+        #expect(await stopFinished.isCompleted() == false)
+        await interruptGate.open()
         await worker.value
         await stopTask.value
         let result = try await reviewRead.value
@@ -1894,7 +2011,6 @@ struct CodexReviewHostTests {
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
-            shutdownCleanupTimeout: .seconds(1),
             networkMonitor: networkMonitor,
             networkRecoveryPolicy: .init(sleep: { _ in }),
             transport: transport
@@ -2007,6 +2123,7 @@ struct CodexReviewHostTests {
         )
         try await mainTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
         let loginTransport = FakeJSONRPCTransport()
+        await loginTransport.failClose(with: .connection("isolated login close failed"))
         try await loginTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await loginTransport.enqueue(
             AppServerAPI.Account.Login.Response.chatgpt(
@@ -2063,6 +2180,16 @@ struct CodexReviewHostTests {
         await #expect(throws: JSONRPC.Error.closed) {
             _ = try await loginTransport.send(JSONRPC.Request(id: 99, method: "ping", params: Data()))
         }
+        let closeError = try #require(await captureStoreCloseError(store))
+        guard case .lifecycleResources(let lifecycle) = closeError.failures.first else {
+            Issue.record("Retired isolated-login cleanup must reach Store close.")
+            return
+        }
+        guard case .client(let message) = lifecycle.first else {
+            Issue.record("Isolated-login connection close must remain a client failure.")
+            return
+        }
+        #expect(message.contains("isolated login close failed"))
     }
 
     @Test func liveStoreRemovingActiveAccountClearsSharedAuthAndRestartsSignedOutRuntime() async throws {
@@ -2579,6 +2706,19 @@ private func failedMessage(from phase: CodexReviewAuthModel.Phase) -> String? {
         return nil
     }
     return message
+}
+
+@MainActor
+private func captureStoreCloseError(_ store: CodexReviewStore) async -> ReviewCloseError? {
+    do {
+        try await store.close()
+        return nil
+    } catch let error as ReviewCloseError {
+        return error
+    } catch {
+        Issue.record("Unexpected Store close error: \(error)")
+        return nil
+    }
 }
 
 @MainActor

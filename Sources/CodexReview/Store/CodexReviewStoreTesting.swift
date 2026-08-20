@@ -13,6 +13,30 @@ extension CodexReviewStore {
         set { requestCancellationDelay = newValue }
     }
 
+    package func setReviewMutationPreparationForTesting(
+        _ operation: (@MainActor @Sendable () async -> Void)?
+    ) {
+        reviewMutationPreparationForTesting = operation
+    }
+
+    package func setReviewCleanupPreparationForTesting(
+        _ operation: (@MainActor @Sendable () async -> Void)?
+    ) {
+        reviewCleanupPreparationForTesting = operation
+    }
+
+    package func setReviewTerminalPublicationPreparationForTesting(
+        _ operation: (@MainActor @Sendable () async -> Void)?
+    ) {
+        reviewTerminalPublicationPreparationForTesting = operation
+    }
+
+    package func setRuntimeForceCloseReceiptRecordedForTesting(
+        _ operation: (@MainActor @Sendable () async -> Void)?
+    ) {
+        runtimeForceCloseReceiptRecordedForTesting = operation
+    }
+
     package func loadForTesting(
         serverState: CodexReviewServerState,
         authPhase: CodexReviewAuthModel.Phase = .signedOut,
@@ -77,6 +101,7 @@ extension CodexReviewStore {
             job.sortOrder = Double(workspaceJobs.count - index - 1)
         }
         self.jobs = Set(resolvedJobs)
+        reviewRegistrationOrder = resolvedJobs.map(\.id)
         if let settingsSnapshot {
             settings.loadForTesting(snapshot: settingsSnapshot)
         }
@@ -96,7 +121,7 @@ extension CodexReviewStore {
                 )
             }
         }
-        let tasks = Array(reviewWorkerTasks.values) + Array(runtimeStopDetachedReviewWorkerTasks.values)
+        let tasks = Array(reviewWorkerTasks.values)
         for task in tasks {
             task.cancel()
         }
@@ -105,7 +130,6 @@ extension CodexReviewStore {
         }
 
         reviewWorkerTasks.removeAll(keepingCapacity: false)
-        runtimeStopDetachedReviewWorkerTasks.removeAll(keepingCapacity: false)
         reviewCleanupFailures.removeAll(keepingCapacity: false)
         reviewAttemptOwnerships.removeAll(keepingCapacity: false)
 
