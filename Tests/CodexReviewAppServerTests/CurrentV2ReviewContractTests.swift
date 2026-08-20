@@ -1214,9 +1214,11 @@ struct CurrentV2ReviewRoutingIntegrationTests {
             )
         )
 
-        #expect(try await failedAttempt.events.next() == .failed(
-            "Malformed app-server notification item/completed: id must be a nonempty string"
-        ))
+        await #expect(throws: ReviewAttemptStreamFailure.protocolViolation(.init(
+            message: "Malformed app-server notification item/completed: id must be a nonempty string"
+        ))) {
+            _ = try await failedAttempt.events.next()
+        }
         #expect(try await collectEvents(from: healthyAttempt.events).last == .completed(
             summary: "Succeeded.",
             result: "Healthy review"
@@ -1265,9 +1267,11 @@ struct CurrentV2ReviewRoutingIntegrationTests {
             )
         )
 
-        #expect(try await failedAttempt.events.next() == .failed(
-            "Unsupported app-server item type futureItem in item/completed."
-        ))
+        await #expect(throws: ReviewAttemptStreamFailure.protocolViolation(.init(
+            message: "Unsupported app-server item type futureItem in item/completed."
+        ))) {
+            _ = try await failedAttempt.events.next()
+        }
         #expect(try await collectEvents(from: healthyAttempt.events).last == .completed(
             summary: "Succeeded.",
             result: "Healthy review"
