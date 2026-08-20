@@ -164,7 +164,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func reviewStartAppliesStartedTurnAndMergesAgentMessageDeltas() async throws {
+    @Test func reviewStartPreservesCanonicalResponseTurnAndMergesAgentMessageDeltas() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -184,18 +184,19 @@ struct CodexReviewStoreCommandTests {
                 groupID: "reasoning-1",
                 replacesGroup: false
             ))
-            await backend.yield(.completed(summary: "Succeeded.", result: nil))
+            await backend.yield(.completed(summary: "Succeeded.", result: "hello world"))
             let read = try await result
 
-            #expect(read.core.run.turnID == "turn-actual")
+            #expect(read.core.run.turnID == "turn-1")
             #expect(read.core.output.lastAgentMessage == "hello world")
             #expect(read.rawLogText.isEmpty)
             #expect(try store.readReview(jobID: "job-1").logs.map(\.text) == [
                 "hello world",
                 " with space",
+                "hello world",
             ])
-            #expect(try #require(store.job(id: "job-1")).reviewOutputText == "hello world\n\n with space")
-            #expect(try store.readReview(jobID: "job-1").core.run.model == "gpt-5.5")
+            #expect(try #require(store.job(id: "job-1")).reviewOutputText == "hello world\n\n with space\n\nhello world")
+            #expect(try store.readReview(jobID: "job-1").core.run.model == nil)
         }
     }
 
@@ -212,7 +213,14 @@ struct CodexReviewStoreCommandTests {
             )
             await backend.yield(.messageDelta("first", itemID: "message-1"))
             await backend.yield(.messageDelta("second", itemID: "message-2"))
-            await backend.yield(.completed(summary: "Succeeded.", result: nil))
+            await backend.yield(.logEntry(
+                kind: .agentMessage,
+                text: "second",
+                groupID: "message-2",
+                replacesGroup: true,
+                metadata: .init(sourceType: "canonicalReviewResult")
+            ))
+            await backend.yield(.completed(summary: "Succeeded.", result: "second"))
             let read = try await result
 
             #expect(read.core.output.lastAgentMessage == "second")
@@ -236,7 +244,8 @@ struct CodexReviewStoreCommandTests {
                 kind: .agentMessage,
                 text: "final review text",
                 groupID: "review-item-1",
-                replacesGroup: true
+                replacesGroup: true,
+                metadata: .init(sourceType: "exitedReviewMode")
             ))
             await backend.yield(.completed(summary: "Succeeded.", result: "final review text"))
             let read = try await result
@@ -247,7 +256,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func reviewCompletionEnforcesLogLimitWithoutFinalAppend() async throws {
+    @Test func reviewCompletionEnforcesLogLimitWithCanonicalFinalResult() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -273,13 +282,14 @@ struct CodexReviewStoreCommandTests {
                 groupID: "reasoning-1",
                 replacesGroup: false
             ))
-            await backend.yield(.completed(summary: "Succeeded.", result: nil))
+            await backend.yield(.completed(summary: "Succeeded.", result: "Review completed."))
             let read = try await result
             let job = try #require(store.job(id: "job-1"))
 
             #expect(read.core.lifecycle.status == .succeeded)
             #expect(job.cappedLogBytes <= 256 * 1024)
-            #expect(job.logText.hasSuffix(delta))
+            #expect(job.logText.contains(delta))
+            #expect(job.logText.hasSuffix("Review completed."))
             #expect(job.lastLogMutation == .reload)
         }
     }
@@ -1106,7 +1116,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func networkRecoveryUsesActualStartedTurn() async throws {
+    @Test func networkRecoveryUsesCanonicalResponseTurn() async throws {
         let initialRun = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
             turnID: "turn-response",
@@ -1141,7 +1151,7 @@ struct CodexReviewStoreCommandTests {
                 model: "gpt-5"
             ), for: initialRun)
             #expect(await waitUntil {
-                store.job(id: "job-1")?.core.run.turnID == "turn-actual"
+                store.job(id: "job-1")?.core.run.turnID == "turn-response"
             })
 
             networkMonitor.yield(.init(status: .unsatisfied))
@@ -1153,7 +1163,7 @@ struct CodexReviewStoreCommandTests {
                 }
                 return nil
             }
-            #expect(interruptedRuns.last?.turnID == "turn-actual")
+            #expect(interruptedRuns.last?.turnID == "turn-response")
 
             networkMonitor.yield(.satisfied())
             try await backend.waitForResumeReviewRecovery(timeout: .seconds(2))
@@ -1164,7 +1174,7 @@ struct CodexReviewStoreCommandTests {
                 }
                 return nil
             }
-            #expect(recoveredFromRuns.last?.turnID == "turn-actual")
+            #expect(recoveredFromRuns.last?.turnID == "turn-response")
 
             try #require(await waitForRunAttemptActivation(store: store, run: recoveredRun))
             await backend.yield(.completed(summary: "Succeeded.", result: "recovered review"), for: recoveredRun)
@@ -1275,7 +1285,7 @@ struct CodexReviewStoreCommandTests {
             try #require(await waitForRunAttemptActivation(store: store, run: recoveredRun))
 
             await backend.yield(.messageDelta("fresh review", itemID: "message-1"), for: recoveredRun)
-            await backend.yield(.completed(summary: "Succeeded.", result: nil), for: recoveredRun)
+            await backend.yield(.completed(summary: "Succeeded.", result: "fresh review"), for: recoveredRun)
             let read = try await result
 
             #expect(read.core.lifecycle.status == .succeeded)
