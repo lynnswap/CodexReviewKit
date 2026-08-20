@@ -386,6 +386,28 @@ struct ReviewAttemptProcessorTests {
         }
         await startResponseGate.open()
         _ = try await registered.task.value
+        #expect(await admission.currentPhase() == .active(canonicalRun))
+
+        let retryStarted = InvocationProbe()
+        let retry = Task {
+            try await admission.cancel(
+                .mcpClient(message: "Retry stop"),
+                interrupt: { run, _ in
+                    #expect(run == canonicalRun)
+                    await retryStarted.record()
+                },
+                forceClose: {}
+            )
+        }
+        await retryStarted.waitForInvocation()
+        try await admission.recordCanonicalTerminal(
+            .interrupted(.requested(.mcpClient(message: "Retry stop"))),
+            for: canonicalRun
+        )
+
+        #expect(try await retry.value.terminal == .canonical(
+            .interrupted(.requested(.mcpClient(message: "Retry stop")))
+        ))
     }
 
     @Test func terminalFirstForceCloseFailureCancelsPendingRequestAndPreservesTerminal() async throws {

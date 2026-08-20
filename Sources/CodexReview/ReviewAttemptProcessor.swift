@@ -1000,6 +1000,9 @@ package actor ReviewStartAdmission {
 
         if case .failure(let error)? = cancellationResult {
             await drainCancellationTasks()
+            if terminal == nil {
+                resetCancellationOperationForRetry()
+            }
             throw error
         }
 
@@ -1075,6 +1078,10 @@ package actor ReviewStartAdmission {
     }
 
     private func resetRejectedCancellationForRetry() {
+        resetCancellationOperationForRetry()
+    }
+
+    private func resetCancellationOperationForRetry() {
         requestedCancellation = nil
         joinedTerminalCancellation = nil
         interruptionPurpose = nil
