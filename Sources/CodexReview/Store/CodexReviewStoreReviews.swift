@@ -403,10 +403,7 @@ extension CodexReviewStore {
             return .init(jobID: job.id, cancelled: false, core: job.core)
         }
 
-        job.cancellationRequested = true
-        job.core.lifecycle.cancellation = cancellation
-        job.core.output.summary = cancellation.message
-        job.core.lifecycle.errorMessage = cancellation.message
+        recordCancellationRequest(cancellation, for: job)
 
         if job.core.lifecycle.status == .queued {
             try completeCancellationLocally(

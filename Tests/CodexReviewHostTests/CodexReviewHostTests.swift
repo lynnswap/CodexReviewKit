@@ -1221,6 +1221,9 @@ struct CodexReviewHostTests {
             await transport.recordedRequests().map(\.method).contains("turn/interrupt")
         }
         let methodsBeforeInterruptCompletes = await transport.recordedRequests().map(\.method)
+        let jobBeforeInterruptCompletes = try #require(store.jobs.first)
+        #expect(jobBeforeInterruptCompletes.cancellationRequested)
+        #expect(jobBeforeInterruptCompletes.core.lifecycle.cancellation?.message == "Review runtime stopped.")
         await interruptGate.open()
         await stopTask.value
         let result = try await reviewRead

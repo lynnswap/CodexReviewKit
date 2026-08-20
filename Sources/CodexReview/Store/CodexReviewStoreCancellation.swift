@@ -28,6 +28,30 @@ private actor RuntimeStopDetachedReviewWorkerDrainRace {
 }
 
 extension CodexReviewStore {
+    package func recordCancellationRequest(
+        _ cancellation: ReviewCancellation,
+        for job: CodexReviewJob
+    ) {
+        guard job.isTerminal == false else {
+            return
+        }
+        job.cancellationRequested = true
+        job.core.lifecycle.cancellation = cancellation
+        job.core.output.summary = cancellation.message
+        job.core.lifecycle.errorMessage = cancellation.message
+    }
+
+    @discardableResult
+    package func recordActiveReviewCancellationRequestsForRuntimeStop(
+        reason: ReviewCancellation = .system(message: "Review runtime stopped.")
+    ) -> [String] {
+        let jobs = orderedJobs.filter { $0.isTerminal == false }
+        for job in jobs {
+            recordCancellationRequest(reason, for: job)
+        }
+        return jobs.map(\.id)
+    }
+
     package func completeCancellationLocally(
         jobID: String,
         sessionID: String,
