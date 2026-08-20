@@ -1414,7 +1414,7 @@ private actor AppServerReviewEventSession {
             return false
         case "item/completed" where notification.payload.item?.type == "commandExecution":
             return false
-        case "turn/completed", "turn/failed", "turn/cancelled", "thread/closed":
+        case "turn/completed", "thread/closed":
             return false
         default:
             return true
@@ -1881,9 +1881,9 @@ private func normalizeReviewNotification(
                 completedAt: nil
             )
             commandLifecycleByItemID[item.id] = lifecycle
-            events = item.startedEvents(startedAt: payload.startedAt, lifecycle: lifecycle)
+            events = try item.startedEvents(startedAt: payload.startedAt, lifecycle: lifecycle)
         } else {
-            events = item.startedEvents(startedAt: payload.startedAt, lifecycle: nil)
+            events = try item.startedEvents(startedAt: payload.startedAt, lifecycle: nil)
         }
     case "item/completed":
         guard let item = payload.item else {
@@ -1900,10 +1900,10 @@ private func normalizeReviewNotification(
                 completedAt: payload.completedAt,
                 fallback: previous
             )
-            events = item.completedEvents(completedAt: payload.completedAt, lifecycle: lifecycle)
+            events = try item.completedEvents(completedAt: payload.completedAt, lifecycle: lifecycle)
             commandLifecycleByItemID.removeValue(forKey: item.id)
         } else {
-            events = item.completedEvents(completedAt: payload.completedAt, lifecycle: nil)
+            events = try item.completedEvents(completedAt: payload.completedAt, lifecycle: nil)
         }
     case "item/agentMessage/delta":
         guard let delta = payload.delta,
@@ -1980,10 +1980,6 @@ private func normalizeReviewNotification(
         events = payload.itemID.map {
             [.logEntry(kind: .diagnostic, text: "Approval review completed.", groupID: $0, replacesGroup: false)]
         } ?? [.logEntry(kind: .diagnostic, text: "Approval review completed.", groupID: nil, replacesGroup: false)]
-    case "agent/message":
-        events = [.message(payload.message ?? "")]
-    case "log":
-        events = [.log(payload.message ?? "")]
     case "turn/diff/updated":
         guard let diff = payload.diff?.nilIfEmpty else {
             throw ReviewIngestionError.malformedKnownEvent(
@@ -2004,15 +2000,13 @@ private func normalizeReviewNotification(
         events = []
     case "error":
         let message = payload.error?.message ?? payload.message ?? "Failed."
-        events = [
-            payload.willRetry == true
-                ? .logEntry(kind: .progress, text: message, groupID: payload.turnID, replacesGroup: false)
-                : .failed(message)
-        ]
-    case "turn/failed":
-        events = [.failed(payload.message)]
-    case "turn/cancelled":
-        events = [.cancelled(payload.message)]
+        let kind: ReviewLogEntry.Kind = payload.willRetry == true ? .progress : .error
+        events = [.logEntry(
+            kind: kind,
+            text: message,
+            groupID: payload.turnID,
+            replacesGroup: false
+        )]
     case "thread/closed":
         events = [.failed("Review thread closed.")]
     case "thread/status/changed":
@@ -2397,7 +2391,7 @@ private struct AppServerThreadItem: Decodable, Sendable {
     func startedEvents(
         startedAt: Date?,
         lifecycle: AppServerCommandLifecycle?
-    ) -> [CodexReviewBackendModel.Review.Event] {
+    ) throws -> [CodexReviewBackendModel.Review.Event] {
         switch type {
         case "userMessage":
             return []
@@ -2446,21 +2440,28 @@ private struct AppServerThreadItem: Decodable, Sendable {
         case "hookPrompt":
             return [logEntry(kind: .event, text: "Hook prompt started.", replacesGroup: true, title: "Hook prompt", status: "started", detail: prompt)]
         case "agentMessage":
-            return text.map { [.logEntry(kind: .agentMessage, text: $0, groupID: id, replacesGroup: true)] } ?? []
+            return text?.nilIfEmpty.map {
+                [.logEntry(kind: .agentMessage, text: $0, groupID: id, replacesGroup: true)]
+            } ?? []
         default:
-            return [.logEntry(kind: .event, text: "App-server item started: \(type).", groupID: id, replacesGroup: true)]
+            throw ReviewIngestionError.unsupportedItemType(
+                method: "item/started",
+                type: type
+            )
         }
     }
 
     func completedEvents(
         completedAt: Date?,
         lifecycle: AppServerCommandLifecycle?
-    ) -> [CodexReviewBackendModel.Review.Event] {
+    ) throws -> [CodexReviewBackendModel.Review.Event] {
         switch type {
         case "userMessage":
             return []
         case "agentMessage":
-            return []
+            return text.map {
+                [.logEntry(kind: .agentMessage, text: $0, groupID: id, replacesGroup: true)]
+            } ?? []
         case "exitedReviewMode":
             return review.map { [.logEntry(kind: .agentMessage, text: $0, groupID: id, replacesGroup: true)] } ?? []
         case "commandExecution":
@@ -2536,7 +2537,10 @@ private struct AppServerThreadItem: Decodable, Sendable {
         case "enteredReviewMode":
             return []
         default:
-            return [.logEntry(kind: .event, text: "App-server item completed: \(type).", groupID: id, replacesGroup: true)]
+            throw ReviewIngestionError.unsupportedItemType(
+                method: "item/completed",
+                type: type
+            )
         }
     }
 

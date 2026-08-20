@@ -86,6 +86,7 @@ package enum ReviewAttemptTerminal: Equatable, Sendable {
 
 package enum ReviewIngestionError: LocalizedError, Equatable, Sendable {
     case malformedKnownEvent(method: String, message: String)
+    case unsupportedItemType(method: String, type: String)
     case missingRoutingIdentity(method: String)
     case conflictingActiveRouting(threadID: String)
     case conflictingStableEvent(key: String)
@@ -98,6 +99,8 @@ package enum ReviewIngestionError: LocalizedError, Equatable, Sendable {
         switch self {
         case .malformedKnownEvent(let method, let message):
             "Malformed app-server notification \(method): \(message)"
+        case .unsupportedItemType(let method, let type):
+            "Unsupported app-server item type \(type) in \(method)."
         case .missingRoutingIdentity(let method):
             "App-server notification \(method) is missing mandatory routing identity."
         case .conflictingActiveRouting(let threadID):
