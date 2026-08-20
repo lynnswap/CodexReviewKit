@@ -2,89 +2,11 @@ import Darwin
 import Foundation
 import MCP
 import OSLog
-import Synchronization
-import CodexReviewKit
 @preconcurrency import NIOCore
 @preconcurrency import NIOHTTP1
 @preconcurrency import NIOPosix
 
 private let logger = Logger(subsystem: "CodexReviewKit", category: "mcp-http")
-
-package typealias MCPHTTPServerLifetime = CodexReviewMCPHTTPServer
-
-package typealias MCPProtocolServerFactory = @MainActor @Sendable (
-    CodexReviewMCPServer,
-    String,
-    MCPReviewSessionRegistry,
-    MCPClientSessionState,
-    Duration
-) async -> Server
-
-package struct MCPHTTPServerClock: Sendable {
-    package struct Instant: Comparable, Sendable {
-        package static let zero = Self(elapsed: .zero)
-
-        fileprivate let elapsed: Duration
-
-        package func advanced(by duration: Duration) -> Self {
-            Self(elapsed: elapsed + duration)
-        }
-
-        package func duration(to other: Self) -> Duration {
-            other.elapsed - elapsed
-        }
-
-        package static func < (lhs: Self, rhs: Self) -> Bool {
-            lhs.elapsed < rhs.elapsed
-        }
-    }
-
-    private let readNow: @Sendable () -> Instant
-    private let sleepForDuration:
-        @Sendable (Duration) async throws(CancellationError) -> Void
-
-    package init(
-        now: @escaping @Sendable () -> Instant,
-        sleep: @escaping @Sendable (Duration) async throws(CancellationError) -> Void
-    ) {
-        self.readNow = now
-        self.sleepForDuration = sleep
-    }
-
-    package static func continuous() -> Self {
-        let clock = ContinuousClock()
-        let origin = clock.now
-        return Self(
-            now: {
-                Instant(elapsed: origin.duration(to: clock.now))
-            },
-            sleep: { (duration: Duration) async throws(CancellationError) -> Void in
-                try await Self.sleep(using: clock, for: duration)
-            }
-        )
-    }
-
-    package var now: Instant {
-        readNow()
-    }
-
-    package func sleep(for duration: Duration) async throws(CancellationError) {
-        try await sleepForDuration(duration)
-    }
-
-    private static func sleep(
-        using clock: ContinuousClock,
-        for duration: Duration
-    ) async throws(CancellationError) {
-        do {
-            try await clock.sleep(for: duration)
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            preconditionFailure("ContinuousClock.sleep failed outside task cancellation: \(error)")
-        }
-    }
-}
 
 private struct TrackedHTTPResponse {
     var response: HTTPResponse
@@ -124,32 +46,26 @@ package extension CodexReviewMCPHTTPServer {
         package var host: String
         package var port: Int
         package var endpoint: String
-        package var sessionTimeout: Duration
-        package var sessionCleanupInterval: Duration
+        package var sessionTimeout: TimeInterval
         package var retryInterval: Int?
         package var streamHeartbeatInterval: Duration?
         package var boundedReviewWaitDuration: Duration
-        package var sessionClock: MCPHTTPServerClock
 
         package init(
             host: String = "localhost",
             port: Int = 9417,
             endpoint: String = "/mcp",
-            sessionTimeout: Duration = .seconds(3600),
-            sessionCleanupInterval: Duration = .seconds(60),
-            retryInterval: Int? = 1000,
-            sessionClock: MCPHTTPServerClock = .continuous()
+            sessionTimeout: TimeInterval = 3600,
+            retryInterval: Int? = 1000
         ) {
             self.init(
                 host: host,
                 port: port,
                 endpoint: endpoint,
                 sessionTimeout: sessionTimeout,
-                sessionCleanupInterval: sessionCleanupInterval,
                 retryInterval: retryInterval,
                 streamHeartbeatInterval: .seconds(30),
-                boundedReviewWaitDuration: .seconds(540),
-                sessionClock: sessionClock
+                boundedReviewWaitDuration: .seconds(540)
             )
         }
 
@@ -157,27 +73,18 @@ package extension CodexReviewMCPHTTPServer {
             host: String = "localhost",
             port: Int = 9417,
             endpoint: String = "/mcp",
-            sessionTimeout: Duration = .seconds(3600),
-            sessionCleanupInterval: Duration = .seconds(60),
+            sessionTimeout: TimeInterval = 3600,
             retryInterval: Int? = 1000,
             streamHeartbeatInterval: Duration?,
-            boundedReviewWaitDuration: Duration = .seconds(540),
-            sessionClock: MCPHTTPServerClock = .continuous()
+            boundedReviewWaitDuration: Duration = .seconds(540)
         ) {
-            precondition(sessionTimeout >= .zero, "The MCP session timeout cannot be negative.")
-            precondition(
-                sessionCleanupInterval > .zero,
-                "The MCP session cleanup interval must be positive."
-            )
             self.host = host
             self.port = port
             self.endpoint = endpoint.hasPrefix("/") ? endpoint : "/\(endpoint)"
             self.sessionTimeout = sessionTimeout
-            self.sessionCleanupInterval = sessionCleanupInterval
             self.retryInterval = retryInterval
             self.streamHeartbeatInterval = streamHeartbeatInterval
             self.boundedReviewWaitDuration = boundedReviewWaitDuration
-            self.sessionClock = sessionClock
         }
 
         package func url(boundPort: Int? = nil) -> URL {
@@ -189,47 +96,15 @@ package extension CodexReviewMCPHTTPServer {
             return components.url!
         }
     }
-
-    struct ResourceSnapshot: Equatable, Sendable {
-        package var listenerCount: Int
-        package var eventLoopGroupCount: Int
-        package var sessionCount: Int
-        package var registrySessionCount: Int
-        package var cleanupTaskCount: Int
-        package var requestPumpTaskCount: Int
-        package var activeRequestWorkCount: Int
-        package var childChannelCount: Int
-    }
 }
 
 package actor CodexReviewMCPHTTPServer {
-    private enum Phase {
-        case idle
-        case staging
-        case staged
-        case accepting
-        case stopping(Task<Void, Never>)
-        case stopped
-    }
-
     private struct SessionContext {
-        enum Phase {
-            case initializing
-            case open
-            case closing(
-                reason: MCPReviewSessionCloseReason,
-                completion: Task<Void, Never>
-            )
-        }
-
-        var phase: Phase
-        var server: Server?
+        let server: Server
         let transport: StatefulHTTPServerTransport
-        var idleSince: MCPHTTPServerClock.Instant?
+        let createdAt: Date
+        var lastAccessedAt: Date
         var activeRequestCount: Int
-        var registryOpened: Bool
-        var creationCompleted: Bool
-        var initializationResponseReady: Bool
     }
 
     private struct FixedSessionIDGenerator: SessionIDGenerator {
@@ -241,51 +116,18 @@ package actor CodexReviewMCPHTTPServer {
     }
 
     private let adapter: CodexReviewMCPServer
-    private let sessionRegistry: MCPReviewSessionRegistry
-    private let protocolServerFactory: MCPProtocolServerFactory
     private let configuration: CodexReviewMCPHTTPServer.Configuration
     private var channel: Channel?
     private var eventLoopGroup: MultiThreadedEventLoopGroup?
     private var sessions: [String: SessionContext] = [:]
-    private var stagingWaiters: [CheckedContinuation<Void, Never>] = []
-    private var creationWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
-    private var requestDrainWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
     private var cleanupTask: Task<Void, Never>?
-    private let requestEventSink = MCPHTTPRequestEventSink()
-    private var requestPumpTask: Task<Void, Never>?
-    private var activeRequestWorkCount = 0
-    private let childChannels = MCPHTTPChannelRegistry()
     private var boundURL: URL?
-    private var phase: Phase = .idle
 
     package init(
         adapter: CodexReviewMCPServer,
-        configuration: CodexReviewMCPHTTPServer.Configuration = .init(),
-        protocolServerFactory: @escaping MCPProtocolServerFactory = {
-            adapter,
-            sessionID,
-            sessionRegistry,
-            clientSession,
-            boundedReviewWaitDuration in
-            await makeMCPProtocolServer(
-                adapter: adapter,
-                sessionID: sessionID,
-                sessionRegistry: sessionRegistry,
-                clientSession: clientSession,
-                boundedReviewWaitDuration: boundedReviewWaitDuration
-            )
-        }
+        configuration: CodexReviewMCPHTTPServer.Configuration = .init()
     ) {
         self.adapter = adapter
-        self.sessionRegistry = MCPReviewSessionRegistry(
-            closeStoreSession: { sessionID in
-                await adapter.closeSession(sessionID)
-            },
-            releaseStoreSession: { sessionID in
-                adapter.releaseClosedSession(sessionID)
-            }
-        )
-        self.protocolServerFactory = protocolServerFactory
         self.configuration = configuration
     }
 
@@ -328,48 +170,17 @@ package actor CodexReviewMCPHTTPServer {
     }
 
     package func start() async throws {
-        try await stage()
-        switch phase {
-        case .staged:
-            phase = .accepting
-        case .stopping(let completion):
-            await completion.value
-        case .stopped:
+        guard channel == nil else {
             return
-        case .idle, .staging, .accepting:
-            preconditionFailure("MCP HTTP staging must complete before activation.")
         }
-    }
 
-    package func stage() async throws {
-        guard case .idle = phase else {
-            preconditionFailure("The MCP HTTP server lifetime can only be started once.")
-        }
-        phase = .staging
-
-        requestPumpTask = Task { [self] in
-            await runRequestPump()
-        }
-        let endpoint = configuration.endpoint
-        let heartbeatInterval = configuration.streamHeartbeatInterval
-        let eventSink = requestEventSink
-        let childChannels = childChannels
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 128)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
-                childChannels.insert(channel)
-                channel.closeFuture.whenComplete { _ in
-                    childChannels.remove(channel)
-                }
-                return channel.pipeline.configureHTTPServerPipeline().flatMap {
-                    channel.pipeline.addHandler(CodexReviewMCPHTTPHandler(
-                        server: self,
-                        endpoint: endpoint,
-                        heartbeatInterval: heartbeatInterval,
-                        eventSink: eventSink
-                    ))
+                channel.pipeline.configureHTTPServerPipeline().flatMap {
+                    channel.pipeline.addHandler(CodexReviewMCPHTTPHandler(server: self))
                 }
             }
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
@@ -385,31 +196,12 @@ package actor CodexReviewMCPHTTPServer {
             self.channel = channel
             let actualPort = channel.localAddress?.port
             boundURL = configuration.url(boundPort: actualPort)
-            phase = .staged
-            let clock = configuration.sessionClock
-            let cleanupInterval = configuration.sessionCleanupInterval
             cleanupTask = Task { [weak self] in
-                while Task.isCancelled == false {
-                    do {
-                        try await clock.sleep(for: cleanupInterval)
-                    } catch {
-                        return
-                    }
-                    guard Task.isCancelled == false else {
-                        return
-                    }
-                    await self?.runScheduledSessionCleanup()
-                }
+                await self?.sessionCleanupLoop()
             }
-            finishStaging()
             logger.info("MCP Streamable HTTP server listening at \(self.url.absoluteString, privacy: .public)")
         } catch {
-            requestEventSink.finish()
-            await requestPumpTask?.value
-            requestPumpTask = nil
             try? await group.shutdownGracefully()
-            phase = .stopped
-            finishStaging()
             throw CodexReviewMCPHTTPServer.Error.classifyStartError(
                 error,
                 configuration: configuration
@@ -417,147 +209,35 @@ package actor CodexReviewMCPHTTPServer {
         }
     }
 
-    package func activate() {
-        guard case .staged = phase else {
-            preconditionFailure("Only a staged MCP HTTP server can begin accepting requests.")
-        }
-        phase = .accepting
-    }
-
     package func stop() async {
-        let completion: Task<Void, Never>
-        switch phase {
-        case .idle:
-            phase = .stopped
-            return
-        case .staging:
-            await waitForStaging()
-            await stop()
-            return
-        case .staged, .accepting:
-            let task = Task { [self] in
-                await performStop()
-            }
-            phase = .stopping(task)
-            completion = task
-        case .stopping(let task):
-            completion = task
-        case .stopped:
-            return
-        }
-        await completion.value
-    }
-
-    private func waitForStaging() async {
-        guard case .staging = phase else {
-            return
-        }
-        await withCheckedContinuation { continuation in
-            stagingWaiters.append(continuation)
-        }
-    }
-
-    private func finishStaging() {
-        let waiters = stagingWaiters
-        stagingWaiters.removeAll()
-        for waiter in waiters {
-            waiter.resume()
-        }
-    }
-
-    private func performStop() async {
-        let cleanup = cleanupTask
+        cleanupTask?.cancel()
         cleanupTask = nil
-        cleanup?.cancel()
-
-        if let channel {
-            try? await channel.close()
-        }
+        await closeAllSessions()
+        try? await channel?.close()
         channel = nil
-        await cleanup?.value
-
-        await closeAllSessions(reason: .serverStop)
-
-        requestEventSink.finish()
-        let requestPump = requestPumpTask
-        requestPumpTask = nil
-        await requestPump?.value
-
-        let openChildChannels = childChannels.snapshot()
-        for childChannel in openChildChannels {
-            try? await childChannel.close()
-        }
-
         if let eventLoopGroup {
             try? await eventLoopGroup.shutdownGracefully()
         }
         eventLoopGroup = nil
         boundURL = nil
-        phase = .stopped
         logger.info("MCP Streamable HTTP server stopped")
     }
 
-    private func runRequestPump() async {
-        await withTaskGroup(of: Void.self) { group in
-            for await work in requestEventSink.events {
-                activeRequestWorkCount += 1
-                group.addTask {
-                    await work.run()
-                    await self.requestWorkFinished()
-                }
-            }
-            while await group.next() != nil {}
-        }
-    }
-
-    private func requestWorkFinished() {
-        precondition(activeRequestWorkCount > 0)
-        activeRequestWorkCount -= 1
-    }
-
-    package func handleHTTPRequestForTesting(_ request: HTTPRequest) async -> HTTPResponse {
-        let trackedResponse = await handleTrackedHTTPRequest(request)
-        trackedResponse.streamCompletion?.finish()
-        return trackedResponse.response
+    package func handleHTTPRequest(_ request: HTTPRequest) async -> HTTPResponse {
+        await handleTrackedHTTPRequest(request).response
     }
 
     fileprivate func handleTrackedHTTPRequest(_ request: HTTPRequest) async -> TrackedHTTPResponse {
-        guard case .accepting = phase else {
-            return .init(
-                response: .error(
-                    statusCode: 503,
-                    .internalError("MCP HTTP server is stopping")
-                )
-            )
-        }
         let sessionID = request.header(HTTPHeaderName.sessionID)
 
         if let sessionID, var session = sessions[sessionID] {
-            switch session.phase {
-            case .initializing:
-                return .init(
-                    response: .error(
-                        statusCode: 409,
-                        .invalidRequest("Conflict: MCP session initialization is not complete")
-                    )
-                )
-            case .closing:
-                return .init(
-                    response: .error(
-                        statusCode: 404,
-                        .invalidRequest("Not Found: Session not found or expired")
-                    )
-                )
-            case .open:
-                break
-            }
-            session.idleSince = nil
+            session.lastAccessedAt = Date()
             session.activeRequestCount += 1
             sessions[sessionID] = session
             let response = await session.transport.handleRequest(request)
             let (trackedResponse, didFinishRequest) = trackActiveRequest(response, sessionID: sessionID)
             if didFinishRequest, request.method.uppercased() == "DELETE", trackedResponse.response.statusCode == 200 {
-                await closeSession(sessionID, reason: .delete)
+                await closeSession(sessionID)
             }
             return trackedResponse
         }
@@ -588,75 +268,34 @@ package actor CodexReviewMCPHTTPServer {
             validationPipeline: makeValidationPipeline(),
             retryInterval: configuration.retryInterval
         )
-        sessions[sessionID] = SessionContext(
-            phase: .initializing,
-            server: nil,
-            transport: transport,
-            idleSince: nil,
-            activeRequestCount: 1,
-            registryOpened: false,
-            creationCompleted: false,
-            initializationResponseReady: false
-        )
-        defer {
-            finishSessionCreation(sessionID)
-        }
 
         do {
-            await sessionRegistry.openSession(sessionID)
-            updateSession(sessionID) { context in
-                context.registryOpened = true
-            }
-            guard isSessionInitializing(sessionID) else {
-                await transport.disconnect()
-                finishActiveRequest(sessionID: sessionID)
-                return sessionClosedDuringInitializationResponse()
-            }
-
-            let server = await protocolServerFactory(
-                adapter,
-                sessionID,
-                sessionRegistry,
-                clientSession,
-                configuration.boundedReviewWaitDuration
+            let server = await makeMCPProtocolServer(
+                adapter: adapter,
+                defaultSessionID: sessionID,
+                clientSession: clientSession,
+                boundedReviewWaitDuration: configuration.boundedReviewWaitDuration
             )
-            updateSession(sessionID) { context in
-                context.server = server
-            }
-            guard isSessionInitializing(sessionID) else {
-                await server.stop()
-                await transport.disconnect()
-                finishActiveRequest(sessionID: sessionID)
-                return sessionClosedDuringInitializationResponse()
-            }
-
             try await server.start(transport: transport) { clientInfo, _ in
                 await clientSession.update(clientInfo: clientInfo)
             }
-            guard isSessionInitializing(sessionID) else {
-                await server.stop()
-                await transport.disconnect()
-                finishActiveRequest(sessionID: sessionID)
-                return sessionClosedDuringInitializationResponse()
-            }
+            sessions[sessionID] = SessionContext(
+                server: server,
+                transport: transport,
+                createdAt: Date(),
+                lastAccessedAt: Date(),
+                activeRequestCount: 1
+            )
 
             let response = await transport.handleRequest(request)
-            guard isSessionInitializing(sessionID) else {
-                finishActiveRequest(sessionID: sessionID)
-                return sessionClosedDuringInitializationResponse()
-            }
             let (trackedResponse, didFinishRequest) = trackActiveRequest(response, sessionID: sessionID)
             if didFinishRequest, case .error = trackedResponse.response {
-                _ = beginCloseSession(sessionID, reason: .initializationFailure)
-            } else {
-                updateSession(sessionID) { context in
-                    context.initializationResponseReady = true
-                }
+                sessions.removeValue(forKey: sessionID)
+                await transport.disconnect()
             }
             return trackedResponse
         } catch {
-            finishActiveRequest(sessionID: sessionID)
-            _ = beginCloseSession(sessionID, reason: .initializationFailure)
+            await transport.disconnect()
             return .init(
                 response: .error(
                     statusCode: 500,
@@ -666,152 +305,13 @@ package actor CodexReviewMCPHTTPServer {
         }
     }
 
-    private func closeSession(
-        _ sessionID: String,
-        reason: MCPReviewSessionCloseReason
-    ) async {
-        guard let completion = beginCloseSession(sessionID, reason: reason) else {
+    private func closeSession(_ sessionID: String) async {
+        guard let session = sessions.removeValue(forKey: sessionID) else {
             return
         }
-        await completion.value
-    }
-
-    private func beginCloseSession(
-        _ sessionID: String,
-        reason: MCPReviewSessionCloseReason
-    ) -> Task<Void, Never>? {
-        guard var context = sessions[sessionID] else {
-            return nil
-        }
-        switch context.phase {
-        case .initializing, .open:
-            let completion = Task { [self] in
-                await driveSessionClose(sessionID: sessionID, reason: reason)
-            }
-            context.phase = .closing(reason: reason, completion: completion)
-            sessions[sessionID] = context
-            return completion
-        case .closing(_, let completion):
-            return completion
-        }
-    }
-
-    private func driveSessionClose(
-        sessionID: String,
-        reason: MCPReviewSessionCloseReason
-    ) async {
-        guard let initialContext = sessions[sessionID] else {
-            return
-        }
-
-        var registryClose: Task<MCPReviewSessionCloseReport, Never>?
-        if initialContext.registryOpened {
-            registryClose = await sessionRegistry.beginClose(sessionID, reason: reason)
-        }
-
-        if let server = initialContext.server {
-            await server.stop()
-        }
-        await initialContext.transport.disconnect()
-        await waitForSessionCreation(sessionID)
-
-        // Initialization can publish a Server or registry session immediately
-        // before observing the close phase. Drain those late resources too.
-        if let finalContext = sessions[sessionID] {
-            if registryClose == nil, finalContext.registryOpened {
-                registryClose = await sessionRegistry.beginClose(sessionID, reason: reason)
-            }
-            if let server = finalContext.server, initialContext.server == nil {
-                await server.stop()
-            }
-            await finalContext.transport.disconnect()
-        }
-
-        await waitForSessionRequests(sessionID)
-        if let registryClose {
-            let report = await registryClose.value
-            if report.cancellationFailed.isEmpty == false {
-                let runIDs = report.cancellationFailed
-                    .map(\.rawValue)
-                    .sorted()
-                    .joined(separator: ",")
-                logger.error(
-                    "MCP session \(sessionID, privacy: .public) closed with undrained runs \(runIDs, privacy: .public)"
-                )
-            }
-        }
-
-        let didOpenRegistry = sessions[sessionID]?.registryOpened == true
-        sessions.removeValue(forKey: sessionID)
-        creationWaiters.removeValue(forKey: sessionID)
-        requestDrainWaiters.removeValue(forKey: sessionID)
-        if didOpenRegistry {
-            await sessionRegistry.removeClosedSession(sessionID)
-        }
+        await session.transport.disconnect()
+        await adapter.closeSession(sessionID)
         logger.info("Closed MCP HTTP session \(sessionID, privacy: .public)")
-    }
-
-    private func waitForSessionCreation(_ sessionID: String) async {
-        guard sessions[sessionID]?.creationCompleted == false else {
-            return
-        }
-        await withCheckedContinuation { continuation in
-            creationWaiters[sessionID, default: []].append(continuation)
-        }
-    }
-
-    private func waitForSessionRequests(_ sessionID: String) async {
-        guard let context = sessions[sessionID], context.activeRequestCount > 0 else {
-            return
-        }
-        await withCheckedContinuation { continuation in
-            requestDrainWaiters[sessionID, default: []].append(continuation)
-        }
-    }
-
-    private func finishSessionCreation(_ sessionID: String) {
-        guard var context = sessions[sessionID] else {
-            return
-        }
-        context.creationCompleted = true
-        if case .initializing = context.phase,
-           context.initializationResponseReady,
-           context.activeRequestCount == 0 {
-            context.phase = .open
-            context.idleSince = configuration.sessionClock.now
-        }
-        sessions[sessionID] = context
-        let waiters = creationWaiters.removeValue(forKey: sessionID) ?? []
-        for waiter in waiters {
-            waiter.resume()
-        }
-    }
-
-    private func isSessionInitializing(_ sessionID: String) -> Bool {
-        guard let context = sessions[sessionID], case .initializing = context.phase else {
-            return false
-        }
-        return true
-    }
-
-    private func updateSession(
-        _ sessionID: String,
-        update: (inout SessionContext) -> Void
-    ) {
-        guard var context = sessions[sessionID] else {
-            return
-        }
-        update(&context)
-        sessions[sessionID] = context
-    }
-
-    private func sessionClosedDuringInitializationResponse() -> TrackedHTTPResponse {
-        .init(
-            response: .error(
-                statusCode: 503,
-                .internalError("MCP session closed during initialization")
-            )
-        )
     }
 
     private func trackActiveRequest(
@@ -820,18 +320,35 @@ package actor CodexReviewMCPHTTPServer {
     ) -> (response: TrackedHTTPResponse, didFinishRequest: Bool) {
         switch response {
         case .stream(let stream, let headers):
-            let eventSink = requestEventSink
-            let completion = ActiveRequestCompletion { [self] in
-                let didSubmit = eventSink.send(MCPHTTPRequestWork {
+            let completion = ActiveRequestCompletion {
+                Task {
                     await self.finishActiveRequest(sessionID: sessionID)
-                })
-                precondition(
-                    didSubmit,
-                    "The HTTP request pump must outlive every tracked MCP response stream."
-                )
+                }
+            }
+            let trackedStream = AsyncThrowingStream<Data, Swift.Error>(bufferingPolicy: .unbounded) { continuation in
+                let heartbeatTask = makeStreamHeartbeatTask(continuation: continuation)
+                let task = Task {
+                    defer {
+                        heartbeatTask?.cancel()
+                        completion.finish()
+                    }
+                    do {
+                        for try await chunk in stream {
+                            continuation.yield(chunk)
+                        }
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+                continuation.onTermination = { _ in
+                    heartbeatTask?.cancel()
+                    task.cancel()
+                    completion.finish()
+                }
             }
             return (
-                .init(response: .stream(stream, headers: headers), streamCompletion: completion),
+                .init(response: .stream(trackedStream, headers: headers), streamCompletion: completion),
                 false
             )
 
@@ -842,119 +359,83 @@ package actor CodexReviewMCPHTTPServer {
     }
 
     private func finishActiveRequest(sessionID: String) {
-        guard var session = sessions[sessionID] else {
-            preconditionFailure("An active MCP HTTP request must retain its session context.")
+        if var session = sessions[sessionID] {
+            session.lastAccessedAt = Date()
+            session.activeRequestCount = max(0, session.activeRequestCount - 1)
+            sessions[sessionID] = session
         }
-        precondition(
-            session.activeRequestCount > 0,
-            "An MCP HTTP request can only finish once."
-        )
-        session.activeRequestCount -= 1
-        if case .initializing = session.phase,
-           session.initializationResponseReady,
-           session.creationCompleted,
-           session.activeRequestCount == 0 {
-            session.phase = .open
+    }
+
+    private func makeStreamHeartbeatTask(
+        continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
+    ) -> Task<Void, Never>? {
+        guard let interval = configuration.streamHeartbeatInterval else {
+            return nil
         }
-        if session.activeRequestCount == 0 {
-            session.idleSince = configuration.sessionClock.now
-        }
-        sessions[sessionID] = session
-        if session.activeRequestCount == 0 {
-            let waiters = requestDrainWaiters.removeValue(forKey: sessionID) ?? []
-            for waiter in waiters {
-                waiter.resume()
+        return Task {
+            while Task.isCancelled == false {
+                do {
+                    try await Task.sleep(for: interval)
+                } catch {
+                    return
+                }
+                guard Task.isCancelled == false else {
+                    return
+                }
+                continuation.yield(Data(": keep-alive\n\n".utf8))
             }
         }
     }
 
-    private func closeAllSessions(reason: MCPReviewSessionCloseReason) async {
-        let sessionIDs = Array(sessions.keys)
-        let completions = sessionIDs.compactMap { sessionID in
-            beginCloseSession(sessionID, reason: reason)
-        }
-        for completion in completions {
-            await completion.value
+    private func closeAllSessions() async {
+        for sessionID in sessions.keys {
+            await closeSession(sessionID)
         }
     }
 
-    private func runScheduledSessionCleanup() async {
-        await closeExpiredSessions(now: configuration.sessionClock.now)
+    private func sessionCleanupLoop() async {
+        while Task.isCancelled == false {
+            try? await Task.sleep(for: .seconds(60))
+            guard Task.isCancelled == false else {
+                return
+            }
+            await closeExpiredSessions(now: Date())
+        }
+    }
+
+    package func runSessionCleanupForTesting(now: Date) async {
+        await closeExpiredSessions(now: now)
     }
 
     package func sessionActiveRequestCountForTesting(sessionID: String) -> Int? {
         sessions[sessionID]?.activeRequestCount
     }
 
-    package func sessionIsClosingForTesting(sessionID: String) -> Bool {
-        guard let context = sessions[sessionID], case .closing = context.phase else {
-            return false
-        }
-        return true
-    }
-
-    package func registerSessionMemberForTesting(
-        _ runID: ReviewRunID,
-        sessionID: String
-    ) async throws {
-        try await sessionRegistry.registerMemberForTesting(runID, in: sessionID)
-    }
-
-    package func resourceSnapshotForTesting() async -> ResourceSnapshot {
-        let registrySessionCount = await sessionRegistry.sessionCountForTesting()
-        return ResourceSnapshot(
-            listenerCount: channel == nil ? 0 : 1,
-            eventLoopGroupCount: eventLoopGroup == nil ? 0 : 1,
-            sessionCount: sessions.count,
-            registrySessionCount: registrySessionCount,
-            cleanupTaskCount: cleanupTask == nil ? 0 : 1,
-            requestPumpTaskCount: requestPumpTask == nil ? 0 : 1,
-            activeRequestWorkCount: activeRequestWorkCount,
-            childChannelCount: childChannels.count
-        )
-    }
-
-    private func closeExpiredSessions(now: MCPHTTPServerClock.Instant) async {
-        var closeCompletions: [Task<Void, Never>] = []
-        let sessionSnapshot = Array(sessions)
-        for (sessionID, context) in sessionSnapshot {
-            guard case .open = context.phase else {
+    private func closeExpiredSessions(now: Date) async {
+        var expiredSessionIDs: [String] = []
+        for (sessionID, context) in sessions {
+            guard now.timeIntervalSince(context.lastAccessedAt) > configuration.sessionTimeout else {
                 continue
             }
             if context.activeRequestCount > 0 {
-                updateSession(sessionID) { context in
-                    context.idleSince = nil
+                continue
+            }
+            if await adapter.hasActiveReviews(in: sessionID) {
+                if var session = sessions[sessionID] {
+                    session.lastAccessedAt = Date()
+                    sessions[sessionID] = session
                 }
                 continue
             }
-            let hasPendingRegistryWork = await sessionRegistry.hasPendingWork(in: sessionID)
-            let hasActiveReviews = await adapter.hasActiveReviews(in: sessionID)
-            if hasPendingRegistryWork || hasActiveReviews {
-                updateSession(sessionID) { context in
-                    context.idleSince = nil
-                }
-                continue
-            }
-            guard let currentContext = sessions[sessionID],
-                  case .open = currentContext.phase,
-                  currentContext.activeRequestCount == 0,
-                  currentContext.idleSince == context.idleSince else {
-                continue
-            }
-            guard let idleSince = currentContext.idleSince else {
-                updateSession(sessionID) { context in
-                    context.idleSince = now
-                }
-                continue
-            }
-            if idleSince.duration(to: now) > configuration.sessionTimeout {
-                if let completion = beginCloseSession(sessionID, reason: .timeout) {
-                    closeCompletions.append(completion)
-                }
+            if let current = sessions[sessionID],
+               current.activeRequestCount == 0,
+               now.timeIntervalSince(current.lastAccessedAt) > configuration.sessionTimeout
+            {
+                expiredSessionIDs.append(sessionID)
             }
         }
-        for completion in closeCompletions {
-            await completion.value
+        for sessionID in expiredSessionIDs {
+            await closeSession(sessionID)
         }
     }
 
@@ -1034,137 +515,23 @@ package actor CodexReviewMCPHTTPServer {
     }
 }
 
-private struct MCPHTTPRequestWork: Sendable {
-    let run: @Sendable () async -> Void
-}
-
-private final class MCPHTTPRequestEventSink: Sendable {
-    private struct State {
-        var isOpen = true
-        let continuation: AsyncStream<MCPHTTPRequestWork>.Continuation
-    }
-
-    let events: AsyncStream<MCPHTTPRequestWork>
-    private let state: Mutex<State>
-
-    init() {
-        let (events, continuation) = AsyncStream<MCPHTTPRequestWork>.makeStream()
-        self.events = events
-        self.state = Mutex(State(continuation: continuation))
-    }
-
-    @discardableResult
-    func send(_ work: MCPHTTPRequestWork) -> Bool {
-        state.withLock { state in
-            guard state.isOpen else {
-                return false
-            }
-            state.continuation.yield(work)
-            return true
-        }
-    }
-
-    func finish() {
-        state.withLock { state in
-            guard state.isOpen else {
-                return
-            }
-            state.isOpen = false
-            state.continuation.finish()
-        }
-    }
-}
-
-private final class MCPHTTPChannelCancellation: Sendable {
-    private struct State {
-        var isCancelled = false
-        var waiters: [UUID: CheckedContinuation<Void, Never>] = [:]
-    }
-
-    private let state = Mutex(State())
-
-    func wait() async {
-        let waiterID = UUID()
-        await withTaskCancellationHandler {
-            await withCheckedContinuation { continuation in
-                let shouldResume = state.withLock { state in
-                    if state.isCancelled || Task.isCancelled {
-                        return true
-                    }
-                    state.waiters[waiterID] = continuation
-                    return false
-                }
-                if shouldResume {
-                    continuation.resume()
-                }
-            }
-        } onCancel: { [self] in
-            let continuation = state.withLock { state in
-                state.waiters.removeValue(forKey: waiterID)
-            }
-            continuation?.resume()
-        }
-    }
-
-    func cancel() {
-        let waiters = state.withLock { state in
-            guard state.isCancelled == false else {
-                return [CheckedContinuation<Void, Never>]()
-            }
-            state.isCancelled = true
-            let waiters = Array(state.waiters.values)
-            state.waiters.removeAll()
-            return waiters
-        }
-        for waiter in waiters {
-            waiter.resume()
-        }
-    }
-}
-
-private final class MCPHTTPChannelRegistry: Sendable {
-    private let channels = Mutex<[ObjectIdentifier: any Channel]>([:])
-
-    func insert(_ channel: any Channel) {
-        channels.withLock { channels in
-            channels[ObjectIdentifier(channel)] = channel
-        }
-    }
-
-    func remove(_ channel: any Channel) {
-        channels.withLock { channels in
-            _ = channels.removeValue(forKey: ObjectIdentifier(channel))
-        }
-    }
-
-    func snapshot() -> [any Channel] {
-        channels.withLock { channels in
-            Array(channels.values)
-        }
-    }
-
-    var count: Int {
-        channels.withLock { $0.count }
-    }
-}
-
-private final class ActiveRequestCompletion: Sendable {
-    private let didFinish = Mutex(false)
+private final class ActiveRequestCompletion: @unchecked Sendable {
+    private let lock = NSLock()
     private let onFinish: @Sendable () -> Void
+    private var didFinish = false
 
     init(onFinish: @escaping @Sendable () -> Void) {
         self.onFinish = onFinish
     }
 
     func finish() {
-        let shouldFinish = didFinish.withLock { didFinish in
-            if didFinish {
-                return false
-            }
-            didFinish = true
-            return true
+        lock.lock()
+        if didFinish {
+            lock.unlock()
+            return
         }
-        guard shouldFinish else { return }
+        didFinish = true
+        lock.unlock()
         onFinish()
     }
 }
@@ -1192,20 +559,6 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
             buffer.writeBytes(data)
             context.writeAndFlush(handler.wrapOutboundOut(.body(.byteBuffer(buffer))), promise: promise)
         }
-
-        func writeResponse(
-            head: HTTPResponseHead,
-            body: Data?,
-            promise: EventLoopPromise<Void>
-        ) {
-            context.write(handler.wrapOutboundOut(.head(head)), promise: nil)
-            if let body {
-                var buffer = context.channel.allocator.buffer(capacity: body.count)
-                buffer.writeBytes(body)
-                context.write(handler.wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
-            }
-            context.writeAndFlush(handler.wrapOutboundOut(.end(nil)), promise: promise)
-        }
     }
 
     private struct RequestState {
@@ -1213,30 +566,14 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
         var bodyBuffer: ByteBuffer
     }
 
-    private enum StreamWriterOutcome: Sendable {
-        case completed
-        case channelClosed
-        case stopped
-        case failed(String)
-    }
-
     private let server: CodexReviewMCPHTTPServer
-    private let endpoint: String
-    private let heartbeatInterval: Duration?
-    private let eventSink: MCPHTTPRequestEventSink
-    private let channelCancellation = MCPHTTPChannelCancellation()
     private var requestState: RequestState?
+    private var activeStreamTask: Task<Void, Never>?
+    private var activeStreamID: UUID?
+    private var activeStreamCompletion: ActiveRequestCompletion?
 
-    init(
-        server: CodexReviewMCPHTTPServer,
-        endpoint: String,
-        heartbeatInterval: Duration?,
-        eventSink: MCPHTTPRequestEventSink
-    ) {
+    init(server: CodexReviewMCPHTTPServer) {
         self.server = server
-        self.endpoint = endpoint
-        self.heartbeatInterval = heartbeatInterval
-        self.eventSink = eventSink
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -1255,11 +592,8 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
             }
             requestState = nil
             nonisolated(unsafe) let context = context
-            let didSubmit = eventSink.send(MCPHTTPRequestWork { [self] in
+            Task {
                 await handleRequest(state: state, context: context)
-            })
-            if didSubmit == false {
-                context.close(promise: nil)
             }
         }
     }
@@ -1270,13 +604,13 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
     }
 
     func channelInactive(context: ChannelHandlerContext) {
-        channelCancellation.cancel()
+        finishActiveStream()
         context.fireChannelInactive()
     }
 
     func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
         if case ChannelEvent.inputClosed = event {
-            channelCancellation.cancel()
+            finishActiveStream()
             context.close(promise: nil)
             return
         }
@@ -1284,8 +618,16 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
     }
 
     func errorCaught(context: ChannelHandlerContext, error: any Error) {
-        channelCancellation.cancel()
+        finishActiveStream()
         context.close(promise: nil)
+    }
+
+    private func finishActiveStream() {
+        activeStreamTask?.cancel()
+        activeStreamCompletion?.finish()
+        activeStreamTask = nil
+        activeStreamID = nil
+        activeStreamCompletion = nil
     }
 
     private func handleRequest(
@@ -1294,6 +636,7 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
     ) async {
         let head = state.head
         let path = head.uri.split(separator: "?").first.map(String.init) ?? head.uri
+        let endpoint = await server.endpoint
         guard path == endpoint else {
             await writeResponse(
                 .init(response: .error(statusCode: 404, .invalidRequest("Not Found"))),
@@ -1349,105 +692,77 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
 
         switch response {
         case .stream(let stream, _):
-            defer {
-                trackedResponse.streamCompletion?.finish()
+            let streamID = UUID()
+            let streamTask = Task {
+                var head = HTTPResponseHead(version: version, status: status)
+                for (name, value) in headers {
+                    head.headers.add(name: name, value: value)
+                }
+
+                var iterator = stream.makeAsyncIterator()
+                do {
+                    try Task.checkCancellation()
+                    try await writeResponsePart(.head(head), context: context, eventLoop: eventLoop)
+                    while let chunk = try await iterator.next() {
+                        try Task.checkCancellation()
+                        try await writeResponseBody(chunk, context: context, eventLoop: eventLoop)
+                    }
+                } catch is CancellationError {
+                    trackedResponse.streamCompletion?.finish()
+                    return
+                } catch {
+                    trackedResponse.streamCompletion?.finish()
+                    logger.error("MCP SSE stream failed: \(error.localizedDescription, privacy: .public)")
+                }
+
+                guard Task.isCancelled == false else {
+                    return
+                }
+                try? await writeResponsePart(.end(nil), context: context, eventLoop: eventLoop)
             }
-            let responseHead = makeResponseHead(
-                version: version,
-                status: status,
-                headers: headers
-            )
             eventLoop.execute {
+                context.channel.closeFuture.whenComplete { _ in
+                    trackedResponse.streamCompletion?.finish()
+                    streamTask.cancel()
+                }
+                guard context.channel.isActive else {
+                    trackedResponse.streamCompletion?.finish()
+                    streamTask.cancel()
+                    return
+                }
+                self.activeStreamTask?.cancel()
+                self.activeStreamCompletion?.finish()
+                self.activeStreamTask = streamTask
+                self.activeStreamID = streamID
+                self.activeStreamCompletion = trackedResponse.streamCompletion
                 context.read()
             }
-
-            let outcome = await withTaskGroup(
-                of: StreamWriterOutcome.self,
-                returning: StreamWriterOutcome.self
-            ) { group in
-                group.addTask { [self] in
-                    do {
-                        try Task.checkCancellation()
-                        try await writeResponsePart(
-                            .head(responseHead),
-                            context: context,
-                            eventLoop: eventLoop
-                        )
-                        for try await chunk in stream {
-                            try Task.checkCancellation()
-                            try await writeResponseBody(chunk, context: context, eventLoop: eventLoop)
-                        }
-                        return .completed
-                    } catch is CancellationError {
-                        return .stopped
-                    } catch {
-                        return .failed(error.localizedDescription)
-                    }
+            await streamTask.value
+            eventLoop.execute {
+                if self.activeStreamID == streamID {
+                    self.activeStreamTask = nil
+                    self.activeStreamID = nil
+                    self.activeStreamCompletion = nil
                 }
-                group.addTask { [channelCancellation] in
-                    await channelCancellation.wait()
-                    return Task.isCancelled ? .stopped : .channelClosed
-                }
-                if let heartbeatInterval {
-                    group.addTask { [self] in
-                        do {
-                            while Task.isCancelled == false {
-                                try await Task.sleep(for: heartbeatInterval)
-                                try Task.checkCancellation()
-                                try await writeResponseBody(
-                                    Data(": keep-alive\n\n".utf8),
-                                    context: context,
-                                    eventLoop: eventLoop
-                                )
-                            }
-                            return .stopped
-                        } catch is CancellationError {
-                            return .stopped
-                        } catch {
-                            return .failed(error.localizedDescription)
-                        }
-                    }
-                }
-
-                let first = await group.next() ?? .stopped
-                group.cancelAll()
-                while await group.next() != nil {}
-                return first
-            }
-
-            switch outcome {
-            case .completed:
-                try? await writeResponsePart(.end(nil), context: context, eventLoop: eventLoop)
-            case .failed(let message):
-                logger.error("MCP SSE stream failed: \(message, privacy: .public)")
-            case .channelClosed, .stopped:
-                break
             }
 
         default:
             let body = response.bodyData
-            var head = makeResponseHead(
-                version: version,
-                status: status,
-                headers: headers
-            )
-            if let body {
-                head.headers.add(name: "Content-Length", value: "\(body.count)")
-            }
-            let responseHead = head
-            let writer = ResponsePartWriter(handler: self, context: context)
-            let promise = eventLoop.makePromise(of: Void.self)
             eventLoop.execute {
-                writer.writeResponse(
-                    head: responseHead,
-                    body: body,
-                    promise: promise
-                )
-            }
-            do {
-                try await promise.futureResult.get()
-            } catch {
-                logger.error("MCP HTTP response write failed: \(error.localizedDescription, privacy: .public)")
+                var head = HTTPResponseHead(version: version, status: status)
+                for (name, value) in headers {
+                    head.headers.add(name: name, value: value)
+                }
+                if let body {
+                    head.headers.add(name: "Content-Length", value: "\(body.count)")
+                }
+                context.write(self.wrapOutboundOut(.head(head)), promise: nil)
+                if let body {
+                    var buffer = context.channel.allocator.buffer(capacity: body.count)
+                    buffer.writeBytes(body)
+                    context.write(self.wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
+                }
+                context.writeAndFlush(self.wrapOutboundOut(.end(nil)), promise: nil)
             }
         }
     }
@@ -1463,18 +778,6 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
             writer.writeAndFlush(part, promise: promise)
         }
         try await promise.futureResult.get()
-    }
-
-    private func makeResponseHead(
-        version: HTTPVersion,
-        status: HTTPResponseStatus,
-        headers: [String: String]
-    ) -> HTTPResponseHead {
-        var head = HTTPResponseHead(version: version, status: status)
-        for (name, value) in headers {
-            head.headers.add(name: name, value: value)
-        }
-        return head
     }
 
     private func writeResponseBody(

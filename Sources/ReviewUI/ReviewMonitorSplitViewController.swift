@@ -1,9 +1,8 @@
 import AppKit
 import Combine
-import CodexDataKit
 import Foundation
 import ObservationBridge
-import CodexReviewKit
+import CodexReview
 
 @MainActor
 final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDelegate {
@@ -14,13 +13,12 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
     private static let addAccountToolbarItemIdentifier = NSToolbarItem.Identifier(
         "CodexReviewKit.ReviewMonitor.Toolbar.AddAccount"
     )
-    private static let sidebarReviewChatFilterToolbarItemIdentifier = NSToolbarItem.Identifier(
-        "CodexReviewKit.ReviewMonitor.Toolbar.SidebarReviewChatFilter"
+    private static let sidebarJobFilterToolbarItemIdentifier = NSToolbarItem.Identifier(
+        "CodexReviewKit.ReviewMonitor.Toolbar.SidebarJobFilter"
     )
 
     private let store: CodexReviewStore
     private let uiState: ReviewMonitorUIState
-    private let codexModelSource: ReviewMonitorCodexModelSource?
     private let showSettings: (@MainActor () -> Void)?
     private var sidebarViewController: ReviewMonitorSidebarViewController?
     private var transportViewController: ReviewMonitorTransportViewController?
@@ -28,40 +26,22 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
     private var contentItem: NSSplitViewItem?
     private var toolbar: NSToolbar?
     private var sidebarPickerToolbarItem: ReviewMonitorSidebarPickerToolbarItem?
-    private var sidebarReviewChatFilterToolbarItem: ReviewMonitorSidebarReviewChatFilterToolbarItem?
+    private var sidebarJobFilterToolbarItem: ReviewMonitorSidebarJobFilterToolbarItem?
     private var addAccountToolbarItem: ReviewMonitorAddAccountToolbarItem?
     private var toolbarMembershipObservation: PortableObservationTracking.Token?
     private var windowTitleObservation: PortableObservationTracking.Token?
-    private var codexSelectionTitleResolver: ReviewMonitorCodexSelectionTitleResolver?
-    private weak var codexSelectionTitleResolverContext: CodexModelContext?
     private var sidebarCollapseObservation: NSKeyValueObservation?
     private var windowCancellable: AnyCancellable?
     private weak var attachedWindow: NSWindow?
     private var isSidebarCollapsed = false
 
-    convenience init(
-        store: CodexReviewStore,
-        uiState: ReviewMonitorUIState,
-        modelContext: CodexModelContext,
-        showSettings: (@MainActor () -> Void)? = nil
-    ) {
-        self.init(
-            store: store,
-            uiState: uiState,
-            codexModelSource: ReviewMonitorCodexModelSource(modelContext: modelContext),
-            showSettings: showSettings
-        )
-    }
-
     init(
         store: CodexReviewStore,
         uiState: ReviewMonitorUIState,
-        codexModelSource: ReviewMonitorCodexModelSource? = nil,
         showSettings: (@MainActor () -> Void)? = nil
     ) {
         self.store = store
         self.uiState = uiState
-        self.codexModelSource = codexModelSource
         self.showSettings = showSettings
         super.init(nibName: nil, bundle: nil)
     }
@@ -80,12 +60,11 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
 
         let sidebarViewController = ReviewMonitorSidebarViewController(
             store: store,
-            uiState: uiState,
-            codexModelSource: codexModelSource
+            uiState: uiState
         )
         let transportViewController = ReviewMonitorTransportViewController(
-            uiState: uiState,
-            codexModelSource: codexModelSource
+            store: store,
+            uiState: uiState
         )
         let statusAccessoryViewController = ReviewMonitorServerStatusAccessoryViewController(
             store: store,
@@ -155,7 +134,6 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
 
     func attach(to window: NSWindow) {
         loadViewIfNeeded()
-        sidebarViewController?.loadViewIfNeeded()
         let isNewWindow = attachedWindow !== window
         attachedWindow = window
 
@@ -171,7 +149,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         }
         window.layoutIfNeeded()
         synchronizeSidebarToolbarState()
-        applyWindowTitle(windowTitlePresentation(for: uiState.selection))
+        applyWindowTitle(Self.windowTitlePresentation(for: uiState.selection))
     }
 
     func detachFromWindow() {
@@ -193,21 +171,17 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
                 isSidebarCollapsed: self.isSidebarCollapsed,
                 isAuthenticating: isAuthenticating
             )
-            let isShowingSidebarReviewChatFilter = Self.isShowingSidebarReviewChatFilterToolbarItem(
+            let isShowingSidebarJobFilter = Self.isShowingSidebarJobFilterToolbarItem(
                 sidebarSelection: sidebarSelection,
                 isSidebarCollapsed: self.isSidebarCollapsed
             )
             self.setShowingAddAccount(isShowingAddAccount)
-            self.setShowingSidebarReviewChatFilter(isShowingSidebarReviewChatFilter)
+            self.setShowingSidebarJobFilter(isShowingSidebarJobFilter)
         }
 
         windowTitleObservation = withPortableContinuousObservation { [weak self, uiState] _ in
-            guard let self else {
-                return
-            }
-            _ = self.codexModelSource?.modelContext
-            let presentation = self.windowTitlePresentation(for: uiState.selection)
-            self.applyWindowTitle(presentation)
+            let presentation = Self.windowTitlePresentation(for: uiState.selection)
+            self?.applyWindowTitle(presentation)
         }
     }
 
@@ -238,39 +212,23 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         var subtitle: String
     }
 
-    private func windowTitlePresentation(
+    private static func windowTitlePresentation(
         for selection: ReviewMonitorSelection?
     ) -> WindowTitlePresentation {
-        guard let presentation = codexSelectionTitlePresentation(for: selection) else {
-            return WindowTitlePresentation(title: "", subtitle: "")
+        switch selection {
+        case .workspaceSection(let section):
+            WindowTitlePresentation(
+                title: section.title,
+                subtitle: section.subtitle
+            )
+        case .job(let job):
+            WindowTitlePresentation(
+                title: job.targetSummary,
+                subtitle: job.cwd
+            )
+        case nil:
+            WindowTitlePresentation(title: "", subtitle: "")
         }
-        return WindowTitlePresentation(
-            title: presentation.title,
-            subtitle: presentation.subtitle
-        )
-    }
-
-    private func codexSelectionTitlePresentation(
-        for selection: ReviewMonitorSelection?
-    ) -> ReviewMonitorCodexSelectionTitlePresentation? {
-        guard let modelContext = codexModelSource?.modelContext else {
-            return nil
-        }
-        let resolver = codexSelectionTitleResolver(for: modelContext)
-        return resolver.titlePresentation(for: selection)
-    }
-
-    private func codexSelectionTitleResolver(
-        for modelContext: CodexModelContext
-    ) -> ReviewMonitorCodexSelectionTitleResolver {
-        if let codexSelectionTitleResolver,
-           codexSelectionTitleResolverContext === modelContext {
-            return codexSelectionTitleResolver
-        }
-        let resolver = ReviewMonitorCodexSelectionTitleResolver(modelContext: modelContext)
-        codexSelectionTitleResolver = resolver
-        codexSelectionTitleResolverContext = modelContext
-        return resolver
     }
 
     private func applyWindowTitle(_ presentation: WindowTitlePresentation) {
@@ -287,7 +245,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         [
             Self.sidebarPickerToolbarItemIdentifier,
             .flexibleSpace,
-            Self.sidebarReviewChatFilterToolbarItemIdentifier,
+            Self.sidebarJobFilterToolbarItemIdentifier,
             .sidebarTrackingSeparator,
             .flexibleSpace,
         ]
@@ -297,7 +255,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         [
             Self.sidebarPickerToolbarItemIdentifier,
             Self.addAccountToolbarItemIdentifier,
-            Self.sidebarReviewChatFilterToolbarItemIdentifier,
+            Self.sidebarJobFilterToolbarItemIdentifier,
             .sidebarTrackingSeparator,
             .space,
             .flexibleSpace,
@@ -317,8 +275,8 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
             let item = resolvedAddAccountToolbarItem()
             return item
 
-        case Self.sidebarReviewChatFilterToolbarItemIdentifier:
-            return resolvedSidebarReviewChatFilterToolbarItem()
+        case Self.sidebarJobFilterToolbarItemIdentifier:
+            return resolvedSidebarJobFilterToolbarItem()
 
         case .sidebarTrackingSeparator:
             return NSTrackingSeparatorToolbarItem(
@@ -347,16 +305,16 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         return item
     }
 
-    private func resolvedSidebarReviewChatFilterToolbarItem() -> ReviewMonitorSidebarReviewChatFilterToolbarItem {
-        if let sidebarReviewChatFilterToolbarItem {
-            return sidebarReviewChatFilterToolbarItem
+    private func resolvedSidebarJobFilterToolbarItem() -> ReviewMonitorSidebarJobFilterToolbarItem {
+        if let sidebarJobFilterToolbarItem {
+            return sidebarJobFilterToolbarItem
         }
 
-        let item = ReviewMonitorSidebarReviewChatFilterToolbarItem(
-            itemIdentifier: Self.sidebarReviewChatFilterToolbarItemIdentifier,
+        let item = ReviewMonitorSidebarJobFilterToolbarItem(
+            itemIdentifier: Self.sidebarJobFilterToolbarItemIdentifier,
             uiState: uiState
         )
-        sidebarReviewChatFilterToolbarItem = item
+        sidebarJobFilterToolbarItem = item
         return item
     }
 
@@ -395,9 +353,9 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         )
     }
 
-    private func updateSidebarReviewChatFilterToolbarVisibility() {
-        setShowingSidebarReviewChatFilter(
-            Self.isShowingSidebarReviewChatFilterToolbarItem(
+    private func updateSidebarJobFilterToolbarVisibility() {
+        setShowingSidebarJobFilter(
+            Self.isShowingSidebarJobFilterToolbarItem(
                 sidebarSelection: uiState.sidebarSelection,
                 isSidebarCollapsed: isSidebarCollapsed
             )
@@ -415,7 +373,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         return sidebarSelection == .account && isSidebarCollapsed == false
     }
 
-    private static func isShowingSidebarReviewChatFilterToolbarItem(
+    private static func isShowingSidebarJobFilterToolbarItem(
         sidebarSelection: SidebarPickerSelection,
         isSidebarCollapsed: Bool
     ) -> Bool {
@@ -428,13 +386,13 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         }
         isSidebarCollapsed = isCollapsed
         updateAddAccountToolbarVisibility()
-        updateSidebarReviewChatFilterToolbarVisibility()
+        updateSidebarJobFilterToolbarVisibility()
     }
 
     private func synchronizeSidebarToolbarState() {
         isSidebarCollapsed = sidebarItem?.isCollapsed ?? isSidebarCollapsed
         updateAddAccountToolbarVisibility()
-        updateSidebarReviewChatFilterToolbarVisibility()
+        updateSidebarJobFilterToolbarVisibility()
     }
 
     private func setShowingAddAccount(_ isShowing: Bool) {
@@ -463,17 +421,17 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         )
     }
 
-    private func setShowingSidebarReviewChatFilter(_ isShowing: Bool) {
+    private func setShowingSidebarJobFilter(_ isShowing: Bool) {
         guard let toolbar else {
             return
         }
 
         let existingIndexes = toolbar.items.indices.filter { index in
-            toolbar.items[index].itemIdentifier == Self.sidebarReviewChatFilterToolbarItemIdentifier
+            toolbar.items[index].itemIdentifier == Self.sidebarJobFilterToolbarItemIdentifier
         }
         if existingIndexes.isEmpty == false {
             if isShowing {
-                ensureSidebarReviewChatFilterToolbarItem(in: toolbar)
+                ensureSidebarJobFilterToolbarItem(in: toolbar)
                 return
             }
             for index in existingIndexes.reversed() {
@@ -490,14 +448,14 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
             $0.itemIdentifier == .sidebarTrackingSeparator
         }) ?? toolbar.items.count
         toolbar.insertItem(
-            withItemIdentifier: Self.sidebarReviewChatFilterToolbarItemIdentifier,
+            withItemIdentifier: Self.sidebarJobFilterToolbarItemIdentifier,
             at: sidebarInsertionIndex
         )
     }
 
-    private func ensureSidebarReviewChatFilterToolbarItem(in toolbar: NSToolbar) {
+    private func ensureSidebarJobFilterToolbarItem(in toolbar: NSToolbar) {
         guard toolbar.items.contains(where: {
-            $0.itemIdentifier == Self.sidebarReviewChatFilterToolbarItemIdentifier
+            $0.itemIdentifier == Self.sidebarJobFilterToolbarItemIdentifier
         }) == false else {
             return
         }
@@ -506,28 +464,18 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
             $0.itemIdentifier == .sidebarTrackingSeparator
         }) ?? toolbar.items.count
         toolbar.insertItem(
-            withItemIdentifier: Self.sidebarReviewChatFilterToolbarItemIdentifier,
+            withItemIdentifier: Self.sidebarJobFilterToolbarItemIdentifier,
             at: sidebarInsertionIndex
         )
     }
 
     private func sidebarTrailingInsertionIndex(for toolbar: NSToolbar) -> Int {
         toolbar.items.firstIndex {
-            $0.itemIdentifier == Self.sidebarReviewChatFilterToolbarItemIdentifier ||
+            $0.itemIdentifier == Self.sidebarJobFilterToolbarItemIdentifier ||
                 $0.itemIdentifier == .sidebarTrackingSeparator
         } ?? toolbar.items.count
     }
 
-}
-
-@MainActor
-extension ReviewMonitorSplitViewController {
-    func prepareForImmediateRenderingForPreviewSupport() {
-        loadViewIfNeeded()
-        sidebarViewController?.loadViewIfNeeded()
-        transportViewController?.loadViewIfNeeded()
-        view.layoutSubtreeIfNeeded()
-    }
 }
 
 #if DEBUG
@@ -538,13 +486,8 @@ extension ReviewMonitorSplitViewController {
         case progress
     }
 
-    enum AddAccountProviderForTesting: Equatable {
-        case chatGPT
-        case apiKey
-    }
-
     enum SidebarPresentationForTesting: Sendable, Equatable {
-        case chatList
+        case jobList
         case accountList
         case unavailable
     }
@@ -559,8 +502,8 @@ extension ReviewMonitorSplitViewController {
 
     var sidebarPresentationForTesting: SidebarPresentationForTesting {
         switch sidebarViewControllerForTesting.sidebarKindForTesting {
-        case .chatList, .empty:
-            return .chatList
+        case .jobList, .empty:
+            return .jobList
         case .accountList:
             return .accountList
         case .unavailable:
@@ -592,10 +535,6 @@ extension ReviewMonitorSplitViewController {
         transportViewControllerForTesting
     }
 
-    var isTransportViewLoadedForTesting: Bool {
-        transportViewController?.isViewLoaded ?? false
-    }
-
     var transportViewControllerForTesting: ReviewMonitorTransportViewController {
         guard let transportViewController else {
             fatalError("Transport view controller is not configured yet.")
@@ -612,8 +551,8 @@ extension ReviewMonitorSplitViewController {
         Self.sidebarPickerToolbarItemIdentifier
     }
 
-    var sidebarReviewChatFilterToolbarItemIdentifierForTesting: NSToolbarItem.Identifier {
-        Self.sidebarReviewChatFilterToolbarItemIdentifier
+    var sidebarJobFilterToolbarItemIdentifierForTesting: NSToolbarItem.Identifier {
+        Self.sidebarJobFilterToolbarItemIdentifier
     }
 
     var sidebarPickerToolbarSegmentAccessibilityDescriptionsForTesting: [String] {
@@ -650,41 +589,41 @@ extension ReviewMonitorSplitViewController {
         sidebarPickerToolbarItem.selectOverflowMenuItemForTesting(selection)
     }
 
-    var sidebarReviewChatFilterToolbarItemIsHiddenForTesting: Bool {
+    var sidebarJobFilterToolbarItemIsHiddenForTesting: Bool {
         toolbar?.items.contains(where: {
-            $0.itemIdentifier == Self.sidebarReviewChatFilterToolbarItemIdentifier
+            $0.itemIdentifier == Self.sidebarJobFilterToolbarItemIdentifier
         }) != true
     }
 
-    var sidebarReviewChatFilterToolbarShowsActiveBackgroundForTesting: Bool {
-        sidebarReviewChatFilterToolbarItem?.buttonShowsActiveBackgroundForTesting ?? false
+    var sidebarJobFilterToolbarShowsActiveBackgroundForTesting: Bool {
+        sidebarJobFilterToolbarItem?.buttonShowsActiveBackgroundForTesting ?? false
     }
 
     var selectedToolbarItemIdentifierForTesting: NSToolbarItem.Identifier? {
         toolbar?.selectedItemIdentifier
     }
 
-    var sidebarReviewChatFilterToolbarMenuItemTitlesForTesting: [String] {
-        sidebarReviewChatFilterToolbarItem?.menuItemTitlesForTesting ?? []
+    var sidebarJobFilterToolbarMenuItemTitlesForTesting: [String] {
+        sidebarJobFilterToolbarItem?.menuItemTitlesForTesting ?? []
     }
 
-    var sidebarReviewChatFilterToolbarSelectedMenuItemTitlesForTesting: [String] {
-        sidebarReviewChatFilterToolbarItem?.selectedMenuItemTitlesForTesting ?? []
+    var sidebarJobFilterToolbarSelectedMenuItemTitlesForTesting: [String] {
+        sidebarJobFilterToolbarItem?.selectedMenuItemTitlesForTesting ?? []
     }
 
-    var sidebarReviewChatFilterToolbarSelectedFilterForTesting: SidebarReviewChatFilter? {
-        sidebarReviewChatFilterToolbarItem?.selectedFilterForTesting
+    var sidebarJobFilterToolbarSelectedFilterForTesting: SidebarJobFilter? {
+        sidebarJobFilterToolbarItem?.selectedFilterForTesting
     }
 
-    func setSidebarReviewChatFilterForTesting(_ filter: SidebarReviewChatFilter) {
-        uiState.sidebarReviewChatFilter = filter
+    func setSidebarJobFilterForTesting(_ filter: SidebarJobFilter) {
+        uiState.sidebarJobFilter = filter
     }
 
-    func selectSidebarReviewChatFilterForTesting(_ filter: SidebarReviewChatFilter) {
-        guard let sidebarReviewChatFilterToolbarItem else {
-            fatalError("Sidebar review chat filter toolbar item is not configured yet.")
+    func selectSidebarJobFilterForTesting(_ filter: SidebarJobFilter) {
+        guard let sidebarJobFilterToolbarItem else {
+            fatalError("Sidebar job filter toolbar item is not configured yet.")
         }
-        sidebarReviewChatFilterToolbarItem.selectFilterForTesting(filter)
+        sidebarJobFilterToolbarItem.selectFilterForTesting(filter)
     }
 
     var addAccountToolbarItemIdentifierForTesting: NSToolbarItem.Identifier {
@@ -710,48 +649,6 @@ extension ReviewMonitorSplitViewController {
 
     var addAccountToolbarMenuTitleForTesting: String? {
         addAccountToolbarItem?.menuTitleForTesting
-    }
-
-    var addAccountProviderMenuItemTitlesForTesting: [String] {
-        addAccountToolbarItem?.providerMenuItemTitlesForTesting ?? []
-    }
-
-    var addAccountAPIKeyProviderIsEnabledForTesting: Bool {
-        addAccountToolbarItem?.apiKeyProviderIsEnabledForTesting ?? false
-    }
-
-    var isPresentingAddAccountAPIKeyPromptForTesting: Bool {
-        addAccountToolbarItem?.isPresentingAPIKeyPromptForTesting ?? false
-    }
-
-    var addAccountAPIKeyPromptContainsTextForTesting: Bool {
-        addAccountToolbarItem?.apiKeyPromptContainsTextForTesting ?? false
-    }
-
-    func selectAddAccountProviderForTesting(_ provider: AddAccountProviderForTesting) {
-        guard let addAccountToolbarItem else {
-            fatalError("Add Account toolbar item is not configured yet.")
-        }
-        switch provider {
-        case .chatGPT:
-            addAccountToolbarItem.selectProviderForTesting(.chatGPT)
-        case .apiKey:
-            addAccountToolbarItem.selectProviderForTesting(.apiKey)
-        }
-    }
-
-    func setAddAccountAPIKeyPromptValueForTesting(_ value: String) {
-        guard let addAccountToolbarItem else {
-            fatalError("Add Account toolbar item is not configured yet.")
-        }
-        addAccountToolbarItem.setAPIKeyPromptValueForTesting(value)
-    }
-
-    func completeAddAccountAPIKeyPromptForTesting(submit: Bool) {
-        guard let addAccountToolbarItem else {
-            fatalError("Add Account toolbar item is not configured yet.")
-        }
-        addAccountToolbarItem.completeAPIKeyPromptForTesting(submit: submit)
     }
 
     func waitForAddAccountToolbarItemModeForTesting(

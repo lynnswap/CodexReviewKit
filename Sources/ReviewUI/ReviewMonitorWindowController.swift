@@ -1,6 +1,5 @@
 import AppKit
-import CodexDataKit
-import CodexReviewKit
+import CodexReview
 
 @MainActor
 func configureReviewMonitorWindowBase(_ window: NSWindow) {
@@ -19,47 +18,21 @@ public final class ReviewMonitorWindowController: NSWindowController {
     private static let frameAutosaveName = NSWindow.FrameAutosaveName("ReviewMonitor.MainWindow")
     private let rootViewController: ReviewMonitorRootViewController
 
-    package convenience init(store: CodexReviewStore) {
+    public convenience init(store: CodexReviewStore) {
         self.init(
             store: store,
-            codexModelSource: nil,
             contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
             showSettings: nil
         )
     }
 
-    package convenience init(
-        store: CodexReviewStore,
-        codexModelContext: CodexModelContext
-    ) {
-        self.init(
-            store: store,
-            codexModelSource: ReviewMonitorCodexModelSource(modelContext: codexModelContext),
-            contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
-            showSettings: nil
-        )
-    }
-
-    package convenience init(
-        store: CodexReviewStore,
-        showSettings: @escaping @MainActor () -> Void
-    ) {
-        self.init(
-            store: store,
-            codexModelSource: nil,
-            contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
-            showSettings: showSettings
-        )
-    }
-
+    @_spi(PreviewSupport)
     public convenience init(
         store: CodexReviewStore,
-        codexModelSource: ReviewMonitorCodexModelSource,
         showSettings: @escaping @MainActor () -> Void
     ) {
         self.init(
             store: store,
-            codexModelSource: codexModelSource,
             contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
             showSettings: showSettings
         )
@@ -67,80 +40,36 @@ public final class ReviewMonitorWindowController: NSWindowController {
 
     convenience init(
         store: CodexReviewStore,
-        codexModelSource: ReviewMonitorCodexModelSource? = nil,
         contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator,
-        initialSelection: ReviewMonitorSelection? = nil,
-        sidebarReviewChatFilterDefaults: UserDefaults? = .standard,
-        showSettings: (@MainActor () -> Void)? = nil,
-        dependencyRetainer: AnyObject? = nil
+        sidebarJobFilterDefaults: UserDefaults? = .standard,
+        showSettings: (@MainActor () -> Void)? = nil
     ) {
         self.init(
             store: store,
-            codexModelSource: codexModelSource,
             contentTransitionAnimator: contentTransitionAnimator,
-            initialSelection: initialSelection,
             frameAutosaveName: Self.frameAutosaveName,
-            sidebarReviewChatFilterDefaults: sidebarReviewChatFilterDefaults,
-            showSettings: showSettings,
-            dependencyRetainer: dependencyRetainer
+            sidebarJobFilterDefaults: sidebarJobFilterDefaults,
+            showSettings: showSettings
         )
     }
 
-    package convenience init(
+    init(
         store: CodexReviewStore,
-        uiState: ReviewMonitorUIState,
-        codexModelSource: ReviewMonitorCodexModelSource? = nil,
-        showSettings: (@MainActor () -> Void)? = nil,
-        dependencyRetainer: AnyObject? = nil
-    ) {
-        let rootViewController = ReviewMonitorRootViewController(
-            store: store,
-            uiState: uiState,
-            codexModelSource: codexModelSource,
-            showSettings: showSettings,
-            dependencyRetainer: dependencyRetainer
-        )
-        self.init(
-            rootViewController: rootViewController,
-            frameAutosaveName: Self.frameAutosaveName
-        )
-    }
-
-    convenience init(
-        store: CodexReviewStore,
-        codexModelSource: ReviewMonitorCodexModelSource? = nil,
         contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator,
-        initialSelection: ReviewMonitorSelection? = nil,
         frameAutosaveName: NSWindow.FrameAutosaveName,
-        sidebarReviewChatFilterDefaults: UserDefaults? = .standard,
-        showSettings: (@MainActor () -> Void)? = nil,
-        dependencyRetainer: AnyObject? = nil
+        sidebarJobFilterDefaults: UserDefaults? = .standard,
+        showSettings: (@MainActor () -> Void)? = nil
     ) {
         let uiState = Self.makeUIState(
             auth: store.auth,
-            sidebarReviewChatFilterDefaults: sidebarReviewChatFilterDefaults
+            sidebarJobFilterDefaults: sidebarJobFilterDefaults
         )
-        if uiState.selection == nil {
-            uiState.selection = initialSelection
-        }
         let rootViewController = ReviewMonitorRootViewController(
             store: store,
             uiState: uiState,
-            codexModelSource: codexModelSource,
             contentTransitionAnimator: contentTransitionAnimator,
-            showSettings: showSettings,
-            dependencyRetainer: dependencyRetainer
+            showSettings: showSettings
         )
-        self.init(
-            rootViewController: rootViewController,
-            frameAutosaveName: frameAutosaveName
-        )
-    }
-
-    private init(
-        rootViewController: ReviewMonitorRootViewController,
-        frameAutosaveName: NSWindow.FrameAutosaveName
-    ) {
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: Self.defaultContentSize),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -165,16 +94,16 @@ public final class ReviewMonitorWindowController: NSWindowController {
 
     private static func makeUIState(
         auth: CodexReviewAuthModel,
-        sidebarReviewChatFilterDefaults: UserDefaults?
+        sidebarJobFilterDefaults: UserDefaults?
     ) -> ReviewMonitorUIState {
-        guard let sidebarReviewChatFilterDefaults else {
+        guard let sidebarJobFilterDefaults else {
             return ReviewMonitorUIState(auth: auth)
         }
         return ReviewMonitorUIState(
             auth: auth,
-            sidebarReviewChatFilter: ReviewMonitorSidebar.ReviewChatFilterPersistence.load(from: sidebarReviewChatFilterDefaults),
-            persistSidebarReviewChatFilter: { filter in
-                ReviewMonitorSidebar.ReviewChatFilterPersistence.save(filter, to: sidebarReviewChatFilterDefaults)
+            sidebarJobFilter: ReviewMonitorSidebar.JobFilterPersistence.load(from: sidebarJobFilterDefaults),
+            persistSidebarJobFilter: { filter in
+                ReviewMonitorSidebar.JobFilterPersistence.save(filter, to: sidebarJobFilterDefaults)
             }
         )
     }
@@ -183,20 +112,20 @@ public final class ReviewMonitorWindowController: NSWindowController {
 enum ReviewMonitorSidebar {}
 
 extension ReviewMonitorSidebar {
-    enum ReviewChatFilterPersistence {
-        static let defaultsKey = "CodexReviewKit.ReviewMonitor.sidebarReviewChatFilter"
+enum JobFilterPersistence {
+    static let defaultsKey = "CodexReviewKit.ReviewMonitor.sidebarJobFilter"
 
-        static func load(from defaults: UserDefaults) -> SidebarReviewChatFilter {
-            guard let rawValue = defaults.string(forKey: defaultsKey),
-                  let filter = SidebarReviewChatFilter(persistedValue: rawValue)
-            else {
-                return .all
-            }
-            return filter
+    static func load(from defaults: UserDefaults) -> SidebarJobFilter {
+        guard let rawValue = defaults.string(forKey: defaultsKey),
+              let filter = SidebarJobFilter(persistedValue: rawValue)
+        else {
+            return .all
         }
-
-        static func save(_ filter: SidebarReviewChatFilter, to defaults: UserDefaults) {
-            defaults.set(filter.persistedValue, forKey: defaultsKey)
-        }
+        return filter
     }
+
+    static func save(_ filter: SidebarJobFilter, to defaults: UserDefaults) {
+        defaults.set(filter.persistedValue, forKey: defaultsKey)
+    }
+}
 }

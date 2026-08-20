@@ -20,198 +20,60 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  DEVELOPER_DIR: /Applications/Xcode_26.6.0.app/Contents/Developer
-  EXPECTED_XCODE_VERSION_LINE: Xcode 26.6
-  EXPECTED_XCODE_BUILD_LINE: Build version 17F113
-
 jobs:
-  api-contract:
-    name: API Contract (macOS)
-    runs-on: macos-26
-    timeout-minutes: 10
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-        with:
-          persist-credentials: false
-
-      - name: Verify GitHub Actions pinning
-        run: ruby scripts/verify-github-actions-pinning.rb
-
-      - name: Verify pinned Xcode
-        run: scripts/verify-ci-xcode.sh
-
-      - name: Verify TextTransitions public API
-        run: scripts/verify-text-transitions-api.sh
-
-      - name: Run integrated product consumer
-        run: swift run --package-path Fixtures/CodexReviewKitProductConsumer
-
-  package-build:
-    name: Package Test Build (macOS)
-    runs-on: macos-26
-    timeout-minutes: 10
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-        with:
-          persist-credentials: false
-
-      - name: Verify pinned Xcode
-        id: toolchain
-        run: scripts/verify-ci-xcode.sh
-
-      - name: Restore SwiftPM build cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .build
-          key: spm-build-v1-debug-swiftbuild-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-id }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ github.sha }}
-          restore-keys: |
-            spm-build-v1-debug-swiftbuild-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-id }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-
-
-      - name: Restore source modification times
-        run: scripts/restore-source-mtimes.sh
-
-      - name: Build package tests
-        run: swift build --build-tests --build-system swiftbuild
-
   package-tests:
-    name: Package Tests (macOS, ${{ matrix.shard }})
-    needs: package-build
+    name: Package Tests (macOS)
     runs-on: macos-26
     timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - shard: CodexAppServerKitTests
-            filter: CodexAppServerKitTests
-            skip: ''
-          - shard: CodexDataKitTests
-            filter: CodexDataKitTests
-            skip: ''
-          - shard: CodexReviewKitTests
-            filter: CodexReviewKitTests
-            skip: ''
-          - shard: CodexReviewAppServerTests
-            filter: CodexReviewAppServerTests
-            skip: ''
-          - shard: CodexReviewMCPServerTests
-            filter: CodexReviewMCPServerTests
-            skip: ''
-          - shard: CodexReviewHostTests-a-d
-            filter: '^CodexReviewHostTests\.CodexReviewHostTests/liveStore[A-D]'
-            skip: ''
-          - shard: CodexReviewHostTests-e-j
-            filter: '^CodexReviewHostTests\.CodexReviewHostTests/liveStore[E-J]'
-            skip: ''
-          - shard: CodexReviewHostTests-k-r
-            filter: '^CodexReviewHostTests\.CodexReviewHostTests/liveStore[K-R]'
-            skip: ''
-          - shard: CodexReviewHostTests-remaining
-            filter: '^CodexReviewHostTests\.'
-            skip: '^CodexReviewHostTests\.CodexReviewHostTests/liveStore[A-R]'
-          - shard: ReviewUITests
-            filter: ReviewUITests
-            skip: ''
-          - shard: remaining
-            filter: ''
-            skip: 'CodexAppServerKitTests|CodexDataKitTests|CodexReviewKitTests|CodexReviewAppServerTests|CodexReviewMCPServerTests|CodexReviewHostTests|ReviewUITests'
+    env:
+      XCODE_MAJOR: '26'
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-        with:
-          persist-credentials: false
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Verify pinned Xcode
-        id: toolchain
-        run: scripts/verify-ci-xcode.sh
-
-      - name: Restore built package tests
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .build
-          key: spm-build-v1-debug-swiftbuild-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-id }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ github.sha }}
-          fail-on-cache-miss: true
-
-      - name: Run package test shard
-        env:
-          TEST_FILTER: ${{ matrix.filter }}
-          TEST_SKIP: ${{ matrix.skip }}
+      - name: Resolve latest stable Xcode
         run: |
-          args=(
-            --skip-build
-            --build-system swiftbuild
-            --no-parallel
-          )
-          [[ -z "$TEST_FILTER" ]] || args+=(--filter "$TEST_FILTER")
-          [[ -z "$TEST_SKIP" ]] || args+=(--skip "$TEST_SKIP")
-          swift test "${args[@]}"
+          xcode_app="$(ruby <<'RUBY'
+          xcode_major = ENV.fetch("XCODE_MAJOR")
+          candidates = Dir["/Applications/Xcode_#{xcode_major}*.app"].select { |path| File.directory?(path) }
 
-  monitor-build:
-    name: ReviewMonitor Test Build (macOS)
-    runs-on: macos-26
-    timeout-minutes: 10
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-        with:
-          persist-credentials: false
+          def pre_release_xcode_path?(path)
+            labels = [path, File.realpath(path)].map { |candidate| File.basename(candidate).downcase }
+            labels.any? do |label|
+              label.match?(/beta|release[ _-]?candidate|(?:^|[_. -])rc(?:$|[_. -])/)
+            end
+          end
 
-      - name: Verify pinned Xcode
-        id: toolchain
-        run: scripts/verify-ci-xcode.sh
+          candidates = candidates.reject do |path|
+            pre_release_xcode_path?(path)
+          end
 
-      - name: Restore ReviewMonitor build cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .ci-build/review-monitor-derived-data
-          key: review-monitor-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-id }}-${{ hashFiles('Package.swift', 'Package.resolved', 'Tools/ReviewMonitor/CodexReviewMonitor.xcodeproj/**') }}-${{ github.sha }}
-          restore-keys: |
-            review-monitor-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-id }}-${{ hashFiles('Package.swift', 'Package.resolved', 'Tools/ReviewMonitor/CodexReviewMonitor.xcodeproj/**') }}-
+          def version_components(path)
+            version = File.basename(path)[/Xcode_(\d+(?:\.\d+)*)/, 1]
+            version.to_s.split(".").map(&:to_i)
+          end
 
-      - name: Restore source modification times
-        run: scripts/restore-source-mtimes.sh
+          selected = candidates.max_by { |path| version_components(path) }
+          abort("No stable Xcode #{xcode_major} installation found") unless selected
+          puts selected
+          RUBY
+          )"
+          echo "DEVELOPER_DIR=${xcode_app}/Contents/Developer" >> "$GITHUB_ENV"
+          echo "Resolved Xcode: ${xcode_app}"
 
-      - name: Build ReviewMonitor tests
+      - name: Show Xcode environment
         run: |
-          xcodebuild build-for-testing \
+          xcodebuild -version
+          xcodebuild -showsdks
+
+      - name: Run Swift package tests
+        run: swift test --build-system swiftbuild --no-parallel
+
+      - name: Run monitor app tests
+        run: |
+          xcodebuild test \
             -project Tools/ReviewMonitor/CodexReviewMonitor.xcodeproj \
             -scheme CodexReviewMonitor \
             -destination 'platform=macOS,arch=arm64' \
-            -derivedDataPath .ci-build/review-monitor-derived-data \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO
-
-  monitor-tests:
-    name: ReviewMonitor Tests (macOS)
-    needs: monitor-build
-    runs-on: macos-26
-    timeout-minutes: 10
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-        with:
-          persist-credentials: false
-
-      - name: Verify pinned Xcode
-        id: toolchain
-        run: scripts/verify-ci-xcode.sh
-
-      - name: Restore built ReviewMonitor tests
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .ci-build/review-monitor-derived-data
-          key: review-monitor-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-id }}-${{ hashFiles('Package.swift', 'Package.resolved', 'Tools/ReviewMonitor/CodexReviewMonitor.xcodeproj/**') }}-${{ github.sha }}
-          fail-on-cache-miss: true
-
-      - name: Run ReviewMonitor tests
-        run: |
-          xcodebuild test-without-building \
-            -project Tools/ReviewMonitor/CodexReviewMonitor.xcodeproj \
-            -scheme CodexReviewMonitor \
-            -destination 'platform=macOS,arch=arm64' \
-            -derivedDataPath .ci-build/review-monitor-derived-data \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO

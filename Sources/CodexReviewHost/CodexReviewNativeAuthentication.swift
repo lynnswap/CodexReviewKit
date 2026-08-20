@@ -1,13 +1,9 @@
 import AppKit
-@preconcurrency import AuthenticationServices
+import AuthenticationServices
 import Foundation
 import OSLog
-import CodexReviewKit
 
-private let nativeAuthenticationLogger = Logger(
-    subsystem: "CodexReviewKit",
-    category: "native-authentication"
-)
+private let logger = Logger(subsystem: "CodexReviewKit", category: "native-auth")
 
 public enum CodexReviewNativeAuthentication {}
 
@@ -34,290 +30,165 @@ public extension CodexReviewNativeAuthentication {
     }
 }
 
-extension CodexReviewNativeAuthentication {
-    package enum PresentationMode: Equatable, Sendable {
-        case webAuthenticationSession
-        case externalBrowser
+@MainActor
+public extension CodexReviewNativeAuthentication {
+    protocol WebSession: AnyObject, Sendable {
+        func waitForCallbackURL() async throws -> URL
+        func cancel() async
     }
-
-    package enum PresentationEvent: Equatable, Sendable {
-        case cancelled
-        case failed(message: String)
-    }
-
-    @MainActor
-    package protocol Presentation: AnyObject {
-        var mode: PresentationMode { get }
-        var eventStream: AsyncStream<PresentationEvent>? { get }
-
-        func close()
-    }
-
-    @MainActor
-    package protocol SystemWebAuthenticationSession: AnyObject {
-        var prefersEphemeralWebBrowserSession: Bool { get set }
-        var presentationContextProvider: (any ASWebAuthenticationPresentationContextProviding)? { get set }
-        var canStart: Bool { get }
-
-        func start() -> Bool
-        func cancel()
-    }
-
-    package typealias WebSessionFactory = @MainActor @Sendable (
-        URL,
-        String,
-        @escaping ASWebAuthenticationSession.CompletionHandler
-    ) -> any SystemWebAuthenticationSession
 }
 
-extension ASWebAuthenticationSession: CodexReviewNativeAuthentication.SystemWebAuthenticationSession {}
+public extension CodexReviewNativeAuthentication {
+    typealias WebSessionFactory = @MainActor @Sendable (
+        URL,
+        String,
+        Configuration.BrowserSessionPolicy,
+        @escaping @MainActor @Sendable () -> ASPresentationAnchor?
+    ) async throws -> any WebSession
+}
+
+public extension CodexReviewNativeAuthentication {
+    enum WebSessions {
+        public static let system: WebSessionFactory = {
+            url,
+            callbackScheme,
+            browserSessionPolicy,
+            presentationAnchorProvider in
+            try await SystemCodexReviewWebAuthenticationSession.start(
+                using: url,
+                callbackScheme: callbackScheme,
+                browserSessionPolicy: browserSessionPolicy,
+                presentationAnchorProvider: presentationAnchorProvider
+            )
+        }
+    }
+}
 
 @MainActor
-package struct CodexReviewAuthenticationPresenter: Sendable {
-    private let configuration: CodexReviewNativeAuthentication.Configuration?
-    private let webSessionFactory: CodexReviewNativeAuthentication.WebSessionFactory
-    private let externalURLOpener: ExternalURLOpener
+private final class SystemCodexReviewWebAuthenticationSession: NSObject, CodexReviewNativeAuthentication.WebSession {
+    private final class PresentationContextProvider: NSObject, ASWebAuthenticationPresentationContextProviding {
+        let anchor: ASPresentationAnchor
 
-    package init(
-        configuration: CodexReviewNativeAuthentication.Configuration?,
-        webSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory,
-        externalURLOpener: @escaping ExternalURLOpener
-    ) {
-        self.configuration = configuration
-        self.webSessionFactory = webSessionFactory
-        self.externalURLOpener = externalURLOpener
-    }
-
-    package func present(
-        _ url: URL
-    ) throws -> any CodexReviewNativeAuthentication.Presentation {
-        if let presentation = makeSystemPresentation(url: url) {
-            return presentation
+        init(anchor: ASPresentationAnchor) {
+            self.anchor = anchor
         }
 
-        try externalURLOpener(url)
-        return ExternalBrowserAuthenticationPresentation()
+        func presentationAnchor(for _: ASWebAuthenticationSession) -> ASPresentationAnchor {
+            anchor
+        }
     }
 
-    private func makeSystemPresentation(
-        url: URL
-    ) -> (any CodexReviewNativeAuthentication.Presentation)? {
-        guard let configuration,
-              let anchor = configuration.presentationAnchorProvider() else {
-            return nil
+    private var session: ASWebAuthenticationSession?
+    private var provider: PresentationContextProvider?
+    private var continuation: CheckedContinuation<URL, Error>?
+    private var result: Result<URL, Error>?
+
+    static func start(
+        using url: URL,
+        callbackScheme: String,
+        browserSessionPolicy: CodexReviewNativeAuthentication.Configuration.BrowserSessionPolicy,
+        presentationAnchorProvider: @escaping @MainActor @Sendable () -> ASPresentationAnchor?
+    ) async throws -> SystemCodexReviewWebAuthenticationSession {
+        guard let anchor = presentationAnchorProvider() else {
+            throw CodexReviewNativeAuthenticationError.loginFailed(
+                "Unable to present authentication session."
+            )
         }
 
-        let eventSink = AuthenticationPresentationEventSink(
-            fallbackURL: url,
-            externalURLOpener: externalURLOpener
+        let activeSession = SystemCodexReviewWebAuthenticationSession()
+        let provider = PresentationContextProvider(anchor: anchor)
+        let session = ASWebAuthenticationSession(
+            url: url,
+            callback: .customScheme(callbackScheme),
+            completionHandler: makeSystemCodexReviewWebAuthenticationCompletionHandler(activeSession)
         )
-        let session = webSessionFactory(
-            url,
-            configuration.callbackScheme
-        ) { [weak eventSink] callbackURL, error in
-            let event = Self.presentationEvent(callbackURL: callbackURL, error: error)
-            Task { @MainActor [weak eventSink] in
-                eventSink?.receive(event)
-            }
-        }
-        let contextProvider = AuthenticationPresentationContextProvider(anchor: anchor)
-
-        switch configuration.browserSessionPolicy {
+        switch browserSessionPolicy {
         case .ephemeral:
             session.prefersEphemeralWebBrowserSession = true
         }
-        session.presentationContextProvider = contextProvider
+        session.presentationContextProvider = provider
+        activeSession.session = session
+        activeSession.provider = provider
 
-        guard session.canStart else {
-            nativeAuthenticationLogger.info(
-                "ASWebAuthenticationSession cannot start; using the external browser"
-            )
-            return nil
-        }
+        logger.info("Starting ASWebAuthenticationSession")
         guard session.start() else {
-            nativeAuthenticationLogger.info(
-                "ASWebAuthenticationSession did not start; using the external browser"
+            activeSession.finishAuthenticationSession(with: .failure(CodexReviewNativeAuthenticationError.loginFailed(
+                "Unable to start authentication session."
+            )))
+            throw CodexReviewNativeAuthenticationError.loginFailed(
+                "Unable to start authentication session."
             )
-            return nil
         }
-
-        nativeAuthenticationLogger.info("Started ephemeral ASWebAuthenticationSession")
-        return SystemAuthenticationPresentation(
-            session: session,
-            contextProvider: contextProvider,
-            eventSink: eventSink
-        )
+        return activeSession
     }
 
-    private nonisolated static func presentationEvent(
-        callbackURL: URL?,
-        error: (any Error)?
-    ) -> SystemAuthenticationPresentationEvent {
-        if callbackURL != nil {
-            // The stock app-server owns the localhost OAuth callback. A URL delivered
-            // to the app callback scheme is therefore outside this login contract.
-            return .failed(message: "Authentication returned an unexpected callback URL.")
+    func waitForCallbackURL() async throws -> URL {
+        if let result {
+            return try result.get()
         }
-        if let error {
-            let nsError = error as NSError
-            if nsError.domain == ASWebAuthenticationSessionErrorDomain,
-               nsError.code == ASWebAuthenticationSessionError.Code.canceledLogin.rawValue {
-                return .cancelled
+        return try await withCheckedThrowingContinuation { continuation in
+            if let result {
+                continuation.resume(with: result)
+                return
             }
-            let isPresentationContextFailure =
-                nsError.code == ASWebAuthenticationSessionError.Code.presentationContextNotProvided.rawValue
-                || nsError.code == ASWebAuthenticationSessionError.Code.presentationContextInvalid.rawValue
-            if nsError.domain == ASWebAuthenticationSessionErrorDomain,
-               isPresentationContextFailure {
-                return .nativePresentationUnavailable
-            }
-            return .failed(message: error.localizedDescription)
+            self.continuation = continuation
         }
-        return .cancelled
     }
 
-    package static let systemWebSessionFactory: CodexReviewNativeAuthentication.WebSessionFactory = {
-        url,
-        callbackScheme,
-        completionHandler in
-        // This callback is deliberately not sent to Codex. The stock app-server
-        // remains the sole owner of its localhost OAuth callback and login result.
-        ASWebAuthenticationSession(
-            url: url,
-            callback: .customScheme(callbackScheme),
-            completionHandler: completionHandler
-        )
+    func cancel() async {
+        logger.info("Cancelling ASWebAuthenticationSession")
+        session?.cancel()
+    }
+
+    fileprivate func finishAuthenticationSession(with result: Result<URL, Error>) {
+        guard self.result == nil else {
+            return
+        }
+        self.result = result
+        session = nil
+        provider = nil
+        continuation?.resume(with: result)
+        continuation = nil
     }
 }
 
-private enum SystemAuthenticationPresentationEvent: Sendable {
+private func makeSystemCodexReviewWebAuthenticationCompletionHandler(
+    _ activeSession: SystemCodexReviewWebAuthenticationSession
+) -> ASWebAuthenticationSession.CompletionHandler {
+    { [weak activeSession] callbackURL, error in
+        let mappedResult = mapAuthenticationResult(callbackURL: callbackURL, error: error)
+        Task { @MainActor [weak activeSession] in
+            activeSession?.finishAuthenticationSession(with: mappedResult)
+        }
+    }
+}
+
+package enum CodexReviewNativeAuthenticationError: LocalizedError, Sendable {
     case cancelled
-    case nativePresentationUnavailable
-    case failed(message: String)
-}
+    case loginFailed(String)
 
-@MainActor
-private final class AuthenticationPresentationContextProvider:
-    NSObject,
-    ASWebAuthenticationPresentationContextProviding
-{
-    let anchor: ASPresentationAnchor
-
-    init(anchor: ASPresentationAnchor) {
-        self.anchor = anchor
-    }
-
-    func presentationAnchor(for _: ASWebAuthenticationSession) -> ASPresentationAnchor {
-        anchor
-    }
-}
-
-@MainActor
-private final class AuthenticationPresentationEventSink {
-    let stream: AsyncStream<CodexReviewNativeAuthentication.PresentationEvent>
-    private let continuation: AsyncStream<CodexReviewNativeAuthentication.PresentationEvent>.Continuation
-    private let fallbackURL: URL
-    private let externalURLOpener: ExternalURLOpener
-    private var isFinished = false
-    private var didOpenExternalFallback = false
-
-    init(
-        fallbackURL: URL,
-        externalURLOpener: @escaping ExternalURLOpener
-    ) {
-        self.fallbackURL = fallbackURL
-        self.externalURLOpener = externalURLOpener
-        (stream, continuation) = AsyncStream.makeStream(
-            of: CodexReviewNativeAuthentication.PresentationEvent.self,
-            bufferingPolicy: .bufferingNewest(1)
-        )
-    }
-
-    func receive(_ event: SystemAuthenticationPresentationEvent) {
-        guard isFinished == false else {
-            return
-        }
-        switch event {
-        case .nativePresentationUnavailable:
-            guard didOpenExternalFallback == false else {
-                return
-            }
-            didOpenExternalFallback = true
-            do {
-                try externalURLOpener(fallbackURL)
-                nativeAuthenticationLogger.info(
-                    "ASWebAuthenticationSession presentation failed; continuing in the external browser"
-                )
-                return
-            } catch {
-                finish(with: .failed(
-                    message: CodexReviewAuthenticationFailure.urlOpen(fallbackURL)
-                        .localizedDescription
-                ))
-                return
-            }
+    package var errorDescription: String? {
+        switch self {
         case .cancelled:
-            finish(with: .cancelled)
-        case .failed(let message):
-            finish(with: .failed(message: message))
+            "Authentication was cancelled."
+        case .loginFailed(let message):
+            message
         }
-    }
-
-    private func finish(with event: CodexReviewNativeAuthentication.PresentationEvent) {
-        guard isFinished == false else {
-            return
-        }
-        isFinished = true
-        continuation.yield(event)
-        continuation.finish()
-    }
-
-    func finish() {
-        guard isFinished == false else {
-            return
-        }
-        isFinished = true
-        continuation.finish()
     }
 }
 
-@MainActor
-private final class SystemAuthenticationPresentation: CodexReviewNativeAuthentication.Presentation {
-    let mode = CodexReviewNativeAuthentication.PresentationMode.webAuthenticationSession
-    let eventStream: AsyncStream<CodexReviewNativeAuthentication.PresentationEvent>?
-
-    private let session: any CodexReviewNativeAuthentication.SystemWebAuthenticationSession
-    // ASWebAuthenticationSession holds its presentationContextProvider weakly.
-    private let contextProvider: AuthenticationPresentationContextProvider
-    private let eventSink: AuthenticationPresentationEventSink
-    private var isClosed = false
-
-    init(
-        session: any CodexReviewNativeAuthentication.SystemWebAuthenticationSession,
-        contextProvider: AuthenticationPresentationContextProvider,
-        eventSink: AuthenticationPresentationEventSink
-    ) {
-        self.session = session
-        self.contextProvider = contextProvider
-        self.eventSink = eventSink
-        eventStream = eventSink.stream
+private func mapAuthenticationResult(callbackURL: URL?, error: Error?) -> Result<URL, Error> {
+    if let callbackURL {
+        return .success(callbackURL)
     }
-
-    func close() {
-        guard isClosed == false else {
-            return
+    if let error {
+        let nsError = error as NSError
+        if nsError.domain == ASWebAuthenticationSessionErrorDomain,
+           nsError.code == ASWebAuthenticationSessionError.Code.canceledLogin.rawValue
+        {
+            return .failure(CodexReviewNativeAuthenticationError.cancelled)
         }
-        isClosed = true
-        eventSink.finish()
-        session.cancel()
-        nativeAuthenticationLogger.info("Closed ASWebAuthenticationSession")
+        return .failure(CodexReviewNativeAuthenticationError.loginFailed(error.localizedDescription))
     }
-}
-
-@MainActor
-private final class ExternalBrowserAuthenticationPresentation: CodexReviewNativeAuthentication.Presentation {
-    let mode = CodexReviewNativeAuthentication.PresentationMode.externalBrowser
-    let eventStream: AsyncStream<CodexReviewNativeAuthentication.PresentationEvent>? = nil
-
-    func close() {}
+    return .failure(CodexReviewNativeAuthenticationError.cancelled)
 }

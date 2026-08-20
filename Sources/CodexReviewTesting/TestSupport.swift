@@ -1,10 +1,64 @@
 import Foundation
-import CodexAppServerKit
-import CodexAppServerKitTesting
-import CodexReviewKit
-import Synchronization
+import CodexReview
+import CodexReviewAppServer
 
-package typealias AsyncGate = CodexAppServerTestGate
+package actor AsyncGate {
+    private var isOpen = false
+    private var waiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+
+    package init() {}
+
+    package func wait() async {
+        if isOpen {
+            return
+        }
+        let waiterID = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if isOpen {
+                    continuation.resume()
+                } else {
+                    waiters[waiterID] = continuation
+                }
+            }
+        } onCancel: {
+            Task {
+                await self.cancelWaiter(id: waiterID)
+            }
+        }
+    }
+
+    package func waitIgnoringCancellation() async {
+        if isOpen {
+            return
+        }
+        let waiterID = UUID()
+        await withCheckedContinuation { continuation in
+            if isOpen {
+                continuation.resume()
+            } else {
+                waiters[waiterID] = continuation
+            }
+        }
+    }
+
+    package func open() {
+        guard isOpen == false else {
+            return
+        }
+        isOpen = true
+        let waiters = Array(waiters.values)
+        self.waiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+
+    private func cancelWaiter(id: UUID) {
+        waiters.removeValue(forKey: id)?.resume()
+    }
+}
+
 package typealias OneShotGate = AsyncGate
 
 package actor ManualClock {
@@ -23,34 +77,25 @@ package actor ManualClock {
     }
 }
 
-package final class ManualCodexReviewNetworkMonitor: CodexReviewNetworkMonitoring, Sendable {
-    private struct State {
-        var current: CodexReviewNetworkSnapshot?
-        var continuations: [UUID: AsyncStream<CodexReviewNetworkSnapshot>.Continuation] = [:]
-        var isFinished = false
-    }
-
-    private let state: Mutex<State>
+package final class ManualCodexReviewNetworkMonitor: CodexReviewNetworkMonitoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: CodexReviewNetworkSnapshot?
+    private var continuations: [UUID: AsyncStream<CodexReviewNetworkSnapshot>.Continuation] = [:]
 
     package init(initialSnapshot: CodexReviewNetworkSnapshot = .satisfied()) {
-        self.state = Mutex(State(current: initialSnapshot))
+        self.current = initialSnapshot
     }
 
     package func snapshots() -> AsyncStream<CodexReviewNetworkSnapshot> {
         let continuationID = UUID()
-        return AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
-            let initial = state.withLock { state in
-                if state.isFinished == false {
-                    state.continuations[continuationID] = continuation
-                }
-                return (snapshot: state.current, isFinished: state.isFinished)
-            }
-            if let snapshot = initial.snapshot {
+        return AsyncStream(bufferingPolicy: .unbounded) { continuation in
+            let snapshot: CodexReviewNetworkSnapshot?
+            lock.lock()
+            continuations[continuationID] = continuation
+            snapshot = current
+            lock.unlock()
+            if let snapshot {
                 continuation.yield(snapshot)
-            }
-            if initial.isFinished {
-                continuation.finish()
-                return
             }
             continuation.onTermination = { [weak self] _ in
                 self?.removeContinuation(id: continuationID)
@@ -59,37 +104,20 @@ package final class ManualCodexReviewNetworkMonitor: CodexReviewNetworkMonitorin
     }
 
     package func yield(_ snapshot: CodexReviewNetworkSnapshot) {
-        let continuations = state.withLock { state in
-            guard state.isFinished == false else {
-                return [AsyncStream<CodexReviewNetworkSnapshot>.Continuation]()
-            }
-            state.current = snapshot
-            return Array(state.continuations.values)
-        }
+        let continuations: [AsyncStream<CodexReviewNetworkSnapshot>.Continuation]
+        lock.lock()
+        current = snapshot
+        continuations = Array(self.continuations.values)
+        lock.unlock()
         for continuation in continuations {
             continuation.yield(snapshot)
         }
     }
 
-    package func finish() {
-        let continuations = state.withLock { state in
-            guard state.isFinished == false else {
-                return [AsyncStream<CodexReviewNetworkSnapshot>.Continuation]()
-            }
-            state.isFinished = true
-            let continuations = Array(state.continuations.values)
-            state.continuations.removeAll(keepingCapacity: false)
-            return continuations
-        }
-        for continuation in continuations {
-            continuation.finish()
-        }
-    }
-
     private func removeContinuation(id: UUID) {
-        _ = state.withLock { state in
-            state.continuations.removeValue(forKey: id)
-        }
+        lock.lock()
+        continuations.removeValue(forKey: id)
+        lock.unlock()
     }
 }
 
@@ -137,188 +165,62 @@ private func withFakeBackendTimeout(
     }
 }
 
-package func makeReviewAttemptForTesting(
-    attemptID: String,
-    sourceThreadID: String,
-    activeTurnThreadID: String,
-    turnID: String,
-    model: String? = nil
-) -> ReviewAttempt {
-    do {
-        return try ReviewAttempt(
-            validatingAttemptID: attemptID,
-            sourceThreadID: sourceThreadID,
-            activeTurnThreadID: activeTurnThreadID,
-            turnID: turnID,
-            model: model
-        )
-    } catch {
-        preconditionFailure("Invalid explicit review attempt fixture: \(error)")
-    }
-}
-
-package enum FakeReviewTerminal: Equatable, Sendable {
-    case completed(finalReview: String)
-    case interrupted(message: String?)
-    case failed(ReviewBackendFailure)
-    case cancelled(String)
-}
-
-private actor FakeReviewTerminalSource {
-    private enum Delivery: Sendable {
-        case observed(ReviewBackendObservedTerminal)
-        case cancelled
-    }
-
-    private let attempt: ReviewAttempt
-    private var delivery: Delivery?
-    private var waiters: [UUID: CheckedContinuation<Delivery, Never>] = [:]
-
-    init(attempt: ReviewAttempt) {
-        self.attempt = attempt
-    }
-
-    func observe() async throws -> ReviewBackendObservedTerminal {
-        let waiterID = UUID()
-        let received: Delivery = await withTaskCancellationHandler {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Delivery, Never>) in
-                if let delivery = self.delivery {
-                    continuation.resume(returning: delivery)
-                } else {
-                    waiters[waiterID] = continuation
-                }
-            }
-        } onCancel: {
-            Task {
-                await self.cancelWaiter(waiterID)
-            }
-        }
-        switch received {
-        case .observed(let terminal):
-            return terminal
-        case .cancelled:
-            throw CancellationError()
-        }
-    }
-
-    func observedIfKnown() -> ReviewBackendObservedTerminal? {
-        guard case .observed(let terminal) = delivery else {
-            return nil
-        }
-        return terminal
-    }
-
-    func yield(_ terminal: FakeReviewTerminal) {
-        let observed: ReviewBackendObservedTerminal
-        switch terminal {
-        case .completed(let finalReview):
-            do {
-                observed = .completed(.init(
-                    turnID: attempt.turnID,
-                    expectedOutput: try NonEmptyReviewOutput(validating: finalReview)
-                ))
-            } catch {
-                observed = .failed(.missingReviewOutput(turnID: attempt.turnID))
-            }
-        case .interrupted(let message):
-            observed = .interrupted(message: message)
-        case .cancelled(let message):
-            observed = .interrupted(message: message)
-        case .failed(let failure):
-            observed = .failed(failure)
-        }
-        resolve(.observed(observed))
-    }
-
-    func finish(throwing error: (any Error)? = nil) {
-        if error is CancellationError {
-            resolve(.cancelled)
-        } else {
-            resolve(.observed(.failed(.protocolViolation(
-                message: error.map {
-                    "Review terminal source failed without a typed terminal: \($0.localizedDescription)"
-                } ?? "Review terminal source finished without a typed terminal."
-            ))))
-        }
-    }
-
-    private func resolve(_ delivery: Delivery) {
-        guard self.delivery == nil else {
-            return
-        }
-        self.delivery = delivery
-        let waiters = Array(waiters.values)
-        self.waiters.removeAll(keepingCapacity: false)
-        for waiter in waiters {
-            waiter.resume(returning: delivery)
-        }
-    }
-
-    private func cancelWaiter(_ id: UUID) {
-        waiters.removeValue(forKey: id)?.resume(returning: .cancelled)
-    }
-}
-
 package actor FakeCodexReviewBackend: CodexReviewBackend {
     package enum Command: Equatable, Sendable {
         case readSettings
         case applySettings(CodexReviewBackendModel.Settings.Change)
         case readAuth
+        case startLogin(CodexReviewBackendModel.Login.Request)
+        case cancelLogin(CodexReviewBackendModel.Login.Challenge)
+        case completeLogin(CodexReviewBackendModel.Login.Response)
         case logout(CodexReviewBackendModel.Account.ID)
         case startReview(CodexReviewBackendModel.Review.Start)
-        case interruptReview(ReviewAttempt, CodexReviewBackendModel.CancellationReason)
-        case prepareReviewRestart(ReviewAttempt)
-        case restartPreparedReview(CodexReviewBackendModel.Review.RestartToken, CodexReviewBackendModel.Review.Start)
-        case discardPreparedReviewRestart(CodexReviewBackendModel.Review.RestartToken)
-        case cleanupReview(ReviewAttempt)
-        case cleanupRetainedReviews([ReviewAttempt])
+        case interruptReview(CodexReviewBackendModel.Review.Run, CodexReviewBackendModel.CancellationReason)
+        case beginReviewRecovery(CodexReviewBackendModel.Review.Run, CodexReviewBackendModel.CancellationReason)
+        case resumeReviewRecovery(CodexReviewBackendModel.Review.RecoveryToken, CodexReviewBackendModel.Review.Start)
+        case cleanupReview(CodexReviewBackendModel.Review.Run)
     }
 
     private var settings: CodexReviewBackendModel.Settings.Snapshot
     private var auth: CodexReviewBackendModel.Auth.Snapshot
     private var commands: [Command] = []
-    private var plannedAttempts: [ReviewAttempt]
-    private var plannedRecoveredAttempts: [ReviewAttempt] = []
-    private var discardedRestartAttempts: [ReviewAttempt] = []
-    private var preparedRestartTokens: [String: CodexReviewBackendModel.Review.RestartToken] = [:]
+    private var nextRun: CodexReviewBackendModel.Review.Run
+    private var nextRecoveredRun: CodexReviewBackendModel.Review.Run?
     private var interruptFailureMessage: String?
     private var recoveryFailureMessage: String?
-    private var retainedCleanupFailureMessage: String?
-    private var retainedCleanupGate: AsyncGate?
-    private var retainedCleanupWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var interruptReviewGate: AsyncGate?
-    private struct InterruptReviewWaiter {
-        var requiredCount: Int
-        var continuation: CheckedContinuation<Void, Never>
-    }
-
-    private var interruptReviewWaiters: [UUID: InterruptReviewWaiter] = [:]
-    private var prepareReviewRestartWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+    private var interruptReviewWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+    private var beginReviewRecoveryWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var startReviewGate: AsyncGate?
-    private var startReviewIgnoresCancellation = false
     private var startReviewWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
-    private var restartPreparedReviewGate: AsyncGate?
-    private var restartPreparedReviewIgnoresCancellation = false
-    private var restartPreparedReviewWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
-    private var cleanupReviewWaiters: [ReviewAttemptID: [UUID: CheckedContinuation<Void, Never>]] = [:]
-    private var terminalSources: [TerminalSourceKey: FakeReviewTerminalSource] = [:]
+    private var resumeReviewRecoveryGate: AsyncGate?
+    private var resumeReviewRecoveryWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+    private var eventMailboxes: [EventMailboxKey: BackendReviewEventMailbox] = [:]
 
-    private struct TerminalSourceKey: Hashable, Sendable {
-        var attempt: ReviewAttempt
+    private struct EventMailboxKey: Hashable, Sendable {
+        var attemptID: String
+        var threadID: String
+        var turnID: String?
+        var reviewThreadID: String?
+        var model: String?
 
-        init(attempt: ReviewAttempt) {
-            self.attempt = attempt
+        init(run: CodexReviewBackendModel.Review.Run) {
+            self.attemptID = run.attemptID
+            self.threadID = run.threadID
+            self.turnID = run.turnID
+            self.reviewThreadID = run.reviewThreadID
+            self.model = run.model
         }
     }
 
     package init(
         settings: CodexReviewBackendModel.Settings.Snapshot = .init(),
         auth: CodexReviewBackendModel.Auth.Snapshot = .init(),
-        plannedAttempt: ReviewAttempt? = nil
+        nextRun: CodexReviewBackendModel.Review.Run = .init(threadID: "thread-1", turnID: "turn-1", reviewThreadID: "review-thread-1")
     ) {
         self.settings = settings
         self.auth = auth
-        self.plannedAttempts = plannedAttempt.map { [$0] } ?? []
+        self.nextRun = nextRun
     }
 
     package func recordedCommands() -> [Command] {
@@ -327,12 +229,6 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
 
     package func holdStartReview(with gate: AsyncGate) {
         startReviewGate = gate
-        startReviewIgnoresCancellation = false
-    }
-
-    package func holdStartReviewIgnoringCancellation(with gate: AsyncGate) {
-        startReviewGate = gate
-        startReviewIgnoresCancellation = true
     }
 
     package func failInterrupts(message: String) {
@@ -343,68 +239,16 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         recoveryFailureMessage = message
     }
 
-    package func failRetainedCleanup(message: String?) {
-        retainedCleanupFailureMessage = message
-    }
-
-    package func holdRetainedCleanup(with gate: AsyncGate) {
-        retainedCleanupGate = gate
-    }
-
-    package func waitForRetainedCleanup() async {
-        if commands.contains(where: {
-            if case .cleanupRetainedReviews = $0 { true } else { false }
-        }) {
-            return
-        }
-        let waiterID = UUID()
-        await withTaskCancellationHandler {
-            await withCheckedContinuation { continuation in
-                if commands.contains(where: {
-                    if case .cleanupRetainedReviews = $0 { true } else { false }
-                }) {
-                    continuation.resume()
-                } else {
-                    retainedCleanupWaiters[waiterID] = continuation
-                }
-            }
-        } onCancel: {
-            Task {
-                await self.cancelRetainedCleanupWaiter(id: waiterID)
-            }
-        }
-    }
-
-    package func waitForRetainedCleanup(timeout: Duration = .seconds(2)) async throws {
-        try await withFakeBackendTimeout(operation: "cleanupRetainedReviews", timeout: timeout) {
-            await self.waitForRetainedCleanup()
-        }
-    }
-
     package func holdInterruptReview(with gate: AsyncGate) {
         interruptReviewGate = gate
     }
 
-    package func holdRestartPreparedReview(with gate: AsyncGate) {
-        restartPreparedReviewGate = gate
-        restartPreparedReviewIgnoresCancellation = false
+    package func holdResumeReviewRecovery(with gate: AsyncGate) {
+        resumeReviewRecoveryGate = gate
     }
 
-    package func holdRestartPreparedReviewIgnoringCancellation(with gate: AsyncGate) {
-        restartPreparedReviewGate = gate
-        restartPreparedReviewIgnoresCancellation = true
-    }
-
-    package func planNextRecoveredAttempt(_ attempt: ReviewAttempt) {
-        plannedRecoveredAttempts.append(attempt)
-    }
-
-    package func planNextAttempt(_ attempt: ReviewAttempt) {
-        plannedAttempts.append(attempt)
-    }
-
-    package func setDiscardedRestartAttempts(_ attempts: [ReviewAttempt]) {
-        discardedRestartAttempts = attempts
+    package func setNextRecoveredRun(_ run: CodexReviewBackendModel.Review.Run) {
+        nextRecoveredRun = run
     }
 
     package func waitForStartReview() async {
@@ -446,24 +290,28 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     }
 
     package func waitForInterruptReview() async {
-        await waitForInterruptReviews(count: 1)
-    }
-
-    package func waitForInterruptReviews(count: Int) async {
-        precondition(count > 0, "An interrupt waiter must require at least one command.")
-        if interruptReviewCommandCount >= count {
+        if commands.contains(where: {
+            if case .interruptReview = $0 {
+                true
+            } else {
+                false
+            }
+        }) {
             return
         }
         let waiterID = UUID()
         await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
-                if interruptReviewCommandCount >= count {
+                if commands.contains(where: {
+                    if case .interruptReview = $0 {
+                        true
+                    } else {
+                        false
+                    }
+                }) {
                     continuation.resume()
                 } else {
-                    interruptReviewWaiters[waiterID] = .init(
-                        requiredCount: count,
-                        continuation: continuation
-                    )
+                    interruptReviewWaiters[waiterID] = continuation
                 }
             }
         } onCancel: {
@@ -479,18 +327,9 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         }
     }
 
-    package func waitForInterruptReviews(
-        count: Int,
-        timeout: Duration = .seconds(2)
-    ) async throws {
-        try await withFakeBackendTimeout(operation: "interruptReview", timeout: timeout) {
-            await self.waitForInterruptReviews(count: count)
-        }
-    }
-
-    package func waitForPrepareReviewRestart() async {
+    package func waitForBeginReviewRecovery() async {
         if commands.contains(where: {
-            if case .prepareReviewRestart = $0 {
+            if case .beginReviewRecovery = $0 {
                 true
             } else {
                 false
@@ -502,7 +341,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 if commands.contains(where: {
-                    if case .prepareReviewRestart = $0 {
+                    if case .beginReviewRecovery = $0 {
                         true
                     } else {
                         false
@@ -510,25 +349,25 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
                 }) {
                     continuation.resume()
                 } else {
-                    prepareReviewRestartWaiters[waiterID] = continuation
+                    beginReviewRecoveryWaiters[waiterID] = continuation
                 }
             }
         } onCancel: {
             Task {
-                await self.cancelPrepareReviewRestartWaiter(id: waiterID)
+                await self.cancelBeginReviewRecoveryWaiter(id: waiterID)
             }
         }
     }
 
-    package func waitForPrepareReviewRestart(timeout: Duration = .seconds(2)) async throws {
-        try await withFakeBackendTimeout(operation: "prepareReviewRestart", timeout: timeout) {
-            await self.waitForPrepareReviewRestart()
+    package func waitForBeginReviewRecovery(timeout: Duration = .seconds(2)) async throws {
+        try await withFakeBackendTimeout(operation: "beginReviewRecovery", timeout: timeout) {
+            await self.waitForBeginReviewRecovery()
         }
     }
 
-    package func waitForRestartPreparedReview() async {
+    package func waitForResumeReviewRecovery() async {
         if commands.contains(where: {
-            if case .restartPreparedReview = $0 {
+            if case .resumeReviewRecovery = $0 {
                 true
             } else {
                 false
@@ -540,7 +379,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 if commands.contains(where: {
-                    if case .restartPreparedReview = $0 {
+                    if case .resumeReviewRecovery = $0 {
                         true
                     } else {
                         false
@@ -548,51 +387,19 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
                 }) {
                     continuation.resume()
                 } else {
-                    restartPreparedReviewWaiters[waiterID] = continuation
+                    resumeReviewRecoveryWaiters[waiterID] = continuation
                 }
             }
         } onCancel: {
             Task {
-                await self.cancelRestartPreparedReviewWaiter(id: waiterID)
+                await self.cancelResumeReviewRecoveryWaiter(id: waiterID)
             }
         }
     }
 
-    package func waitForRestartPreparedReview(timeout: Duration = .seconds(2)) async throws {
-        try await withFakeBackendTimeout(operation: "restartPreparedReview", timeout: timeout) {
-            await self.waitForRestartPreparedReview()
-        }
-    }
-
-    package func waitForCleanupReview(_ attempt: ReviewAttempt) async {
-        if commands.contains(.cleanupReview(attempt)) {
-            return
-        }
-        let waiterID = UUID()
-        await withTaskCancellationHandler {
-            await withCheckedContinuation { continuation in
-                if commands.contains(.cleanupReview(attempt)) {
-                    continuation.resume()
-                } else {
-                    cleanupReviewWaiters[attempt.attemptID, default: [:]][waiterID] = continuation
-                }
-            }
-        } onCancel: {
-            Task {
-                await self.cancelCleanupReviewWaiter(
-                    attemptID: attempt.attemptID,
-                    waiterID: waiterID
-                )
-            }
-        }
-    }
-
-    package func waitForCleanupReview(
-        _ attempt: ReviewAttempt,
-        timeout: Duration
-    ) async throws {
-        try await withFakeBackendTimeout(operation: "cleanupReview", timeout: timeout) {
-            await self.waitForCleanupReview(attempt)
+    package func waitForResumeReviewRecovery(timeout: Duration = .seconds(2)) async throws {
+        try await withFakeBackendTimeout(operation: "resumeReviewRecovery", timeout: timeout) {
+            await self.waitForResumeReviewRecovery()
         }
     }
 
@@ -601,9 +408,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         return settings
     }
 
-    package func applySettings(_ change: CodexReviewBackendModel.Settings.Change) async throws
-        -> CodexReviewBackendModel.Settings.Snapshot
-    {
+    package func applySettings(_ change: CodexReviewBackendModel.Settings.Change) async throws -> CodexReviewBackendModel.Settings.Snapshot {
         commands.append(.applySettings(change))
         settings = .init(
             model: change.updatesModel ? change.model : settings.model,
@@ -620,9 +425,23 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         return auth
     }
 
-    package func logout(_ account: CodexReviewBackendModel.Account.ID) async throws
-        -> CodexReviewBackendModel.Auth.Snapshot
-    {
+    package func startLogin(_ request: CodexReviewBackendModel.Login.Request) async throws -> CodexReviewBackendModel.Login.Challenge {
+        commands.append(.startLogin(request))
+        return .init(id: "challenge-1")
+    }
+
+    package func cancelLogin(_ challenge: CodexReviewBackendModel.Login.Challenge) async throws {
+        commands.append(.cancelLogin(challenge))
+    }
+
+    package func completeLogin(_ response: CodexReviewBackendModel.Login.Response) async throws -> CodexReviewBackendModel.Auth.Snapshot {
+        commands.append(.completeLogin(response))
+        let account = CodexReviewBackendModel.Account.Snapshot(id: .init("account-1"), label: "Codex", isActive: true)
+        auth = .init(accounts: [account], activeAccountID: account.id)
+        return auth
+    }
+
+    package func logout(_ account: CodexReviewBackendModel.Account.ID) async throws -> CodexReviewBackendModel.Auth.Snapshot {
         commands.append(.logout(account))
         auth = .init()
         return auth
@@ -635,208 +454,109 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         for waiter in waiters {
             waiter.resume()
         }
-        guard plannedAttempts.isEmpty == false else {
-            throw FakeCodexReviewBackendError(
-                message: "No review attempt was planned for startReview."
-            )
-        }
         if let startReviewGate {
-            if startReviewIgnoresCancellation {
-                await startReviewGate.waitIgnoringCancellation()
-            } else {
-                try await startReviewGate.wait()
-            }
+            await startReviewGate.wait()
         }
-        guard plannedAttempts.isEmpty == false else {
-            throw FakeCodexReviewBackendError(
-                message: "No review attempt remained planned when startReview completed."
-            )
-        }
-        let plannedAttempt = plannedAttempts.removeFirst()
-        return backendAttempt(for: plannedAttempt)
+        return .init(run: nextRun, events: eventMailbox(for: nextRun))
     }
 
-    package func interruptReview(
-        _ attempt: ReviewAttempt, reason: CodexReviewBackendModel.CancellationReason
-    ) async throws {
-        commands.append(.interruptReview(attempt, reason))
-        let interruptReviewCommandCount = interruptReviewCommandCount
-        let readyWaiterIDs = interruptReviewWaiters.compactMap { id, waiter in
-            waiter.requiredCount <= interruptReviewCommandCount ? id : nil
-        }
-        for waiterID in readyWaiterIDs {
-            interruptReviewWaiters.removeValue(forKey: waiterID)?.continuation.resume()
-        }
-        if let interruptReviewGate {
-            try await interruptReviewGate.wait()
-        }
-        if let interruptFailureMessage {
-            throw FakeCodexReviewBackendError(message: interruptFailureMessage)
-        }
-    }
-
-    package func prepareReviewRestart(
-        _ attempt: ReviewAttempt
-    ) async throws -> CodexReviewBackendModel.Review.RestartToken {
-        commands.append(.prepareReviewRestart(attempt))
-        let waiters = Array(prepareReviewRestartWaiters.values)
-        prepareReviewRestartWaiters.removeAll(keepingCapacity: false)
+    package func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws {
+        commands.append(.interruptReview(run, reason))
+        let waiters = Array(interruptReviewWaiters.values)
+        interruptReviewWaiters.removeAll(keepingCapacity: false)
         for waiter in waiters {
             waiter.resume()
         }
         if let interruptReviewGate {
-            try await interruptReviewGate.wait()
+            await interruptReviewGate.wait()
         }
         if let interruptFailureMessage {
             throw FakeCodexReviewBackendError(message: interruptFailureMessage)
         }
-        let token = CodexReviewBackendModel.Review.RestartToken(
-            id: "restart-token-\(attempt.attemptID.rawValue)",
-            interruptedAttempt: attempt
-        )
-        precondition(
-            preparedRestartTokens.updateValue(token, forKey: token.id) == nil,
-            "A fake restart token identity can only be prepared once."
-        )
-        return token
     }
 
-    package func restartPreparedReview(
-        _ token: CodexReviewBackendModel.Review.RestartToken,
+    package func beginReviewRecovery(
+        _ run: CodexReviewBackendModel.Review.Run,
+        reason: CodexReviewBackendModel.CancellationReason
+    ) async throws -> CodexReviewBackendModel.Review.RecoveryToken {
+        commands.append(.beginReviewRecovery(run, reason))
+        let waiters = Array(beginReviewRecoveryWaiters.values)
+        beginReviewRecoveryWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
+        if let interruptReviewGate {
+            await interruptReviewGate.wait()
+        }
+        if let interruptFailureMessage {
+            throw FakeCodexReviewBackendError(message: interruptFailureMessage)
+        }
+        return .init(interruptedRun: run, rollbackThreadID: run.reviewThreadID ?? run.threadID)
+    }
+
+    package func resumeReviewRecovery(
+        _ token: CodexReviewBackendModel.Review.RecoveryToken,
         request: CodexReviewBackendModel.Review.Start
     ) async throws -> BackendReviewAttempt {
-        commands.append(.restartPreparedReview(token, request))
-        guard preparedRestartTokens[token.id] == token else {
-            preconditionFailure("A fake restart token must be live and consumed exactly once.")
-        }
-        let waiters = Array(restartPreparedReviewWaiters.values)
-        restartPreparedReviewWaiters.removeAll(keepingCapacity: false)
+        commands.append(.resumeReviewRecovery(token, request))
+        let waiters = Array(resumeReviewRecoveryWaiters.values)
+        resumeReviewRecoveryWaiters.removeAll(keepingCapacity: false)
         for waiter in waiters {
             waiter.resume()
         }
-        if let restartPreparedReviewGate {
-            if restartPreparedReviewIgnoresCancellation {
-                await restartPreparedReviewGate.waitIgnoringCancellation()
-            } else {
-                try await restartPreparedReviewGate.wait()
-            }
+        if let resumeReviewRecoveryGate {
+            await resumeReviewRecoveryGate.wait()
         }
         if let recoveryFailureMessage {
             throw FakeCodexReviewBackendError(message: recoveryFailureMessage)
         }
-        guard plannedRecoveredAttempts.isEmpty == false else {
-            throw FakeCodexReviewBackendError(
-                message: "No review attempt was planned for restartPreparedReview."
-            )
-        }
-        let recoveredAttempt = plannedRecoveredAttempts.removeFirst()
-        preparedRestartTokens.removeValue(forKey: token.id)
-        return backendAttempt(for: recoveredAttempt)
+        let run = token.interruptedRun
+        let recoveredRun = nextRecoveredRun ?? .init(
+            attemptID: "attempt-recovered",
+            threadID: run.threadID,
+            turnID: "turn-recovered",
+            reviewThreadID: run.reviewThreadID,
+            model: run.model ?? request.model
+        )
+        return .init(run: recoveredRun, events: eventMailbox(for: recoveredRun))
     }
 
-    package func discardPreparedReviewRestart(
-        _ token: CodexReviewBackendModel.Review.RestartToken
-    ) async -> [ReviewAttempt] {
-        commands.append(.discardPreparedReviewRestart(token))
-        guard preparedRestartTokens.removeValue(forKey: token.id) == token else {
-            preconditionFailure("A fake restart token must be live and discarded exactly once.")
-        }
-        let attempts = discardedRestartAttempts
-        discardedRestartAttempts = []
-        return attempts
+    package func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async {
+        commands.append(.cleanupReview(run))
     }
 
-    package func cleanupReview(_ attempt: ReviewAttempt) async {
-        commands.append(.cleanupReview(attempt))
-        let waiters = cleanupReviewWaiters
-            .removeValue(forKey: attempt.attemptID)
-            .map { Array($0.values) } ?? []
-        for waiter in waiters {
-            waiter.resume()
-        }
+    package func yield(_ event: CodexReviewBackendModel.Review.Event, for run: CodexReviewBackendModel.Review.Run? = nil) async {
+        await eventMailbox(for: run ?? nextRun).append(event)
     }
 
-    package func cleanupRetainedReviews(
-        _ attempts: [ReviewAttempt],
-        additionalThreadIDs _: [ReviewThreadID]
-    ) async -> ReviewRetainedThreadCleanupResult {
-        commands.append(.cleanupRetainedReviews(attempts))
-        let waiters = Array(retainedCleanupWaiters.values)
-        retainedCleanupWaiters.removeAll(keepingCapacity: false)
-        for waiter in waiters {
-            waiter.resume()
-        }
-        if let retainedCleanupGate {
-            try? await retainedCleanupGate.wait()
-        }
-        guard let retainedCleanupFailureMessage,
-              let attempt = attempts.first
-        else {
-            return .init()
-        }
-        return .init(failures: [
-            .init(
-                threadID: attempt.threadIdentity.activeTurnThreadID,
-                message: retainedCleanupFailureMessage
-            )
-        ])
+    package func finishEvents(for run: CodexReviewBackendModel.Review.Run? = nil) async {
+        await eventMailbox(for: run ?? nextRun).finish()
     }
 
-    package func yield(_ terminal: FakeReviewTerminal, for attempt: ReviewAttempt) async {
-        await terminalSource(for: attempt).yield(terminal)
-    }
-
-    package func finishEvents(for attempt: ReviewAttempt) async {
-        await terminalSource(for: attempt).finish()
-    }
-
-    package func finishEvents(throwing error: any Error, for attempt: ReviewAttempt) async {
-        await terminalSource(for: attempt).finish(throwing: error)
+    package func finishEvents(throwing error: any Error, for run: CodexReviewBackendModel.Review.Run? = nil) async {
+        await eventMailbox(for: run ?? nextRun).fail(error)
     }
 
     package func finishEventMailboxes() async {
-        let sources = Array(terminalSources.values)
-        terminalSources.removeAll(keepingCapacity: false)
-        for source in sources {
-            await source.finish()
+        let mailboxes = Array(eventMailboxes.values)
+        eventMailboxes.removeAll(keepingCapacity: false)
+        for mailbox in mailboxes {
+            await mailbox.finish()
         }
     }
 
-    package func hasEventMailbox(for attempt: ReviewAttempt) -> Bool {
-        terminalSources[.init(attempt: attempt)] != nil
+    package func hasEventMailbox(for run: CodexReviewBackendModel.Review.Run) -> Bool {
+        eventMailboxes[.init(run: run)] != nil
     }
 
-    private func terminalSource(for attempt: ReviewAttempt) -> FakeReviewTerminalSource {
-        let key = TerminalSourceKey(attempt: attempt)
-        if let source = terminalSources[key] {
-            return source
+    private func eventMailbox(for run: CodexReviewBackendModel.Review.Run) -> BackendReviewEventMailbox {
+        let key = EventMailboxKey(run: run)
+        if let mailbox = eventMailboxes[key] {
+            return mailbox
         }
-        let source = FakeReviewTerminalSource(attempt: attempt)
-        terminalSources[key] = source
-        return source
-    }
-
-    private func backendAttempt(for attempt: ReviewAttempt) -> BackendReviewAttempt {
-        let source = terminalSource(for: attempt)
-        return BackendReviewAttempt(
-            attempt: attempt,
-            observeTerminal: {
-                try await source.observe()
-            },
-            observedTerminalIfKnown: {
-                await source.observedIfKnown()
-            },
-            finalizeTerminal: { observed in
-                switch observed {
-                case .completed(let candidate):
-                    .completed(.init(finalReview: candidate.expectedOutput))
-                case .interrupted(let message):
-                    .interrupted(message: message)
-                case .failed(let failure):
-                    .failed(failure)
-                }
-            }
-        )
+        let mailbox = BackendReviewEventMailbox()
+        eventMailboxes[key] = mailbox
+        return mailbox
     }
 
     private func cancelStartReviewWaiter(id: UUID) {
@@ -844,37 +564,15 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     }
 
     private func cancelInterruptReviewWaiter(id: UUID) {
-        interruptReviewWaiters.removeValue(forKey: id)?.continuation.resume()
+        interruptReviewWaiters.removeValue(forKey: id)?.resume()
     }
 
-    private var interruptReviewCommandCount: Int {
-        commands.reduce(into: 0) { count, command in
-            if case .interruptReview = command {
-                count += 1
-            }
-        }
+    private func cancelBeginReviewRecoveryWaiter(id: UUID) {
+        beginReviewRecoveryWaiters.removeValue(forKey: id)?.resume()
     }
 
-    private func cancelPrepareReviewRestartWaiter(id: UUID) {
-        prepareReviewRestartWaiters.removeValue(forKey: id)?.resume()
-    }
-
-    private func cancelRestartPreparedReviewWaiter(id: UUID) {
-        restartPreparedReviewWaiters.removeValue(forKey: id)?.resume()
-    }
-
-    private func cancelCleanupReviewWaiter(
-        attemptID: ReviewAttemptID,
-        waiterID: UUID
-    ) {
-        cleanupReviewWaiters[attemptID]?.removeValue(forKey: waiterID)?.resume()
-        if cleanupReviewWaiters[attemptID]?.isEmpty == true {
-            cleanupReviewWaiters.removeValue(forKey: attemptID)
-        }
-    }
-
-    private func cancelRetainedCleanupWaiter(id: UUID) {
-        retainedCleanupWaiters.removeValue(forKey: id)?.resume()
+    private func cancelResumeReviewRecoveryWaiter(id: UUID) {
+        resumeReviewRecoveryWaiters.removeValue(forKey: id)?.resume()
     }
 
 }
@@ -888,44 +586,58 @@ package final class StoreSnapshotProbe {
     }
 
     package func snapshot() -> StoreSnapshot {
-        let reviewRuns = store.reviewRuns
+        let jobs = store.jobs
             .sorted { lhs, rhs in
                 if lhs.sortOrder == rhs.sortOrder {
-                    return lhs.id.rawValue < rhs.id.rawValue
+                    return lhs.id < rhs.id
                 }
                 return lhs.sortOrder > rhs.sortOrder
             }
-            .map { runRecord in
-                let runtimeState = store.runtimeReviewRunState(runID: runRecord.id)
-                return StoreRunSnapshot(
-                    runID: runRecord.id.rawValue,
-                    status: runRecord.core.status,
-                    summary: runRecord.presentation.lifecycle.testingSummary,
-                    attempt: runRecord.core.attempt,
-                    activeAttempt: runtimeState.activeAttempt,
-                    cancellationRequested: runRecord.cancellationRequested
+            .map { job in
+                StoreJobSnapshot(
+                    jobID: job.id,
+                    status: job.core.lifecycle.status,
+                    summary: job.core.output.summary,
+                    lastAgentMessage: job.core.output.lastAgentMessage,
+                    logs: job.logEntries,
+                    run: job.core.run,
+                    activeRun: store.activeRuns[job.id],
+                    cancellationRequested: job.cancellationRequested
                 )
             }
-        return StoreSnapshot(reviewRuns: reviewRuns)
+        return StoreSnapshot(jobs: jobs)
     }
 
-    package func waitUntilRunStatus(
-        _ status: ReviewRunState,
-        runID: String? = nil,
+    package func waitUntilJobStatus(
+        _ status: ReviewJobState,
+        jobID: String? = nil,
         timeout: Duration = .seconds(2)
     ) async -> StoreSnapshot? {
         await waitUntil(timeout: timeout) { snapshot in
-            snapshot.run(runID)?.status == status
+            snapshot.job(jobID)?.status == status
+        }
+    }
+
+    package func waitUntilLogs(
+        jobID: String? = nil,
+        timeout: Duration = .seconds(2),
+        matching predicate: @escaping @MainActor (Array<ReviewLogEntry>) -> Bool
+    ) async -> StoreSnapshot? {
+        await waitUntil(timeout: timeout) { snapshot in
+            guard let job = snapshot.job(jobID) else {
+                return false
+            }
+            return predicate(job.logs)
         }
     }
 
     package func waitUntilRunAttempt(
         _ attemptID: String,
-        runID: String? = nil,
+        jobID: String? = nil,
         timeout: Duration = .seconds(2)
     ) async -> StoreSnapshot? {
         await waitUntil(timeout: timeout) { snapshot in
-            snapshot.run(runID)?.activeAttempt?.attemptID.rawValue == attemptID
+            snapshot.job(jobID)?.activeRun?.attemptID == attemptID
         }
     }
 
@@ -949,65 +661,34 @@ package final class StoreSnapshotProbe {
 }
 
 package struct StoreSnapshot: Sendable {
-    package var reviewRuns: [StoreRunSnapshot]
+    package var jobs: [StoreJobSnapshot]
 
-    package func run(_ runID: String? = nil) -> StoreRunSnapshot? {
-        guard let runID else {
-            return reviewRuns.first
+    package func job(_ jobID: String? = nil) -> StoreJobSnapshot? {
+        guard let jobID else {
+            return jobs.first
         }
-        return reviewRuns.first { $0.runID == runID }
+        return jobs.first { $0.jobID == jobID }
     }
 }
 
-package struct StoreRunSnapshot: Sendable {
-    package var runID: String
-    package var status: ReviewRunState
+package struct StoreJobSnapshot: Sendable {
+    package var jobID: String
+    package var status: ReviewJobState
     package var summary: String
-    package var attempt: ReviewAttempt?
-    package var activeAttempt: ReviewAttempt?
+    package var lastAgentMessage: String?
+    package var logs: [ReviewLogEntry]
+    package var run: ReviewJobCore.Run
+    package var activeRun: CodexReviewBackendModel.Review.Run?
     package var cancellationRequested: Bool
-}
-
-private extension ReviewLifecyclePresentation {
-    var testingSummary: String {
-        switch self {
-        case .queued:
-            "Queued."
-        case .starting:
-            "Starting review."
-        case .running:
-            "Review started."
-        case .waitingForNetwork:
-            "Network unavailable; waiting to reconnect."
-        case .preparingRestart:
-            "Preparing review restart."
-        case .restarting:
-            "Network restored; restarting review."
-        case .cancelling(let cancellation), .cancelled(let cancellation):
-            cancellation.message
-        case .succeeded:
-            "Review completed."
-        case .failed(let failure):
-            failure.message
-        }
-    }
 }
 
 @MainActor
 package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
-    package enum AuthenticationCommand: Equatable, Sendable {
-        case signInWithChatGPT
-        case signInWithAPIKey
-        case addChatGPTAccount
-        case addAPIKeyAccount
-    }
-
     package let reviewBackend: FakeCodexReviewBackend
     package let seed: CodexReviewStoreSeed
     package var currentSettingsSnapshot: CodexReviewSettings.Snapshot
     package private(set) var isActive = false
     package private(set) var startRequests: [Bool] = []
-    package private(set) var authenticationCommands: [AuthenticationCommand] = []
 
     package init(
         reviewBackend: FakeCodexReviewBackend,
@@ -1030,7 +711,7 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         store.transitionToRunning(serverURL: nil)
     }
 
-    package func stop(store _: CodexReviewStore, purpose _: CodexReviewRuntimeStopPurpose) async {
+    package func stop(store _: CodexReviewStore) async {
         isActive = false
     }
 
@@ -1039,12 +720,12 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     package func refreshAuth(auth: CodexReviewAuthModel) async {
         do {
             let snapshot = try await reviewBackend.readAuth()
-            let accounts = snapshot.accounts.compactMap { account -> CodexReviewKit.CodexReviewAccount? in
+            let accounts = snapshot.accounts.compactMap { account -> CodexAccount? in
                 let label = account.label.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard label.isEmpty == false else {
                     return nil
                 }
-                return CodexReviewKit.CodexReviewAccount(email: label)
+                return CodexAccount(email: label)
             }
             auth.applyPersistedAccountStates(
                 accounts.map(savedAccountPayload(from:)),
@@ -1053,37 +734,26 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
             auth.selectPersistedAccount(snapshot.activeAccountID?.rawValue)
             auth.updatePhase(auth.selectedAccount == nil ? .signedOut : .signedOut)
         } catch {
-            auth.updatePhase(.failed(.runtime(message: error.localizedDescription)))
+            auth.updatePhase(.failed(message: error.localizedDescription))
         }
     }
 
-    package func authenticate(
-        auth: CodexReviewAuthModel,
-        request: CodexReviewAuthenticationRequest
-    ) async throws {
-        let command: AuthenticationCommand = switch request {
-        case .signIn(using: .chatGPT):
-            .signInWithChatGPT
-        case .signIn(using: .apiKey):
-            .signInWithAPIKey
-        case .addAccount(using: .chatGPT):
-            .addChatGPTAccount
-        case .addAccount(using: .apiKey):
-            .addAPIKeyAccount
+    package func signIn(auth: CodexReviewAuthModel) async {
+        do {
+            let challenge = try await reviewBackend.startLogin(.init())
+            auth.updatePhase(.signingIn(.init(
+                title: "Sign in to Codex",
+                detail: "Complete sign in in your browser, then return to ReviewMonitor.",
+                browserURL: challenge.verificationURL?.absoluteString,
+                userCode: challenge.userCode
+            )))
+        } catch {
+            auth.updatePhase(.failed(message: error.localizedDescription))
         }
-        authenticationCommands.append(command)
-        let detail: String = switch request.method {
-        case .chatGPT:
-            "Complete sign in in your browser, then return to ReviewMonitor."
-        case .apiKey:
-            "Authenticating with API key."
-        }
-        auth.updatePhase(.signingIn(.init(
-            title: "Sign in to Codex",
-            detail: detail,
-            browserURL: nil,
-            userCode: nil
-        )))
+    }
+
+    package func addAccount(auth: CodexReviewAuthModel) async {
+        await signIn(auth: auth)
     }
 
     package func cancelAuthentication(auth: CodexReviewAuthModel) async {
@@ -1149,43 +819,28 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     package func interruptReview(
-        _ attempt: ReviewAttempt,
+        _ run: CodexReviewBackendModel.Review.Run,
         reason: CodexReviewBackendModel.CancellationReason
     ) async throws {
-        try await reviewBackend.interruptReview(attempt, reason: reason)
+        try await reviewBackend.interruptReview(run, reason: reason)
     }
 
-    package func prepareReviewRestart(
-        _ attempt: ReviewAttempt
-    ) async throws -> CodexReviewBackendModel.Review.RestartToken {
-        try await reviewBackend.prepareReviewRestart(attempt)
+    package func beginReviewRecovery(
+        _ run: CodexReviewBackendModel.Review.Run,
+        reason: CodexReviewBackendModel.CancellationReason
+    ) async throws -> CodexReviewBackendModel.Review.RecoveryToken {
+        try await reviewBackend.beginReviewRecovery(run, reason: reason)
     }
 
-    package func restartPreparedReview(
-        _ token: CodexReviewBackendModel.Review.RestartToken,
+    package func resumeReviewRecovery(
+        _ token: CodexReviewBackendModel.Review.RecoveryToken,
         request: CodexReviewBackendModel.Review.Start
     ) async throws -> BackendReviewAttempt {
-        try await reviewBackend.restartPreparedReview(token, request: request)
+        try await reviewBackend.resumeReviewRecovery(token, request: request)
     }
 
-    package func discardPreparedReviewRestart(
-        _ token: CodexReviewBackendModel.Review.RestartToken
-    ) async -> [ReviewAttempt] {
-        await reviewBackend.discardPreparedReviewRestart(token)
-    }
-
-    package func cleanupReview(_ attempt: ReviewAttempt) async {
-        await reviewBackend.cleanupReview(attempt)
-    }
-
-    package func cleanupRetainedReviews(
-        _ attempts: [ReviewAttempt],
-        additionalThreadIDs: [ReviewThreadID]
-    ) async -> ReviewRetainedThreadCleanupResult {
-        await reviewBackend.cleanupRetainedReviews(
-            attempts,
-            additionalThreadIDs: additionalThreadIDs
-        )
+    package func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async {
+        await reviewBackend.cleanupReview(run)
     }
 
     package func refreshSettings() async throws -> CodexReviewSettings.Snapshot {
@@ -1230,4 +885,220 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 }
 
-package typealias FakeCodexAppServerTransport = CodexAppServerTestTransport
+package actor FakeJSONRPCTransport: JSONRPC.Transport {
+    private struct RequestGate: Sendable {
+        var gate: AsyncGate
+        var ignoresCancellation: Bool
+
+        func wait() async {
+            if ignoresCancellation {
+                await gate.waitIgnoringCancellation()
+            } else {
+                await gate.wait()
+            }
+        }
+    }
+
+    private enum QueuedResponse: Sendable {
+        case success(Data)
+        case failure(JSONRPC.Error)
+    }
+
+    private var responses: [String: [QueuedResponse]]
+    private var requests: [JSONRPC.Request] = []
+    private var notifications: [JSONRPC.Notification] = []
+    private var serverNotificationContinuations: [AsyncThrowingStream<JSONRPC.Notification, Error>.Continuation] = []
+    private var activeByMethod: [String: Int] = [:]
+    private var maxActiveByMethod: [String: Int] = [:]
+    private var gatesByMethod: [String: RequestGate] = [:]
+    private var oneShotGatesByMethod: [String: [RequestGate]] = [:]
+    private var requestCountWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+    private var notificationStreamCountWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+    private var closed = false
+
+    package init(responses: [String: [Data]] = [:]) {
+        self.responses = responses
+            .mapValues { $0.map(QueuedResponse.success) }
+    }
+
+    package func enqueue<Response: Encodable & Sendable>(
+        _ response: Response,
+        for method: String
+    ) throws {
+        let data = try JSONEncoder().encode(response)
+        responses[method, default: []].append(.success(data))
+    }
+
+    package func enqueueFailure(
+        _ error: JSONRPC.Error,
+        for method: String
+    ) {
+        responses[method, default: []].append(.failure(error))
+    }
+
+    package func hold(method: String, gate: AsyncGate) {
+        gatesByMethod[method] = .init(gate: gate, ignoresCancellation: false)
+    }
+
+    package func holdNext(method: String, gate: AsyncGate) {
+        oneShotGatesByMethod[method, default: []].append(.init(gate: gate, ignoresCancellation: false))
+    }
+
+    package func holdNextIgnoringCancellation(method: String, gate: AsyncGate) {
+        oneShotGatesByMethod[method, default: []].append(.init(gate: gate, ignoresCancellation: true))
+    }
+
+    package func send(_ request: JSONRPC.Request) async throws -> Data {
+        guard closed == false else {
+            throw JSONRPC.Error.closed
+        }
+        requests.append(request)
+        resumeRequestCountWaiters()
+        activeByMethod[request.method, default: 0] += 1
+        maxActiveByMethod[request.method] = max(
+            maxActiveByMethod[request.method] ?? 0,
+            activeByMethod[request.method] ?? 0
+        )
+        let queuedResponse = dequeueResponse(for: request.method)
+        if let gate = dequeueOneShotGate(for: request.method) ?? gatesByMethod[request.method] {
+            await gate.wait()
+        }
+        activeByMethod[request.method, default: 1] -= 1
+        if let queuedResponse {
+            switch queuedResponse {
+            case .success(let data):
+                return data
+            case .failure(let error):
+                throw error
+            }
+        }
+        return try JSONEncoder().encode(EmptyResponse())
+    }
+
+    private func dequeueResponse(for method: String) -> QueuedResponse? {
+        guard var queued = responses[method], queued.isEmpty == false else {
+            return nil
+        }
+        let response = queued.removeFirst()
+        responses[method] = queued
+        return response
+    }
+
+    private func dequeueOneShotGate(for method: String) -> RequestGate? {
+        guard var gates = oneShotGatesByMethod[method], gates.isEmpty == false else {
+            return nil
+        }
+        let gate = gates.removeFirst()
+        oneShotGatesByMethod[method] = gates
+        return gate
+    }
+
+    package func notify(_ notification: JSONRPC.Notification) async throws {
+        notifications.append(notification)
+    }
+
+    package func notificationStream() -> AsyncThrowingStream<JSONRPC.Notification, Error> {
+        AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
+            serverNotificationContinuations.append(continuation)
+            resumeNotificationStreamCountWaiters()
+        }
+    }
+
+    package func close() async {
+        closed = true
+        for continuation in serverNotificationContinuations {
+            continuation.finish()
+        }
+        serverNotificationContinuations.removeAll()
+    }
+
+    package func finishNotificationStreams(throwing error: any Error) {
+        for continuation in serverNotificationContinuations {
+            continuation.finish(throwing: error)
+        }
+        serverNotificationContinuations.removeAll()
+    }
+
+    package func recordedRequests() -> [JSONRPC.Request] {
+        requests
+    }
+
+    package func waitForRequestCount(_ count: Int) async {
+        if requests.count >= count {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            if requests.count >= count {
+                continuation.resume()
+            } else {
+                requestCountWaiters.append((count, continuation))
+            }
+        }
+    }
+
+    package func recordedNotifications() -> [JSONRPC.Notification] {
+        notifications
+    }
+
+    package func waitForNotificationStreamCount(_ count: Int) async {
+        if serverNotificationContinuations.count >= count {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            if serverNotificationContinuations.count >= count {
+                continuation.resume()
+            } else {
+                notificationStreamCountWaiters.append((count, continuation))
+            }
+        }
+    }
+
+    package func notificationStreamCount() -> Int {
+        serverNotificationContinuations.count
+    }
+
+    package func isClosedForTesting() -> Bool {
+        closed
+    }
+
+    package func maxActiveCount(for method: String) -> Int {
+        maxActiveByMethod[method] ?? 0
+    }
+
+    package func emitServerNotification<Params: Encodable & Sendable>(
+        method: String,
+        params: Params
+    ) throws {
+        let notification = JSONRPC.Notification(
+            method: method,
+            params: try JSONEncoder().encode(params)
+        )
+        for continuation in serverNotificationContinuations {
+            continuation.yield(notification)
+        }
+    }
+
+    private func resumeRequestCountWaiters() {
+        var remaining: [(Int, CheckedContinuation<Void, Never>)] = []
+        for waiter in requestCountWaiters {
+            if requests.count >= waiter.0 {
+                waiter.1.resume()
+            } else {
+                remaining.append(waiter)
+            }
+        }
+        requestCountWaiters = remaining
+    }
+
+    private func resumeNotificationStreamCountWaiters() {
+        var remaining: [(Int, CheckedContinuation<Void, Never>)] = []
+        for waiter in notificationStreamCountWaiters {
+            if serverNotificationContinuations.count >= waiter.0 {
+                waiter.1.resume()
+            } else {
+                remaining.append(waiter)
+            }
+        }
+        notificationStreamCountWaiters = remaining
+    }
+}

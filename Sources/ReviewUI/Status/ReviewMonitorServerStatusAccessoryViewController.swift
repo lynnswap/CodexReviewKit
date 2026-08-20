@@ -1,6 +1,6 @@
 import AppKit
 import SwiftUI
-import CodexReviewKit
+import CodexReview
 import ObservationBridge
 
 @MainActor
@@ -80,7 +80,7 @@ final class ReviewMonitorServerStatusAccessoryViewController: NSSplitViewItemAcc
 }
 
 struct AccountRateLimitsSectionView: View {
-    let account: CodexReviewAccount?
+    let account: CodexAccount?
 
     var body: some View {
         ForEach(rateLimits) { window in
@@ -94,7 +94,7 @@ struct AccountRateLimitsSectionView: View {
 
     @ViewBuilder
     private func rateLimitsRow(
-        _ window: CodexReviewAccount.RateLimitWindow
+        _ window: CodexAccount.RateLimitWindow
     ) -> some View {
         if let details = Self.rateLimitDetailsText(for: window) {
             Button {
@@ -104,12 +104,12 @@ struct AccountRateLimitsSectionView: View {
         }
     }
 
-    private var rateLimits: [CodexReviewAccount.RateLimitWindow] {
+    private var rateLimits: [CodexAccount.RateLimitWindow] {
         account?.rateLimits ?? []
     }
 
     static func rateLimitDetailsText(
-        for window: CodexReviewAccount.RateLimitWindow
+        for window: CodexAccount.RateLimitWindow
     ) -> AttributedString? {
         guard let resetsAt = window.resetsAt else {
             return nil
@@ -172,15 +172,10 @@ struct StatusView: View {
 
     var body: some View {
         let currentAccount = store.auth.selectedAccount
-        let usagePresentation = AccountUsageSummaryPresentation(account: currentAccount)
         VStack{
             Menu {
-                if let currentAccount,
-                   usagePresentation.showsRateLimitControls
-                {
-                    Section(currentAccount.reviewMonitorIdentityName) {
-                        AccountRateLimitsSectionView(account: currentAccount)
-                    }
+                Section(currentAccount?.email ?? "") {
+                    AccountRateLimitsSectionView(account: currentAccount)
                 }
                 if let showSettings {
                     Section{
@@ -201,7 +196,7 @@ struct StatusView: View {
                     }
                 }
             } label: {
-                AccountUsageSummaryView(account: currentAccount)
+                AccountRateLimitGaugesView(account: currentAccount)
                     .transition(.blurReplace)
                     .animation(.default, value: currentAccount)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -273,3 +268,42 @@ struct StatusView: View {
         }
     }
 }
+
+#if DEBUG
+
+#Preview("Signed In") {
+    let store = makeStatusPreviewStore()
+    StatusView(store: store)
+        .padding()
+}
+
+#Preview("Server Failed") {
+    let store = makeStatusPreviewStore(
+        serverState: .failed("The embedded server stopped responding.")
+    )
+    StatusView(store: store)
+        .padding()
+}
+
+@MainActor
+func makeStatusPreviewStore(
+    authPhase: CodexReviewAuthModel.Phase = .signedOut,
+    account: CodexAccount? = nil,
+    serverState: CodexReviewServerState = .running
+) -> CodexReviewStore {
+    let store = ReviewMonitorPreviewContent.makeStore()
+    let runningServerURL = store.serverURL
+    let previewAccounts = ReviewMonitorPreviewContent.makePreviewAccounts()
+    let resolvedAccount = account ?? previewAccounts.first
+    store.auth.updatePhase(authPhase)
+    store.auth.applyPersistedAccountStates(previewAccounts.map(savedAccountPayload(from:)))
+    store.auth.selectPersistedAccount(resolvedAccount?.id)
+    store.serverState = serverState
+    store.serverURL = serverState == .running ? runningServerURL : nil
+    return store
+}
+@MainActor
+func makeStatusPreviewAccount() -> CodexAccount {
+    ReviewMonitorPreviewContent.makePreviewAccount()
+}
+#endif

@@ -4,7 +4,7 @@ import SwiftUI
 enum PlaceholderContent: Equatable {
     case noSelection
     case noFindings
-    case noReviewChats
+    case noReviewJobs
 
     var title: LocalizedStringResource {
         switch self {
@@ -12,8 +12,8 @@ enum PlaceholderContent: Equatable {
             "Select a workspace or review"
         case .noFindings:
             "No findings"
-        case .noReviewChats:
-            "No review chats"
+        case .noReviewJobs:
+            "No review jobs"
         }
     }
 
@@ -23,8 +23,8 @@ enum PlaceholderContent: Equatable {
             "Choose a workspace or review from the list."
         case .noFindings:
             "No structured review findings are available for this workspace."
-        case .noReviewChats:
-            "Start a review through the embedded server to see review chats here."
+        case .noReviewJobs:
+            "Start a review through the embedded server to see workspaces here."
         }
     }
 
@@ -34,7 +34,7 @@ enum PlaceholderContent: Equatable {
             "review-monitor.detail-empty.title"
         case .noFindings:
             "review-monitor.workspace-findings-empty.title"
-        case .noReviewChats:
+        case .noReviewJobs:
             "review-monitor.sidebar-empty.title"
         }
     }
@@ -45,7 +45,7 @@ enum PlaceholderContent: Equatable {
             "review-monitor.detail-empty.description"
         case .noFindings:
             "review-monitor.workspace-findings-empty.description"
-        case .noReviewChats:
+        case .noReviewJobs:
             "review-monitor.sidebar-empty.description"
         }
     }

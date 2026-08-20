@@ -1,9 +1,6 @@
-import Foundation
 import Testing
-import MCP
-import CodexDataKit
-@testable import CodexReviewKit
-@testable import CodexReviewMCPServer
+@testable import CodexReview
+import CodexReviewMCPServer
 import CodexReviewTesting
 
 @Suite("MCP server adapter")
@@ -25,191 +22,27 @@ struct CodexReviewMCPServerTests {
         ])
     }
 
-    @Test func reviewRunArgumentRejectsEmptyAndWhitespaceIDs() {
-        for rawValue in ["", " \n\t "] {
-            do {
-                _ = try ReviewRunIDArgument.requiredValue(in: ["runId": .string(rawValue)])
-                Issue.record("Expected invalid run ID \(rawValue.debugDescription)")
-            } catch {
-                #expect(error.localizedDescription == "runId must not be empty.")
-            }
-        }
-    }
-
     @Test func reviewStartConvertsToSystemCommand() async throws {
-        let attempt = makeReviewAttemptForTesting(
-            attemptID: "attempt-review-start",
-            sourceThreadID: "thread-review-start",
-            activeTurnThreadID: "review-thread-review-start",
-            turnID: "turn-1"
-        )
-        let backend = FakeCodexReviewBackend(plannedAttempt: attempt)
+        let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
-            idGenerator: .init(next: { "run-1" })
+            idGenerator: .init(next: { "job-1" })
         )
-        let server = CodexReviewMCPServer(
-            store: store,
-            logProjectionProvider: { result in
-                .available(ReviewMCPLogProjection(
-                    result: result,
-                    turnID: "turn-1",
-                    threadItems: [],
-                    reviewOutputText: "No issues found."
-                ))
-            }
-        )
+        let server = CodexReviewMCPServer(store: store)
 
         async let response = server.handle(.reviewStart(
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
             waitTimeout: nil
         ))
-        await backend.yield(.completed(finalReview: "No issues found."), for: attempt)
+        await backend.yield(.completed(summary: "Done", result: "review"))
         let resolved = try await response
 
-        guard case .reviewStart(let snapshot) = resolved else {
-            Issue.record("Expected reviewStart response")
+        guard case .reviewRead(let read) = resolved else {
+            Issue.record("Expected reviewRead response")
             return
         }
-        let read = snapshot.result
-        let log = snapshot.log
-        #expect(read.runID.rawValue == "run-1")
-        #expect(read.presentation.status == .succeeded)
-        #expect(log.finalResult == "No issues found.")
-        #expect(log.items.isEmpty)
-    }
-
-    @Test func succeededRunRejectsUnavailableProjection() async throws {
-        let runID = try ReviewRunID(validating: "run-succeeded")
-        let store = succeededStore(runID: runID)
-        let server = CodexReviewMCPServer(store: store)
-
-        await #expect(throws: ReviewMCPError.projectionInvariantViolation(runID: runID)) {
-            _ = try await server.handle(.reviewRead(sessionID: nil, runID: runID))
-        }
-    }
-
-    @Test func reviewListResolvesSucceededRunProjection() async throws {
-        let runID = try ReviewRunID(validating: "run-succeeded")
-        let server = succeededServer(runID: runID)
-
-        let response = try await server.handle(.reviewList(
-            sessionID: nil,
-            cwd: nil,
-            statuses: [.succeeded],
-            limit: nil
-        ))
-
-        guard case .reviewList(let snapshot) = response else {
-            Issue.record("Expected reviewList response")
-            return
-        }
-        #expect(snapshot.items.count == 1)
-        #expect(snapshot.items.first?.result.runID == runID)
-        #expect(snapshot.items.first?.log.finalResult == "No issues found.")
-    }
-
-    @Test func reviewCancelResolvesAlreadyFinishedRunProjection() async throws {
-        let runID = try ReviewRunID(validating: "run-succeeded")
-        let server = succeededServer(runID: runID)
-
-        let response = try await server.handle(.reviewCancel(
-            sessionID: nil,
-            selector: .init(runID: runID),
-            reason: .system()
-        ))
-
-        guard case .reviewCancel(let snapshot) = response else {
-            Issue.record("Expected reviewCancel response")
-            return
-        }
-        #expect(snapshot.result.runID == runID)
-        #expect(snapshot.result.cancelled == false)
-        #expect(snapshot.log.finalResult == "No issues found.")
-    }
-
-    @Test func succeededRunRejectsEmptyAndMismatchedProjection() async throws {
-        let runID = try ReviewRunID(validating: "run-succeeded")
-        let store = succeededStore(runID: runID)
-        let emptyServer = CodexReviewMCPServer(
-            store: store,
-            logProjectionProvider: { result in
-                .available(ReviewMCPLogProjection(
-                    result: result,
-                    turnID: "turn-1",
-                    threadItems: [],
-                    reviewOutputText: nil
-                ))
-            }
-        )
-        await #expect(throws: ReviewMCPError.projectionInvariantViolation(runID: runID)) {
-            _ = try await emptyServer.handle(.reviewRead(sessionID: nil, runID: runID))
-        }
-
-        let mismatchedServer = CodexReviewMCPServer(
-            store: store,
-            logProjectionProvider: { result in
-                .available(ReviewMCPLogProjection(
-                    result: result,
-                    turnID: "other-turn",
-                    threadItems: [],
-                    reviewOutputText: "No issues found."
-                ))
-            }
-        )
-        await #expect(throws: ReviewMCPError.projectionInvariantViolation(runID: runID)) {
-            _ = try await mismatchedServer.handle(.reviewRead(sessionID: nil, runID: runID))
-        }
-    }
-
-    @Test func projectionRefreshFailureRemainsTyped() async throws {
-        let runID = try ReviewRunID(validating: "run-succeeded")
-        let failure = CodexFetchFailure.validation(.negativeFetchLimit(-1))
-        let server = CodexReviewMCPServer(
-            store: succeededStore(runID: runID),
-            logProjectionProvider: { _ in .refreshFailed(failure) }
-        )
-
-        await #expect(throws: ReviewMCPError.projectionRefreshFailed(runID: runID, failure: failure)) {
-            _ = try await server.handle(.reviewRead(sessionID: nil, runID: runID))
-        }
-    }
-
-    private func succeededServer(runID: ReviewRunID) -> CodexReviewMCPServer {
-        CodexReviewMCPServer(
-            store: succeededStore(runID: runID),
-            logProjectionProvider: { result in
-                .available(ReviewMCPLogProjection(
-                    result: result,
-                    turnID: "turn-1",
-                    threadItems: [],
-                    reviewOutputText: "No issues found."
-                ))
-            }
-        )
-    }
-
-    private func succeededStore(runID: ReviewRunID) -> CodexReviewStore {
-        let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
-        )
-        store.loadForTesting(
-            serverState: .running,
-            reviewRuns: [
-                .makeForTesting(
-                    id: runID.rawValue,
-                    targetSummary: "Completed",
-                    attemptID: "attempt-1",
-                    threadID: "thread-1",
-                    turnID: "turn-1",
-                    status: .succeeded,
-                    startedAt: Date(timeIntervalSince1970: 1_000),
-                    endedAt: Date(timeIntervalSince1970: 1_001),
-                    summary: "Done"
-                )
-            ]
-        )
-        return store
+        #expect(read.jobID == "job-1")
+        #expect(read.core.lifecycle.status == .succeeded)
     }
 }

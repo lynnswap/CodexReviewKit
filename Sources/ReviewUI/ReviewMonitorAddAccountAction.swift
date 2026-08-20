@@ -1,40 +1,43 @@
-import CodexReviewKit
+import AppKit
+import CodexReview
 
 @MainActor
 enum ReviewMonitorAddAccountAction {
-    static func perform(
-        store: CodexReviewStore,
-        submission: ReviewMonitorAuthenticationSubmission
-    ) {
+    static func perform(store: CodexReviewStore) {
         Task {
-            await perform(store: store, submission: submission) { method in
-                try await store.addAccount(using: method)
+            let auth = store.auth
+            let previousFailureCount = auth.authenticationFailureCount
+            let previousWarningMessage = auth.warningMessage
+            await store.addAccount()
+            if auth.authenticationFailureCount != previousFailureCount,
+               let message = auth.errorMessage
+            {
+                await presentFailureAlert(
+                    title: "Failed to Add Account",
+                    message: message
+                )
+            } else if let warningMessage = auth.warningMessage,
+                      warningMessage != previousWarningMessage
+            {
+                await presentFailureAlert(
+                    title: "Account Updated With Warning",
+                    message: warningMessage
+                )
             }
         }
     }
 
-    static func perform(
-        store: CodexReviewStore,
-        submission: ReviewMonitorAuthenticationSubmission = .chatGPT,
-        operation: (CodexReviewAuthenticationMethod) async throws -> Void
+    private static func presentFailureAlert(
+        title: String,
+        message: String
     ) async {
-        do {
-            try await operation(submission.method)
-        } catch {
-            store.auth.presentAccountActionAlert(
-                title: "Failed to Add Account",
-                message: error.localizedDescription
-            )
+        await MainActor.run {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = title
+            alert.informativeText = message
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
         }
-    }
-
-    static func presentValidationFailure(
-        store: CodexReviewStore,
-        error: any Error
-    ) {
-        store.auth.presentAccountActionAlert(
-            title: "Failed to Add Account",
-            message: error.localizedDescription
-        )
     }
 }

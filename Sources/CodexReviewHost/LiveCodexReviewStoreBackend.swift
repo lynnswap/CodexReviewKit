@@ -1,25 +1,78 @@
 import AppKit
 import Foundation
 import OSLog
-import CodexAppServerKit
-import CodexDataKit
-import CodexReviewKit
+import CodexReview
 import CodexReviewAppServer
 import CodexReviewMCPServer
 
 private let logger = Logger(subsystem: "CodexReviewKit", category: "live-store-backend")
-package typealias ExternalURLOpener = @MainActor @Sendable (URL) throws -> Void
-public typealias CodexReviewAppServerLifecycleHandler = @MainActor @Sendable (CodexModelContainer?) -> Void
+private typealias ExternalURLOpener = @MainActor @Sendable (URL) -> Void
 
 private let defaultExternalURLOpener: ExternalURLOpener = { url in
-    guard NSWorkspace.shared.open(url) else {
-        throw CodexReviewAuthenticationFailure.urlOpen(url)
+    _ = NSWorkspace.shared.open(url)
+}
+
+private actor RuntimeShutdownCleanupRace {
+    private var result: Bool?
+    private var continuation: CheckedContinuation<Bool, Never>?
+
+    func finish(_ value: Bool) {
+        guard result == nil else {
+            return
+        }
+        result = value
+        continuation?.resume(returning: value)
+        continuation = nil
+    }
+
+    func wait() async -> Bool {
+        if let result {
+            return result
+        }
+        return await withCheckedContinuation { continuation in
+            if let result {
+                continuation.resume(returning: result)
+            } else {
+                self.continuation = continuation
+            }
+        }
     }
 }
 
-private enum RuntimeReviewCleanupMode {
-    case connected
-    case connectionTerminated
+private func runRuntimeShutdownCleanup(
+    timeout: Duration,
+    operation: @escaping @Sendable () async -> Void
+) async -> Bool {
+    let race = RuntimeShutdownCleanupRace()
+    let operationTask = Task {
+        await operation()
+        await race.finish(true)
+    }
+    let timeoutTask = Task {
+        do {
+            try await Task.sleep(for: timeout)
+        } catch {
+            return
+        }
+        await race.finish(false)
+    }
+    let result = await race.wait()
+    if result {
+        timeoutTask.cancel()
+    } else {
+        operationTask.cancel()
+    }
+    return result
+}
+
+private struct PendingLoginRuntimeCleanup {
+    var client: AppServerClient?
+    var codexHomeURL: URL?
+    var authenticationSession: (any CodexReviewNativeAuthentication.WebSession)?
+
+    var isEmpty: Bool {
+        client == nil && codexHomeURL == nil && authenticationSession == nil
+    }
 }
 
 package struct CodexReviewMCPPortOwner: Equatable, Sendable {
@@ -40,33 +93,11 @@ package typealias CodexReviewMCPHTTPServerBindChecker = @MainActor @Sendable (
     CodexReviewMCPHTTPServer.Configuration
 ) async throws -> Void
 
-package typealias CodexReviewAuthenticationMutationDidBegin = @Sendable () async -> Void
-package typealias CodexReviewAuthenticationOwnershipWillRelease = @MainActor @Sendable () async -> Void
-package typealias CodexReviewAuthenticationCancellationDidRequest = @Sendable () async -> Void
-package typealias CodexReviewAuthenticationProductCommitDidApply = @Sendable () async -> Void
-package typealias CodexReviewAuthenticationOperationDidBind = @Sendable () async -> Void
-package typealias CodexReviewAccountRegistryLoadDidBegin = @Sendable () async -> Void
-package typealias CodexReviewAppServerCloser = @MainActor @Sendable (CodexAppServer) async -> Void
-package typealias CodexReviewFinalRuntimeRetirementDidClaim = @MainActor @Sendable () async -> Void
-package typealias CodexReviewFinalShutdownDidRequest = @MainActor @Sendable () async -> Void
-package typealias CodexReviewReconciliationDebtDidClear = @MainActor @Sendable (CodexAppServer) async -> Void
-package typealias CodexReviewRegistryDestinationDidReplace = @Sendable () throws -> Void
-
 package protocol CodexReviewMCPHTTPServing: AnyObject, Sendable {
     var url: URL { get async }
 
     func start() async throws
-    func stage() async throws
-    func activate() async
     func stop() async
-}
-
-extension CodexReviewMCPHTTPServing {
-    package func stage() async throws {
-        try await start()
-    }
-
-    package func activate() async {}
 }
 
 extension CodexReviewMCPHTTPServer: CodexReviewMCPHTTPServing {}
@@ -76,127 +107,76 @@ public extension CodexReviewStore {
     static func makeLiveStore(
         runtimePreferences: CodexReviewRuntime.Preferences = .defaults,
         nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration? = nil,
-        appServerLifecycleHandler: CodexReviewAppServerLifecycleHandler? = nil
+        webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory = CodexReviewNativeAuthentication.WebSessions.system
     ) -> CodexReviewStore {
         CodexReviewStore(backend: LiveCodexReviewStoreBackend(
             runtimePreferences: runtimePreferences,
             nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
-            appServerLifecycleHandler: appServerLifecycleHandler
+            webAuthenticationSessionFactory: webAuthenticationSessionFactory
         ))
     }
 
     package static func makeLiveStoreForTesting(
         environment: [String: String],
         runtimePreferences: CodexReviewRuntime.Preferences = .defaults,
-        externalURLOpener: @escaping ExternalURLOpener = defaultExternalURLOpener,
         nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration? = nil,
-        webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory =
-            CodexReviewAuthenticationPresenter.systemWebSessionFactory,
+        webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory,
+        externalURLOpener: @escaping @MainActor @Sendable (URL) -> Void = defaultExternalURLOpener,
         mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
         mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
+        shutdownCleanupTimeout: Duration = .seconds(2),
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
         networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
-        appServer: CodexAppServer,
-        appServerLifecycleHandler: CodexReviewAppServerLifecycleHandler? = nil,
-        authenticationMutationDidBegin: CodexReviewAuthenticationMutationDidBegin? = nil,
-        authenticationOwnershipWillRelease: CodexReviewAuthenticationOwnershipWillRelease? = nil,
-        authenticationCancellationDidRequest: CodexReviewAuthenticationCancellationDidRequest? = nil,
-        authenticationProductCommitDidApply: CodexReviewAuthenticationProductCommitDidApply? = nil,
-        authenticationOperationDidBind: CodexReviewAuthenticationOperationDidBind? = nil,
-        accountRegistryLoadDidBegin: CodexReviewAccountRegistryLoadDidBegin? = nil,
-        finalRuntimeRetirementDidClaim: CodexReviewFinalRuntimeRetirementDidClaim? = nil,
-        finalShutdownDidRequest: CodexReviewFinalShutdownDidRequest? = nil,
-        reconciliationDebtDidClear: CodexReviewReconciliationDebtDidClear? = nil,
-        registryDestinationDidReplace: CodexReviewRegistryDestinationDidReplace? = nil,
-        appServerCloser: @escaping CodexReviewAppServerCloser = { await $0.close() }
+        transport: any JSONRPC.Transport
     ) -> CodexReviewStore {
         makeLiveStoreForTesting(
             environment: environment,
             runtimePreferences: runtimePreferences,
-            externalURLOpener: externalURLOpener,
             nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
             webAuthenticationSessionFactory: webAuthenticationSessionFactory,
+            externalURLOpener: externalURLOpener,
             mcpPortOwnerResolver: mcpPortOwnerResolver,
             mcpHTTPServerBindChecker: mcpHTTPServerBindChecker,
+            shutdownCleanupTimeout: shutdownCleanupTimeout,
             networkMonitor: networkMonitor,
             networkRecoveryPolicy: networkRecoveryPolicy,
-            appServerLifecycleHandler: appServerLifecycleHandler,
-            authenticationMutationDidBegin: authenticationMutationDidBegin,
-            authenticationOwnershipWillRelease: authenticationOwnershipWillRelease,
-            authenticationCancellationDidRequest: authenticationCancellationDidRequest,
-            authenticationProductCommitDidApply: authenticationProductCommitDidApply,
-            authenticationOperationDidBind: authenticationOperationDidBind,
-            accountRegistryLoadDidBegin: accountRegistryLoadDidBegin,
-            finalRuntimeRetirementDidClaim: finalRuntimeRetirementDidClaim,
-            finalShutdownDidRequest: finalShutdownDidRequest,
-            reconciliationDebtDidClear: reconciliationDebtDidClear,
-            registryDestinationDidReplace: registryDestinationDidReplace,
-            appServerCloser: appServerCloser,
-            appServerFactory: { _ in appServer }
+            transportFactory: { _ in transport }
         )
     }
 
     package static func makeLiveStoreForTesting(
         environment: [String: String],
         runtimePreferences: CodexReviewRuntime.Preferences = .defaults,
-        externalURLOpener: @escaping ExternalURLOpener = defaultExternalURLOpener,
         nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration? = nil,
-        webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory =
-            CodexReviewAuthenticationPresenter.systemWebSessionFactory,
+        webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory,
+        externalURLOpener: @escaping @MainActor @Sendable (URL) -> Void = defaultExternalURLOpener,
         mcpHTTPServerFactory: (@MainActor @Sendable (
             CodexReviewStore,
-            CodexReviewMCPHTTPServer.Configuration,
-            ReviewMCPLogProjectionProvider?
+            CodexReviewMCPHTTPServer.Configuration
         ) -> any CodexReviewMCPHTTPServing)? = nil,
         mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
         mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
+        shutdownCleanupTimeout: Duration = .seconds(2),
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
         networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
-        appServerLifecycleHandler: CodexReviewAppServerLifecycleHandler? = nil,
-        authenticationMutationDidBegin: CodexReviewAuthenticationMutationDidBegin? = nil,
-        authenticationOwnershipWillRelease: CodexReviewAuthenticationOwnershipWillRelease? = nil,
-        authenticationCancellationDidRequest: CodexReviewAuthenticationCancellationDidRequest? = nil,
-        authenticationProductCommitDidApply: CodexReviewAuthenticationProductCommitDidApply? = nil,
-        authenticationOperationDidBind: CodexReviewAuthenticationOperationDidBind? = nil,
-        accountRegistryLoadDidBegin: CodexReviewAccountRegistryLoadDidBegin? = nil,
-        finalRuntimeRetirementDidClaim: CodexReviewFinalRuntimeRetirementDidClaim? = nil,
-        finalShutdownDidRequest: CodexReviewFinalShutdownDidRequest? = nil,
-        reconciliationDebtDidClear: CodexReviewReconciliationDebtDidClear? = nil,
-        registryDestinationDidReplace: CodexReviewRegistryDestinationDidReplace? = nil,
-        appServerCloser: @escaping CodexReviewAppServerCloser = { await $0.close() },
-        appServerFactory: @escaping @MainActor @Sendable (URL) async throws -> CodexAppServer
+        transportFactory: @escaping @MainActor @Sendable (URL) async throws -> any JSONRPC.Transport
     ) -> CodexReviewStore {
         CodexReviewStore(
             backend: LiveCodexReviewStoreBackend(
                 environment: environment,
                 runtimePreferences: runtimePreferences,
-                externalURLOpener: externalURLOpener,
                 nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
                 webAuthenticationSessionFactory: webAuthenticationSessionFactory,
+                externalURLOpener: externalURLOpener,
                 mcpHTTPServerFactory: mcpHTTPServerFactory,
                 mcpPortOwnerResolver: mcpPortOwnerResolver,
                 mcpHTTPServerBindChecker: mcpHTTPServerBindChecker,
-                appServerLifecycleHandler: appServerLifecycleHandler,
-                authenticationMutationDidBegin: authenticationMutationDidBegin,
-                authenticationOwnershipWillRelease: authenticationOwnershipWillRelease,
-                authenticationCancellationDidRequest: authenticationCancellationDidRequest,
-                authenticationProductCommitDidApply: authenticationProductCommitDidApply,
-                authenticationOperationDidBind: authenticationOperationDidBind,
-                accountRegistryLoadDidBegin: accountRegistryLoadDidBegin,
-                finalRuntimeRetirementDidClaim: finalRuntimeRetirementDidClaim,
-                finalShutdownDidRequest: finalShutdownDidRequest,
-                reconciliationDebtDidClear: reconciliationDebtDidClear,
-                registryDestinationDidReplace: registryDestinationDidReplace,
-                appServerCloser: appServerCloser,
+                shutdownCleanupTimeout: shutdownCleanupTimeout,
                 appServerRuntimeFactory: { codexHomeURL in
-                    let appServer = try await appServerFactory(codexHomeURL)
-                    let modelContainer = CodexModelContainer(appServer: appServer)
+                    let client = AppServerClient(transport: try await transportFactory(codexHomeURL))
                     return .init(
-                        appServer: appServer,
-                        modelContainer: modelContainer,
-                        backend: AppServerCodexReviewBackend(
-                            modelContainer: modelContainer
-                        )
+                        client: client,
+                        backend: AppServerCodexReviewBackend(client: client)
                     )
                 }
             ),
@@ -210,206 +190,52 @@ public extension CodexReviewStore {
 private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     typealias MCPHTTPServerFactory = @MainActor @Sendable (
         CodexReviewStore,
-        CodexReviewMCPHTTPServer.Configuration,
-        ReviewMCPLogProjectionProvider?
+        CodexReviewMCPHTTPServer.Configuration
     ) -> any CodexReviewMCPHTTPServing
-
-    private enum RuntimePublicationOwner {
-        case explicit(AccountRuntimeTransitionCoordinator.ExplicitRuntimeStart)
-        case account(AccountRuntimeTransitionCoordinator.AccountTransition)
-        case primary(AccountRuntimeTransitionCoordinator.PrimaryReconciliationReservation)
-    }
-
-    private enum RuntimeStartMode {
-        case published(owner: RuntimePublicationOwner)
-        case quiescentReconciliation
-
-        var explicitStart: AccountRuntimeTransitionCoordinator.ExplicitRuntimeStart? {
-            guard case .published(.explicit(let explicitStart)) = self else {
-                return nil
-            }
-            return explicitStart
-        }
-
-        var requestsPublication: Bool {
-            if case .published = self {
-                return true
-            }
-            return false
-        }
-
-        var publishesAuthenticationTerminalPhase: Bool {
-            guard case .published(let owner) = self else {
-                return false
-            }
-            if case .primary = owner {
-                return false
-            }
-            return true
-        }
-    }
-
-    private struct LoginSessionResolution {
-        let terminal: LoginSessionTerminal
-        let terminalPhase: CodexReviewAuthModel.Phase?
-    }
-
-    private enum RuntimeAuthReconciliationCause {
-        case manualRefresh
-        case accountUpdated
-    }
-
-    private enum ActiveRateLimitRefreshFailure: Error {
-        case staleAccountIdentity
-    }
-
-    private enum ChatGPTLoginWaitEvent: Sendable {
-        case login(LoginRootObservation)
-        case presentation(CodexReviewNativeAuthentication.PresentationEvent?)
-    }
-
-    @MainActor
-    private final class AccountMutationContext {
-        let lease: AccountRegistryStore.MutationLease
-        let before: AccountRegistryStore.Snapshot
-        private(set) var recoveryExpectation: ExpectedRuntimeAccount
-        private let admittedRuntimeGeneration: UInt64?
-        private let admittedRuntimeInvalidationRevision: UInt64?
-        private var recoversAdmittedRuntime = true
-
-        init(
-            _ mutation: AccountRegistryStore.AccountMutation,
-            admittedRuntimeGeneration: UInt64?,
-            admittedRuntimeInvalidationRevision: UInt64?
-        ) {
-            lease = mutation.lease
-            before = mutation.before
-            recoveryExpectation = mutation.before.expectedRuntimeAccount
-            self.admittedRuntimeGeneration = admittedRuntimeGeneration
-            self.admittedRuntimeInvalidationRevision = admittedRuntimeInvalidationRevision
-        }
-
-        func expectRecovery(_ expectation: ExpectedRuntimeAccount) {
-            recoveryExpectation = expectation
-            recoversAdmittedRuntime = false
-        }
-
-        func expectBeforeRecovery() {
-            recoveryExpectation = before.expectedRuntimeAccount
-            recoversAdmittedRuntime = true
-        }
-
-        func expectationForUnconfirmedMutation(
-            currentRuntimeSession: HostRuntimeSession?
-        ) -> ExpectedRuntimeAccount {
-            guard recoversAdmittedRuntime,
-                  let admittedRuntimeGeneration,
-                  let admittedRuntimeInvalidationRevision else {
-                return recoveryExpectation
-            }
-            guard currentRuntimeSession?.generation == admittedRuntimeGeneration,
-                  currentRuntimeSession?.accountInvalidationRevision
-                    == admittedRuntimeInvalidationRevision else {
-                return .reconcileCurrentRuntime
-            }
-            return recoveryExpectation
-        }
-    }
 
     let seed: CodexReviewStoreSeed
 
-    private var runtimeSession: HostRuntimeSession?
-    private var nextRuntimeGeneration: UInt64 = 1
-    private var loginSession: LoginSession?
-    private var primaryLoginAdmission: (
-        generationID: UUID,
-        admission: AccountRuntimeTransitionCoordinator.LoginAdmission
-    )?
-    private var activePrimaryAuthenticationReconciliation: (
-        loginGenerationID: UUID,
-        finalResult: LoginFinalResultCompletion
-    )?
-    private var pendingRuntimeRestart: (
-        admission: CodexReviewRuntimeRestartAdmission,
-        start: AccountRuntimeTransitionCoordinator.ExplicitRuntimeStart
-    )?
-    private var pendingRuntimeAuthDrainTask: Task<Void, Never>?
-    private var pendingRuntimeAuthDrainRequestRevision: UInt64 = 0
-    private var runtimeStopFollowups: [UInt64: Task<Void, Never>] = [:]
+    private var client: AppServerClient?
+    private var appServerBackend: AppServerCodexReviewBackend?
+    private var mcpHTTPServer: (any CodexReviewMCPHTTPServing)?
+    private var loginChallenge: CodexReviewBackendModel.Login.Challenge?
+    private var loginBackend: AppServerCodexReviewBackend?
+    private var loginClient: AppServerClient?
+    private var loginCodexHomeURL: URL?
+    private var loginActivation: LoginActivation = .activateAuthenticatedAccount
+    private var isWaitingForLoginAccountUpdate = false
+    private var activeAuthenticationSession: (any CodexReviewNativeAuthentication.WebSession)?
+    private var authenticationTask: Task<Void, Never>?
+    private var authNotificationTask: Task<Void, Never>?
+    private var loginNotificationTask: Task<Void, Never>?
     private var settingsSnapshot = CodexReviewSettings.Snapshot()
     private let codexHomeURL: URL
     private let mcpHTTPServerConfiguration: CodexReviewMCPHTTPServer.Configuration
-    private let authenticationPresenter: CodexReviewAuthenticationPresenter
+    private let nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration?
+    private let webAuthenticationSessionFactory: CodexReviewNativeAuthentication.WebSessionFactory
+    private let externalURLOpener: ExternalURLOpener
     private let mcpHTTPServerFactory: MCPHTTPServerFactory?
     private let mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver
     private let mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker
     private let appServerRuntimeFactory: AppServerRuntimeFactory
-    private let appServerCloser: CodexReviewAppServerCloser
-    private let authenticationOwnershipWillRelease: CodexReviewAuthenticationOwnershipWillRelease?
-    private let authenticationOperationDidBind: CodexReviewAuthenticationOperationDidBind?
-    private let finalRuntimeRetirementDidClaim: CodexReviewFinalRuntimeRetirementDidClaim?
-    private let reconciliationDebtDidClear: CodexReviewReconciliationDebtDidClear?
-    private let accountRegistry: AccountRegistryStore
-    private let accountRuntimeTransitionCoordinator: AccountRuntimeTransitionCoordinator
-    private let registryLoadFailure: CodexReviewAuthenticationFailure?
-    private let appServerLifecycleHandler: CodexReviewAppServerLifecycleHandler?
+    private let shutdownCleanupTimeout: Duration
     private weak var attachedStore: CodexReviewStore?
-
-    private var appServer: CodexAppServer? {
-        runtimeSession?.activeRuntime?.appServer
-    }
-
-    private var appServerBackend: AppServerCodexReviewBackend? {
-        runtimeSession?.activeRuntime?.backend
-    }
-
-    private var teardownAppServerBackend: AppServerCodexReviewBackend? {
-        runtimeSession?.runtime?.backend
-    }
-
-    private func quiesceRuntimeAdmissionForAccountTransition() async {
-        guard let session = runtimeSession else {
-            return
-        }
-        session.closeAdmission()
-        await accountRegistry.closeRuntimeAdmission(generation: session.generation)
-        await session.mcpHTTPServer?.stop()
-    }
-
-    private var mcpHTTPServer: (any CodexReviewMCPHTTPServing)? {
-        runtimeSession?.activeMCPHTTPServer
-    }
 
     init(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         runtimePreferences: CodexReviewRuntime.Preferences = .defaults,
-        externalURLOpener: @escaping ExternalURLOpener = defaultExternalURLOpener,
         nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration? = nil,
-        webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory =
-            CodexReviewAuthenticationPresenter.systemWebSessionFactory,
-        mcpHTTPServerFactory: MCPHTTPServerFactory? = { store, configuration, logProjectionProvider in
+        webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory = CodexReviewNativeAuthentication.WebSessions.system,
+        externalURLOpener: @escaping ExternalURLOpener = defaultExternalURLOpener,
+        mcpHTTPServerFactory: MCPHTTPServerFactory? = { store, configuration in
             CodexReviewMCPHTTPServer(
-                adapter: CodexReviewMCPServer(
-                    store: store,
-                    logProjectionProvider: logProjectionProvider
-                ),
+                adapter: CodexReviewMCPServer(store: store),
                 configuration: configuration
             )
         },
         mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
         mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
-        appServerLifecycleHandler: CodexReviewAppServerLifecycleHandler? = nil,
-        authenticationMutationDidBegin: CodexReviewAuthenticationMutationDidBegin? = nil,
-        authenticationOwnershipWillRelease: CodexReviewAuthenticationOwnershipWillRelease? = nil,
-        authenticationCancellationDidRequest: CodexReviewAuthenticationCancellationDidRequest? = nil,
-        authenticationProductCommitDidApply: CodexReviewAuthenticationProductCommitDidApply? = nil,
-        authenticationOperationDidBind: CodexReviewAuthenticationOperationDidBind? = nil,
-        accountRegistryLoadDidBegin: CodexReviewAccountRegistryLoadDidBegin? = nil,
-        finalRuntimeRetirementDidClaim: CodexReviewFinalRuntimeRetirementDidClaim? = nil,
-        finalShutdownDidRequest: CodexReviewFinalShutdownDidRequest? = nil,
-        reconciliationDebtDidClear: CodexReviewReconciliationDebtDidClear? = nil,
-        registryDestinationDidReplace: CodexReviewRegistryDestinationDidReplace? = nil,
-        appServerCloser: @escaping CodexReviewAppServerCloser = { await $0.close() },
+        shutdownCleanupTimeout: Duration = .seconds(2),
         appServerRuntimeFactory: AppServerRuntimeFactory? = nil
     ) {
         let runtimePreferences = runtimePreferences.normalized
@@ -417,79 +243,36 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             runtimePreferences: runtimePreferences,
             environment: environment
         )
-        accountRegistry = AccountRegistryStore(
-            codexHomeURL: codexHomeURL,
-            authenticationMutationDidBegin: authenticationMutationDidBegin,
-            authenticationCancellationDidRequest: authenticationCancellationDidRequest,
-            authenticationProductCommitDidApply: authenticationProductCommitDidApply,
-            registryDestinationDidReplace: registryDestinationDidReplace,
-            loadDidBegin: accountRegistryLoadDidBegin
-        )
-        accountRuntimeTransitionCoordinator = AccountRuntimeTransitionCoordinator(
-            finalShutdownDidRequest: finalShutdownDidRequest
-        )
         self.mcpHTTPServerConfiguration = .init(
             host: runtimePreferences.mcpHost,
             port: runtimePreferences.mcpPort,
             endpoint: runtimePreferences.mcpPath
         )
-        authenticationPresenter = CodexReviewAuthenticationPresenter(
-            configuration: nativeAuthenticationConfiguration,
-            webSessionFactory: webAuthenticationSessionFactory,
-            externalURLOpener: externalURLOpener
-        )
+        self.nativeAuthenticationConfiguration = nativeAuthenticationConfiguration
+        self.webAuthenticationSessionFactory = webAuthenticationSessionFactory
+        self.externalURLOpener = externalURLOpener
         self.mcpHTTPServerFactory = mcpHTTPServerFactory
         self.mcpPortOwnerResolver = mcpPortOwnerResolver ?? Self.defaultMCPPortOwnerResolver
         self.mcpHTTPServerBindChecker = mcpHTTPServerBindChecker ?? Self.defaultMCPHTTPServerBindChecker
-        self.appServerLifecycleHandler = appServerLifecycleHandler
-        self.appServerCloser = appServerCloser
-        self.authenticationOwnershipWillRelease = authenticationOwnershipWillRelease
-        self.authenticationOperationDidBind = authenticationOperationDidBind
-        self.finalRuntimeRetirementDidClaim = finalRuntimeRetirementDidClaim
-        self.reconciliationDebtDidClear = reconciliationDebtDidClear
+        self.shutdownCleanupTimeout = shutdownCleanupTimeout
         self.appServerRuntimeFactory = appServerRuntimeFactory ?? Self.makeAppServerRuntimeFactory(
             codexExecutablePath: runtimePreferences.codexExecutablePath
         )
-        let registry: AccountRegistryStore.Snapshot
-        do {
-            registry = try AccountRegistryStore.loadInitialSnapshot(codexHomeURL: codexHomeURL)
-            registryLoadFailure = nil
-        } catch let failure as CodexReviewAuthenticationFailure {
-            registry = .init(accounts: [], activeAccountKey: nil)
-            registryLoadFailure = failure
-        } catch {
-            registry = .init(accounts: [], activeAccountKey: nil)
-            registryLoadFailure = .persistenceInconsistent(message: error.localizedDescription)
-        }
+        let registry = CodexReviewAccountRegistry.load(
+            codexHomeURL: codexHomeURL
+        )
         seed = CodexReviewStoreSeed(
             shouldAutoStartEmbeddedServer: true,
-            initialAccounts: registry.accounts.map(makeCodexReviewAccount(from:)),
+            initialAccounts: registry.accounts,
             initialActiveAccountKey: registry.activeAccountKey
         )
-        accountRuntimeTransitionCoordinator.installDidBecomeIdle { [weak self] in
-            self?.schedulePendingRuntimeAuthDrain()
-        }
     }
 
     var isActive: Bool {
-        appServer != nil
+        client != nil
     }
 
-    var acceptsNewReviewOperations: Bool {
-        isActive
-            && runtimeSession?.hasCurrentAccountObservation == true
-            && accountRuntimeTransitionCoordinator.acceptsNewOperations
-    }
-
-    var reviewThreadRetentionCodexHomePath: String {
-        codexHomeURL.path
-    }
-
-    var reviewThreadRetentionJournalURL: URL? {
-        codexHomeURL.appendingPathComponent("review-thread-retention.json", isDirectory: false)
-    }
-
-    var invokesRuntimeStopReviewCleanupDuringStop: Bool {
+    var handlesActiveReviewStopCleanup: Bool {
         true
     }
 
@@ -504,32 +287,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         if let codexHomePath = runtimePreferences.codexHomePath {
             return URL(fileURLWithPath: codexHomePath, isDirectory: true)
         }
-        return defaultCodexReviewHomeURL(environment: environment)
-    }
-
-    private static func defaultCodexReviewHomeURL(
-        environment: [String: String],
-        homeDirectoryForCurrentUser: URL = FileManager.default.homeDirectoryForCurrentUser,
-        applicationSupportDirectory: URL? = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first
-    ) -> URL {
-        if let codexHome = environment["CODEX_HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines),
-           codexHome.isEmpty == false {
-            return URL(fileURLWithPath: codexHome, isDirectory: true)
-        }
-        if let home = environment["HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines),
-           home.isEmpty == false {
-            return URL(fileURLWithPath: home, isDirectory: true)
-                .appendingPathComponent(".codex_review", isDirectory: true)
-        }
-        if let applicationSupportDirectory {
-            return applicationSupportDirectory
-                .appendingPathComponent("CodexReviewMonitor", isDirectory: true)
-        }
-        return homeDirectoryForCurrentUser
-            .appendingPathComponent(".codex_review", isDirectory: true)
+        return AppServerCodexHome.url(environment: environment)
     }
 
     private static func defaultMCPPortOwnerResolver(
@@ -610,21 +368,24 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         codexExecutablePath: String?
     ) -> AppServerRuntimeFactory {
         { codexHomeURL in
-            let appServer = try await Task.detached(priority: .userInitiated) {
+            let processRuntime = try await Task.detached(priority: .userInitiated) {
                 // The configuration probe can wait on `codex app-server --help`; keep it off the MainActor.
-                try await CodexAppServer(configuration: .init(
-                    localProcess: .init(
-                        executable: codexExecutablePath,
-                        codexHomeURL: codexHomeURL
-                    )
-                ))
+                let configuration = AppServerProcessTransport.Configuration(
+                    executable: codexExecutablePath,
+                    codexHomeURL: codexHomeURL
+                )
+                let transport = try AppServerProcessTransport(configuration: configuration)
+                return AppServerProcessRuntime(
+                    transport: transport,
+                    threadStartPermissionStrategy: configuration.threadStartPermissionStrategy
+                )
             }.value
-            let modelContainer = CodexModelContainer(appServer: appServer)
+            let client = AppServerClient(transport: processRuntime.transport)
             return .init(
-                appServer: appServer,
-                modelContainer: modelContainer,
+                client: client,
                 backend: AppServerCodexReviewBackend(
-                    modelContainer: modelContainer
+                    client: client,
+                    threadStartPermissionStrategy: processRuntime.threadStartPermissionStrategy
                 )
             )
         }
@@ -634,465 +395,53 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         attachedStore = store
     }
 
-    func beginRuntimeRestart() -> CodexReviewRuntimeRestartAdmission? {
-        guard loginSession == nil,
-              pendingRuntimeRestart == nil,
-              let start = accountRuntimeTransitionCoordinator.prepareForExplicitRuntimeStart() else {
-            return nil
-        }
-        let admission = CodexReviewRuntimeRestartAdmission()
-        pendingRuntimeRestart = (admission, start)
-        return admission
-    }
-
-    func resumeRuntimeRestart(
-        store: CodexReviewStore,
-        admission: CodexReviewRuntimeRestartAdmission
-    ) async {
-        guard let pendingRuntimeRestart,
-              pendingRuntimeRestart.admission == admission else {
-            return
-        }
-        self.pendingRuntimeRestart = nil
-        await start(
-            store: store,
-            forceRestartIfNeeded: true,
-            explicitStart: pendingRuntimeRestart.start
-        )
-    }
-
-    func claimRuntimeRestart(_ admission: CodexReviewRuntimeRestartAdmission) -> Bool {
-        guard let pendingRuntimeRestart,
-              pendingRuntimeRestart.admission == admission else {
-            return false
-        }
-        guard accountRuntimeTransitionCoordinator.shouldStageExplicitRuntimeStart(
-            pendingRuntimeRestart.start
-        ) else {
-            self.pendingRuntimeRestart = nil
-            accountRuntimeTransitionCoordinator.finishExplicitRuntimeStart(
-                pendingRuntimeRestart.start,
-                didCommitActiveRuntime: false
-            )
-            return false
-        }
-        return true
-    }
-
     func start(store: CodexReviewStore, forceRestartIfNeeded: Bool) async {
-        guard loginSession == nil,
-              pendingRuntimeRestart == nil else {
-            logger.info("Rejecting a Host runtime start while authentication owns the active runtime")
-            if let session = runtimeSession, session.isActive {
-                store.transitionToRunning(serverURL: await session.activeMCPHTTPServer?.url)
-            } else {
-                store.transitionToFailed("Authentication is already in progress.")
-            }
-            return
-        }
-        guard let explicitStart = accountRuntimeTransitionCoordinator.prepareForExplicitRuntimeStart() else {
-            if accountRuntimeTransitionCoordinator.isFinalShutdownRequested == false,
-               let session = runtimeSession,
-               session.isActive {
-                store.transitionToRunning(serverURL: await session.activeMCPHTTPServer?.url)
-            } else {
-                store.transitionToFailed("The previous final shutdown has not completed.")
-            }
-            return
-        }
-        await start(
-            store: store,
-            forceRestartIfNeeded: forceRestartIfNeeded,
-            explicitStart: explicitStart
-        )
-    }
-
-    private func start(
-        store: CodexReviewStore,
-        forceRestartIfNeeded: Bool,
-        explicitStart: AccountRuntimeTransitionCoordinator.ExplicitRuntimeStart
-    ) async {
-        let didStart = await startRuntime(
-            store: store,
-            forceRestartIfNeeded: forceRestartIfNeeded,
-            expectedAccount: nil,
-            mode: .published(owner: .explicit(explicitStart)),
-            registryAuthorization: nil,
-            accountSnapshotForPublication: nil
-        )
-        let didCommitActiveRuntime = didStart && runtimeSession?.isActive == true
-        if didStart == false {
-            do {
-                if try await accountRegistry.reconciliationDebtExpectation() != nil {
-                    _ = accountRuntimeTransitionCoordinator.commitExplicitRuntimeStartFailure(explicitStart)
-                }
-            } catch {
-                let failure = (error as? CodexReviewAuthenticationFailure)
-                    ?? .persistenceInconsistent(message: error.localizedDescription)
-                if accountRuntimeTransitionCoordinator.commitExplicitRuntimeStartFailure(explicitStart) {
-                    store.auth.updatePhase(.failed(failure))
-                    store.transitionToFailed(failure.localizedDescription)
-                }
-            }
-        }
-        accountRuntimeTransitionCoordinator.finishExplicitRuntimeStart(
-            explicitStart,
-            didCommitActiveRuntime: didCommitActiveRuntime
-        )
-    }
-
-    private func startRuntime(
-        store: CodexReviewStore,
-        forceRestartIfNeeded: Bool,
-        expectedAccount: ExpectedRuntimeAccount?,
-        mode: RuntimeStartMode,
-        registryAuthorization: AccountRegistryStore.MutationLease?,
-        accountSnapshotForPublication: AccountRegistryStore.Snapshot?
-    ) async -> Bool {
         logger.info("Starting review runtime; forceRestartIfNeeded=\(forceRestartIfNeeded, privacy: .public)")
-        if let registryLoadFailure {
-            if shouldPublishRuntimeState(mode: mode) {
-                if mode.publishesAuthenticationTerminalPhase {
-                    store.auth.updatePhase(.failed(registryLoadFailure))
-                }
-                store.transitionToFailed(registryLoadFailure.localizedDescription)
-            }
-            return false
-        }
-        if let session = runtimeSession,
-           session.isActive,
-           forceRestartIfNeeded == false,
-           mode.explicitStart.map({
-               accountRuntimeTransitionCoordinator.explicitRuntimeStartRequiresRepair($0)
-           }) != true {
-            guard claimRuntimePublicationCommit(mode: mode) else {
-                return false
-            }
+        if appServerBackend != nil, forceRestartIfNeeded == false {
             logger.info("Review runtime already has an app-server backend")
-            if shouldPublishRuntimeState(mode: mode) {
-                store.transitionToRunning(serverURL: await mcpHTTPServer?.url)
-            }
-            return true
-        }
-        if let session = runtimeSession {
-            if case .stopIncomplete = session.phase {
-                if shouldPublishRuntimeState(mode: mode) {
-                    store.transitionToFailed(
-                        "Review thread retention recovery is quarantined; the previous runtime cannot be replaced."
-                    )
-                }
-                return false
-            }
-            await stop(store: store, purpose: .runtimeRestartPreservingRuns)
-            guard runtimeSession == nil else {
-                if shouldPublishRuntimeState(mode: mode) {
-                    store.transitionToFailed("The previous review runtime did not finish stopping.")
-                }
-                return false
-            }
-        }
-        if mode.explicitStart != nil,
-           shouldStageRuntimePublication(mode: mode) == false {
-            logger.info("Skipping a superseded runtime start before creating replacement resources")
-            return false
-        }
-
-        precondition(nextRuntimeGeneration < .max, "Host runtime generations must not wrap.")
-        let session = HostRuntimeSession(
-            generation: nextRuntimeGeneration,
-            lifecycleHandler: appServerLifecycleHandler,
-            finalRetirementDidClaim: finalRuntimeRetirementDidClaim
-        )
-        nextRuntimeGeneration += 1
-        runtimeSession = session
-        var clearedDebtExpectation: ExpectedRuntimeAccount?
-        do {
-            let persistedDebtExpectation = try await accountRegistry.reconciliationDebtExpectation()
-            let validationExpectation = expectedAccount ?? persistedDebtExpectation
-            let runtime = try await appServerRuntimeFactory(codexHomeURL)
-            guard runtimeSession === session else {
-                await appServerCloser(runtime.appServer)
-                return false
-            }
-            do {
-                try session.requireHealthyStaging()
-            } catch {
-                await appServerCloser(runtime.appServer)
-                return false
-            }
-            session.installRuntime(runtime)
-            let appServer = runtime.appServer
-            let backend = runtime.backend
-            let modelContainer = runtime.modelContainer
-            try await installRuntimeConsumers(
-                session: session,
-                appServer: appServer,
-                store: store
-            )
-            switch await store.recoverOrphanedReviewThreads() {
-            case .recovered, .cleanupIncomplete:
-                break
-            case .journalUnavailable(let message):
-                throw ReviewBackendFailure.retentionJournal(message: message)
-            }
-            try requireCurrentStagingSession(session)
-            if shouldStageRuntimePublication(mode: mode),
-               let mcpHTTPServerFactory {
-                try await mcpHTTPServerBindChecker(mcpHTTPServerConfiguration)
-                try requireCurrentStagingSession(session)
-                let logProjectionProvider = CodexReviewMCPServer.chatLogProjectionProvider(
-                    modelContext: modelContainer.mainContext
-                )
-                let mcpHTTPServer = mcpHTTPServerFactory(
-                    store,
-                    mcpHTTPServerConfiguration,
-                    logProjectionProvider
-                )
-                session.installMCPHTTPServer(mcpHTTPServer)
-                try await mcpHTTPServer.stage()
-            }
-            try requireCurrentStagingSession(session)
-            let serverURL = await session.mcpHTTPServer?.url
-            try requireCurrentStagingSession(session)
-            var pendingDebtExpectation = persistedDebtExpectation
-            while true {
-                let authResolution = try await reconcileStagingRuntimeAuthentication(
-                    session: session,
-                    backend: backend,
-                    validationExpectation: validationExpectation,
-                    registryAuthorization: registryAuthorization,
-                    accountSnapshotForPublication: accountSnapshotForPublication
-                )
-                if let debtExpectation = pendingDebtExpectation {
-                    clearedDebtExpectation = debtExpectation
-                    try await accountRegistry.clearReconciliationDebt()
-                    await reconciliationDebtDidClear?(appServer)
-                    try requireCurrentStagingSession(session)
-                    pendingDebtExpectation = nil
-                }
-                try requireCurrentStagingSession(session)
-                guard session.accountInvalidationRevision == authResolution.revision else {
-                    continue
-                }
-                guard mode.requestsPublication else {
-                    session.recordAccountObservation(
-                        authResolution.observation,
-                        revision: authResolution.revision
-                    )
-                    logger.info("Review runtime staged for final account-transition cleanup")
-                    return true
-                }
-                guard shouldStageRuntimePublication(mode: mode) else {
-                    session.recordAccountObservation(
-                        authResolution.observation,
-                        revision: authResolution.revision
-                    )
-                    logger.info("Review runtime publication was superseded after debt reconciliation")
-                    if mode.explicitStart != nil {
-                        await discardStagingRuntime(session, store: store)
-                        return false
-                    }
-                    return true
-                }
-                await accountRegistry.openRuntimeAdmission(generation: session.generation)
-                do {
-                    try requireCurrentStagingSession(session)
-                } catch {
-                    await accountRegistry.closeRuntimeAdmission(generation: session.generation)
-                    throw error
-                }
-                guard session.accountInvalidationRevision == authResolution.revision else {
-                    await accountRegistry.closeRuntimeAdmission(generation: session.generation)
-                    continue
-                }
-                session.recordAccountObservation(
-                    authResolution.observation,
-                    revision: authResolution.revision
-                )
-                guard claimRuntimePublicationCommit(mode: mode) else {
-                    await accountRegistry.closeRuntimeAdmission(generation: session.generation)
-                    logger.info("Review runtime publication was superseded at its commit point")
-                    if mode.explicitStart != nil {
-                        await discardStagingRuntime(session, store: store)
-                        return false
-                    }
-                    return true
-                }
-                session.commit()
-                if shouldPublishRuntimeState(mode: mode),
-                   let reconciledAccountSnapshot = authResolution.persisted {
-                    applyAccountRegistrySnapshot(reconciledAccountSnapshot, to: store.auth)
-                    if mode.publishesAuthenticationTerminalPhase {
-                        store.auth.updatePhase(.signedOut)
-                    }
-                }
-                store.transitionToRunning(serverURL: serverURL)
-                await session.mcpHTTPServer?.activate()
-                guard runtimeSession === session, session.isActive else {
-                    return false
-                }
-                await refreshSelectedAccountRateLimits(auth: store.auth)
-                logger.info("Review runtime started")
-                return true
-            }
-        } catch {
-            if let clearedDebtExpectation {
-                do {
-                    try await accountRegistry.recordReconciliationDebt(
-                        expectedAccount: clearedDebtExpectation,
-                        message: "Runtime validation failed after reconciliation debt was cleared: \(error.localizedDescription)"
-                    )
-                } catch {
-                    preconditionFailure(
-                        "A failed debt-repair runtime must durably restore reconciliation debt: \(error.localizedDescription)"
-                    )
-                }
-            }
-            let ownsStagingFailure = runtimeSession === session && session.isStaging
-            guard ownsStagingFailure else {
-                _ = await session.waitForStopCompletion()
-                logger.debug("Ignoring a late startup result from a stopped or superseded Host runtime generation")
-                return false
-            }
-            let failureMessage = await runtimeStartupFailureMessage(for: error)
-            guard runtimeSession === session, session.isStaging else {
-                _ = await session.waitForStopCompletion()
-                logger.debug("Ignoring a late startup failure from a stopped Host runtime generation")
-                return false
-            }
-            logger.error("Review runtime failed to start: \(failureMessage, privacy: .public)")
-            let stopTask = session.requestStop(purpose: .runtimeRestartPreservingRuns) { session in
-                await self.accountRegistry.closeRuntimeAdmission(generation: session.generation)
-                return await self.performRuntimeStop(
-                    session: session,
-                    store: store,
-                    reviewCleanupMode: .connected,
-                    reviewCancellation: .system(message: "Review runtime staging failed."),
-                    loginTerminationReason: .runtimeFailure(.runtime(message: failureMessage))
-                )
-            }
-            if let stopTask, await stopTask.value.didReleaseResources == false {
-                return false
-            }
-            if runtimeSession === session {
-                runtimeSession = nil
-                if shouldPublishRuntimeState(mode: mode) {
-                    store.transitionToFailed(failureMessage)
-                }
-            }
-            return false
-        }
-    }
-
-    private func requireCurrentStagingSession(_ session: HostRuntimeSession) throws {
-        guard runtimeSession === session else {
-            throw HostRuntimeConsumerFailure(message: "The Host runtime staging generation was superseded.")
-        }
-        try session.requireHealthyStaging()
-    }
-
-    private func reconcileStagingRuntimeAuthentication(
-        session: HostRuntimeSession,
-        backend: AppServerCodexReviewBackend,
-        validationExpectation: ExpectedRuntimeAccount?,
-        registryAuthorization: AccountRegistryStore.MutationLease?,
-        accountSnapshotForPublication: AccountRegistryStore.Snapshot?
-    ) async throws -> (
-        revision: UInt64,
-        observation: RuntimeAccountObservation,
-        persisted: AccountRegistryStore.Snapshot?
-    ) {
-        while true {
-            try requireCurrentStagingSession(session)
-            let revision = session.accountInvalidationRevision
-            let authSnapshot = try await backend.readAuth()
-            try requireCurrentStagingSession(session)
-            guard session.accountInvalidationRevision == revision else {
-                continue
-            }
-            let observation = runtimeAccountObservation(from: authSnapshot)
-            if let validationExpectation {
-                try validateRuntimeAccount(authSnapshot, expected: validationExpectation)
-            }
-            let persisted: AccountRegistryStore.Snapshot?
-            if let accountSnapshotForPublication {
-                persisted = accountSnapshotForPublication
-            } else if shouldReconcileRuntimeAuthSnapshot(
-                expectation: validationExpectation,
-                observation: observation
-            ) {
-                persisted = try await reconcileAuthSnapshotSerialized(
-                    authSnapshot,
-                    authorization: registryAuthorization
-                ).persisted
-            } else {
-                persisted = try await accountRegistry.load()
-            }
-            try requireCurrentStagingSession(session)
-            guard session.accountInvalidationRevision == revision else {
-                continue
-            }
-            return (revision, observation, persisted)
-        }
-    }
-
-    private func discardStagingRuntime(
-        _ session: HostRuntimeSession,
-        store: CodexReviewStore
-    ) async {
-        guard runtimeSession === session, session.isStaging else {
+            store.transitionToRunning(serverURL: await mcpHTTPServer?.url)
             return
         }
-        let stopTask = session.requestStop(purpose: .runtimeRestartPreservingRuns) { session in
-            await self.accountRegistry.closeRuntimeAdmission(generation: session.generation)
-            return await self.performRuntimeStop(
-                session: session,
-                store: store,
-                reviewCleanupMode: .connected,
-                reviewCancellation: .system(message: "Review runtime publication was superseded."),
-                loginTerminationReason: .storeStop
-            )
+        if forceRestartIfNeeded {
+            await stop(store: store)
         }
-        let didReleaseResources = if let stopTask {
-            await stopTask.value.didReleaseResources
-        } else {
-            session.phase == .stopped
-        }
-        if didReleaseResources, runtimeSession === session {
-            runtimeSession = nil
-        }
-    }
 
-    private func shouldStageRuntimePublication(mode: RuntimeStartMode) -> Bool {
-        guard case .published(let owner) = mode else {
-            return false
+        var startedClient: AppServerClient?
+        var startedHTTPServer: (any CodexReviewMCPHTTPServing)?
+        do {
+            if mcpHTTPServerFactory != nil {
+                try await mcpHTTPServerBindChecker(mcpHTTPServerConfiguration)
+            }
+            let runtime = try await appServerRuntimeFactory(codexHomeURL)
+            let client = runtime.client
+            let backend = runtime.backend
+            startedClient = client
+            self.client = client
+            self.appServerBackend = backend
+            observeAuthNotifications(client: client, backend: backend, store: store)
+            if let mcpHTTPServerFactory {
+                let mcpHTTPServer = mcpHTTPServerFactory(store, mcpHTTPServerConfiguration)
+                try await mcpHTTPServer.start()
+                startedHTTPServer = mcpHTTPServer
+                self.mcpHTTPServer = mcpHTTPServer
+            }
+            store.transitionToRunning(serverURL: await self.mcpHTTPServer?.url)
+            let authSnapshot = try await backend.readAuth()
+            applyAuthSnapshot(authSnapshot, to: store.auth)
+            await refreshSelectedAccountRateLimits(auth: store.auth)
+            logger.info("Review runtime started")
+        } catch {
+            let failureMessage = await runtimeStartupFailureMessage(for: error)
+            logger.error("Review runtime failed to start: \(failureMessage, privacy: .public)")
+            await startedHTTPServer?.stop()
+            await startedClient?.close()
+            self.client = nil
+            self.appServerBackend = nil
+            self.mcpHTTPServer = nil
+            authNotificationTask?.cancel()
+            authNotificationTask = nil
+            store.transitionToFailed(failureMessage)
         }
-        switch owner {
-        case .explicit(let explicitStart):
-            return accountRuntimeTransitionCoordinator.shouldStageExplicitRuntimeStart(explicitStart)
-        case .account(let transition):
-            return accountRuntimeTransitionCoordinator.shouldStageRuntimePublication(transition)
-        case .primary(let reservation):
-            return accountRuntimeTransitionCoordinator.shouldStageRuntimePublication(reservation)
-        }
-    }
-
-    private func claimRuntimePublicationCommit(mode: RuntimeStartMode) -> Bool {
-        guard case .published(let owner) = mode else {
-            return false
-        }
-        switch owner {
-        case .explicit(let explicitStart):
-            return accountRuntimeTransitionCoordinator.claimExplicitRuntimeStartCommit(explicitStart)
-        case .account(let transition):
-            return accountRuntimeTransitionCoordinator.claimRuntimePublication(transition)
-        case .primary(let reservation):
-            return accountRuntimeTransitionCoordinator.claimRuntimePublication(reservation)
-        }
-    }
-
-    private func shouldPublishRuntimeState(mode: RuntimeStartMode) -> Bool {
-        mode.requestsPublication && shouldStageRuntimePublication(mode: mode)
     }
 
     private func runtimeStartupFailureMessage(for error: Error) async -> String {
@@ -1120,294 +469,65 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         return message
     }
 
-    private func cleanupActiveReviewsForRuntimeTeardown(
+    private func cancelActiveReviewsForRuntimeTeardown(
         store: CodexReviewStore,
         appServerBackend: AppServerCodexReviewBackend,
         reason: ReviewCancellation,
-        mode: RuntimeReviewCleanupMode
+        timeoutWarning: String
     ) async {
-        let cleanupResult = await store.cleanupActiveReviewsForRuntimeStop(reason: reason) { request in
-            switch mode {
-            case .connected:
-                await appServerBackend.cleanupActiveReviewsForShutdown(request)
-                return true
-            case .connectionTerminated:
-                await appServerBackend.cleanupActiveReviewsAfterConnectionTermination(request)
-                return true
-            }
+        let didInterrupt = await runRuntimeShutdownCleanup(timeout: shutdownCleanupTimeout) {
+            await appServerBackend.interruptActiveReviewsForShutdown(reason: .init(message: reason.message))
         }
-        precondition(cleanupResult.didComplete, "Runtime teardown must drain backend cleanup and review workers.")
+        let locallyCancelledJobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
+            reason: reason,
+            cancelWorkers: false
+        )
+        store.cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
+        let didDrainReviewWorkers = await store.drainReviewWorkersForRuntimeStop(
+            timeout: shutdownCleanupTimeout
+        )
+        if didInterrupt == false || didDrainReviewWorkers == false {
+            logger.warning("\(timeoutWarning, privacy: .public)")
+        }
     }
 
-    func stop(store: CodexReviewStore, purpose: CodexReviewRuntimeStopPurpose) async {
-        if purpose.retiresRuns {
-            _ = await accountRuntimeTransitionCoordinator.performFinalShutdown { [weak self, weak store] in
-                guard let self, let store else {
-                    return true
-                }
-                await self.stopRuntime(store: store, purpose: purpose)
-                return self.runtimeSession == nil
-            }
-            return
-        }
-        await stopRuntime(store: store, purpose: purpose)
-    }
-
-    private func stopRuntime(
-        store: CodexReviewStore,
-        purpose: CodexReviewRuntimeStopPurpose
-    ) async {
-        let session = runtimeSession
-        let loginSession = self.loginSession
-        guard let session else {
-            _ = await loginSession?.terminate(reason: .storeStop)
-            if purpose.retiresRuns,
-               store.reviewRuns.isEmpty == false,
-               await startRuntime(
-                    store: store,
-                    forceRestartIfNeeded: true,
-                    expectedAccount: nil,
-                    mode: .quiescentReconciliation,
-                    registryAuthorization: nil,
-                    accountSnapshotForPublication: nil
-               ) {
-                await stopRuntime(store: store, purpose: purpose)
-                return
-            }
-            if purpose.retiresRuns {
-                _ = await store.retireReviewRunsForFinalStoreStop()
-            }
+    func stop(store: CodexReviewStore) async {
+        let client = client
+        let appServerBackend = appServerBackend
+        let mcpHTTPServer = mcpHTTPServer
+        let hasRuntimeState = client != nil || appServerBackend != nil || mcpHTTPServer != nil
+        let loginCleanup = takeLoginRuntimeForCleanup()
+        guard hasRuntimeState || loginCleanup.isEmpty == false else {
             return
         }
         logger.info("Stopping review runtime")
-        session.closeAdmission()
-        let task = session.requestStop(purpose: purpose) { session in
-            await self.accountRegistry.closeRuntimeAdmission(generation: session.generation)
-            return await self.performRuntimeStop(
-                session: session,
-                store: store,
-                reviewCleanupMode: .connected,
-                reviewCancellation: .system(message: "Review runtime stopped."),
-                loginTerminationReason: .storeStop
-            )
-        }
-        if let task {
-            await installRuntimeStopFollowup(
-                stopTask: task,
-                session: session,
-                store: store
-            ).value
-            await session.waitForFinalRetirementClaim()
-        } else if let runtimeStopFollowup = runtimeStopFollowups[session.generation] {
-            await runtimeStopFollowup.value
-            await session.waitForFinalRetirementClaim()
-        }
-    }
-
-    private func installRuntimeStopFollowup(
-        stopTask: Task<HostRuntimeStopResult, Never>,
-        session: HostRuntimeSession,
-        store: CodexReviewStore
-    ) -> Task<Void, Never> {
-        if let runtimeStopFollowup = runtimeStopFollowups[session.generation] {
-            return runtimeStopFollowup
-        }
-        let generation = session.generation
-        let followupTask = Task { @MainActor [weak self, weak store] in
-            let result = await stopTask.value
-            await session.waitForFinalRetirementClaim()
-            guard let self else {
-                return
-            }
-            defer { self.runtimeStopFollowups.removeValue(forKey: generation) }
-            guard let store else {
-                return
-            }
-            if result.didReleaseResources, self.runtimeSession === session {
-                self.runtimeSession = nil
-            }
-            let handoff = result.didReleaseResources
-                ? session.takePrimaryAuthenticationHandoff(from: result)
-                : nil
-            guard result.didReleaseResources else {
-                return
-            }
-            await self.consumePrimaryAuthenticationHandoff(
-                handoff,
-                stoppedSession: session,
-                store: store
-            )
-            if handoff == nil,
-               result.didRetireRuns == false,
-               self.accountRuntimeTransitionCoordinator.isFinalShutdownRequested,
-               await self.startRuntime(
-                    store: store,
-                    forceRestartIfNeeded: true,
-                    expectedAccount: nil,
-                    mode: .quiescentReconciliation,
-                    registryAuthorization: nil,
-                    accountSnapshotForPublication: nil
-               ) {
-                await self.stopRuntime(
-                    store: store,
-                    purpose: .finalStoreShutdownRetiringRuns
-                )
-            }
-        }
-        runtimeStopFollowups[generation] = followupTask
-        return followupTask
-    }
-
-    private func consumePrimaryAuthenticationHandoff(
-        _ handoff: PrimaryAuthenticationReconciliationHandoff?,
-        stoppedSession: HostRuntimeSession,
-        store: CodexReviewStore
-    ) async {
-        guard let handoff else {
-            return
-        }
-        if loginSession?.generationID == handoff.loginGenerationID {
-            loginSession = nil
-        }
-        precondition(
-            runtimeSession !== stoppedSession,
-            "A primary authentication handoff can start replacement work only after the old runtime is detached."
-        )
-        await accountRuntimeTransitionCoordinator.performStoppedPrimaryReconciliation {
-            [weak self, weak store] reservation in
-            guard let self, let store else {
-                return nil
-            }
-            return await self.performPrimaryAuthenticationReconciliation(
-                handoff,
-                reservation: reservation,
-                auth: store.auth,
-                oldRuntimeAlreadyStopped: true
-            )
-        }
-        if accountRuntimeTransitionCoordinator.isFinalShutdownRequested,
-           runtimeSession != nil {
-            await stopRuntime(
-                store: store,
-                purpose: .finalStoreShutdownRetiringRuns
-            )
-        }
-    }
-
-    private func performRuntimeStop(
-        session: HostRuntimeSession,
-        store: CodexReviewStore,
-        reviewCleanupMode: RuntimeReviewCleanupMode,
-        reviewCancellation: ReviewCancellation,
-        loginTerminationReason: LoginTerminationReason
-    ) async -> HostRuntimeStopResult {
-        let runtime = session.runtime
-        await session.mcpHTTPServer?.stop()
-        var didRetainPreparedRestarts = true
-        if let appServerBackend = runtime?.backend {
-            let retainedAttemptsByRunID = await appServerBackend.discardAllPreparedReviewRestarts(
-                ownedAttemptsByRunID: store.runtimeStopReviewAttemptOwners()
-            )
-            didRetainPreparedRestarts = await store.retainPreparedRestartAttemptsForRuntimeStop(
-                retainedAttemptsByRunID
-            )
-            await cleanupActiveReviewsForRuntimeTeardown(
+        if let appServerBackend {
+            let reason = ReviewCancellation.system(message: "Review runtime stopped.")
+            await cancelActiveReviewsForRuntimeTeardown(
                 store: store,
                 appServerBackend: appServerBackend,
-                reason: reviewCancellation,
-                mode: reviewCleanupMode
+                reason: reason,
+                timeoutWarning: "Timed out cleaning active reviews before stopping runtime"
             )
         }
-        let stoppingLoginSession = loginSession
-        await stoppingLoginSession?.recordCancellationIntent()
-        if let stoppingLoginSession,
-           let lease = stoppingLoginSession.mutationLeaseForCancellation() {
-            await accountRegistry.requestAuthenticationCancellation(lease)
-        }
-        let loginTerminal = await stoppingLoginSession?.terminate(reason: loginTerminationReason)
-        let primaryAuthenticationHandoff = loginTerminal.flatMap { terminal in
-            stoppingLoginSession?.takePrimaryAuthenticationHandoffForRuntimeStop(from: terminal)
-        }
-        if let primaryAuthenticationHandoff {
-            installActivePrimaryAuthenticationReconciliation(primaryAuthenticationHandoff)
-            if let stoppingLoginSession {
-                clearLoginSessionIfCurrent(stoppingLoginSession)
-            }
-        }
-        session.retainPrimaryAuthenticationHandoffForStop(primaryAuthenticationHandoff)
-        guard didRetainPreparedRestarts else {
-            logger.error("Review runtime remains open because prepared-restart cleanup ownership could not be persisted")
-            return .init(
-                didReleaseResources: false,
-                didRetireRuns: false,
-                primaryAuthenticationHandoff: primaryAuthenticationHandoff
-            )
-        }
-        var didRetireRuns = false
-        if session.shouldRetireRuns
-            || accountRuntimeTransitionCoordinator.isFinalShutdownRequested {
-            guard await store.retireReviewRunsForFinalStoreStop() else {
-                logger.error("Review runtime remains open because an unpersisted cleanup quarantine is unresolved")
-                return .init(
-                    didReleaseResources: false,
-                    didRetireRuns: false,
-                    primaryAuthenticationHandoff: primaryAuthenticationHandoff
-                )
-            }
-            didRetireRuns = true
-        }
-        await session.cancelConsumersAndWait()
-        if didRetireRuns == false,
-           session.shouldRetireRuns
-            || accountRuntimeTransitionCoordinator.isFinalShutdownRequested {
-            guard await store.retireReviewRunsForFinalStoreStop() else {
-                logger.error("Review runtime remains open because a late final shutdown upgrade could not retire its runs")
-                return .init(
-                    didReleaseResources: false,
-                    didRetireRuns: false,
-                    primaryAuthenticationHandoff: primaryAuthenticationHandoff
-                )
-            }
-            didRetireRuns = true
-        }
-        if let appServer = runtime?.appServer {
-            await appServerCloser(appServer)
-        }
+        self.client = nil
+        self.mcpHTTPServer = nil
+        authNotificationTask?.cancel()
+        authNotificationTask = nil
+        await mcpHTTPServer?.stop()
+        self.appServerBackend = nil
+        await cleanupLoginRuntime(loginCleanup)
+        await client?.close()
         logger.info("Review runtime stopped")
-        return .init(
-            didReleaseResources: true,
-            didRetireRuns: didRetireRuns,
-            primaryAuthenticationHandoff: primaryAuthenticationHandoff
-        )
     }
 
-    func waitUntilStopped() async {
-        await accountRuntimeTransitionCoordinator.waitForFinalShutdownCompletionIfRequested()
-        while true {
-            if let task = runtimeSession?.stopTask {
-                _ = await task.value
-                continue
-            }
-            let followups = Array(runtimeStopFollowups.values)
-            if followups.isEmpty == false {
-                for task in followups {
-                    await task.value
-                }
-                continue
-            }
-            if let pendingRuntimeAuthDrainTask {
-                await pendingRuntimeAuthDrainTask.value
-                continue
-            }
-            return
-        }
-    }
+    func waitUntilStopped() async {}
 
     func refreshSettings() async throws -> CodexReviewSettings.Snapshot {
-        let admitted = try requireAdmittedRuntimeBackend()
-        let refreshed = try await Self.monitorSettings(from: admitted.backend.readSettings())
-        try requireRuntimeCommitAdmission(generation: admitted.generation)
-        settingsSnapshot = refreshed
+        guard let appServerBackend else {
+            return settingsSnapshot
+        }
+        settingsSnapshot = try await Self.monitorSettings(from: appServerBackend.readSettings())
         return settingsSnapshot
     }
 
@@ -1418,7 +538,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         serviceTier: CodexReviewSettings.ServiceTier?,
         persistServiceTier: Bool
     ) async throws {
-        let admitted = try requireAdmittedRuntimeBackend()
+        guard let appServerBackend else {
+            return
+        }
         var change = CodexReviewBackendModel.Settings.Change(
             model: model,
             updatesModel: true
@@ -1431,281 +553,156 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             change.serviceTier = serviceTier?.rawValue
             change.updatesServiceTier = true
         }
-        let updated = try await Self.monitorSettings(from: admitted.backend.applySettings(change))
-        try requireRuntimeCommitAdmission(generation: admitted.generation)
-        settingsSnapshot = updated
+        settingsSnapshot = try await Self.monitorSettings(from: appServerBackend.applySettings(change))
     }
 
     func updateSettingsReasoningEffort(
         _ reasoningEffort: CodexReviewSettings.ReasoningEffort?
     ) async throws {
-        let admitted = try requireAdmittedRuntimeBackend()
-        let updated = try await Self.monitorSettings(
-            from: admitted.backend.applySettings(.init(
+        guard let appServerBackend else {
+            return
+        }
+        settingsSnapshot = try await Self.monitorSettings(
+            from: appServerBackend.applySettings(.init(
                 reasoningEffort: reasoningEffort?.rawValue,
                 updatesReasoningEffort: true
             ))
         )
-        try requireRuntimeCommitAdmission(generation: admitted.generation)
-        settingsSnapshot = updated
     }
 
     func updateSettingsServiceTier(
         _ serviceTier: CodexReviewSettings.ServiceTier?
     ) async throws {
-        let admitted = try requireAdmittedRuntimeBackend()
-        let updated = try await Self.monitorSettings(
-            from: admitted.backend.applySettings(.init(
+        guard let appServerBackend else {
+            return
+        }
+        settingsSnapshot = try await Self.monitorSettings(
+            from: appServerBackend.applySettings(.init(
                 serviceTier: serviceTier?.rawValue,
                 updatesServiceTier: true
             ))
         )
-        try requireRuntimeCommitAdmission(generation: admitted.generation)
-        settingsSnapshot = updated
     }
 
     func refreshAuth(auth: CodexReviewAuthModel) async {
-        guard loginSession == nil, acceptsNewReviewOperations else {
-            logger.debug("Dropping an authentication refresh while runtime admission is closed")
-            return
+        do {
+            guard let appServerBackend else {
+                auth.updatePhase(.signedOut)
+                return
+            }
+            let snapshot = try await appServerBackend.readAuth()
+            applyAuthSnapshot(snapshot, to: auth)
+        } catch {
+            auth.updatePhase(.failed(message: error.localizedDescription))
         }
-        guard let session = runtimeSession,
-              let appServerBackend = session.activeRuntime?.backend else {
-            auth.updatePhase(.signedOut)
-            return
-        }
-        guard let reservation = accountRuntimeTransitionCoordinator.reserveRuntimeAuthReconciliation(
-            generation: session.generation
-        ) else {
-            logger.debug("Dropping an authentication refresh while runtime admission is closed")
-            return
-        }
-        _ = await performRuntimeAuthReconciliation(
-            reservation: reservation,
-            generation: session.generation,
-            backend: appServerBackend,
+    }
+
+    func signIn(auth: CodexReviewAuthModel) async {
+        await startLogin(auth: auth, activation: .activateAuthenticatedAccount)
+    }
+
+    func addAccount(auth: CodexReviewAuthModel) async {
+        let activeAccountKey = auth.persistedActiveAccountKey ?? auth.selectedAccount?.accountKey
+        await startLogin(
             auth: auth,
-            cause: .manualRefresh
+            activation: activeAccountKey != nil
+                ? .preserveActiveAccount(activeAccountKey)
+                : .activateAuthenticatedAccount
         )
     }
 
-    func authenticate(
-        auth: CodexReviewAuthModel,
-        request: CodexReviewAuthenticationRequest
-    ) async throws {
-        try await beginAuthentication(auth: auth, request: request)
-    }
-
-    func cancelAuthentication(auth _: CodexReviewAuthModel) async {
-        guard let session = loginSession else {
-            if let admission = accountRuntimeTransitionCoordinator
-                .requestLoginAdmissionCancellation() {
-                await accountRuntimeTransitionCoordinator.waitForLoginAdmissionCompletion(admission)
-                return
+    func cancelAuthentication(auth: CodexReviewAuthModel) async {
+        let activeAuthenticationSession = activeAuthenticationSession
+        self.activeAuthenticationSession = nil
+        authenticationTask?.cancel()
+        authenticationTask = nil
+        loginNotificationTask?.cancel()
+        loginNotificationTask = nil
+        let loginBackend = loginBackend
+        self.loginBackend = nil
+        isWaitingForLoginAccountUpdate = false
+        let loginClient = loginClient
+        self.loginClient = nil
+        let loginCodexHomeURL = loginCodexHomeURL
+        self.loginCodexHomeURL = nil
+        defer {
+            loginChallenge = nil
+        }
+        await activeAuthenticationSession?.cancel()
+        guard let loginBackend, let loginChallenge else {
+            if auth.selectedAccount == nil {
+                auth.updatePhase(.signedOut)
             }
-            if let activePrimaryAuthenticationReconciliation {
-                _ = await activePrimaryAuthenticationReconciliation.finalResult.wait()
-            }
+            await closeIsolatedLoginRuntime(client: loginClient, codexHomeURL: loginCodexHomeURL)
             return
         }
-        await session.recordCancellationIntent()
-        if let lease = session.mutationLeaseForCancellation() {
-            await accountRegistry.requestAuthenticationCancellation(lease)
+        do {
+            try await loginBackend.cancelLogin(loginChallenge)
+            auth.updatePhase(auth.selectedAccount == nil ? .signedOut : .signedOut)
+        } catch {
+            auth.updatePhase(.failed(message: error.localizedDescription))
         }
-        let terminal = await session.terminate(reason: .explicitCancellation)
-        if case .primaryRuntimeReconciliation = terminal {
-            _ = await session.waitForPrimaryAuthenticationFinalResult()
-        }
+        await closeIsolatedLoginRuntime(client: loginClient, codexHomeURL: loginCodexHomeURL)
     }
 
     func switchAccount(auth: CodexReviewAuthModel, accountKey: String) async throws {
-        try await attachedStore?.requireReviewThreadRetentionAcceptance()
-        try await withAccountMutation { transition, mutation in
-        let before = mutation.before
-        guard let attachedStore, appServerBackend != nil else {
-            let prepared = try await accountRegistry.prepareAccountActivation(accountKey)
-            guard case .apply = accountRuntimeTransitionCoordinator.claimEffect(transition) else {
-                _ = try await accountRegistry.abortPreparedMutation(prepared)
-                throw CodexReviewAuthenticationFailure.accountMutationBlockedByAuthentication
-            }
-            mutation.expectRecovery(prepared.expectedAccount)
-            let persisted = try await commitPreparedAccountMutation(
-                prepared,
-                transition: transition
-            )
-            accountRuntimeTransitionCoordinator.recordRegistryCommit(transition)
-            if case .published = accountRuntimeTransitionCoordinator.claimPublication(transition) {
-                applyAccountRegistrySnapshot(persisted, to: auth)
-                auth.updatePhase(.signedOut)
-            }
+        guard auth.persistedAccounts.contains(where: { $0.accountKey == accountKey }) else {
             return
         }
-        await quiesceRuntimeAdmissionForAccountTransition()
-        await attachedStore.closeActiveReviewSessions(
-            reason: .system(message: "Account switched.")
+        try CodexReviewAccountRegistry.activateAccount(
+            accountKey,
+            accounts: auth.persistedAccounts,
+            codexHomeURL: codexHomeURL
         )
-        let prepared: AccountRegistryStore.PreparedMutation
-        do {
-            prepared = try await accountRegistry.prepareAccountActivation(accountKey)
-        } catch {
-            try await recoverQuiescedPreEffectRuntime(
-                before: before,
-                store: attachedStore,
-                transition: transition,
-                originalError: error
-            )
-        }
-        guard case .apply = accountRuntimeTransitionCoordinator.claimEffect(transition) else {
-            _ = try await accountRegistry.abortPreparedMutation(prepared)
-            try await recoverQuiescedPreEffectRuntime(
-                before: before,
-                store: attachedStore,
-                transition: transition,
-                originalError: CodexReviewAuthenticationFailure.accountMutationBlockedByAuthentication
-            )
-        }
-        await stop(store: attachedStore, purpose: .accountTransitionPreservingRuns)
-        mutation.expectRecovery(prepared.expectedAccount)
-        let persisted = try await commitPreparedAccountMutation(
-            prepared,
-            transition: transition
+        auth.applyPersistedAccountStates(
+            auth.persistedAccounts.map(savedAccountPayload(from:)),
+            activeAccountKey: accountKey
         )
-        try await finishCommittedAccountTransition(
-            expectedAccount: prepared.expectedAccount,
-            persisted: persisted,
-            transition: transition,
-            auth: auth,
-            store: attachedStore
-        )
+        auth.selectPersistedAccount(auth.persistedAccounts.first(where: { $0.accountKey == accountKey })?.id)
+        auth.updatePhase(.signedOut)
+        guard let attachedStore, appServerBackend != nil else {
+            return
         }
+        await attachedStore.closeActiveReviewSessions(reason: .system(message: "Account switched."))
+        await stop(store: attachedStore)
+        await start(store: attachedStore, forceRestartIfNeeded: true)
     }
 
     func removeAccount(auth: CodexReviewAuthModel, accountKey: String) async throws {
-        try await attachedStore?.requireReviewThreadRetentionAcceptance()
-        try await withAccountMutation { transition, mutation in
-        let before = mutation.before
-        let normalizedAccountKey = CodexReviewAccount.normalizedEmail(accountKey)
-        guard before.accounts.contains(where: { $0.accountKey == normalizedAccountKey }) else {
-            return
+        let removedActiveAccount = auth.selectedAccount?.accountKey == accountKey
+            || auth.persistedActiveAccountKey == accountKey
+        if removedActiveAccount, let appServerBackend {
+            _ = try? await appServerBackend.logout(.init(accountKey))
         }
-        let removedActiveAccount = before.activeAccountKey == normalizedAccountKey
-        let transitionBackend = removedActiveAccount ? teardownAppServerBackend : nil
-        let transitionStore = removedActiveAccount
-            ? attachedStore.flatMap { transitionBackend == nil ? nil : $0 }
-            : nil
-        let persisted: AccountRegistryStore.Snapshot
+        let remaining = auth.persistedAccounts.filter { $0.accountKey != accountKey }
+        let activeAccountKey = auth.persistedActiveAccountKey == accountKey
+            ? nil
+            : auth.persistedActiveAccountKey
+        try CodexReviewAccountRegistry.saveAccounts(
+            remaining,
+            activeAccountKey: activeAccountKey,
+            codexHomeURL: codexHomeURL
+        )
+        try CodexReviewAccountRegistry.removeSavedAccountDirectory(
+            accountKey: accountKey,
+            codexHomeURL: codexHomeURL
+        )
         if removedActiveAccount {
-            if let transitionStore {
-                await quiesceRuntimeAdmissionForAccountTransition()
-                await transitionStore.closeActiveReviewSessions(
-                    reason: .system(message: "Account removed.")
-                )
-            }
-            let prepared: AccountRegistryStore.PreparedMutation
-            do {
-                prepared = try await accountRegistry.prepareIrreversibleRemoval(
-                    accountKey: normalizedAccountKey
-                )
-            } catch {
-                if let transitionStore {
-                    try await recoverQuiescedPreEffectRuntime(
-                        before: before,
-                        store: transitionStore,
-                        transition: transition,
-                        originalError: error
-                    )
-                }
-                throw error
-            }
-            guard case .apply = accountRuntimeTransitionCoordinator.claimEffect(transition) else {
-                _ = try await accountRegistry.abortPreparedMutation(prepared)
-                if let transitionStore {
-                    try await recoverQuiescedPreEffectRuntime(
-                        before: before,
-                        store: transitionStore,
-                        transition: transition,
-                        originalError: CodexReviewAuthenticationFailure.accountMutationBlockedByAuthentication
-                    )
-                }
-                throw CodexReviewAuthenticationFailure.accountMutationBlockedByAuthentication
-            }
-            var forwardRecoveredSnapshot: AccountRegistryStore.Snapshot?
-            do {
-                if let transitionBackend {
-                    _ = try await transitionBackend.logout(.init(normalizedAccountKey))
-                }
-            } catch {
-                let originalError = error
-                mutation.expectRecovery(.reconcileCurrentRuntime)
-                let disposition = try await abortPreparedMutationBeforeEffect(
-                    prepared,
-                    after: originalError
-                )
-                switch disposition {
-                case .restoredBefore:
-                    mutation.expectBeforeRecovery()
-                    accountRuntimeTransitionCoordinator.recordEffectAborted(transition)
-                    if let transitionStore {
-                        try await recoverQuiescedPreEffectRuntime(
-                            before: before,
-                            store: transitionStore,
-                            transition: transition,
-                            originalError: originalError
-                        )
-                    }
-                    throw originalError
-                case .forwardedDesired(let snapshot):
-                    mutation.expectRecovery(.signedOut)
-                    forwardRecoveredSnapshot = snapshot
-                }
-            }
-            mutation.expectRecovery(.signedOut)
-            accountRuntimeTransitionCoordinator.recordEffectApplied(transition)
-            if let transitionStore {
-                await stop(
-                    store: transitionStore,
-                    purpose: .accountTransitionPreservingRuns
-                )
-            }
-            if let forwardRecoveredSnapshot {
-                persisted = forwardRecoveredSnapshot
-            } else {
-                persisted = try await commitPreparedAccountMutation(
-                    prepared,
-                    transition: transition
-                )
-            }
-        } else {
-            guard case .apply = accountRuntimeTransitionCoordinator.claimEffect(transition) else {
-                throw CodexReviewAuthenticationFailure.accountMutationBlockedByAuthentication
-            }
-            persisted = try await accountRegistry.removeInactiveAccount(
-                accountKey: normalizedAccountKey
-            )
+            try? CodexReviewAccountRegistry.removeSharedAuth(codexHomeURL: codexHomeURL)
         }
-        await accountRegistry.cleanupRemovedAccountDirectory(accountKey: normalizedAccountKey)
+        auth.applyPersistedAccountStates(
+            remaining.map(savedAccountPayload(from:)),
+            activeAccountKey: activeAccountKey
+        )
         if removedActiveAccount {
-            guard let transitionStore else {
-                accountRuntimeTransitionCoordinator.recordRegistryCommit(transition)
-                if case .published = accountRuntimeTransitionCoordinator.claimPublication(transition) {
-                    applyAccountRegistrySnapshot(persisted, to: auth)
-                    auth.updatePhase(.signedOut)
-                }
+            auth.selectPersistedAccount(nil)
+            auth.updatePhase(.signedOut)
+            guard let attachedStore, appServerBackend != nil else {
                 return
             }
-            try await finishCommittedAccountTransition(
-                expectedAccount: .signedOut,
-                persisted: persisted,
-                transition: transition,
-                auth: auth,
-                store: transitionStore
-            )
-        } else {
-            accountRuntimeTransitionCoordinator.recordRegistryCommit(transition)
-            if case .published = accountRuntimeTransitionCoordinator.claimPublication(transition) {
-                applyAccountRegistrySnapshot(persisted, to: auth)
-            }
-        }
+            await attachedStore.closeActiveReviewSessions(reason: .system(message: "Account removed."))
+            await stop(store: attachedStore)
+            await start(store: attachedStore, forceRestartIfNeeded: true)
         }
     }
 
@@ -1714,134 +711,58 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         accountKey: String,
         toIndex: Int
     ) async throws {
-        try await withAccountMutation { transition, _ in
-        guard case .apply = accountRuntimeTransitionCoordinator.claimEffect(transition) else {
-            throw CodexReviewAuthenticationFailure.accountMutationBlockedByAuthentication
+        var accounts = auth.persistedAccounts
+        guard let sourceIndex = accounts.firstIndex(where: { $0.accountKey == accountKey }) else {
+            return
         }
-        let persisted = try await accountRegistry.reorderAccount(
-            accountKey: accountKey,
-            toIndex: toIndex
+        let destinationIndex = max(0, min(toIndex, accounts.count - 1))
+        guard sourceIndex != destinationIndex else {
+            return
+        }
+        let account = accounts.remove(at: sourceIndex)
+        accounts.insert(account, at: destinationIndex)
+        try CodexReviewAccountRegistry.saveAccounts(
+            accounts,
+            activeAccountKey: auth.persistedActiveAccountKey,
+            codexHomeURL: codexHomeURL
         )
-        accountRuntimeTransitionCoordinator.recordRegistryCommit(transition)
-        if case .published = accountRuntimeTransitionCoordinator.claimPublication(transition) {
-            applyAccountRegistrySnapshot(persisted, to: auth)
-        }
-        }
+        auth.applyPersistedAccountStates(accounts.map(savedAccountPayload(from:)))
     }
 
     func signOutActiveAccount(auth: CodexReviewAuthModel) async throws {
-        try await attachedStore?.requireReviewThreadRetentionAcceptance()
-        try await withAccountMutation { transition, mutation in
-        let before = mutation.before
-        guard let accountKey = before.activeAccountKey else {
+        guard let account = auth.selectedAccount else {
+            auth.updatePhase(.signedOut)
+            auth.selectPersistedAccount(nil)
             return
         }
-        let transitionBackend = teardownAppServerBackend
-        let shouldRecycleRuntime = attachedStore != nil && transitionBackend != nil
+        let shouldRecycleRuntime = attachedStore != nil && appServerBackend != nil
+        if shouldRecycleRuntime {
+            await attachedStore?.closeActiveReviewSessions(reason: .system(message: "Signed out."))
+        }
+        if let appServerBackend {
+            _ = try await appServerBackend.logout(.init(account.accountKey))
+        }
+        let remaining = auth.persistedAccounts.filter { $0.accountKey != account.accountKey }
+        try CodexReviewAccountRegistry.saveAccounts(
+            remaining,
+            activeAccountKey: nil,
+            codexHomeURL: codexHomeURL
+        )
+        try CodexReviewAccountRegistry.removeSavedAccountDirectory(
+            accountKey: account.accountKey,
+            codexHomeURL: codexHomeURL
+        )
+        try? CodexReviewAccountRegistry.removeSharedAuth(codexHomeURL: codexHomeURL)
+        auth.updatePhase(.signedOut)
+        auth.selectPersistedAccount(nil)
+        auth.applyPersistedAccountStates(remaining.map(savedAccountPayload(from:)), activeAccountKey: nil)
         if shouldRecycleRuntime, let attachedStore {
-            await quiesceRuntimeAdmissionForAccountTransition()
-            await attachedStore.closeActiveReviewSessions(
-                reason: .system(message: "Signed out.")
-            )
-        }
-        let prepared: AccountRegistryStore.PreparedMutation
-        do {
-            prepared = try await accountRegistry.prepareIrreversibleRemoval(
-                accountKey: accountKey
-            )
-        } catch {
-            if shouldRecycleRuntime, let attachedStore {
-                try await recoverQuiescedPreEffectRuntime(
-                    before: before,
-                    store: attachedStore,
-                    transition: transition,
-                    originalError: error
-                )
-            }
-            throw error
-        }
-        guard case .apply = accountRuntimeTransitionCoordinator.claimEffect(transition) else {
-            _ = try await accountRegistry.abortPreparedMutation(prepared)
-            if shouldRecycleRuntime, let attachedStore {
-                try await recoverQuiescedPreEffectRuntime(
-                    before: before,
-                    store: attachedStore,
-                    transition: transition,
-                    originalError: CodexReviewAuthenticationFailure.accountMutationBlockedByAuthentication
-                )
-            }
-            throw CodexReviewAuthenticationFailure.accountMutationBlockedByAuthentication
-        }
-        var forwardRecoveredSnapshot: AccountRegistryStore.Snapshot?
-        do {
-            if let transitionBackend {
-                _ = try await transitionBackend.logout(.init(accountKey))
-            }
-        } catch {
-            let originalError = error
-            mutation.expectRecovery(.reconcileCurrentRuntime)
-            let disposition = try await abortPreparedMutationBeforeEffect(
-                prepared,
-                after: originalError
-            )
-            switch disposition {
-            case .restoredBefore:
-                mutation.expectBeforeRecovery()
-                accountRuntimeTransitionCoordinator.recordEffectAborted(transition)
-                if shouldRecycleRuntime, let attachedStore {
-                    try await recoverQuiescedPreEffectRuntime(
-                        before: before,
-                        store: attachedStore,
-                        transition: transition,
-                        originalError: originalError
-                    )
-                }
-                throw originalError
-            case .forwardedDesired(let snapshot):
-                mutation.expectRecovery(.signedOut)
-                forwardRecoveredSnapshot = snapshot
-            }
-        }
-        mutation.expectRecovery(.signedOut)
-        accountRuntimeTransitionCoordinator.recordEffectApplied(transition)
-        if shouldRecycleRuntime, let attachedStore {
-            await stop(
-                store: attachedStore,
-                purpose: .accountTransitionPreservingRuns
-            )
-        }
-        let persisted: AccountRegistryStore.Snapshot
-        if let forwardRecoveredSnapshot {
-            persisted = forwardRecoveredSnapshot
-        } else {
-            persisted = try await commitPreparedAccountMutation(
-                prepared,
-                transition: transition
-            )
-        }
-        await accountRegistry.cleanupRemovedAccountDirectory(accountKey: accountKey)
-        if shouldRecycleRuntime, let attachedStore {
-            try await finishCommittedAccountTransition(
-                expectedAccount: .signedOut,
-                persisted: persisted,
-                transition: transition,
-                auth: auth,
-                store: attachedStore
-            )
-        } else {
-            accountRuntimeTransitionCoordinator.recordRegistryCommit(transition)
-            if case .published = accountRuntimeTransitionCoordinator.claimPublication(transition) {
-                applyAccountRegistrySnapshot(persisted, to: auth)
-                auth.updatePhase(.signedOut)
-            }
-        }
+            await stop(store: attachedStore)
+            await start(store: attachedStore, forceRestartIfNeeded: true)
         }
     }
 
     func refreshAccountRateLimits(auth: CodexReviewAuthModel, accountKey: String) async {
-        guard acceptsNewReviewOperations else {
-            return
-        }
         guard let account = auth.accounts.first(where: { $0.accountKey == accountKey }) else {
             return
         }
@@ -1852,1361 +773,227 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         false
     }
 
-    private func withAccountMutation<T>(
-        _ operation: (
-            AccountRuntimeTransitionCoordinator.AccountTransition,
-            AccountMutationContext
-        ) async throws -> T
-    ) async throws -> T {
-        guard runtimeSession == nil
-                || runtimeSession?.hasCurrentAccountObservation == true else {
-            throw CodexReviewAuthenticationFailure.accountMutationBlockedByAuthentication
-        }
-        return try await accountRuntimeTransitionCoordinator.perform { transition in
-            let admittedRuntimeGeneration = runtimeSession?.generation
-            let admittedRuntimeInvalidationRevision = runtimeSession?.accountInvalidationRevision
-            let mutation = AccountMutationContext(
-                try await accountRegistry.beginAccountMutation(),
-                admittedRuntimeGeneration: admittedRuntimeGeneration,
-                admittedRuntimeInvalidationRevision: admittedRuntimeInvalidationRevision
-            )
-            do {
-                let result = try await operation(transition, mutation)
-                await accountRegistry.finishMutation(mutation.lease)
-                return result
-            } catch {
-                if let failure = error as? CodexReviewAuthenticationFailure,
-                   case .persistenceInconsistent = failure {
-                    await recordUnconfirmedDirectRegistryMutation(
-                        failure,
-                        expectedAccount: mutation.expectationForUnconfirmedMutation(
-                            currentRuntimeSession: runtimeSession
-                        ),
-                        transition: transition
-                    )
-                }
-                await accountRegistry.finishMutation(mutation.lease)
-                throw error
-            }
-        }
-    }
-
-    private func recordUnconfirmedDirectRegistryMutation(
-        _ failure: CodexReviewAuthenticationFailure,
-        expectedAccount: ExpectedRuntimeAccount,
-        transition: AccountRuntimeTransitionCoordinator.AccountTransition
-    ) async {
-        let message = "The account registry mutation has an unresolved durable outcome: "
-            + failure.localizedDescription
+    private func startLogin(auth: CodexReviewAuthModel, activation: LoginActivation) async {
+        var isolatedLoginClient: AppServerClient?
+        var isolatedLoginCodexHomeURL: URL?
         do {
-            try await accountRegistry.recordReconciliationDebt(
-                expectedAccount: expectedAccount,
-                message: message
-            )
-        } catch {
-            preconditionFailure(
-                "An unresolved account registry mutation must durably record reconciliation debt: \(error.localizedDescription)"
-            )
-        }
-        if accountRuntimeTransitionCoordinator.commitAccountReconciliationFailure(transition) {
-            attachedStore?.transitionToFailed(message)
-            attachedStore?.auth.updatePhase(.failed(.accountCommit(message: message)))
-        }
-    }
-
-    private func finishCommittedAccountTransition(
-        expectedAccount: ExpectedRuntimeAccount,
-        persisted: AccountRegistryStore.Snapshot,
-        transition: AccountRuntimeTransitionCoordinator.AccountTransition,
-        auth: CodexReviewAuthModel,
-        store: CodexReviewStore
-    ) async throws {
-        accountRuntimeTransitionCoordinator.recordRegistryCommit(transition)
-        let publication = accountRuntimeTransitionCoordinator.claimPublication(transition)
-        let didStart = await startRuntime(
-            store: store,
-            forceRestartIfNeeded: true,
-            expectedAccount: expectedAccount,
-            mode: publication == .published
-                ? .published(owner: .account(transition))
-                : .quiescentReconciliation,
-            registryAuthorization: nil,
-            accountSnapshotForPublication: publication == .published ? persisted : nil
-        )
-        guard didStart else {
-            let message = "The committed account transition could not start and validate its replacement runtime."
-            do {
-                try await accountRegistry.recordReconciliationDebt(
-                    expectedAccount: expectedAccount,
-                    message: message
+            let runtime = try await loginRuntime(for: activation)
+            let appServerBackend = runtime.backend
+            let loginCodexHomeURL = runtime.codexHomeURL
+            let loginClient = runtime.usesPrimaryRuntime ? nil : runtime.client
+            isolatedLoginClient = loginClient
+            isolatedLoginCodexHomeURL = loginCodexHomeURL
+            guard runtime.usesPrimaryRuntime || self.appServerBackend != nil else {
+                logger.error("Cannot start login because review runtime is not running")
+                updateAuthenticationFailure(
+                    "Review runtime is not running.",
+                    auth: auth,
+                    activation: activation
                 )
-            } catch {
-                preconditionFailure(
-                    "A committed account transition must durably record reconciliation debt: \(error.localizedDescription)"
-                )
-            }
-            if accountRuntimeTransitionCoordinator.commitAccountReconciliationFailure(transition) {
-                store.transitionToFailed(message)
-            }
-            throw CodexReviewAuthenticationFailure.accountCommit(message: message)
-        }
-    }
-
-    private func commitPreparedAccountMutation(
-        _ mutation: AccountRegistryStore.PreparedMutation,
-        transition: AccountRuntimeTransitionCoordinator.AccountTransition
-    ) async throws -> AccountRegistryStore.Snapshot {
-        do {
-            return try await accountRegistry.commitPreparedMutation(mutation)
-        } catch {
-            let message = "The account mutation effect was accepted, but its durable desired state could not be confirmed: "
-                + error.localizedDescription
-            do {
-                try await accountRegistry.recordReconciliationDebt(
-                    expectedAccount: mutation.expectedAccount,
-                    message: message
-                )
-            } catch {
-                preconditionFailure(
-                    "An unconfirmed account mutation must durably record reconciliation debt: \(error.localizedDescription)"
-                )
-            }
-            if accountRuntimeTransitionCoordinator.commitAccountReconciliationFailure(transition) {
-                attachedStore?.transitionToFailed(message)
-            }
-            throw CodexReviewAuthenticationFailure.accountCommit(message: message)
-        }
-    }
-
-    private func recoverQuiescedPreEffectRuntime(
-        before: AccountRegistryStore.Snapshot,
-        store: CodexReviewStore,
-        transition: AccountRuntimeTransitionCoordinator.AccountTransition,
-        originalError: any Error
-    ) async throws -> Never {
-        await stop(store: store, purpose: .accountTransitionPreservingRuns)
-        let expectation = before.expectedRuntimeAccount
-        let publication = accountRuntimeTransitionCoordinator.claimPreEffectRecovery(transition)
-        let didStart = await startRuntime(
-            store: store,
-            forceRestartIfNeeded: true,
-            expectedAccount: expectation,
-            mode: publication == .published
-                ? .published(owner: .account(transition))
-                : .quiescentReconciliation,
-            registryAuthorization: nil,
-            accountSnapshotForPublication: publication == .published ? before : nil
-        )
-        guard didStart else {
-            let message = "The account transition failed before its external effect, and the previous runtime could not be restored: "
-                + originalError.localizedDescription
-            do {
-                try await accountRegistry.recordReconciliationDebt(
-                    expectedAccount: expectation,
-                    message: message
-                )
-            } catch {
-                preconditionFailure(
-                    "A failed pre-effect runtime recovery must durably record reconciliation debt: \(error.localizedDescription)"
-                )
-            }
-            if accountRuntimeTransitionCoordinator.commitAccountReconciliationFailure(transition) {
-                store.transitionToFailed(message)
-            }
-            throw CodexReviewAuthenticationFailure.accountCommit(message: message)
-        }
-        throw originalError
-    }
-
-    private func abortPreparedMutationBeforeEffect(
-        _ mutation: AccountRegistryStore.PreparedMutation,
-        after originalError: any Error
-    ) async throws -> AccountRegistryStore.PreparedAbortDisposition {
-        do {
-            return try await accountRegistry.abortPreparedMutation(mutation)
-        } catch let failure as CodexReviewAuthenticationFailure {
-            if case .persistenceInconsistent = failure {
-                throw failure
-            }
-            throw CodexReviewAuthenticationFailure.accountCommit(
-                message: "Account mutation failed and its durable journal could not be reconciled. "
-                    + "Original failure: \(originalError.localizedDescription). "
-                    + "Recovery failure: \(failure.localizedDescription)"
-            )
-        } catch {
-            throw CodexReviewAuthenticationFailure.accountCommit(
-                message: "Account mutation failed and its durable journal could not be reconciled. "
-                    + "Original failure: \(originalError.localizedDescription). "
-                    + "Recovery failure: \(error.localizedDescription)"
-            )
-        }
-    }
-
-    private func beginAuthentication(
-        auth: CodexReviewAuthModel,
-        request: CodexReviewAuthenticationRequest
-    ) async throws {
-        guard loginSession == nil else {
-            throw CodexReviewAuthenticationFailure.alreadyInProgress
-        }
-        guard accountRuntimeTransitionCoordinator.hasActiveLoginTransition == false else {
-            throw CodexReviewAuthenticationFailure.alreadyInProgress
-        }
-        try requireOperationAdmission()
-        let loginAdmission = try accountRuntimeTransitionCoordinator.reserveLoginAdmission()
-        let authenticationMutation: AccountRegistryStore.AuthenticationMutation
-        do {
-            try await attachedStore?.requireReviewThreadRetentionAcceptance()
-            guard accountRuntimeTransitionCoordinator.canCommitLoginAdmission(loginAdmission) else {
-                if accountRuntimeTransitionCoordinator
-                    .isLoginAdmissionCancellationRequested(loginAdmission) {
-                    accountRuntimeTransitionCoordinator.finishLoginAdmission(loginAdmission)
-                    return
-                }
-                throw CodexReviewAuthenticationFailure.accountMutationBlockedByAuthentication
-            }
-            authenticationMutation = try await accountRegistry.beginAuthenticationMutation(
-                request: request
-            )
-        } catch {
-            accountRuntimeTransitionCoordinator.finishLoginAdmission(loginAdmission)
-            throw error
-        }
-        let mutationLease = authenticationMutation.lease
-        let cancellationRequested = accountRuntimeTransitionCoordinator
-            .isLoginAdmissionCancellationRequested(loginAdmission)
-        guard accountRuntimeTransitionCoordinator.canCommitLoginAdmission(loginAdmission),
-              loginSession == nil else {
-            if cancellationRequested {
-                await accountRegistry.requestAuthenticationCancellation(mutationLease)
-            }
-            await accountRegistry.finishMutation(mutationLease)
-            accountRuntimeTransitionCoordinator.finishLoginAdmission(loginAdmission)
-            if cancellationRequested {
+                await closeIsolatedLoginRuntime(client: loginClient, codexHomeURL: loginCodexHomeURL)
                 return
             }
-            throw CodexReviewAuthenticationFailure.accountMutationBlockedByAuthentication
-        }
-        let purpose = authenticationMutation.purpose
-        let provider = LoginProvider(request.method)
-        let generationID = UUID()
-        let runtimeProvider: @MainActor @Sendable (LoginPurpose) async throws -> LoginRuntime = {
-            [weak self] purpose in
-            guard let self else {
-                throw CodexReviewAuthenticationFailure.runtime(
-                    message: "The review store was released while authentication was starting."
-                )
+            logger.info("Starting ChatGPT login")
+            let challenge = try await appServerBackend.startLogin(.init(
+                nativeWebAuthenticationCallbackScheme: nativeAuthenticationConfiguration?.callbackScheme
+            ))
+            loginChallenge = challenge
+            loginBackend = appServerBackend
+            self.loginClient = loginClient
+            self.loginCodexHomeURL = loginCodexHomeURL
+            loginActivation = activation
+            isWaitingForLoginAccountUpdate = false
+            if let loginClient {
+                observeLoginNotifications(client: loginClient, backend: appServerBackend, auth: auth)
             }
-            return try await self.loginRuntime(for: purpose)
-        }
-        let authenticationPresenter = authenticationPresenter
-        let session = LoginSession(
-            generationID: generationID,
-            purpose: purpose,
-            provider: provider,
-            previousActiveAccountKey: authenticationMutation.previousActiveAccountKey,
-            mutationLease: mutationLease,
-            cancellationTimeout: .seconds(5),
-            rootOperation: { @MainActor [weak self, weak auth] operationState, startCompletion in
-                let finish: @MainActor (LoginRootObservation) -> LoginRootObservation = { observation in
-                    self?.publishLoginRootObservation(
-                        observation,
-                        generationID: generationID
-                    )
-                    return observation
+            logger.info("Received ChatGPT login challenge")
+            let nativeCallbackScheme = challenge.nativeWebAuthenticationCallbackScheme
+            let usesNativeAuthentication = nativeAuthenticationConfiguration != nil && challenge.verificationURL != nil
+            auth.updatePhase(.signingIn(.init(
+                title: "Sign in to Codex",
+                detail: challenge.signInDetail(nativeAuthentication: usesNativeAuthentication),
+                browserURL: challenge.verificationURL?.absoluteString,
+                userCode: challenge.userCode
+            )))
+            guard let nativeAuthenticationConfiguration, challenge.verificationURL != nil else {
+                if let verificationURL = challenge.verificationURL {
+                    externalURLOpener(verificationURL)
                 }
-                let runtime: LoginRuntime
-                do {
-                    runtime = try await runtimeProvider(purpose)
-                } catch {
-                    let failure = (error as? CodexReviewAuthenticationFailure)
-                        ?? .runtime(message: error.localizedDescription)
-                    let failureDisposition = await operationState.claimPreCommitFailure()
-                    if case .cancel = failureDisposition {
-                        await startCompletion.resolve(.success(()))
-                        return finish(.cancelled)
-                    } else {
-                        await startCompletion.resolve(.failure(failure))
-                        return finish(.failure(failure))
-                    }
-                }
-                guard case .proceed = await operationState.bind(runtime: runtime) else {
-                    await startCompletion.resolve(.success(()))
-                    return finish(.cancelled)
-                }
-
-                switch request.method {
-                case .chatGPT:
-                    let handle: CodexLoginHandle
-                    do {
-                        handle = try await runtime.appServer.loginChatGPT(
-                            accountReadinessTimeout: .seconds(5)
-                        )
-                    } catch {
-                        let failure = (error as? CodexReviewAuthenticationFailure)
-                            ?? .runtime(message: error.localizedDescription)
-                        let failureDisposition = await operationState.claimPreCommitFailure()
-                        if case .cancel = failureDisposition {
-                            await startCompletion.resolve(.success(()))
-                            return finish(.cancelled)
-                        } else {
-                            await startCompletion.resolve(.failure(failure))
-                            return finish(.failure(failure))
-                        }
-                    }
-
-                    let handleDisposition = await operationState.bind(
-                        handle: handle,
-                        runtime: runtime
-                    )
-                    if case .cancel = handleDisposition {
-                        await startCompletion.resolve(.success(()))
-                        do {
-                            return finish(.chatGPTOutcome(try await handle.cancel(
-                                acknowledgementTimeout: .seconds(5)
-                            )))
-                        } catch is CancellationError {
-                            return finish(.waiterCancelled(message: nil))
-                        } catch {
-                            return finish(.waiterCancelled(message: error.localizedDescription))
-                        }
-                    }
-
-                    await self?.authenticationOperationDidBind?()
-                    if case .cancel = await operationState.claimURLPresentation(handle: handle) {
-                        await startCompletion.resolve(.success(()))
-                        do {
-                            return finish(.chatGPTOutcome(try await handle.result()))
-                        } catch is CancellationError {
-                            return finish(.waiterCancelled(message: nil))
-                        } catch {
-                            return finish(.waiterCancelled(message: error.localizedDescription))
-                        }
-                    }
-
-                    let presentation: any CodexReviewNativeAuthentication.Presentation
-                    do {
-                        presentation = try authenticationPresenter.present(handle.authenticationURL)
-                    } catch {
-                        let failure = CodexReviewAuthenticationFailure.urlOpen(handle.authenticationURL)
-                        let observation = await Self.cancelChatGPTLogin(
-                            handle,
-                            failureOnCancellation: failure
-                        )
-                        switch observation {
-                        case .failure(let failure):
-                            await startCompletion.resolve(.failure(failure))
-                        case .chatGPTOutcome(.failed(let message)):
-                            await startCompletion.resolve(.failure(.login(message: message)))
-                        case .chatGPTOutcome, .cancelled, .apiKeySucceeded,
-                             .apiKeyOutcomeUnknown, .waiterCancelled:
-                            await startCompletion.resolve(.success(()))
-                        }
-                        return finish(observation)
-                    }
-
-                    auth?.updatePhase(.signingIn(.init(
-                        title: "Sign in to Codex",
-                        detail: presentation.mode == .webAuthenticationSession
-                            ? "Complete sign in in the authentication window."
-                            : "Continue signing in with your browser.",
-                        browserURL: handle.authenticationURL.absoluteString,
-                        userCode: nil
-                    )))
-                    await startCompletion.resolve(.success(()))
-
-                    defer {
-                        presentation.close()
-                    }
-                    return finish(await Self.waitForChatGPTLogin(
-                        handle,
-                        presentation: presentation
-                    ))
-                case .apiKey(let apiKey):
-                    guard case .proceed = await operationState.bindAPIKey(runtime: runtime) else {
-                        await startCompletion.resolve(.success(()))
-                        return finish(.cancelled)
-                    }
-                    await self?.authenticationOperationDidBind?()
-                    guard case .proceed = await operationState.claimAPIKeyRequest() else {
-                        await startCompletion.resolve(.success(()))
-                        return finish(.cancelled)
-                    }
-                    auth?.updatePhase(.signingIn(.init(
-                        title: "Sign in to Codex",
-                        detail: "Authenticating with API key."
-                    )))
-                    do {
-                        try await apiKey.withValue { rawValue in
-                            try await runtime.appServer.login(apiKey: rawValue)
-                        }
-                        await startCompletion.resolve(.success(()))
-                        return finish(.apiKeySucceeded)
-                    } catch is CancellationError {
-                        await startCompletion.resolve(.success(()))
-                        return finish(.cancelled)
-                    } catch CodexAppServerError.authenticationOutcomeUnknown(_) {
-                        let failure = CodexReviewAuthenticationFailure.login(
-                            message: "The API-key authentication outcome could not be confirmed."
-                        )
-                        if case .addAccountPreservingActive = purpose {
-                            await startCompletion.resolve(.failure(failure))
-                        } else {
-                            await startCompletion.resolve(.success(()))
-                        }
-                        return finish(.apiKeyOutcomeUnknown)
-                    } catch let appServerError as CodexAppServerError {
-                        await operationState.claimKnownAPIKeyFailure()
-                        let failure = CodexReviewAuthenticationFailure.login(
-                            message: appServerError.localizedDescription
-                        )
-                        await startCompletion.resolve(.failure(failure))
-                        return finish(.failure(failure))
-                    } catch {
-                        await operationState.claimKnownAPIKeyFailure()
-                        let failure = CodexReviewAuthenticationFailure.runtime(
-                            message: "API-key authentication failed."
-                        )
-                        await startCompletion.resolve(.failure(failure))
-                        return finish(.failure(failure))
-                    }
-                }
-            },
-            terminationHandler: { @MainActor [weak self, weak auth] session, reason, observation in
+                return
+            }
+            let authURL = try Self.authenticationURL(from: challenge)
+            let callbackScheme = nativeCallbackScheme ?? nativeAuthenticationConfiguration.callbackScheme
+            guard callbackScheme == nativeAuthenticationConfiguration.callbackScheme else {
+                try? await appServerBackend.cancelLogin(challenge)
+                loginChallenge = nil
+                loginBackend = nil
+                self.loginClient = nil
+                self.loginCodexHomeURL = nil
+                updateAuthenticationFailure(
+                    "Authentication callback is misconfigured.",
+                    auth: auth,
+                    activation: activation
+                )
+                await closeIsolatedLoginRuntime(client: loginClient, codexHomeURL: loginCodexHomeURL)
+                return
+            }
+            let session = try await webAuthenticationSessionFactory(
+                authURL,
+                callbackScheme,
+                nativeAuthenticationConfiguration.browserSessionPolicy,
+                nativeAuthenticationConfiguration.presentationAnchorProvider
+            )
+            activeAuthenticationSession = session
+            authenticationTask = Task { @MainActor [weak self, weak auth] in
                 guard let self, let auth else {
-                    return .stopped
+                    return
                 }
-                return await self.finishLoginSession(
-                    session,
-                    reason: reason,
-                    observation: observation,
+                await self.monitorAuthenticationSession(
+                    challenge: challenge,
+                    session: session,
+                    completesLoginThroughCallback: nativeCallbackScheme != nil,
                     auth: auth
                 )
             }
-        )
-        // The session owns the mutation lease and cancellation intent before either
-        // runtime acquisition or account/login/start can suspend.
-        loginSession = session
-        if case .signIn = purpose {
-            accountRuntimeTransitionCoordinator.retainPrimaryLoginAdmission(loginAdmission)
-            primaryLoginAdmission = (generationID, loginAdmission)
-        } else {
-            accountRuntimeTransitionCoordinator.finishLoginAdmission(loginAdmission)
-        }
-        let startResult = await session.activate()
-        if case .failure(let failure) = startResult {
-            let terminal = await session.terminate(reason: .rootOutcome)
-            if case .addAccountPreservingActive = purpose,
-               case .failed(let terminalFailure) = terminal {
-                throw terminalFailure
-            }
-            _ = failure
-        } else if provider == .apiKey {
-            let terminal = await session.terminate(reason: .rootOutcome)
-            switch terminal {
-            case .failed(let failure):
-                throw failure
-            case .primaryRuntimeReconciliation:
-                _ = await session.waitForPrimaryAuthenticationFinalResult()
-            case .succeeded, .cancelled, .stopped, .committedNeedsRuntimeReconciliation:
-                break
-            }
-        }
-    }
-
-    private static func waitForChatGPTLogin(
-        _ handle: CodexLoginHandle,
-        presentation: any CodexReviewNativeAuthentication.Presentation
-    ) async -> LoginRootObservation {
-        guard let eventStream = presentation.eventStream else {
-            return await loginObservation(from: handle)
-        }
-
-        let winner = await withTaskGroup(of: ChatGPTLoginWaitEvent.self) { group in
-            group.addTask {
-                .login(await loginObservation(from: handle))
-            }
-            group.addTask {
-                var iterator = eventStream.makeAsyncIterator()
-                return .presentation(await iterator.next())
-            }
-            guard let winner = await group.next() else {
-                preconditionFailure("A ChatGPT login wait must have an active observation source.")
-            }
-            group.cancelAll()
-            return winner
-        }
-
-        switch winner {
-        case .login(let observation):
-            return observation
-        case .presentation(.cancelled):
-            return await cancelChatGPTLogin(handle, failureOnCancellation: nil)
-        case .presentation(.failed(let message)):
-            return await cancelChatGPTLogin(
-                handle,
-                failureOnCancellation: .login(message: message)
-            )
-        case .presentation(nil):
-            if Task.isCancelled {
-                return .waiterCancelled(message: nil)
-            }
-            return .failure(.protocolViolation(
-                message: "The native authentication presentation ended without a result."
-            ))
-        }
-    }
-
-    private nonisolated static func loginObservation(
-        from handle: CodexLoginHandle
-    ) async -> LoginRootObservation {
-        do {
-            return .chatGPTOutcome(try await handle.result())
-        } catch is CancellationError {
-            return .waiterCancelled(message: nil)
         } catch {
-            return .failure(.runtime(message: error.localizedDescription))
-        }
-    }
-
-    private nonisolated static func cancelChatGPTLogin(
-        _ handle: CodexLoginHandle,
-        failureOnCancellation: CodexReviewAuthenticationFailure?
-    ) async -> LoginRootObservation {
-        do {
-            let outcome = try await handle.cancel(acknowledgementTimeout: .seconds(5))
-            if case .cancelled = outcome,
-               let failureOnCancellation {
-                return .failure(failureOnCancellation)
+            logger.error("ChatGPT login failed to start: \(error.localizedDescription, privacy: .public)")
+            let pendingLoginBackend = loginBackend
+            let pendingLoginChallenge = loginChallenge
+            loginChallenge = nil
+            loginBackend = nil
+            isWaitingForLoginAccountUpdate = false
+            let loginClient = loginClient ?? isolatedLoginClient
+            self.loginClient = nil
+            let loginCodexHomeURL = loginCodexHomeURL ?? isolatedLoginCodexHomeURL
+            self.loginCodexHomeURL = nil
+            activeAuthenticationSession = nil
+            authenticationTask?.cancel()
+            authenticationTask = nil
+            loginNotificationTask?.cancel()
+            loginNotificationTask = nil
+            if let pendingLoginBackend, let pendingLoginChallenge {
+                try? await pendingLoginBackend.cancelLogin(pendingLoginChallenge)
             }
-            return .chatGPTOutcome(outcome)
-        } catch is CancellationError {
-            if let failureOnCancellation {
-                return .failure(failureOnCancellation)
-            }
-            return .waiterCancelled(message: nil)
-        } catch {
-            if let failureOnCancellation {
-                return .failure(failureOnCancellation)
-            }
-            return .waiterCancelled(message: error.localizedDescription)
-        }
-    }
-
-    private func publishLoginRootObservation(
-        _ observation: LoginRootObservation,
-        generationID: UUID
-    ) {
-        guard let session = loginSession,
-              session.generationID == generationID else {
-            return
-        }
-        session.publishRootObservation(observation)
-    }
-
-    private func finishLoginSession(
-        _ session: LoginSession,
-        reason: LoginTerminationReason,
-        observation: LoginRootObservation,
-        auth: CodexReviewAuthModel
-    ) async -> LoginSessionTerminal {
-        let resolution: LoginSessionResolution
-        switch observation {
-        case .chatGPTOutcome(let outcome):
-            resolution = await finishLoginOutcome(
-                outcome,
-                session: session,
-                reason: reason,
-                auth: auth
-            )
-        case .apiKeySucceeded:
-            resolution = await finishSuccessfulLogin(session: session, auth: auth)
-        case .apiKeyOutcomeUnknown:
-            guard session.provider == .apiKey else {
-                preconditionFailure("Only an API-key login can report an unknown immediate authentication outcome.")
-            }
-            if case .signIn = session.purpose {
-                resolution = .init(
-                    terminal: .primaryRuntimeReconciliation(
-                        session.takePrimaryAuthenticationReconciliationHandoff(
-                            cause: .apiKeyOutcomeUnknown(
-                                previousActiveAccountKey: session.previousActiveAccountKey
-                            )
-                        )
-                    ),
-                    terminalPhase: nil
-                )
-            } else {
-                let failure = CodexReviewAuthenticationFailure.login(
-                    message: "The isolated API-key authentication outcome could not be confirmed."
-                )
-                resolution = .init(
-                    terminal: .failed(failure),
-                    terminalPhase: .failed(failure)
-                )
-            }
-        case .cancelled:
-            resolution = finishCancelledLoginOutcome(reason: reason)
-        case .failure(let failure):
-            resolution = .init(
-                terminal: .failed(failure),
-                terminalPhase: .failed(failure)
-            )
-        case .waiterCancelled(let message):
-            resolution = finishCancelledLoginWaiter(
-                session: session,
-                reason: reason,
-                message: message
+            await closeIsolatedLoginRuntime(client: loginClient, codexHomeURL: loginCodexHomeURL)
+            updateAuthenticationFailure(
+                error.localizedDescription,
+                auth: auth,
+                activation: activation
             )
         }
-
-        await closeLoginRuntimeIfNeeded(session)
-        let terminal = resolution.terminal
-        if case .primaryRuntimeReconciliation(let handoff) = terminal {
-            let requiresRuntimeStopHandoff: Bool = switch reason {
-            case .runtimeFailure, .storeStop:
-                true
-            case .rootOutcome, .explicitCancellation, .urlOpenFailure:
-                false
-            }
-            if requiresRuntimeStopHandoff {
-                finishPrimaryLoginAdmissionIfCurrent(session)
-                return terminal
-            } else {
-                guard let primaryAdmission = takePrimaryLoginAdmissionIfCurrent(session) else {
-                    preconditionFailure("A direct primary reconciliation requires retained login ownership.")
-                }
-                let disposition = accountRuntimeTransitionCoordinator
-                    .handoffPrimaryLoginToReconciliation(
-                    primaryAdmission
-                ) {
-                    [weak self, weak auth] reservation in
-                    guard let self, let auth else {
-                        return nil
-                    }
-                    return await self.performPrimaryAuthenticationReconciliation(
-                        handoff,
-                        reservation: reservation,
-                        auth: auth,
-                        oldRuntimeAlreadyStopped: false
-                    )
-                }
-                switch disposition {
-                case .handedOff:
-                    session.claimPrimaryAuthenticationHandoffForDirectReconciliation(handoff)
-                    installActivePrimaryAuthenticationReconciliation(handoff)
-                    clearLoginSessionIfCurrent(session)
-                case .deferUntilRuntimeStop:
-                    accountRuntimeTransitionCoordinator.finishPrimaryLoginAdmission(
-                        primaryAdmission
-                    )
-                    return terminal
-                }
-            }
-        } else {
-            await authenticationOwnershipWillRelease?()
-            await releaseLoginMutationIfNeeded(session)
-            clearLoginSessionIfCurrent(session)
-            finishPrimaryLoginAdmissionIfCurrent(session)
-            publishAuthenticationTerminalPhase(resolution.terminalPhase, to: auth)
-            await reconcilePendingRuntimeAuthInvalidation(auth: auth)
-            if case .succeeded = terminal,
-               case .signIn = session.purpose {
-                await refreshSelectedAccountRateLimits(auth: auth)
-            }
-        }
-        return terminal
     }
 
-    private func reconcilePendingRuntimeAuthInvalidation(
+    private func monitorAuthenticationSession(
+        challenge: CodexReviewBackendModel.Login.Challenge,
+        session: any CodexReviewNativeAuthentication.WebSession,
+        completesLoginThroughCallback: Bool,
         auth: CodexReviewAuthModel
     ) async {
-        guard loginSession == nil,
-              let store = attachedStore,
-              let session = runtimeSession,
-              session.isActive,
-              session.hasCurrentAccountObservation == false,
-              let backend = session.activeRuntime?.backend else {
-            return
-        }
-        await refreshAuthAfterAccountNotification(
-            generation: session.generation,
-            backend: backend,
-            store: store
-        )
-    }
-
-    private func schedulePendingRuntimeAuthDrain() {
-        precondition(
-            pendingRuntimeAuthDrainRequestRevision < .max,
-            "A pending runtime-auth drain request revision must not wrap."
-        )
-        pendingRuntimeAuthDrainRequestRevision += 1
-        startPendingRuntimeAuthDrainIfNeeded()
-    }
-
-    private func startPendingRuntimeAuthDrainIfNeeded() {
-        guard pendingRuntimeAuthDrainTask == nil else { return }
-        let requestRevision = pendingRuntimeAuthDrainRequestRevision
-        pendingRuntimeAuthDrainTask = Task { @MainActor [weak self] in
-            await Task.yield()
-            guard let self else { return }
-            if let auth = self.attachedStore?.auth {
-                await self.reconcilePendingRuntimeAuthInvalidation(auth: auth)
-            }
-            self.pendingRuntimeAuthDrainTask = nil
-            if self.pendingRuntimeAuthDrainRequestRevision != requestRevision {
-                self.startPendingRuntimeAuthDrainIfNeeded()
-            }
-        }
-    }
-
-    private func finishPrimaryLoginAdmissionIfCurrent(_ session: LoginSession) {
-        guard let admission = takePrimaryLoginAdmissionIfCurrent(session) else {
-            return
-        }
-        accountRuntimeTransitionCoordinator.finishPrimaryLoginAdmission(
-            admission
-        )
-    }
-
-    private func takePrimaryLoginAdmissionIfCurrent(
-        _ session: LoginSession
-    ) -> AccountRuntimeTransitionCoordinator.LoginAdmission? {
-        guard let primaryLoginAdmission,
-              primaryLoginAdmission.generationID == session.generationID else {
-            return nil
-        }
-        self.primaryLoginAdmission = nil
-        return primaryLoginAdmission.admission
-    }
-
-    private func claimLoginResultPublication(
-        for session: LoginSession,
-        usesPrimaryRuntime: Bool
-    ) -> Bool {
-        guard usesPrimaryRuntime else {
-            return accountRuntimeTransitionCoordinator.commitLoginResultPublication()
-        }
-        guard let primaryLoginAdmission,
-              primaryLoginAdmission.generationID == session.generationID else {
-            return false
-        }
-        return accountRuntimeTransitionCoordinator.claimPrimaryLoginResultPublication(
-            primaryLoginAdmission.admission
-        )
-    }
-
-    private func finishLoginOutcome(
-        _ outcome: CodexLoginOutcome,
-        session: LoginSession,
-        reason terminationReason: LoginTerminationReason,
-        auth: CodexReviewAuthModel
-    ) async -> LoginSessionResolution {
-        precondition(session.provider == .chatGPT)
-        switch outcome {
-        case .succeeded:
-            return await finishSuccessfulLogin(session: session, auth: auth)
-        case .failed(let message):
-            let failure = CodexReviewAuthenticationFailure.login(
-                message: message ?? "Authentication failed."
-            )
-            return .init(
-                terminal: .failed(failure),
-                terminalPhase: .failed(failure)
-            )
-        case .cancelled:
-            return finishCancelledLoginOutcome(reason: terminationReason)
-        case .authenticationCommittedNeedsConnectionReconciliation(let reconciliationReason):
-            if case .cancelOutcomeUnknown = reconciliationReason {
-                guard case .signIn = session.purpose else {
-                    return finishCancelledLoginOutcome(reason: terminationReason)
-                }
-                return .init(
-                    terminal: .primaryRuntimeReconciliation(
-                        session.takePrimaryAuthenticationReconciliationHandoff(
-                            cause: .chatGPTCancelOutcomeUnknown(
-                                previousActiveAccountKey: session.previousActiveAccountKey
-                            )
-                        )
-                    ),
-                    terminalPhase: nil
-                )
-            }
-            guard case .signIn = session.purpose else {
-                let failure = CodexReviewAuthenticationFailure.protocolViolation(
-                    message: "An isolated add-account login cannot hand off primary authentication reconciliation."
-                )
-                return .init(
-                    terminal: .failed(failure),
-                    terminalPhase: .failed(failure)
-                )
-            }
-            return .init(
-                terminal: .primaryRuntimeReconciliation(
-                    session.takePrimaryAuthenticationReconciliationHandoff(
-                        cause: .chatGPTCommitted(reconciliationReason)
-                    )
-                ),
-                terminalPhase: nil
-            )
-        }
-    }
-
-    private func finishSuccessfulLogin(
-        session: LoginSession,
-        auth: CodexReviewAuthModel
-    ) async -> LoginSessionResolution {
-        guard let loginRuntime = await session.runtime() else {
-            let failure = CodexReviewAuthenticationFailure.protocolViolation(
-                message: "Authentication completed without a bound login runtime."
-            )
-            return .init(
-                terminal: .failed(failure),
-                terminalPhase: .failed(failure)
-            )
-        }
-        var stagingURLRequiringRemoval: URL?
-        var deferredPrimaryExpectation = session.provider.successfulLoginExpectation
-        var primaryObservationPublication: (
-            session: HostRuntimeSession,
-            observation: RuntimeAccountObservation,
-            revision: UInt64
-        )?
         do {
-            let mutationLease = session.mutationLeaseForOwnedOperation()
-            let reconciliation: (
-                persisted: AccountRegistryStore.Snapshot,
-                account: CodexReviewAccount?
-            )
-            if loginRuntime.usesPrimaryRuntime {
-                while true {
-                    guard let primaryRuntimeSession = runtimeSession,
-                          primaryRuntimeSession.isActive else {
-                        throw CodexReviewAuthenticationFailure.runtime(
-                            message: "The primary login runtime stopped before authentication reconciliation."
-                        )
-                    }
-                    let revision = primaryRuntimeSession.accountInvalidationRevision
-                    let snapshot: CodexReviewBackendModel.Auth.Snapshot
-                    do {
-                        snapshot = try await loginRuntime.backend.readAuth()
-                    } catch {
-                        if runtimeSession !== primaryRuntimeSession
-                            || primaryRuntimeSession.accountInvalidationRevision != revision {
-                            deferredPrimaryExpectation = .reconcileCurrentRuntime
-                        }
-                        throw error
-                    }
-                    guard runtimeSession === primaryRuntimeSession,
-                          primaryRuntimeSession.isActive else {
-                        throw CodexReviewAuthenticationFailure.runtime(
-                            message: "The primary login runtime stopped during authentication reconciliation."
-                        )
-                    }
-                    if primaryRuntimeSession.accountInvalidationRevision != revision {
-                        deferredPrimaryExpectation = .reconcileCurrentRuntime
-                        continue
-                    }
-                    let account = try successfulLoginAccount(
-                        from: snapshot,
-                        provider: session.provider,
-                        previousActiveAccountKey: session.previousActiveAccountKey
-                    )
-                    deferredPrimaryExpectation = .observedAccount(
-                        accountKey: account.accountKey,
-                        provider: session.provider.expectedProvider
-                    )
-                    let candidate: (
-                        persisted: AccountRegistryStore.Snapshot,
-                        account: CodexReviewAccount?
-                    )
-                    do {
-                        candidate = try await reconcileAuthSnapshotSerialized(
-                            snapshot,
-                            activation: session.purpose.activation,
-                            authSourceCodexHomeURL: loginRuntime.codexHomeURL,
-                            authenticatedRateLimits: nil,
-                            authorization: mutationLease
-                        )
-                    } catch {
-                        if runtimeSession !== primaryRuntimeSession
-                            || primaryRuntimeSession.accountInvalidationRevision != revision {
-                            deferredPrimaryExpectation = .reconcileCurrentRuntime
-                        }
-                        throw error
-                    }
-                    guard runtimeSession === primaryRuntimeSession,
-                          primaryRuntimeSession.isActive else {
-                        throw CodexReviewAuthenticationFailure.runtime(
-                            message: "The primary login runtime stopped after authentication reconciliation."
-                        )
-                    }
-                    guard primaryRuntimeSession.accountInvalidationRevision == revision else {
-                        deferredPrimaryExpectation = .reconcileCurrentRuntime
-                        continue
-                    }
-                    primaryObservationPublication = (
-                        primaryRuntimeSession,
-                        .account(
-                            accountKey: account.accountKey,
-                            provider: session.provider.expectedProvider
-                        ),
-                        revision
-                    )
-                    reconciliation = candidate
-                    break
-                }
-            } else {
-                let snapshot = try await loginRuntime.backend.readAuth()
-                _ = try successfulLoginAccount(
-                    from: snapshot,
-                    provider: session.provider,
-                    previousActiveAccountKey: session.previousActiveAccountKey
-                )
-                let isolatedRateLimits: CodexRateLimits? = if session.provider == .chatGPT {
-                    try? await loginRuntime.backend.readRateLimits()
-                } else {
-                    nil
-                }
-                guard let runtime = await session.takeOwnedRuntimeForClose() else {
-                    preconditionFailure("An isolated login runtime can be closed only once.")
-                }
-                await appServerCloser(runtime.appServer)
-                stagingURLRequiringRemoval = runtime.codexHomeURL
-                reconciliation = try await reconcileAuthSnapshotSerialized(
-                    snapshot,
-                    activation: session.purpose.activation,
-                    authSourceCodexHomeURL: loginRuntime.codexHomeURL,
-                    authenticatedRateLimits: isolatedRateLimits,
-                    authorization: mutationLease,
-                    isolatedProductCommitAuthorization: mutationLease
-                )
+            let callbackURL = try await session.waitForCallbackURL()
+            guard loginChallenge?.id == challenge.id else {
+                return
             }
-            let publishesResult = claimLoginResultPublication(
-                for: session,
-                usesPrimaryRuntime: loginRuntime.usesPrimaryRuntime
+            guard completesLoginThroughCallback else {
+                logger.info("Authentication session completed; waiting for app-server login completion notification")
+                return
+            }
+            guard let loginBackend else {
+                return
+            }
+            let snapshot = try await loginBackend.completeLogin(.init(
+                challengeID: challenge.id,
+                callbackURL: callbackURL.absoluteString
+            ))
+            let activation = loginActivation
+            let loginClient = loginClient
+            let loginCodexHomeURL = loginCodexHomeURL
+            loginChallenge = nil
+            self.loginBackend = nil
+            isWaitingForLoginAccountUpdate = false
+            self.loginClient = nil
+            self.loginCodexHomeURL = nil
+            activeAuthenticationSession = nil
+            authenticationTask = nil
+            loginNotificationTask?.cancel()
+            loginNotificationTask = nil
+            let account = applyAuthSnapshot(
+                snapshot,
+                to: auth,
+                activation: activation,
+                authSourceCodexHomeURL: loginCodexHomeURL
             )
-            if publishesResult {
-                if let primaryObservationPublication {
-                    primaryObservationPublication.session.updateAccountObservation(
-                        primaryObservationPublication.observation,
-                        revision: primaryObservationPublication.revision
+            await refreshSelectedAccountRateLimits(auth: auth)
+            if case .preserveActiveAccount = activation, let account {
+                let didRefresh = await refreshRateLimits(for: account, using: loginBackend, source: "login-runtime")
+                if didRefresh {
+                    persistRefreshedSharedAuth(
+                        from: loginCodexHomeURL,
+                        for: account
                     )
                 }
-                applyAccountRegistrySnapshot(reconciliation.persisted, to: auth)
             }
-            if let stagingURLRequiringRemoval {
-                await accountRegistry.finishTemporaryCodexHome(stagingURLRequiringRemoval)
-            }
-            return .init(
-                terminal: .succeeded,
-                terminalPhase: publishesResult ? .signedOut : nil
-            )
+            await closeIsolatedLoginRuntime(client: loginClient, codexHomeURL: loginCodexHomeURL)
+        } catch is CancellationError {
+            await handleAuthenticationSessionCancelled(challenge: challenge, auth: auth)
+        } catch CodexReviewNativeAuthenticationError.cancelled {
+            await handleAuthenticationSessionCancelled(challenge: challenge, auth: auth)
         } catch {
-            if let stagingURLRequiringRemoval {
-                await accountRegistry.finishTemporaryCodexHome(stagingURLRequiringRemoval)
+            guard loginChallenge?.id == challenge.id else {
+                return
             }
-            if error is IsolatedLoginProductCommitCancelled {
-                return .init(
-                    terminal: .cancelled,
-                    terminalPhase: .signedOut
-                )
-            }
-            if let productCommitFailure = error as? IsolatedLoginProductCommitFailure {
-                return .init(
-                    terminal: .failed(productCommitFailure.failure),
-                    terminalPhase: .failed(productCommitFailure.failure)
-                )
-            }
-            if loginRuntime.usesPrimaryRuntime {
-                return await finishPrimaryLoginWithDeferredRegistryReconciliation(
-                    session: session,
-                    expectedAccount: deferredPrimaryExpectation,
-                    underlyingError: error
-                )
-            }
-            let failure = (error as? CodexReviewAuthenticationFailure)
-                ?? CodexReviewAuthenticationFailure.login(message: error.localizedDescription)
-            switch await session.claimPreCommitFailure() {
-            case .cancel:
-                return .init(
-                    terminal: .cancelled,
-                    terminalPhase: .signedOut
-                )
-            case .fail:
-                return .init(
-                    terminal: .failed(failure),
-                    terminalPhase: .failed(failure)
-                )
-            }
-        }
-    }
-
-    private func successfulLoginAccount(
-        from snapshot: CodexReviewBackendModel.Auth.Snapshot,
-        provider: LoginProvider,
-        previousActiveAccountKey: String?
-    ) throws -> CodexReviewAccount {
-        guard let activeAccountID = snapshot.activeAccountID,
-              let backendAccount = snapshot.accounts.first(where: { $0.id == activeAccountID }),
-              let account = Self.monitorAccount(from: backendAccount) else {
-            throw CodexReviewAuthenticationFailure.protocolViolation(
-                message: "A successful login must expose an active authenticated account."
-            )
-        }
-        switch provider {
-        case .chatGPT:
-            guard account.kind == .chatGPT,
-                  account.accountKey != previousActiveAccountKey else {
-                throw CodexReviewAuthenticationFailure.protocolViolation(
-                    message: "A successful login must expose a new active ChatGPT account."
-                )
-            }
-        case .apiKey:
-            guard account.kind == .apiKey,
-                  account.accountKey == "api-key" else {
-                throw CodexReviewAuthenticationFailure.protocolViolation(
-                    message: "A successful API-key login must expose the API-key account."
-                )
-            }
-        }
-        return account
-    }
-
-    private func finishPrimaryLoginWithDeferredRegistryReconciliation(
-        session: LoginSession,
-        expectedAccount: ExpectedRuntimeAccount,
-        underlyingError: any Error
-    ) async -> LoginSessionResolution {
-        let message = "Authentication succeeded, but account registry reconciliation remains pending: "
-            + underlyingError.localizedDescription
-        do {
-            try await accountRegistry.recordReconciliationDebt(
-                expectedAccount: expectedAccount,
-                message: message
-            )
-        } catch {
-            preconditionFailure(
-                "Committed primary authentication must durably record reconciliation debt: \(error.localizedDescription)"
-            )
-        }
-        let publishesFailure = commitPrimaryLoginReconciliationFailure(for: session)
-        if publishesFailure {
-            attachedStore?.transitionToFailed(message)
-        }
-        logger.error("\(message, privacy: .public)")
-        return .init(
-            terminal: .committedNeedsRuntimeReconciliation(message: message),
-            terminalPhase: publishesFailure ? .failed(.accountCommit(message: message)) : nil
-        )
-    }
-
-    private func commitPrimaryLoginReconciliationFailure(
-        for session: LoginSession
-    ) -> Bool {
-        guard let primaryLoginAdmission,
-              primaryLoginAdmission.generationID == session.generationID else {
-            return accountRuntimeTransitionCoordinator.commitUnownedReconciliationFailure()
-        }
-        return accountRuntimeTransitionCoordinator.commitPrimaryLoginReconciliationFailure(
-            primaryLoginAdmission.admission
-        )
-    }
-
-    private func finishCancelledLoginOutcome(
-        reason: LoginTerminationReason
-    ) -> LoginSessionResolution {
-        switch reason {
-        case .urlOpenFailure(let failure), .runtimeFailure(let failure):
-            return .init(
-                terminal: .failed(failure),
-                terminalPhase: .failed(failure)
-            )
-        case .storeStop:
-            return .init(
-                terminal: .stopped,
-                terminalPhase: .signedOut
-            )
-        case .rootOutcome, .explicitCancellation:
-            return .init(
-                terminal: .cancelled,
-                terminalPhase: .signedOut
+            logger.error("ChatGPT login failed to complete: \(error.localizedDescription, privacy: .public)")
+            let loginClient = loginClient
+            let loginCodexHomeURL = loginCodexHomeURL
+            loginChallenge = nil
+            self.loginBackend = nil
+            isWaitingForLoginAccountUpdate = false
+            self.loginClient = nil
+            self.loginCodexHomeURL = nil
+            activeAuthenticationSession = nil
+            authenticationTask = nil
+            loginNotificationTask?.cancel()
+            loginNotificationTask = nil
+            await closeIsolatedLoginRuntime(client: loginClient, codexHomeURL: loginCodexHomeURL)
+            updateAuthenticationFailure(
+                error.localizedDescription,
+                auth: auth,
+                activation: loginActivation
             )
         }
     }
 
-    private func finishCancelledLoginWaiter(
-        session _: LoginSession,
-        reason: LoginTerminationReason,
-        message: String?
-    ) -> LoginSessionResolution {
-        finishLoginWaiterFailure(
-            reason: reason,
-            message: message ?? "Authentication cancellation failed."
-        )
-    }
-
-    private func finishLoginWaiterFailure(
-        reason: LoginTerminationReason,
-        message: String
-    ) -> LoginSessionResolution {
-        switch reason {
-        case .rootOutcome:
-            let failure = CodexReviewAuthenticationFailure.login(message: message)
-            return .init(
-                terminal: .failed(failure),
-                terminalPhase: .failed(failure)
-            )
-        case .explicitCancellation:
-            let failure = CodexReviewAuthenticationFailure.runtime(message: message)
-            return .init(
-                terminal: .failed(failure),
-                terminalPhase: .failed(failure)
-            )
-        case .urlOpenFailure(let failure), .runtimeFailure(let failure):
-            return .init(
-                terminal: .failed(failure),
-                terminalPhase: .failed(failure)
-            )
-        case .storeStop:
-            return .init(
-                terminal: .stopped,
-                terminalPhase: .signedOut
-            )
-        }
-    }
-
-    private func performPrimaryAuthenticationReconciliation(
-        _ handoff: PrimaryAuthenticationReconciliationHandoff,
-        reservation: AccountRuntimeTransitionCoordinator.PrimaryReconciliationReservation,
+    private func updateAuthenticationFailure(
+        _ message: String,
         auth: CodexReviewAuthModel,
-        oldRuntimeAlreadyStopped: Bool
-    ) async -> AccountRuntimeTransitionCoordinator.PrimaryReconciliationFinishAction {
-        let finalResult: PrimaryAuthenticationReconciliationResult
-        var terminalPhase: CodexReviewAuthModel.Phase?
-        var publishesRuntimeState = false
-        let expectedAccount: ExpectedRuntimeAccount = switch handoff.cause {
-        case .chatGPTCommitted:
-            .anyChatGPT
-        case .chatGPTCancelOutcomeUnknown(let previousActiveAccountKey):
-            .cancelOutcomeUnknown(previousActiveAccountKey: previousActiveAccountKey)
-        case .apiKeyOutcomeUnknown:
-            .reconcileCurrentRuntime
-        }
-        if case .apiKeyOutcomeUnknown(let previousActiveAccountKey) = handoff.cause {
-            precondition(
-                previousActiveAccountKey.map(CodexReviewAccount.normalizedEmail) != "api-key",
-                "API-key authentication admission must reject an existing fixed API-key identity."
-            )
-        }
-        do {
-            guard let store = attachedStore else {
-                throw CodexReviewAuthenticationFailure.runtime(
-                    message: "Authentication committed, but the review store is unavailable for reconciliation."
-                )
-            }
-            if oldRuntimeAlreadyStopped == false {
-                await stop(store: store, purpose: .loginReconciliationPreservingRuns)
-            }
-            publishesRuntimeState = accountRuntimeTransitionCoordinator
-                .primaryPublicationClaim(reservation) == .published
-            guard await startRuntime(
-                store: store,
-                forceRestartIfNeeded: true,
-                expectedAccount: expectedAccount,
-                mode: publishesRuntimeState
-                    ? .published(owner: .primary(reservation))
-                    : .quiescentReconciliation,
-                registryAuthorization: handoff.mutationLease,
-                accountSnapshotForPublication: nil
-            ) else {
-                throw CodexReviewAuthenticationFailure.runtime(
-                    message: "Authentication committed, but the replacement runtime failed validation."
-                )
-            }
-            guard let accountObservation = runtimeSession?.accountObservation else {
-                throw CodexReviewAuthenticationFailure.runtime(
-                    message: "Authentication reconciliation completed without a validated account observation."
-                )
-            }
-            switch (handoff.cause, accountObservation) {
-            case (.chatGPTCommitted, .account(let accountKey, .chatGPT)):
-                finalResult = .authenticated(accountKey: accountKey)
-            case (.chatGPTCancelOutcomeUnknown(let previousActiveAccountKey), .account(let accountKey, .chatGPT))
-                where accountKey != previousActiveAccountKey:
-                finalResult = .authenticated(accountKey: accountKey)
-            case (.chatGPTCancelOutcomeUnknown, .signedOut):
-                finalResult = .cancelled
-            case (.chatGPTCancelOutcomeUnknown(let previousActiveAccountKey), .account(let accountKey, .chatGPT))
-                where accountKey == previousActiveAccountKey:
-                finalResult = .cancelled
-            case (.apiKeyOutcomeUnknown, .account(let accountKey, .apiKey))
-                where accountKey == "api-key":
-                finalResult = .authenticated(accountKey: accountKey)
-            case (.apiKeyOutcomeUnknown, .signedOut):
-                finalResult = .cancelled
-            case (.apiKeyOutcomeUnknown(let previousActiveAccountKey), .account(let accountKey, _))
-                where accountKey == previousActiveAccountKey:
-                finalResult = .cancelled
-            case (.chatGPTCommitted, .signedOut),
-                 (_, .invalid),
-                 (_, .account(_, .amazonBedrock)),
-                 (.chatGPTCommitted, .account(_, .apiKey)),
-                 (.chatGPTCancelOutcomeUnknown, .account(_, .apiKey)),
-                 (.chatGPTCancelOutcomeUnknown, .account(_, .chatGPT)),
-                 (.apiKeyOutcomeUnknown, .account(_, .chatGPT)),
-                 (.apiKeyOutcomeUnknown, .account(_, .apiKey)):
-                throw CodexReviewAuthenticationFailure.protocolViolation(
-                    message: "Authentication reconciliation produced an invalid account observation."
-                )
-            }
-            if publishesRuntimeState {
-                terminalPhase = .signedOut
-            }
-        } catch {
-            let message = "Authentication was committed, but runtime reconciliation remains pending: \(error.localizedDescription)"
-            do {
-                try await accountRegistry.recordReconciliationDebt(
-                    expectedAccount: expectedAccount,
-                    message: message
-                )
-            } catch {
-                preconditionFailure(
-                    "Committed primary authentication must durably record reconciliation debt: \(error.localizedDescription)"
-                )
-            }
-            if accountRuntimeTransitionCoordinator.commitPrimaryReconciliationFailure(reservation) {
-                attachedStore?.transitionToFailed(message)
-                terminalPhase = .failed(.accountCommit(message: message))
-            }
-            logger.error(
-                "Primary authentication reconciliation deferred after \(String(describing: handoff.cause), privacy: .public): \(message, privacy: .public)"
-            )
-            finalResult = .committedNeedsRuntimeReconciliation(message: message)
-        }
-        await authenticationOwnershipWillRelease?()
-        await accountRegistry.finishMutation(handoff.mutationLease)
-        return { @MainActor [self, weak auth] in
-            clearActivePrimaryAuthenticationReconciliation(handoff)
-            if let auth {
-                publishAuthenticationTerminalPhase(terminalPhase, to: auth)
-            }
-            let didResolve = handoff.finalResult.resolve(finalResult)
-            precondition(
-                didResolve,
-                "A primary authentication reconciliation resolver can complete only once."
-            )
-        }
-    }
-
-    private func publishAuthenticationTerminalPhase(
-        _ terminalPhase: CodexReviewAuthModel.Phase?,
-        to auth: CodexReviewAuthModel
+        activation: LoginActivation
     ) {
-        let publishedTerminalPhase: CodexReviewAuthModel.Phase? =
-            accountRuntimeTransitionCoordinator.isFinalShutdownRequested
-                ? .signedOut
-                : terminalPhase
-        if let publishedTerminalPhase {
-            auth.updatePhase(publishedTerminalPhase)
+        switch activation {
+        case .activateAuthenticatedAccount:
+            auth.updatePhase(.failed(message: message))
+        case .preserveActiveAccount:
+            auth.recordAuthenticationFailure(message: message)
         }
     }
 
-    private func installActivePrimaryAuthenticationReconciliation(
-        _ handoff: PrimaryAuthenticationReconciliationHandoff
-    ) {
-        precondition(
-            activePrimaryAuthenticationReconciliation == nil,
-            "Only one primary authentication reconciliation can own the active final-result slot."
-        )
-        activePrimaryAuthenticationReconciliation = (
-            loginGenerationID: handoff.loginGenerationID,
-            finalResult: handoff.finalResult
-        )
-    }
-
-    private func clearActivePrimaryAuthenticationReconciliation(
-        _ handoff: PrimaryAuthenticationReconciliationHandoff
-    ) {
-        guard let activePrimaryAuthenticationReconciliation else {
-            preconditionFailure("A primary authentication reconciliation must resolve its active final-result slot.")
-        }
-        precondition(
-            activePrimaryAuthenticationReconciliation.loginGenerationID == handoff.loginGenerationID
-                && activePrimaryAuthenticationReconciliation.finalResult === handoff.finalResult,
-            "Only the active primary authentication reconciliation can clear its final-result slot."
-        )
-        self.activePrimaryAuthenticationReconciliation = nil
-    }
-
-    private func clearLoginSessionIfCurrent(_ session: LoginSession) {
-        guard loginSession === session,
-              loginSession?.generationID == session.generationID else {
-            return
-        }
-        loginSession = nil
-    }
-
-    private func closeLoginRuntime(_ runtime: LoginRuntime?) async {
-        guard let runtime else {
-            return
-        }
-        guard runtime.usesPrimaryRuntime == false else {
-            return
-        }
-        await closeIsolatedLoginRuntime(
-            appServer: runtime.appServer,
-            codexHomeURL: runtime.codexHomeURL
-        )
-    }
-
-    private func closeLoginRuntimeIfNeeded(_ session: LoginSession) async {
-        guard let runtime = await session.takeOwnedRuntimeForClose() else {
-            return
-        }
-        await closeLoginRuntime(runtime)
-    }
-
-    private func releaseLoginMutationIfNeeded(_ session: LoginSession) async {
-        guard let lease = session.takeMutationLeaseForRelease() else {
-            return
-        }
-        await accountRegistry.finishMutation(lease)
-    }
-
-    private func loginRuntime(for purpose: LoginPurpose) async throws -> LoginRuntime {
-        switch purpose {
-        case .signIn:
-            guard let appServer, let appServerBackend else {
+    private func loginRuntime(for activation: LoginActivation) async throws -> LoginRuntime {
+        switch activation {
+        case .activateAuthenticatedAccount:
+            guard let client, let appServerBackend else {
                 throw CodexReviewAPI.Error.io("Review runtime is not running.")
             }
             return .init(
-                appServer: appServer,
+                client: client,
                 backend: appServerBackend,
                 codexHomeURL: codexHomeURL,
                 usesPrimaryRuntime: true
             )
-        case .addAccountPreservingActive:
-            let temporaryCodexHomeURL = try await accountRegistry.reserveTemporaryCodexHome(
-                kind: .authentication
-            )
-            let runtime: AppServerRuntime
-            do {
-                runtime = try await appServerRuntimeFactory(temporaryCodexHomeURL)
-            } catch {
-                await accountRegistry.finishTemporaryCodexHome(temporaryCodexHomeURL)
-                throw error
-            }
-            guard appServerBackend != nil else {
-                await closeIsolatedLoginRuntime(
-                    appServer: runtime.appServer,
-                    codexHomeURL: temporaryCodexHomeURL
-                )
-                throw CodexReviewAPI.Error.io("Review runtime is not running.")
-            }
+        case .preserveActiveAccount:
+            let temporaryCodexHomeURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("codex-review-auth-\(UUID().uuidString)", isDirectory: true)
+            let runtime = try await appServerRuntimeFactory(temporaryCodexHomeURL)
             return .init(
-                appServer: runtime.appServer,
+                client: runtime.client,
                 backend: runtime.backend,
                 codexHomeURL: temporaryCodexHomeURL,
                 usesPrimaryRuntime: false
@@ -3214,533 +1001,401 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         }
     }
 
+    private func handleAuthenticationSessionCancelled(
+        challenge: CodexReviewBackendModel.Login.Challenge,
+        auth: CodexReviewAuthModel
+    ) async {
+        guard loginChallenge?.id == challenge.id else {
+            return
+        }
+        logger.info("ChatGPT login session was cancelled")
+        let loginBackend = loginBackend
+        let loginClient = loginClient
+        let loginCodexHomeURL = loginCodexHomeURL
+        if let loginBackend {
+            do {
+                try await loginBackend.cancelLogin(challenge)
+            } catch {
+                logger.error("Failed to cancel ChatGPT login after session close: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+        loginChallenge = nil
+        self.loginBackend = nil
+        isWaitingForLoginAccountUpdate = false
+        self.loginClient = nil
+        self.loginCodexHomeURL = nil
+        activeAuthenticationSession = nil
+        authenticationTask = nil
+        loginNotificationTask?.cancel()
+        loginNotificationTask = nil
+        auth.updatePhase(.signedOut)
+        await closeIsolatedLoginRuntime(client: loginClient, codexHomeURL: loginCodexHomeURL)
+    }
+
     func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt {
-        try requireOperationAdmission()
         guard let appServerBackend else {
             throw CodexReviewAPI.Error.io("Review runtime is not running.")
         }
         return try await appServerBackend.startReview(request)
     }
 
-    func interruptReview(_ attempt: ReviewAttempt, reason: CodexReviewBackendModel.CancellationReason) async throws {
-        guard let appServerBackend = teardownAppServerBackend else {
-            throw CodexReviewAPI.Error.io("Review runtime is not running.")
-        }
-        try await appServerBackend.interruptReview(attempt, reason: reason)
-    }
-
-    func prepareReviewRestart(_ attempt: ReviewAttempt) async throws -> CodexReviewBackendModel.Review.RestartToken {
-        try requireOperationAdmission()
+    func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws {
         guard let appServerBackend else {
             throw CodexReviewAPI.Error.io("Review runtime is not running.")
         }
-        return try await appServerBackend.prepareReviewRestart(attempt)
+        try await appServerBackend.interruptReview(run, reason: reason)
     }
 
-    func restartPreparedReview(
-        _ token: CodexReviewBackendModel.Review.RestartToken,
+    func beginReviewRecovery(
+        _ run: CodexReviewBackendModel.Review.Run,
+        reason: CodexReviewBackendModel.CancellationReason
+    ) async throws -> CodexReviewBackendModel.Review.RecoveryToken {
+        guard let appServerBackend else {
+            throw CodexReviewAPI.Error.io("Review runtime is not running.")
+        }
+        return try await appServerBackend.beginReviewRecovery(run, reason: reason)
+    }
+
+    func resumeReviewRecovery(
+        _ token: CodexReviewBackendModel.Review.RecoveryToken,
         request: CodexReviewBackendModel.Review.Start
     ) async throws -> BackendReviewAttempt {
-        try requireOperationAdmission()
         guard let appServerBackend else {
             throw CodexReviewAPI.Error.io("Review runtime is not running.")
         }
-        return try await appServerBackend.restartPreparedReview(token, request: request)
+        return try await appServerBackend.resumeReviewRecovery(token, request: request)
     }
 
-    func discardPreparedReviewRestart(
-        _ token: CodexReviewBackendModel.Review.RestartToken
-    ) async -> [ReviewAttempt] {
-        guard let appServerBackend = teardownAppServerBackend else {
-            preconditionFailure(
-                "A prepared review restart must retain its matching app-server runtime until discard completes."
-            )
-        }
-        return await appServerBackend.discardPreparedReviewRestart(token)
-    }
-
-    func cleanupReview(_ attempt: ReviewAttempt) async {
-        guard let appServerBackend = teardownAppServerBackend else {
+    func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async {
+        guard let appServerBackend else {
             return
         }
-        await appServerBackend.cleanupReview(attempt)
+        await appServerBackend.cleanupReview(run)
     }
 
-    func cleanupRetainedReviews(
-        _ attempts: [ReviewAttempt],
-        additionalThreadIDs: [ReviewThreadID]
-    ) async -> ReviewRetainedThreadCleanupResult {
-        guard let appServerBackend = teardownAppServerBackend else {
-            let attemptFailures = attempts.flatMap { attempt -> [ReviewRetainedThreadCleanupFailure] in
-                if attempt.threadIdentity.activeTurnThreadID == attempt.threadIdentity.sourceThreadID {
-                    return [.init(
-                        threadID: attempt.threadIdentity.sourceThreadID,
-                        message: "The matching review runtime is not running."
-                    )]
-                }
-                return [
-                    .init(
-                        threadID: attempt.threadIdentity.activeTurnThreadID,
-                        message: "The matching review runtime is not running."
-                    ),
-                    .init(
-                        threadID: attempt.threadIdentity.sourceThreadID,
-                        message: "The matching review runtime is not running."
-                    ),
-                ]
-            }
-            return .init(failures: attemptFailures + additionalThreadIDs.map { threadID in
-                .init(
-                    threadID: threadID,
-                    message: "The matching review runtime is not running."
-                )
-            })
-        }
-        return await appServerBackend.cleanupRetainedReviews(
-            attempts,
-            additionalThreadIDs: additionalThreadIDs
-        )
-    }
-
-    private func applyAccountRegistrySnapshot(
-        _ snapshot: AccountRegistryStore.Snapshot,
-        to auth: CodexReviewAuthModel
-    ) {
-        auth.applyPersistedAccountStates(
-            snapshot.accounts,
-            activeAccountKey: snapshot.activeAccountKey
-        )
-        auth.selectPersistedAccount(snapshot.activeAccountKey)
-    }
-
-    private func reconcileAuthSnapshotSerialized(
+    @discardableResult
+    private func applyAuthSnapshot(
         _ snapshot: CodexReviewBackendModel.Auth.Snapshot,
+        to auth: CodexReviewAuthModel,
         activation: LoginActivation = .activateAuthenticatedAccount,
-        authSourceCodexHomeURL: URL? = nil,
-        authenticatedRateLimits: CodexRateLimits? = nil,
-        authorization: AccountRegistryStore.MutationLease? = nil,
-        runtimeAuthorization: AccountRegistryStore.RuntimeCommitAuthorization? = nil,
-        isolatedProductCommitAuthorization: AccountRegistryStore.MutationLease? = nil
-    ) async throws -> (
-        persisted: AccountRegistryStore.Snapshot,
-        account: CodexReviewAccount?
+        authSourceCodexHomeURL: URL? = nil
+    ) -> CodexAccount? {
+        guard let activeAccountID = snapshot.activeAccountID?.rawValue,
+              let backendAccount = snapshot.accounts.first(where: { $0.id.rawValue == activeAccountID }),
+              let account = Self.monitorAccount(from: backendAccount)
+        else {
+            if case .activateAuthenticatedAccount = activation {
+                auth.selectPersistedAccount(nil)
+                auth.updatePhase(.signedOut)
+            } else {
+                auth.updatePhase(.signedOut)
+            }
+            return nil
+        }
+        var persistedAccounts = auth.persistedAccounts
+        let persistedAccount: CodexAccount
+        if let index = persistedAccounts.firstIndex(where: { $0.accountKey == account.accountKey }) {
+            persistedAccounts[index].updateEmail(account.email)
+            persistedAccounts[index].updateKind(account.kind, capabilities: account.capabilities)
+            persistedAccounts[index].updatePlanType(account.planType)
+            persistedAccount = persistedAccounts[index]
+        } else {
+            persistedAccounts.insert(account, at: 0)
+            persistedAccount = account
+        }
+        let activeAccountKey = activation.resolvedActiveAccountKey(
+            authenticatedAccountKey: account.accountKey,
+            persistedAccounts: persistedAccounts
+        )
+        try? CodexReviewAccountRegistry.saveAccounts(
+            persistedAccounts,
+            activeAccountKey: activeAccountKey,
+            codexHomeURL: codexHomeURL
+        )
+        switch activation {
+        case .activateAuthenticatedAccount:
+            try? CodexReviewAccountRegistry.saveSharedAuth(
+                for: account,
+                codexHomeURL: codexHomeURL
+            )
+        case .preserveActiveAccount:
+            if let authSourceCodexHomeURL {
+                try? CodexReviewAccountRegistry.saveSharedAuth(
+                    from: authSourceCodexHomeURL,
+                    for: account,
+                    codexHomeURL: codexHomeURL
+                )
+            }
+        }
+        auth.applyPersistedAccountStates(
+            persistedAccounts.map(savedAccountPayload(from:)),
+            activeAccountKey: activeAccountKey
+        )
+        auth.selectPersistedAccount(activeAccountKey)
+        auth.updatePhase(auth.selectedAccount == nil ? .signedOut : .signedOut)
+        return auth.persistedAccounts.first(where: { $0.accountKey == persistedAccount.accountKey })
+    }
+
+    private func observeAuthNotifications(
+        client: AppServerClient,
+        backend: AppServerCodexReviewBackend,
+        store: CodexReviewStore
     ) {
-        guard let activeAccountID = snapshot.activeAccountID?.rawValue.nilIfEmpty else {
-            guard case .activateAuthenticatedAccount = activation else {
-                throw CodexReviewAuthenticationFailure.protocolViolation(
-                    message: "An isolated successful login did not expose its authenticated account."
-                )
-            }
-            let persisted = try await accountRegistry.deactivateAccount(
-                authorization: authorization,
-                runtimeAuthorization: runtimeAuthorization
-            )
-            return (persisted, nil)
-        }
-        guard let backendAccount = snapshot.accounts.first(where: {
-            $0.id.rawValue == activeAccountID
-        }) else {
-            throw CodexReviewAuthenticationFailure.protocolViolation(
-                message: "The active runtime account identifier is missing from the account snapshot."
-            )
-        }
-        guard let account = Self.monitorAccount(from: backendAccount) else {
-            throw CodexReviewAuthenticationFailure.protocolViolation(
-                message: "The active runtime account snapshot is invalid."
-            )
-        }
-        if let authenticatedRateLimits {
-            applyRateLimits(authenticatedRateLimits, to: account)
-        }
-        let accountPayload = savedAccountPayload(from: account)
-        let persisted: AccountRegistryStore.Snapshot
-        switch accountPayload.kind {
-        case .chatGPT, .apiKey:
-            persisted = try await accountRegistry.commitAuthenticatedAccount(
-                accountPayload,
-                activation: activation,
-                authSourceCodexHomeURL: authSourceCodexHomeURL,
-                authorization: authorization,
-                runtimeAuthorization: runtimeAuthorization,
-                isolatedProductCommitAuthorization: isolatedProductCommitAuthorization
-            )
-        case .amazonBedrock:
-            persisted = try await accountRegistry.upsertAccount(
-                accountPayload,
-                activation: activation,
-                authorization: authorization,
-                runtimeAuthorization: runtimeAuthorization
-            )
-        }
-        return (persisted, account)
-    }
-
-    private func installRuntimeConsumers(
-        session: HostRuntimeSession,
-        appServer: CodexAppServer,
-        store: CodexReviewStore
-    ) async throws {
-        let generation = session.generation
-        let connectionEvents = await appServer.connectionEvents()
-        do {
-            try requireCurrentStagingSession(session)
-        } catch {
-            await connectionEvents.cancel()
-            throw error
-        }
-        let accountEvents = await appServer.accountEvents()
-        do {
-            try requireCurrentStagingSession(session)
-        } catch {
-            await accountEvents.cancel()
-            await connectionEvents.cancel()
-            throw error
-        }
-        session.installConsumers(
-            accountEvents: accountEvents,
-            connectionEvents: connectionEvents,
-            accountEventSink: { @MainActor [weak self, weak store] event in
-                guard let self, let store else {
-                    return
-                }
-                await self.handleRuntimeAccountEvent(
-                    event,
-                    generation: generation,
-                    store: store
-                )
-            },
-            exitSink: { @MainActor [weak self, weak store] failure in
-                guard let self, let store else {
-                    return
-                }
-                await self.runtimeConsumerDidExit(
-                    generation: generation,
-                    failure: failure,
-                    store: store
-                )
-            }
-        )
-    }
-
-    private func handleRuntimeAccountEvent(
-        _ event: CodexAccountEvent,
-        generation: UInt64,
-        store: CodexReviewStore
-    ) async {
-        guard let session = runtimeSession,
-              session.generation == generation else {
-            return
-        }
-        if case .accountUpdated = event {
-            session.recordAccountInvalidation()
-        }
-        guard let backend = session.activeRuntime?.backend else {
-            return
-        }
-        await handleAuthNotification(
-            event,
-            generation: generation,
-            backend: backend,
-            store: store
-        )
-    }
-
-    private func runtimeConsumerDidExit(
-        generation: UInt64,
-        failure: HostRuntimeConsumerFailure,
-        store: CodexReviewStore
-    ) async {
-        guard let session = runtimeSession,
-              session.generation == generation else {
-            return
-        }
-        switch session.phase {
-        case .staging:
-            session.recordStagingFailure(failure)
-        case .active:
-            guard session.isActive else {
-                logger.debug("Ignoring a runtime consumer exit after its generation admission closed")
+        authNotificationTask?.cancel()
+        authNotificationTask = Task { @MainActor [weak self, weak store] in
+            guard let self, let store else {
                 return
             }
-            let message = "Review runtime stopped unexpectedly: \(failure.message)"
-            store.transitionToFailed(message)
-            session.closeAdmission()
-            let requestedStopTask = session.requestStop(purpose: .runtimeRestartPreservingRuns) { session in
-                await self.accountRegistry.closeRuntimeAdmission(generation: generation)
-                return await self.performRuntimeStop(
-                    session: session,
-                    store: store,
-                    reviewCleanupMode: .connectionTerminated,
-                    reviewCancellation: .system(message: message),
-                    loginTerminationReason: .runtimeFailure(.runtime(message: message))
-                )
+            let stream = await client.notificationStream()
+            do {
+                for try await notification in stream {
+                    await self.handleAuthNotification(
+                        notification,
+                        backend: backend,
+                        auth: store.auth
+                    )
+                }
+            } catch is CancellationError {
+            } catch {
+                logger.error("Auth notification stream ended: \(error.localizedDescription, privacy: .public)")
+                await markRuntimeFailedAfterNotificationStreamError(error, store: store)
             }
-            guard let stopTask = requestedStopTask else {
-                return
-            }
-            _ = installRuntimeStopFollowup(
-                stopTask: stopTask,
-                session: session,
-                store: store
-            )
-        case .stopping, .stopIncomplete, .stopped:
+        }
+    }
+
+    private func markRuntimeFailedAfterNotificationStreamError(
+        _ error: any Error,
+        store: CodexReviewStore
+    ) async {
+        let loginCleanup = takeLoginRuntimeForCleanup()
+        guard client != nil || appServerBackend != nil || mcpHTTPServer != nil || loginCleanup.isEmpty == false else {
             return
         }
+        let message = "Review runtime stopped unexpectedly: \(error.localizedDescription)"
+        if let appServerBackend {
+            let reason = ReviewCancellation.system(message: message)
+            await cancelActiveReviewsForRuntimeTeardown(
+                store: store,
+                appServerBackend: appServerBackend,
+                reason: reason,
+                timeoutWarning: "Timed out cleaning active reviews after runtime failure"
+            )
+        }
+        let failedClient = client
+        let failedMCPHTTPServer = mcpHTTPServer
+        client = nil
+        appServerBackend = nil
+        mcpHTTPServer = nil
+        authNotificationTask = nil
+        store.transitionToFailed(message)
+        await failedMCPHTTPServer?.stop()
+        await cleanupLoginRuntime(loginCleanup)
+        await failedClient?.close()
     }
 
     private func handleAuthNotification(
-        _ event: CodexAccountEvent,
-        generation: UInt64,
+        _ notification: JSONRPC.Notification,
         backend: AppServerCodexReviewBackend,
-        store: CodexReviewStore
+        auth: CodexReviewAuthModel
     ) async {
-        switch event {
-        case .accountUpdated:
-            schedulePendingRuntimeAuthDrain()
-        case .rateLimitsUpdated(let rateLimits):
-            guard acceptsRuntimeEvent(generation: generation) else {
-                return
-            }
-            await applyRateLimitsUpdatedNotification(
-                rateLimits,
-                generation: generation,
-                auth: store.auth
-            )
-        case .malformed(let method, let message):
-            logger.error("Malformed account notification \(method, privacy: .public): \(message, privacy: .public)")
-        case .unknown:
+        switch notification.method {
+        case "account/login/completed":
+            await handleLoginCompletedNotification(notification, backend: backend, auth: auth)
+        case "account/updated":
+            await handleAccountUpdatedNotification(backend: backend, auth: auth)
+        case "account/rateLimits/updated":
+            await applyRateLimitsUpdatedNotification(notification, auth: auth)
+        default:
             return
         }
+    }
+
+    private func observeLoginNotifications(
+        client: AppServerClient,
+        backend: AppServerCodexReviewBackend,
+        auth: CodexReviewAuthModel
+    ) {
+        loginNotificationTask?.cancel()
+        loginNotificationTask = Task { @MainActor [weak self, weak auth] in
+            guard let self, let auth else {
+                return
+            }
+            let stream = await client.notificationStream()
+            do {
+                for try await notification in stream
+                    where notification.method == "account/login/completed"
+                        || notification.method == "account/updated"
+                {
+                    await self.handleLoginRuntimeNotification(notification, backend: backend, auth: auth)
+                }
+            } catch is CancellationError {
+            } catch {
+                logger.error("Login notification stream ended: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    private func handleLoginRuntimeNotification(
+        _ notification: JSONRPC.Notification,
+        backend: AppServerCodexReviewBackend,
+        auth: CodexReviewAuthModel
+    ) async {
+        switch notification.method {
+        case "account/login/completed":
+            await handleLoginCompletedNotification(notification, backend: backend, auth: auth)
+        case "account/updated":
+            guard loginBackend != nil, isWaitingForLoginAccountUpdate else {
+                return
+            }
+            await finishCompletedLoginAfterAccountUpdate(backend: backend, auth: auth)
+        default:
+            return
+        }
+    }
+
+    private func handleLoginCompletedNotification(
+        _ notification: JSONRPC.Notification,
+        backend: AppServerCodexReviewBackend,
+        auth: CodexReviewAuthModel
+    ) async {
+        guard notification.method == "account/login/completed" else {
+            await handleAccountUpdatedNotification(backend: backend, auth: auth)
+            return
+        }
+        do {
+            let payload = try JSONDecoder().decode(AppServerAccountLoginCompletedNotification.self, from: notification.params)
+            guard payload.loginID == nil || payload.loginID == loginChallenge?.id else {
+                return
+            }
+            loginChallenge = nil
+            let loginClient = loginClient
+            let loginCodexHomeURL = loginCodexHomeURL
+            let activeAuthenticationSession = activeAuthenticationSession
+            self.activeAuthenticationSession = nil
+            authenticationTask?.cancel()
+            authenticationTask = nil
+            await activeAuthenticationSession?.cancel()
+            guard payload.success else {
+                updateAuthenticationFailure(
+                    payload.error ?? "Authentication failed.",
+                    auth: auth,
+                    activation: loginActivation
+                )
+                self.loginBackend = nil
+                isWaitingForLoginAccountUpdate = false
+                self.loginClient = nil
+                self.loginCodexHomeURL = nil
+                loginNotificationTask?.cancel()
+                loginNotificationTask = nil
+                await closeIsolatedLoginRuntime(client: loginClient, codexHomeURL: loginCodexHomeURL)
+                return
+            }
+            isWaitingForLoginAccountUpdate = true
+            logger.info("ChatGPT login completed; waiting for account update notification")
+        } catch {
+            logger.error("Failed to decode account login completion: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func handleAccountUpdatedNotification(
+        backend: AppServerCodexReviewBackend,
+        auth: CodexReviewAuthModel
+    ) async {
+        guard isWaitingForLoginAccountUpdate else {
+            await refreshAuthAfterAccountNotification(backend: backend, auth: auth)
+            return
+        }
+        await finishCompletedLoginAfterAccountUpdate(backend: backend, auth: auth)
+    }
+
+    private func finishCompletedLoginAfterAccountUpdate(
+        backend: AppServerCodexReviewBackend,
+        auth: CodexReviewAuthModel
+    ) async {
+        let activation = loginActivation
+        let loginBackend = loginBackend
+        let loginClient = loginClient
+        let loginCodexHomeURL = loginCodexHomeURL
+        let activeAuthenticationSession = activeAuthenticationSession
+        do {
+            loginChallenge = nil
+            self.activeAuthenticationSession = nil
+            authenticationTask?.cancel()
+            authenticationTask = nil
+            await activeAuthenticationSession?.cancel()
+            let account = applyAuthSnapshot(
+                try await backend.readAuth(),
+                to: auth,
+                activation: activation,
+                authSourceCodexHomeURL: loginCodexHomeURL
+            )
+            if case .preserveActiveAccount = activation, let account, let loginBackend {
+                let didRefresh = await refreshRateLimits(for: account, using: loginBackend, source: "login-runtime")
+                if didRefresh {
+                    persistRefreshedSharedAuth(
+                        from: loginCodexHomeURL,
+                        for: account
+                    )
+                }
+            } else {
+                await refreshSelectedAccountRateLimits(auth: auth)
+            }
+        } catch {
+            updateAuthenticationFailure(
+                error.localizedDescription,
+                auth: auth,
+                activation: activation
+            )
+        }
+        self.loginBackend = nil
+        self.loginClient = nil
+        self.loginCodexHomeURL = nil
+        isWaitingForLoginAccountUpdate = false
+        loginNotificationTask?.cancel()
+        loginNotificationTask = nil
+        await closeIsolatedLoginRuntime(client: loginClient, codexHomeURL: loginCodexHomeURL)
     }
 
     private func refreshAuthAfterAccountNotification(
-        generation: UInt64,
         backend: AppServerCodexReviewBackend,
-        store: CodexReviewStore
+        auth: CodexReviewAuthModel
     ) async {
-        guard let reservation = accountRuntimeTransitionCoordinator.reserveRuntimeAuthReconciliation(
-            generation: generation
-        ) else {
-            return
+        do {
+            applyAuthSnapshot(try await backend.readAuth(), to: auth)
+            await refreshSelectedAccountRateLimits(auth: auth)
+        } catch {
+            auth.updatePhase(.failed(message: error.localizedDescription))
         }
-        let didReconcile = await performRuntimeAuthReconciliation(
-            reservation: reservation,
-            generation: generation,
-            backend: backend,
-            auth: store.auth,
-            cause: .accountUpdated
-        )
-        if didReconcile {
-            await refreshSelectedAccountRateLimits(auth: store.auth)
-        }
-    }
-
-    private func performRuntimeAuthReconciliation(
-        reservation: AccountRuntimeTransitionCoordinator.RuntimeAuthReconciliation,
-        generation: UInt64,
-        backend: AppServerCodexReviewBackend,
-        auth: CodexReviewAuthModel,
-        cause: RuntimeAuthReconciliationCause
-    ) async -> Bool {
-        defer {
-            accountRuntimeTransitionCoordinator.finishRuntimeAuthReconciliation(reservation)
-        }
-        var requiresAuthoritativeRefresh = cause == .accountUpdated
-        while true {
-            guard let session = currentActiveRuntimeSession(generation: generation) else {
-                return false
-            }
-            let readRevision = session.accountInvalidationRevision
-            let snapshot: CodexReviewBackendModel.Auth.Snapshot
-            do {
-                snapshot = try await backend.readAuth()
-            } catch {
-                guard let currentSession = currentActiveRuntimeSession(generation: generation) else {
-                    return false
-                }
-                if currentSession.accountInvalidationRevision != readRevision {
-                    requiresAuthoritativeRefresh = true
-                    continue
-                }
-                let failure = (error as? CodexReviewAuthenticationFailure)
-                    ?? CodexReviewAuthenticationFailure.runtime(message: error.localizedDescription)
-                if requiresAuthoritativeRefresh == false {
-                    if accountRuntimeTransitionCoordinator.canPublishRuntimeAuthReadResult(reservation) {
-                        auth.updatePhase(.failed(failure))
-                    }
-                } else {
-                    if accountRuntimeTransitionCoordinator.commitRuntimeAuthReconciliationFailure(reservation) {
-                        attachedStore?.transitionToFailed(failure.localizedDescription)
-                        auth.updatePhase(.failed(failure))
-                    }
-                }
-                return false
-            }
-
-            guard let currentSession = currentActiveRuntimeSession(generation: generation) else {
-                return false
-            }
-            if currentSession.accountInvalidationRevision != readRevision {
-                requiresAuthoritativeRefresh = true
-                continue
-            }
-            let observation = runtimeAccountObservation(from: snapshot)
-            guard let expectedAccount = observation.exactExpectation else {
-                let failure = CodexReviewAuthenticationFailure.protocolViolation(
-                    message: "The active runtime authentication snapshot has an invalid account reference."
-                )
-                if accountRuntimeTransitionCoordinator.commitRuntimeAuthReconciliationFailure(reservation) {
-                    attachedStore?.transitionToFailed(failure.localizedDescription)
-                    auth.updatePhase(.failed(failure))
-                }
-                return false
-            }
-            guard accountRuntimeTransitionCoordinator.claimRuntimeAuthRegistryEffect(reservation) else {
-                return false
-            }
-
-            let reconciliation: (
-                persisted: AccountRegistryStore.Snapshot,
-                account: CodexReviewAccount?
-            )
-            do {
-                reconciliation = try await reconcileAuthSnapshotSerialized(
-                    snapshot,
-                    runtimeAuthorization: runtimeCommitAuthorization(generation: generation)
-                )
-            } catch {
-                let message = "Runtime authentication changed, but its account registry reconciliation remains pending: "
-                    + error.localizedDescription
-                let recoveryExpectation: ExpectedRuntimeAccount
-                if let currentSession = currentActiveRuntimeSession(generation: generation),
-                   currentSession.accountInvalidationRevision == readRevision {
-                    recoveryExpectation = expectedAccount
-                } else {
-                    recoveryExpectation = .reconcileCurrentRuntime
-                }
-                do {
-                    try await accountRegistry.recordReconciliationDebt(
-                        expectedAccount: recoveryExpectation,
-                        message: message
-                    )
-                } catch {
-                    preconditionFailure(
-                        "An unresolved runtime authentication change must durably record reconciliation debt: \(error.localizedDescription)"
-                    )
-                }
-                if accountRuntimeTransitionCoordinator.commitRuntimeAuthReconciliationFailure(reservation) {
-                    attachedStore?.transitionToFailed(message)
-                    auth.updatePhase(.failed(.accountCommit(message: message)))
-                }
-                return false
-            }
-
-            guard let committedSession = currentActiveRuntimeSession(generation: generation) else {
-                return false
-            }
-            guard committedSession.accountInvalidationRevision == readRevision else {
-                requiresAuthoritativeRefresh = true
-                guard accountRuntimeTransitionCoordinator
-                    .continueRuntimeAuthReadingAfterRegistryCommit(reservation) else {
-                    return false
-                }
-                continue
-            }
-            guard case .published = accountRuntimeTransitionCoordinator
-                .claimRuntimeAuthReconciliationPublication(reservation) else {
-                return false
-            }
-            committedSession.updateAccountObservation(
-                observation,
-                revision: readRevision
-            )
-            applyAccountRegistrySnapshot(reconciliation.persisted, to: auth)
-            auth.updatePhase(.signedOut)
-            return true
-        }
-    }
-
-    private func currentActiveRuntimeSession(
-        generation: UInt64
-    ) -> HostRuntimeSession? {
-        guard let session = runtimeSession,
-              session.generation == generation,
-              session.isActive else {
-            return nil
-        }
-        return session
-    }
-
-    private func isCurrentActiveRuntimeGeneration(_ generation: UInt64) -> Bool {
-        guard let session = runtimeSession,
-              session.generation == generation else {
-            return false
-        }
-        return session.isActive
-    }
-
-    private func acceptsRuntimeEvent(generation: UInt64) -> Bool {
-        guard let session = runtimeSession,
-              session.generation == generation else {
-            return false
-        }
-        return session.isActive && accountRuntimeTransitionCoordinator.acceptsNewOperations
-    }
-
-    private func requireOperationAdmission() throws {
-        guard acceptsNewReviewOperations else {
-            throw CodexReviewAPI.Error.io("The review runtime is changing accounts or stopping.")
-        }
-    }
-
-    private func requireAdmittedRuntimeBackend() throws -> (
-        generation: UInt64,
-        backend: AppServerCodexReviewBackend
-    ) {
-        try requireOperationAdmission()
-        guard let session = runtimeSession,
-              let backend = session.activeRuntime?.backend else {
-            throw CodexReviewAPI.Error.io("Review runtime is not running.")
-        }
-        return (session.generation, backend)
-    }
-
-    private func requireRuntimeCommitAdmission(generation: UInt64) throws {
-        guard acceptsRuntimeEvent(generation: generation) else {
-            throw CodexReviewAPI.Error.io(
-                "The runtime generation that accepted this operation is no longer active."
-            )
-        }
-    }
-
-    private func runtimeCommitAuthorization(
-        generation: UInt64
-    ) -> AccountRegistryStore.RuntimeCommitAuthorization {
-        .init(generation: generation)
     }
 
     private func applyRateLimitsUpdatedNotification(
-        _ rateLimits: CodexRateLimits,
-        generation: UInt64,
+        _ notification: JSONRPC.Notification,
         auth: CodexReviewAuthModel
     ) async {
-        guard let selectedAccount = auth.selectedAccount else {
-            return
+        do {
+            let payload = try JSONDecoder().decode(AppServerAccountRateLimitsUpdatedPayload.self, from: notification.params)
+            guard let selectedAccount = auth.selectedAccount else {
+                return
+            }
+            guard selectedAccount.capabilities.supportsRateLimitRefresh else {
+                return
+            }
+            guard AppServerAPI.Account.RateLimits.Response.isCodexRateLimit(payload.rateLimits.limitID) else {
+                return
+            }
+            let response = AppServerAPI.Account.RateLimits.Response(rateLimits: payload.rateLimits)
+            applyRateLimits(
+                windows: response.codexRateLimitWindows,
+                planType: response.codexPlanType,
+                to: selectedAccount
+            )
+            try? CodexReviewAccountRegistry.updateCachedRateLimits(
+                from: selectedAccount,
+                codexHomeURL: codexHomeURL
+            )
+        } catch {
+            logger.error("Failed to decode account rate limit update: \(error.localizedDescription, privacy: .public)")
         }
-        guard selectedAccount.capabilities.supportsRateLimitRefresh else {
-            return
-        }
-        guard let session = runtimeSession,
-              session.generation == generation,
-              session.authorizeRateLimitObservation(for: selectedAccount) != nil else {
-            logger.debug("Dropping a sparse rate-limit notification without a matching runtime account observation")
-            return
-        }
-        applyRateLimits(rateLimits, to: selectedAccount)
-        _ = await persistRateLimitMetadata(
-            for: selectedAccount,
-            runtimeAuthorization: runtimeCommitAuthorization(generation: generation)
-        )
     }
 
     private func refreshSelectedAccountRateLimits(auth: CodexReviewAuthModel) async {
@@ -3750,7 +1405,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         await refreshRateLimits(for: selectedAccount, auth: auth)
     }
 
-    private func refreshRateLimits(for account: CodexReviewAccount, auth: CodexReviewAuthModel) async {
+    private func refreshRateLimits(for account: CodexAccount, auth: CodexReviewAuthModel) async {
         guard account.capabilities.supportsRateLimitRefresh else {
             return
         }
@@ -3758,186 +1413,104 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             await refreshSavedAccountRateLimits(for: account)
             return
         }
-        await refreshActiveAccountRateLimits(for: account, auth: auth)
+        let didRefresh = await refreshRateLimits(for: account, using: appServerBackend, source: "active-runtime")
+        if didRefresh {
+            persistRefreshedSharedAuth(
+                from: codexHomeURL,
+                for: account
+            )
+        }
     }
 
-    private func refreshActiveAccountRateLimits(
-        for account: CodexReviewAccount,
-        auth: CodexReviewAuthModel
-    ) async {
-        guard let admitted = try? requireAdmittedRuntimeBackend() else {
-            return
-        }
-        guard let session = runtimeSession,
-              session.generation == admitted.generation,
-              let observationAuthorization = session.authorizeRateLimitObservation(
-                  for: account
-              ) else {
-            logger.debug("Dropping a rate-limit refresh without an exact runtime account observation")
-            return
-        }
-        let authorization = runtimeCommitAuthorization(generation: admitted.generation)
+    private func refreshSavedAccountRateLimits(for account: CodexAccount) async {
+        let temporaryCodexHomeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-review-rate-limits-\(UUID().uuidString)", isDirectory: true)
         do {
-            let beforeAuth = try await admitted.backend.readAuth()
-            try requireActiveRateLimitCommitAdmission(
-                authorization: observationAuthorization,
-                account: account,
-                auth: auth
-            )
-            try requireRateLimitRuntimeIdentity(
-                beforeAuth,
-                authorization: observationAuthorization
-            )
-            let response = try await admitted.backend.readRateLimits()
-            let afterAuth = try await admitted.backend.readAuth()
-            try requireActiveRateLimitCommitAdmission(
-                authorization: observationAuthorization,
-                account: account,
-                auth: auth
-            )
-            try requireRateLimitRuntimeIdentity(
-                afterAuth,
-                authorization: observationAuthorization
-            )
-            applyRateLimits(response, to: account)
-            guard await persistRateLimitMetadata(
-                for: account,
-                runtimeAuthorization: authorization
-            ) else {
-                return
-            }
-            try requireActiveRateLimitCommitAdmission(
-                authorization: observationAuthorization,
-                account: account,
-                auth: auth
-            )
-        } catch ActiveRateLimitRefreshFailure.staleAccountIdentity {
-            logger.debug("Dropping a rate-limit refresh whose runtime account identity changed")
-        } catch {
-            guard (try? requireActiveRateLimitCommitAdmission(
-                authorization: observationAuthorization,
-                account: account,
-                auth: auth
-            )) != nil else {
-                logger.debug("Dropping a completed rate-limit refresh from a retired runtime generation")
-                return
-            }
-            recordRateLimitRefreshFailure(error, account: account)
-            _ = await persistRateLimitMetadata(
-                for: account,
-                runtimeAuthorization: authorization
-            )
-        }
-    }
-
-    private func requireActiveRateLimitCommitAdmission(
-        authorization: RuntimeAccountObservationAuthorization,
-        account: CodexReviewAccount,
-        auth: CodexReviewAuthModel
-    ) throws {
-        try requireRuntimeCommitAdmission(generation: authorization.generation)
-        guard let session = runtimeSession,
-              session.validatesRateLimitObservation(authorization) else {
-            throw ActiveRateLimitRefreshFailure.staleAccountIdentity
-        }
-        guard auth.persistedActiveAccountKey == account.accountKey,
-              auth.selectedAccount === account else {
-            throw ActiveRateLimitRefreshFailure.staleAccountIdentity
-        }
-    }
-
-    private func requireRateLimitRuntimeIdentity(
-        _ snapshot: CodexReviewBackendModel.Auth.Snapshot,
-        authorization: RuntimeAccountObservationAuthorization
-    ) throws {
-        guard runtimeAccountObservation(from: snapshot) == authorization.observation else {
-            throw ActiveRateLimitRefreshFailure.staleAccountIdentity
-        }
-    }
-
-    private func refreshSavedAccountRateLimits(for account: CodexReviewAccount) async {
-        let temporaryCodexHomeURL: URL
-        do {
-            temporaryCodexHomeURL = try await accountRegistry.reserveTemporaryCodexHome(
-                kind: .rateLimits
-            )
-        } catch {
-            account.updateRateLimitFetchMetadata(fetchedAt: Date(), error: error.localizedDescription)
-            _ = await persistRateLimitMetadata(for: account)
-            return
-        }
-        var isolatedAppServer: CodexAppServer?
-        do {
-            guard try await accountRegistry.copySavedAuth(
+            guard try CodexReviewAccountRegistry.copySavedAuth(
                 accountKey: account.accountKey,
+                from: codexHomeURL,
                 to: temporaryCodexHomeURL
             ) else {
                 account.markRateLimitReauthenticationRequired(
                     fetchedAt: Date(),
                     error: "Saved account authentication is not available."
                 )
-                _ = await persistRateLimitMetadata(for: account)
-                await accountRegistry.finishTemporaryCodexHome(temporaryCodexHomeURL)
+                try? CodexReviewAccountRegistry.updateCachedRateLimits(
+                    from: account,
+                    codexHomeURL: codexHomeURL
+                )
                 return
             }
             let runtime = try await appServerRuntimeFactory(temporaryCodexHomeURL)
-            isolatedAppServer = runtime.appServer
-            let didRefresh = await refreshRateLimits(
-                for: account,
-                using: runtime.backend,
-                validatesBackendAccount: true
-            )
-            if didRefresh {
-                try await accountRegistry.saveSharedAuth(
-                    from: temporaryCodexHomeURL,
-                    for: savedAccountPayload(from: account)
-                )
+            let didRefresh = await refreshRateLimits(for: account, using: runtime.backend, source: "saved-auth-isolated-runtime")
+            do {
+                if didRefresh {
+                    try CodexReviewAccountRegistry.saveSharedAuth(
+                        from: temporaryCodexHomeURL,
+                        for: account,
+                        codexHomeURL: codexHomeURL
+                    )
+                }
+            } catch {
+                await closeIsolatedLoginRuntime(client: runtime.client, codexHomeURL: temporaryCodexHomeURL)
+                throw error
             }
-            await closeIsolatedLoginRuntime(appServer: runtime.appServer, codexHomeURL: temporaryCodexHomeURL)
+            await closeIsolatedLoginRuntime(client: runtime.client, codexHomeURL: temporaryCodexHomeURL)
         } catch {
-            await closeIsolatedLoginRuntime(
-                appServer: isolatedAppServer,
-                codexHomeURL: temporaryCodexHomeURL
-            )
+            try? FileManager.default.removeItem(at: temporaryCodexHomeURL)
             account.updateRateLimitFetchMetadata(fetchedAt: Date(), error: error.localizedDescription)
-            _ = await persistRateLimitMetadata(for: account)
+            try? CodexReviewAccountRegistry.updateCachedRateLimits(
+                from: account,
+                codexHomeURL: codexHomeURL
+            )
         }
     }
 
     private func refreshRateLimits(
-        for account: CodexReviewAccount,
+        for account: CodexAccount,
         using backend: AppServerCodexReviewBackend?,
-        validatesBackendAccount: Bool
+        source: String
     ) async -> Bool {
         do {
             guard let backend else {
                 return false
             }
-            if validatesBackendAccount {
+            if source == "saved-auth-isolated-runtime" {
                 try await validateRateLimitBackendAccount(
                     account,
                     using: backend
                 )
             }
             let response = try await backend.readRateLimits()
-            applyRateLimits(response, to: account)
-            return await persistRateLimitMetadata(for: account)
+            applyRateLimits(
+                windows: response.codexRateLimitWindows,
+                planType: response.codexPlanType,
+                to: account
+            )
+            try? CodexReviewAccountRegistry.updateCachedRateLimits(
+                from: account,
+                codexHomeURL: codexHomeURL
+            )
+            return true
         } catch {
             recordRateLimitRefreshFailure(error, account: account)
-            _ = await persistRateLimitMetadata(for: account)
+            try? CodexReviewAccountRegistry.updateCachedRateLimits(
+                from: account,
+                codexHomeURL: codexHomeURL
+            )
             return false
         }
     }
 
     private func validateRateLimitBackendAccount(
-        _ account: CodexReviewAccount,
+        _ account: CodexAccount,
         using backend: AppServerCodexReviewBackend
     ) async throws {
         let snapshot = try await backend.readAuth()
         guard let activeAccountID = snapshot.activeAccountID?.rawValue.nilIfEmpty else {
             throw CodexReviewAPI.Error.io("Saved authentication is missing for \(account.maskedEmail). Sign in again.")
         }
-        let actualAccountKey = CodexReviewAccount.normalizedEmail(activeAccountID)
+        let actualAccountKey = CodexAccount.normalizedEmail(activeAccountID)
         guard actualAccountKey == account.accountKey else {
             let actualEmail = snapshot.accounts.first(where: { $0.id.rawValue == activeAccountID })?.label
                 ?? activeAccountID
@@ -3948,10 +1521,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     private func recordRateLimitRefreshFailure(
         _ error: any Error,
-        account: CodexReviewAccount
+        account: CodexAccount
     ) {
         let message = error.localizedDescription
-        if CodexReviewAccount.requiresReauthentication(errorMessage: message) {
+        if CodexAccount.requiresReauthentication(errorMessage: message) {
             account.markRateLimitReauthenticationRequired(
                 fetchedAt: Date(),
                 error: message
@@ -3961,34 +1534,51 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         }
     }
 
-    private func closeIsolatedLoginRuntime(appServer: CodexAppServer?, codexHomeURL: URL?) async {
+    private func closeIsolatedLoginRuntime(client: AppServerClient?, codexHomeURL: URL?) async {
         guard let codexHomeURL else {
-            if let appServer {
-                await appServerCloser(appServer)
-            }
+            await client?.close()
             return
         }
         guard codexHomeURL != self.codexHomeURL else {
             return
         }
-        if let appServer {
-            await appServerCloser(appServer)
-        }
-        await accountRegistry.finishTemporaryCodexHome(codexHomeURL)
+        await client?.close()
+        try? FileManager.default.removeItem(at: codexHomeURL)
+    }
+
+    private func takeLoginRuntimeForCleanup() -> PendingLoginRuntimeCleanup {
+        loginChallenge = nil
+        loginBackend = nil
+        isWaitingForLoginAccountUpdate = false
+        let loginClient = loginClient
+        self.loginClient = nil
+        let loginCodexHomeURL = loginCodexHomeURL
+        self.loginCodexHomeURL = nil
+        let activeAuthenticationSession = activeAuthenticationSession
+        self.activeAuthenticationSession = nil
+        authenticationTask?.cancel()
+        authenticationTask = nil
+        loginNotificationTask?.cancel()
+        loginNotificationTask = nil
+        return .init(
+            client: loginClient,
+            codexHomeURL: loginCodexHomeURL,
+            authenticationSession: activeAuthenticationSession
+        )
+    }
+
+    private func cleanupLoginRuntime(_ cleanup: PendingLoginRuntimeCleanup) async {
+        await cleanup.authenticationSession?.cancel()
+        await closeIsolatedLoginRuntime(client: cleanup.client, codexHomeURL: cleanup.codexHomeURL)
     }
 
     private func applyRateLimits(
-        _ rateLimits: CodexRateLimits,
-        to account: CodexReviewAccount
+        windows: [(windowDurationMinutes: Int, usedPercent: Int, resetsAt: Date?)],
+        planType: String?,
+        to account: CodexAccount
     ) {
-        account.updateRateLimits(rateLimits.windows.map {
-            (
-                windowDurationMinutes: $0.windowDurationMinutes,
-                usedPercent: $0.usedPercent,
-                resetsAt: $0.resetsAt
-            )
-        })
-        if let planType = rateLimits.planType {
+        account.updateRateLimits(windows)
+        if let planType {
             account.updatePlanType(planType)
         }
         account.updateRateLimitFetchMetadata(fetchedAt: Date(), error: nil)
@@ -3996,43 +1586,16 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     private func persistRefreshedSharedAuth(
         from sourceCodexHomeURL: URL?,
-        for account: CodexReviewAccount,
-        runtimeAuthorization: AccountRegistryStore.RuntimeCommitAuthorization? = nil
-    ) async throws {
+        for account: CodexAccount
+    ) {
         guard let sourceCodexHomeURL else {
             return
         }
-        try await accountRegistry.saveSharedAuth(
+        try? CodexReviewAccountRegistry.saveSharedAuth(
             from: sourceCodexHomeURL,
-            for: savedAccountPayload(from: account),
-            runtimeAuthorization: runtimeAuthorization
+            for: account,
+            codexHomeURL: codexHomeURL
         )
-    }
-
-    @discardableResult
-    private func persistRateLimitMetadata(
-        for account: CodexReviewAccount,
-        runtimeAuthorization: AccountRegistryStore.RuntimeCommitAuthorization? = nil
-    ) async -> Bool {
-        do {
-            try await accountRegistry.updateCachedRateLimits(
-                from: savedAccountPayload(from: account),
-                runtimeAuthorization: runtimeAuthorization
-            )
-            return true
-        } catch {
-            if let runtimeAuthorization,
-               (try? requireRuntimeCommitAdmission(
-                   generation: runtimeAuthorization.generation
-               )) == nil {
-                logger.debug("Dropping rate-limit persistence from a retired runtime generation")
-                return false
-            }
-            let message = "Failed to persist account rate-limit metadata: \(error.localizedDescription)"
-            account.updateRateLimitFetchMetadata(fetchedAt: Date(), error: message)
-            logger.error("\(message, privacy: .public)")
-            return false
-        }
     }
 
     private func maskedReviewAccountEmail(_ email: String) -> String {
@@ -4072,13 +1635,13 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         )
     }
 
-    private static func monitorAccount(from snapshot: CodexReviewBackendModel.Account.Snapshot) -> CodexReviewAccount? {
+    private static func monitorAccount(from snapshot: CodexReviewBackendModel.Account.Snapshot) -> CodexAccount? {
         let label = snapshot.label.trimmingCharacters(in: .whitespacesAndNewlines)
-        let accountKey = CodexReviewAccount.normalizedEmail(snapshot.id.rawValue)
+        let accountKey = CodexAccount.normalizedEmail(snapshot.id.rawValue)
         guard label.isEmpty == false, accountKey.isEmpty == false else {
             return nil
         }
-        return CodexReviewAccount(
+        return CodexAccount(
             accountKey: accountKey,
             email: label,
             planType: snapshot.planType,
@@ -4087,87 +1650,480 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         )
     }
 
-    private func validateRuntimeAccount(
-        _ snapshot: CodexReviewBackendModel.Auth.Snapshot,
-        expected: ExpectedRuntimeAccount
-    ) throws {
-        let activeAccount = snapshot.activeAccountID.flatMap { activeID in
-            snapshot.accounts.first { $0.id == activeID }
+    private static func authenticationURL(from challenge: CodexReviewBackendModel.Login.Challenge) throws -> URL {
+        guard let url = challenge.verificationURL else {
+            throw CodexReviewAPI.Error.io("Authentication did not provide a valid authorization URL.")
         }
-        switch expected {
-        case .signedOut:
-            guard activeAccount == nil else {
-                throw CodexReviewAuthenticationFailure.protocolViolation(
-                    message: "The replacement runtime remained authenticated after a signed-out account transition."
-                )
-            }
-        case .account(let expectedAccountKey):
-            guard let activeAccount,
-                  activeAccount.kind == .chatGPT,
-                  CodexReviewAccount.normalizedEmail(activeAccount.id.rawValue)
-                    == CodexReviewAccount.normalizedEmail(expectedAccountKey) else {
-                throw CodexReviewAuthenticationFailure.protocolViolation(
-                    message: "The replacement runtime did not authenticate the expected account \(expectedAccountKey)."
-                )
-            }
-        case .observedAccount(let expectedAccountKey, let provider):
-            guard let activeAccount,
-                  activeAccount.kind == provider.accountKind,
-                  CodexReviewAccount.normalizedEmail(activeAccount.id.rawValue)
-                    == CodexReviewAccount.normalizedEmail(expectedAccountKey) else {
-                throw CodexReviewAuthenticationFailure.protocolViolation(
-                    message: "The replacement runtime did not authenticate the observed account \(expectedAccountKey)."
-                )
-            }
-        case .anyChatGPT:
-            guard activeAccount?.kind == .chatGPT else {
-                throw CodexReviewAuthenticationFailure.protocolViolation(
-                    message: "The replacement runtime did not confirm the committed ChatGPT authentication."
-                )
-            }
-        case .cancelOutcomeUnknown:
-            guard snapshot.activeAccountID == nil || activeAccount?.kind == .chatGPT else {
-                throw CodexReviewAuthenticationFailure.protocolViolation(
-                    message: "An unknown login cancellation outcome resolved to an unsupported authentication provider."
-                )
-            }
-        case .reconcileCurrentRuntime:
-            break
-        }
+        return url
     }
+}
 
-    private func runtimeAccountObservation(
-        from snapshot: CodexReviewBackendModel.Auth.Snapshot
-    ) -> RuntimeAccountObservation {
-        guard let activeAccountID = snapshot.activeAccountID else {
-            return .signedOut
-        }
-        guard let backendAccount = snapshot.accounts.first(where: { $0.id == activeAccountID }),
-              let account = Self.monitorAccount(from: backendAccount) else {
-            return .invalid
-        }
-        return .account(
-            accountKey: account.accountKey,
-            provider: .init(account.kind)
-        )
-    }
+@MainActor
+private struct AppServerRuntime: Sendable {
+    var client: AppServerClient
+    var backend: AppServerCodexReviewBackend
+}
 
-    private func shouldReconcileRuntimeAuthSnapshot(
-        expectation: ExpectedRuntimeAccount?,
-        observation: RuntimeAccountObservation
-    ) -> Bool {
-        guard case .cancelOutcomeUnknown(let previousActiveAccountKey) = expectation else {
-            return true
-        }
-        switch observation {
-        case .signedOut:
-            return previousActiveAccountKey != nil
-        case .account:
-            return true
-        case .invalid:
-            return true
+private struct AppServerProcessRuntime: Sendable {
+    var transport: AppServerProcessTransport
+    var threadStartPermissionStrategy: AppServerAPI.Thread.Start.PermissionStrategy
+}
+
+@MainActor
+private struct LoginRuntime: Sendable {
+    var client: AppServerClient
+    var backend: AppServerCodexReviewBackend
+    var codexHomeURL: URL
+    var usesPrimaryRuntime: Bool
+}
+
+private enum LoginActivation: Equatable, Sendable {
+    case activateAuthenticatedAccount
+    case preserveActiveAccount(String?)
+
+    func resolvedActiveAccountKey(
+        authenticatedAccountKey: String,
+        persistedAccounts: [CodexAccount]
+    ) -> String? {
+        switch self {
+        case .activateAuthenticatedAccount:
+            return authenticatedAccountKey
+        case .preserveActiveAccount(let activeAccountKey):
+            return activeAccountKey.flatMap { activeAccountKey in
+                persistedAccounts.contains(where: { $0.accountKey == activeAccountKey })
+                    ? activeAccountKey
+                    : nil
+            }
         }
     }
 }
 
 private typealias AppServerRuntimeFactory = @MainActor @Sendable (URL) async throws -> AppServerRuntime
+
+private struct AppServerAccountLoginCompletedNotification: Decodable, Equatable, Sendable {
+    var error: String?
+    var loginID: String?
+    var success: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case error
+        case loginID = "loginId"
+        case success
+    }
+}
+
+private struct AppServerAccountRateLimitsUpdatedPayload: Decodable, Equatable, Sendable {
+    var rateLimits: AppServerAPI.Account.RateLimits.Snapshot
+}
+
+@MainActor
+private enum CodexReviewAccountRegistry {
+    private struct Registry: Codable {
+        var activeAccountKey: String?
+        var accounts: [Entry]
+    }
+
+    private struct Entry: Codable {
+        var accountKey: String?
+        var kind: Kind
+        var email: String
+        var planType: String?
+        var lastActivatedAt: Date?
+        var lastRateLimitFetchAt: Date?
+        var lastRateLimitError: String?
+        var cachedRateLimits: [SavedRateLimitWindow]?
+
+        enum CodingKeys: String, CodingKey {
+            case accountKey
+            case kind
+            case email
+            case planType
+            case lastActivatedAt
+            case lastRateLimitFetchAt
+            case lastRateLimitError
+            case cachedRateLimits
+        }
+
+        init(
+            accountKey: String?,
+            kind: Kind,
+            email: String,
+            planType: String?,
+            lastActivatedAt: Date?,
+            lastRateLimitFetchAt: Date?,
+            lastRateLimitError: String?,
+            cachedRateLimits: [SavedRateLimitWindow]?
+        ) {
+            self.accountKey = accountKey
+            self.kind = kind
+            self.email = email
+            self.planType = planType
+            self.lastActivatedAt = lastActivatedAt
+            self.lastRateLimitFetchAt = lastRateLimitFetchAt
+            self.lastRateLimitError = lastRateLimitError
+            self.cachedRateLimits = cachedRateLimits
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.accountKey = try container.decodeIfPresent(String.self, forKey: .accountKey)
+            self.email = try container.decode(String.self, forKey: .email)
+            self.kind = try container.decodeIfPresent(Kind.self, forKey: .kind)
+                ?? Kind.legacyDefault(accountKey: accountKey, email: email)
+            self.planType = try container.decodeIfPresent(String.self, forKey: .planType)
+            self.lastActivatedAt = try container.decodeIfPresent(Date.self, forKey: .lastActivatedAt)
+            self.lastRateLimitFetchAt = try container.decodeIfPresent(Date.self, forKey: .lastRateLimitFetchAt)
+            self.lastRateLimitError = try container.decodeIfPresent(String.self, forKey: .lastRateLimitError)
+            self.cachedRateLimits = try container.decodeIfPresent(
+                [SavedRateLimitWindow].self,
+                forKey: .cachedRateLimits
+            )
+        }
+    }
+
+    private enum Kind: String, Codable {
+        case chatGPT = "chatgpt"
+        case apiKey
+        case amazonBedrock
+
+        init(_ accountKind: CodexReviewBackendModel.Account.Kind) {
+            switch accountKind {
+            case .chatGPT:
+                self = .chatGPT
+            case .apiKey:
+                self = .apiKey
+            case .amazonBedrock:
+                self = .amazonBedrock
+            }
+        }
+
+        var accountKind: CodexReviewBackendModel.Account.Kind {
+            switch self {
+            case .chatGPT:
+                .chatGPT
+            case .apiKey:
+                .apiKey
+            case .amazonBedrock:
+                .amazonBedrock
+            }
+        }
+
+        static func legacyDefault(accountKey: String?, email: String) -> Self {
+            let normalizedAccountKey = accountKey
+                .map(CodexAccount.normalizedEmail)
+                .flatMap { $0.isEmpty ? nil : $0 }
+            switch normalizedAccountKey ?? CodexAccount.normalizedEmail(email) {
+            case "api-key":
+                return .apiKey
+            case "amazon-bedrock":
+                return .amazonBedrock
+            default:
+                return .chatGPT
+            }
+        }
+    }
+
+    private struct SavedRateLimitWindow: Codable {
+        var windowDurationMinutes: Int
+        var usedPercent: Int
+        var resetsAt: Date?
+
+        var tuple: (windowDurationMinutes: Int, usedPercent: Int, resetsAt: Date?) {
+            (windowDurationMinutes, usedPercent, resetsAt)
+        }
+    }
+
+    static func load(codexHomeURL: URL) -> (accounts: [CodexAccount], activeAccountKey: String?) {
+        let registry = loadRegistry(codexHomeURL: codexHomeURL)
+        let accounts = registry.accounts.compactMap(makeAccount(from:))
+        let activeAccountKey = registry.activeAccountKey
+            .map(CodexAccount.normalizedEmail)
+            .flatMap { activeAccountKey in
+                accounts.contains(where: { $0.accountKey == activeAccountKey }) ? activeAccountKey : nil
+            }
+        logger.info("Loaded \(accounts.count, privacy: .public) persisted Codex review account(s)")
+        return (accounts, activeAccountKey)
+    }
+
+    static func saveAccounts(
+        _ accounts: [CodexAccount],
+        activeAccountKey: String?,
+        codexHomeURL: URL
+    ) throws {
+        let existing = loadRegistry(codexHomeURL: codexHomeURL)
+        let existingByAccountKey = Dictionary(uniqueKeysWithValues: existing.accounts.compactMap { entry in
+            normalizedAccountKey(from: entry).map { ($0, entry) }
+        })
+        let normalizedActiveAccountKey = activeAccountKey
+            .map(CodexAccount.normalizedEmail)
+            .flatMap { accountKey in
+                accounts.contains(where: { $0.accountKey == accountKey }) ? accountKey : nil
+            }
+        let records = accounts.map { account in
+            var entry = existingByAccountKey[account.accountKey] ?? Entry(
+                accountKey: account.accountKey,
+                kind: .init(account.kind),
+                email: account.email,
+                planType: account.planType,
+                lastActivatedAt: nil,
+                lastRateLimitFetchAt: nil,
+                lastRateLimitError: nil,
+                cachedRateLimits: nil
+            )
+            entry.accountKey = account.accountKey
+            entry.kind = .init(account.kind)
+            entry.email = account.email
+            entry.planType = account.planType
+            entry.cachedRateLimits = account.rateLimits.map { window in
+                .init(
+                    windowDurationMinutes: window.windowDurationMinutes,
+                    usedPercent: window.usedPercent,
+                    resetsAt: window.resetsAt
+                )
+            }
+            entry.lastRateLimitFetchAt = account.lastRateLimitFetchAt
+            entry.lastRateLimitError = account.lastRateLimitError
+            if account.accountKey == normalizedActiveAccountKey {
+                entry.lastActivatedAt = Date()
+            }
+            return entry
+        }
+        try saveRegistry(
+            .init(activeAccountKey: normalizedActiveAccountKey, accounts: records),
+            codexHomeURL: codexHomeURL
+        )
+    }
+
+    static func activateAccount(
+        _ accountKey: String,
+        accounts: [CodexAccount],
+        codexHomeURL: URL
+    ) throws {
+        let normalizedAccountKey = CodexAccount.normalizedEmail(accountKey)
+        let savedAuthURL = savedAccountAuthURL(
+            accountKey: normalizedAccountKey,
+            codexHomeURL: codexHomeURL
+        )
+        guard FileManager.default.fileExists(atPath: savedAuthURL.path) else {
+            throw CodexReviewAPI.Error.io("Saved authentication is missing for account \(normalizedAccountKey).")
+        }
+        try saveAccounts(
+            accounts,
+            activeAccountKey: normalizedAccountKey,
+            codexHomeURL: codexHomeURL
+        )
+        try copyAuth(from: savedAuthURL, to: sharedAuthURL(codexHomeURL: codexHomeURL))
+    }
+
+    static func updateCachedRateLimits(
+        from account: CodexAccount,
+        codexHomeURL: URL
+    ) throws {
+        var registry = loadRegistry(codexHomeURL: codexHomeURL)
+        guard let index = registry.accounts.firstIndex(where: {
+            normalizedAccountKey(from: $0) == account.accountKey
+        }) else {
+            return
+        }
+        registry.accounts[index].planType = account.planType
+        registry.accounts[index].cachedRateLimits = account.rateLimits.map { window in
+            .init(
+                windowDurationMinutes: window.windowDurationMinutes,
+                usedPercent: window.usedPercent,
+                resetsAt: window.resetsAt
+            )
+        }
+        registry.accounts[index].lastRateLimitFetchAt = account.lastRateLimitFetchAt
+        registry.accounts[index].lastRateLimitError = account.lastRateLimitError
+        try saveRegistry(registry, codexHomeURL: codexHomeURL)
+    }
+
+    static func saveSharedAuth(
+        for account: CodexAccount,
+        codexHomeURL: URL
+    ) throws {
+        try saveSharedAuth(
+            from: codexHomeURL,
+            for: account,
+            codexHomeURL: codexHomeURL
+        )
+    }
+
+    static func saveSharedAuth(
+        from sourceCodexHomeURL: URL,
+        for account: CodexAccount,
+        codexHomeURL: URL
+    ) throws {
+        let sourceURL = sharedAuthURL(codexHomeURL: sourceCodexHomeURL)
+        guard FileManager.default.fileExists(atPath: sourceURL.path) else {
+            return
+        }
+        try copyAuth(
+            from: sourceURL,
+            to: savedAccountAuthURL(accountKey: account.accountKey, codexHomeURL: codexHomeURL)
+        )
+    }
+
+    static func removeSharedAuth(codexHomeURL: URL) throws {
+        let url = sharedAuthURL(codexHomeURL: codexHomeURL)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return
+        }
+        try FileManager.default.removeItem(at: url)
+    }
+
+    static func removeSavedAccountDirectory(
+        accountKey: String,
+        codexHomeURL: URL
+    ) throws {
+        let directoryURL = savedAccountDirectoryURL(accountKey: accountKey, codexHomeURL: codexHomeURL)
+        guard FileManager.default.fileExists(atPath: directoryURL.path) else {
+            return
+        }
+        try FileManager.default.removeItem(at: directoryURL)
+    }
+
+    static func copySavedAuth(
+        accountKey: String,
+        from sourceCodexHomeURL: URL,
+        to destinationCodexHomeURL: URL
+    ) throws -> Bool {
+        let normalizedAccountKey = CodexAccount.normalizedEmail(accountKey)
+        let sourceURL = savedAccountAuthURL(
+            accountKey: normalizedAccountKey,
+            codexHomeURL: sourceCodexHomeURL
+        )
+        guard FileManager.default.fileExists(atPath: sourceURL.path) else {
+            return false
+        }
+        try copyAuth(
+            from: sourceURL,
+            to: sharedAuthURL(codexHomeURL: destinationCodexHomeURL)
+        )
+        return true
+    }
+
+    private static func makeAccount(from entry: Entry) -> CodexAccount? {
+        let email = entry.email.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard email.isEmpty == false else {
+            return nil
+        }
+        let normalizedEmail = CodexAccount.normalizedEmail(email)
+        let accountKey = entry.accountKey
+            .map(CodexAccount.normalizedEmail)
+            .flatMap { $0.isEmpty ? nil : $0 }
+            ?? normalizedEmail
+        let account = CodexAccount(
+            accountKey: accountKey,
+            email: email,
+            planType: entry.planType,
+            kind: entry.kind.accountKind
+        )
+        account.updateRateLimits(entry.cachedRateLimits?.map(\.tuple) ?? [])
+        account.updateRateLimitFetchMetadata(
+            fetchedAt: entry.lastRateLimitFetchAt,
+            error: entry.lastRateLimitError
+        )
+        return account
+    }
+
+    private static func loadRegistry(codexHomeURL: URL) -> Registry {
+        let url = registryURL(codexHomeURL: codexHomeURL)
+        guard let data = try? Data(contentsOf: url),
+              let registry = try? JSONDecoder().decode(Registry.self, from: data)
+        else {
+            return .init(activeAccountKey: nil, accounts: [])
+        }
+        return registry
+    }
+
+    private static func saveRegistry(
+        _ registry: Registry,
+        codexHomeURL: URL
+    ) throws {
+        let url = registryURL(codexHomeURL: codexHomeURL)
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(registry).write(to: url, options: .atomic)
+    }
+
+    private static func copyAuth(from sourceURL: URL, to destinationURL: URL) throws {
+        let destinationDirectoryURL = destinationURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(
+            at: destinationDirectoryURL,
+            withIntermediateDirectories: true
+        )
+        let replacementURL = destinationDirectoryURL
+            .appendingPathComponent(".\(destinationURL.lastPathComponent).replacement-\(UUID().uuidString)")
+        try FileManager.default.copyItem(at: sourceURL, to: replacementURL)
+        do {
+            if FileManager.default.fileExists(atPath: destinationURL.path) {
+                _ = try FileManager.default.replaceItemAt(
+                    destinationURL,
+                    withItemAt: replacementURL,
+                    backupItemName: nil,
+                    options: []
+                )
+            } else {
+                try FileManager.default.moveItem(at: replacementURL, to: destinationURL)
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: replacementURL)
+            throw error
+        }
+    }
+
+    private static func normalizedAccountKey(from entry: Entry) -> String? {
+        let email = entry.email.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedEmail = CodexAccount.normalizedEmail(email)
+        return entry.accountKey
+            .map(CodexAccount.normalizedEmail)
+            .flatMap { $0.isEmpty ? nil : $0 }
+            ?? (normalizedEmail.isEmpty ? nil : normalizedEmail)
+    }
+
+    private static func registryURL(codexHomeURL: URL) -> URL {
+        accountsDirectoryURL(codexHomeURL: codexHomeURL)
+            .appendingPathComponent("registry.json")
+    }
+
+    private static func sharedAuthURL(codexHomeURL: URL) -> URL {
+        codexHomeURL.appendingPathComponent("auth.json")
+    }
+
+    private static func savedAccountAuthURL(accountKey: String, codexHomeURL: URL) -> URL {
+        savedAccountDirectoryURL(accountKey: accountKey, codexHomeURL: codexHomeURL)
+            .appendingPathComponent("auth.json")
+    }
+
+    private static func savedAccountDirectoryURL(accountKey: String, codexHomeURL: URL) -> URL {
+        accountsDirectoryURL(codexHomeURL: codexHomeURL)
+            .appendingPathComponent(pathComponent(forAccountKey: accountKey), isDirectory: true)
+    }
+
+    private static func accountsDirectoryURL(codexHomeURL: URL) -> URL {
+        codexHomeURL.appendingPathComponent("accounts", isDirectory: true)
+    }
+
+    private static func pathComponent(forAccountKey accountKey: String) -> String {
+        let normalizedAccountKey = CodexAccount.normalizedEmail(accountKey)
+        switch normalizedAccountKey {
+        case ".":
+            return "%2E"
+        case "..":
+            return "%2E%2E"
+        default:
+            break
+        }
+        return normalizedAccountKey
+            .addingPercentEncoding(withAllowedCharacters: accountDirectoryNameAllowedCharacters)
+            ?? normalizedAccountKey
+    }
+
+    private static let accountDirectoryNameAllowedCharacters =
+        CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+}
