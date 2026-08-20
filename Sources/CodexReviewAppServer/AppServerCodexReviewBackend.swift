@@ -467,36 +467,42 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                 completedReviewEventSessionMetricsByThreadID[threadID] = metrics
             }
         }
-        var firstFailure: ReviewRuntimeCloseFailure?
+        var failureMessages: [String] = []
         do {
             let _: EmptyResponse = try await client.send(AppServerAPI.Thread.BackgroundTerminals.Clean.Request(
                 params: .init(threadID: run.threadID)
             ))
         } catch {
-            firstFailure = .cleanup("thread/backgroundTerminals/clean for \(run.threadID): \(error.localizedDescription)")
+            failureMessages.append(
+                "thread/backgroundTerminals/clean for \(run.threadID): \(error.localizedDescription)"
+            )
         }
         do {
             let _: AppServerAPI.Thread.Unsubscribe.Response = try await client.send(AppServerAPI.Thread.Unsubscribe.Request(
                 params: .init(threadID: run.threadID)
             ))
-        } catch where firstFailure == nil {
-            firstFailure = .cleanup("thread/unsubscribe for \(run.threadID): \(error.localizedDescription)")
-        } catch {}
+        } catch {
+            failureMessages.append(
+                "thread/unsubscribe for \(run.threadID): \(error.localizedDescription)"
+            )
+        }
         for threadID in cleanupThreadIDs {
             do {
                 let _: EmptyResponse = try await client.send(AppServerAPI.Thread.Delete.Request(
                     params: .init(threadID: threadID)
                 ))
-            } catch where firstFailure == nil {
-                firstFailure = .cleanup("thread/delete for \(threadID): \(error.localizedDescription)")
-            } catch {}
+            } catch {
+                failureMessages.append(
+                    "thread/delete for \(threadID): \(error.localizedDescription)"
+                )
+            }
         }
         for threadID in cleanupThreadIDs {
             reviewEventSessionCanonicalThreadIDByThreadID.removeValue(forKey: threadID)
         }
         reviewThreadIDsForCleanupByThreadID.removeValue(forKey: run.threadID)
-        if let firstFailure {
-            throw firstFailure
+        if failureMessages.isEmpty == false {
+            throw ReviewRuntimeCloseFailure.cleanup(failureMessages.joined(separator: "; "))
         }
     }
 
