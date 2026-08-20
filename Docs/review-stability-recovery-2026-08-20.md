@@ -108,6 +108,7 @@ The proposed Phase 2 gate now includes:
 | 2026-08-20 | Phase 2 gate converged | Persistence, recovery-contract, and lifecycle/source-of-truth critics independently reported zero implementation blockers after fail-closed persistence, trigger-specific runtime semantics, typed ingestion containment, one final-result owner, bounded final output, and failed-state close were fixed. |
 | 2026-08-20 | Final self-review | Review MCP run `35CF35A6-03DF-4460-8DDF-736C7D8215E4` completed with zero findings: the docs-only recovery contracts were internally consistent and introduced no definite correctness issue. |
 | 2026-08-20 | Wave 1 / #103 integrated | `03bf36e` replaces fixed-count bottom scrolling with TextKit 2 viewport-layout completion ownership. Worker validation passed 536 package tests, 15 app tests, and Review MCP with zero findings; integration reran 57 ReviewUIShell tests successfully. |
+| 2026-08-20 | Wave 1 / compatibility gates integrated | `3801200` adds a separate four-product consumer, strict four-module `swift-api-digester` baseline, and canonical five-tool MCP golden. Integration aggregate gate passed on Xcode 27 / Swift 6.4. |
 
 ## Remaining decisions
 
@@ -121,7 +122,7 @@ The proposed Phase 2 gate now includes:
 |---|---|---|---|
 | Wave 0 / RecoveryV1 environment | 4 hours; 4 production + 4 test files | `CodexReviewHost` composition/runtime paths | Ready for worker |
 | Wave 1 / #103 log viewport | 3 hours; 2 production + 2 test files | ReviewUI native scroll/layout | Integrated at `03bf36e` |
-| Wave 1 / compatibility gates | 5 hours; 10 files | external consumer/API/MCP contract tests | Ready for worker |
+| Wave 1 / compatibility gates | 5 hours; 10 files | external consumer/API/MCP contract tests | Integrated at `3801200` |
 
 The committed worker contract is
 [recovery-wave-0-1-task-brief-2026-08-20.md](recovery-wave-0-1-task-brief-2026-08-20.md).
