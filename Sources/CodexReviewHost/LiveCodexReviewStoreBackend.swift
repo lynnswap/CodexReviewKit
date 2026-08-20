@@ -1431,15 +1431,31 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         let temporaryCodexHomeURL = recoveryEnvironment.loginStagingCodexHomeURL(
             sessionID: stagingSessionID
         )
+        var stagingClient: AppServerClient?
         do {
             _ = try await recoveryEnvironment.prepareLoginStagingCodexHome(
                 sessionID: stagingSessionID
             )
-            guard try CodexReviewAccountRegistry.copySavedAuth(
+            if try CodexReviewAccountRegistry.copySavedAuth(
                 accountKey: account.accountKey,
                 environment: recoveryEnvironment,
                 to: temporaryCodexHomeURL
-            ) else {
+            ) {
+                let runtime = try await appServerRuntimeFactory(temporaryCodexHomeURL)
+                stagingClient = runtime.client
+                let didRefresh = await refreshRateLimits(
+                    for: account,
+                    using: runtime.backend,
+                    source: "saved-auth-isolated-runtime"
+                )
+                if didRefresh {
+                    try CodexReviewAccountRegistry.saveSharedAuth(
+                        from: temporaryCodexHomeURL,
+                        for: account,
+                        environment: recoveryEnvironment
+                    )
+                }
+            } else {
                 account.markRateLimitReauthenticationRequired(
                     fetchedAt: Date(),
                     error: "Saved account authentication is not available."
@@ -1448,37 +1464,18 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                     from: account,
                     environment: recoveryEnvironment
                 )
-                return
             }
-            let runtime = try await appServerRuntimeFactory(temporaryCodexHomeURL)
-            let didRefresh = await refreshRateLimits(for: account, using: runtime.backend, source: "saved-auth-isolated-runtime")
-            do {
-                if didRefresh {
-                    try CodexReviewAccountRegistry.saveSharedAuth(
-                        from: temporaryCodexHomeURL,
-                        for: account,
-                        environment: recoveryEnvironment
-                    )
-                }
-            } catch {
-                await closeIsolatedLoginRuntime(client: runtime.client, codexHomeURL: temporaryCodexHomeURL)
-                throw error
-            }
-            await closeIsolatedLoginRuntime(client: runtime.client, codexHomeURL: temporaryCodexHomeURL)
         } catch {
-            do {
-                try await recoveryEnvironment.removeLoginStagingCodexHome(
-                    at: temporaryCodexHomeURL
-                )
-            } catch {
-                logger.error("Failed to remove rate-limit staging home: \(error.localizedDescription, privacy: .public)")
-            }
             account.updateRateLimitFetchMetadata(fetchedAt: Date(), error: error.localizedDescription)
             try? CodexReviewAccountRegistry.updateCachedRateLimits(
                 from: account,
                 environment: recoveryEnvironment
             )
         }
+        await closeIsolatedLoginRuntime(
+            client: stagingClient,
+            codexHomeURL: temporaryCodexHomeURL
+        )
     }
 
     private func refreshRateLimits(

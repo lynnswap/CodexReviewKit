@@ -174,6 +174,12 @@ struct CodexReviewHostTests {
         #expect(environment.recoveryDirectoryURL == recoveryURL)
         #expect(environment.codexHomeURL == recoveryURL.appendingPathComponent("CodexHome", isDirectory: true))
         #expect(
+            environment.codexSQLiteHomeURL
+                == recoveryURL
+                    .appendingPathComponent("CodexHome", isDirectory: true)
+                    .appendingPathComponent("sqlite", isDirectory: true)
+        )
+        #expect(
             environment.loginStagingDirectoryURL
                 == recoveryURL.appendingPathComponent("LoginStaging", isDirectory: true)
         )
@@ -808,6 +814,10 @@ struct CodexReviewHostTests {
                 #expect(codexHomeURL.deletingLastPathComponent() == environment.loginStagingDirectoryURL)
                 let stagingPermissions = try posixPermissions(at: codexHomeURL)
                 #expect(stagingPermissions == 0o700)
+                let stagingSQLitePermissions = try posixPermissions(
+                    at: AppServerCodexHome.sqliteHomeURL(for: codexHomeURL)
+                )
+                #expect(stagingSQLitePermissions == 0o700)
                 let runtimeIndex = nonPrimaryRuntimeIndex
                 nonPrimaryRuntimeIndex += 1
                 try FileManager.default.createDirectory(at: codexHomeURL, withIntermediateDirectories: true)
@@ -959,6 +969,65 @@ struct CodexReviewHostTests {
             "initialize",
             "account/read",
         ])
+    }
+
+    @Test func liveStoreRemovesRateLimitStagingHomeWhenSavedAuthIsMissing() async throws {
+        let homeURL = try temporaryHome()
+        let environment = recoveryEnvironment(homeURL: homeURL)
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "active@example.com",
+            accounts: ["active@example.com", "missing@example.com"]
+        )
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(
+            AppServerAPI.Account.Read.Response(
+                account: .init(email: "active@example.com", planType: "pro")
+            ),
+            for: "account/read"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
+                limitID: "codex",
+                primary: .init(usedPercent: 10, windowDurationMins: 300)
+            )),
+            for: "account/rateLimits/read"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        var nonPrimaryRuntimeCount = 0
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            recoveryEnvironment: environment,
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transportFactory: { codexHomeURL in
+                guard codexHomeURL != environment.codexHomeURL else {
+                    return transport
+                }
+                nonPrimaryRuntimeCount += 1
+                return FakeJSONRPCTransport()
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        await store.refreshAccountRateLimits(accountKey: "missing@example.com")
+
+        #expect(nonPrimaryRuntimeCount == 0)
+        #expect(
+            try FileManager.default.contentsOfDirectory(
+                atPath: environment.loginStagingDirectoryURL.path
+            ).isEmpty
+        )
+        #expect(
+            store.auth.persistedAccounts
+                .first { $0.accountKey == "missing@example.com" }?
+                .requiresReauthentication == true
+        )
+        await store.stop()
     }
 
     @Test func liveStoreAddAccountActivatesNewLoginWhenPersistedAccountsHaveNoActiveAccount() async throws {
@@ -2118,6 +2187,7 @@ private func recoveryOwnedDirectories(
     [
         environment.recoveryDirectoryURL,
         environment.codexHomeURL,
+        environment.codexSQLiteHomeURL,
         environment.loginStagingDirectoryURL,
         environment.savedAccountsDirectoryURL,
     ]
