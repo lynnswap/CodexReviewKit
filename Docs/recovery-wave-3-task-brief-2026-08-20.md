@@ -1,11 +1,14 @@
 # Recovery Wave 3 task brief (2026-08-20)
 
-Status: Draft until the integrated Wave 2 SHA is recorded below.
+Status: Authorized for Wave 3A. Wave 3B/3C remain gated on the reviewed prior
+slice SHA.
 
 | Item | Value |
 |---|---|
 | Integration branch | `codex/v0-6-2-recovery` |
-| Worker base | Post-Wave-2 integration HEAD; record exact SHA before dispatch |
+| Wave 3A base | `51354e8c01ce04e1992bce252f6e778dca7edd98` |
+| Wave 3B base | Reviewed Wave 3A HEAD; record before dispatch |
+| Wave 3C base | Reviewed Wave 3B HEAD; record before dispatch |
 | Approved design | `Docs/recovery-design-2026-08-20.md` |
 | Issue | #106 cancellation terminal barrier |
 | Upstream contract | `openai/codex@3b45c29062ff0e76e71c91b6753290400e7fa8da` |
