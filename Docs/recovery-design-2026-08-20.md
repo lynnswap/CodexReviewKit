@@ -72,6 +72,8 @@ products. Do not create a proxy consumer to preserve them.
 ### Non-goals
 
 - A general Codex thread/chat browser.
+- A client for standalone `command/exec` or `process/spawn`; ReviewMonitor does
+  not originate or own those connection-scoped requests.
 - Exposing reviewer, compact, spawn, or other internal subagent threads as
   standalone product rows.
 - Recreating the current CodexDataKit fetched-results stack.
@@ -363,9 +365,12 @@ under the same review. `(reviewID, displayOrdinal)` is unique. Appends allocate
 the next ordinal inside the writer transaction; grouped append/replace updates
 the existing row without changing its ordinal and stamps only
 `lastMutationRevision`. Stable upstream
-event IDs have a uniqueness constraint scoped to the attempt. Connection-scoped
-process handles are stored only as attempt-local routing metadata and never as
-global identity. Review history stores effective semantic log rows, not an
+event IDs have a uniqueness constraint scoped to the attempt. A connection-
+scoped standalone process handle is never inferred to be a review item ID. It
+may exist as attempt-local routing metadata only when the owner of that exact
+standalone request registered the handle-to-attempt/item mapping before sending
+the request; the current recovery product sends no such request. Review history
+stores effective semantic log rows, not an
 append-only raw event journal: group replacement updates one row, and rows
 removed or truncated by the existing 256 KiB capped-text policy are changed in
 the same transaction. That 256 KiB policy applies only to the existing capped
@@ -438,8 +443,9 @@ output, or user-visible effective log rows. A late event for an older attempt
 may update that attempt's terminal, receipt, or bounded diagnostic record, but
 cannot update the product result/log or reopen/reterminalize the current run.
 Group and receipt uniqueness keys are scoped as
-`(reviewID, attemptID, kind, upstreamKey)`; no group or process handle crosses
-an attempt boundary.
+`(reviewID, attemptID, kind, upstreamKey)`. A registered process handle, if a
+future product operation introduces one, is additionally scoped to its app-
+server connection and cannot cross an attempt boundary.
 
 On startup, a nonterminal row with no matching live processor becomes
 `recoveryRequired`. The product may attach a verified matching current turn; if
@@ -485,7 +491,7 @@ SQLite database revision N
   Live raw deltas have no current upstream sequence/event ID and are consumed
   once in connection order. Recovery uses an authoritative full logical-item
   replacement or starts a new attempt; it never replays raw deltas and never
-  deduplicates by display text or reusable process handle.
+  deduplicates by display text or a reusable process handle.
 
 One `@MainActor` `ReviewHistoryQuery` owns the published observation generation;
 each generation consists of one GRDB `ValueObservation` whose single read
@@ -685,6 +691,29 @@ If the identity conflict means the router cannot prove which attempt owns the
 event, containment escalates to the connection rather than guessing. If writing
 the diagnostic/failure transition itself fails, the persistence-failure
 transition above takes precedence.
+
+#### Review command versus standalone process output
+
+The pinned current-v2 review stream uses
+`item/commandExecution/outputDelta { threadId, turnId, itemId, delta }`. That
+typed outer/turn/item identity is the only command-output delta admitted to a
+review attempt in this recovery.
+
+`command/exec/outputDelta { processId, ... }` and
+`process/outputDelta { processHandle, ... }` belong to standalone,
+connection-scoped APIs. Their handles have no documented namespace or equality
+relationship with review `ThreadItem` IDs. ReviewMonitor does not issue those
+standalone requests, so unregistered notifications are classified as non-review
+traffic and cannot mutate or fail a review. They are not broadcast to active
+attempts and are never matched by first string equality.
+
+A future product feature that issues a standalone request must add one request
+owner that registers `(connection, handle) -> (reviewID, attemptID, itemID)`
+before sending, removes it on response/connection close, and routes base64 bytes
+through that exact mapping. That is a new variant/design change, not a Wave 2
+fallback. Until then, ReviewMonitor preserves the Unicode `delta` already
+normalized by app-server for review command items; it does not base64-decode
+unowned standalone chunks.
 
 ### ChatGPT login state machine (#107)
 
@@ -1535,7 +1564,9 @@ Within the recovery branch:
 - Current-v2 sparse fallback accepts only the canonical outer turn's documented
   single final-message summary field; generic last-message, async, child, and
   cross-attempt candidates fail.
-- Command/process/tool/file/reasoning event normalization and lossy UTF-8.
+- Review-scoped command/tool/file/reasoning normalization, preservation of the
+  app-server-delivered lossy Unicode string, and proof that unregistered
+  standalone command/process deltas cannot mutate a review.
 - Interrupt response/terminal races and cleanup ordering.
 - Terminal-before-interrupt-response, accepted/rejected/outcome-unknown
   interrupt, duplicate/conflicting terminal, and forced transport close using a

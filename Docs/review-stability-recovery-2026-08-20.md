@@ -111,6 +111,8 @@ The proposed Phase 2 gate now includes:
 | 2026-08-20 | Wave 1 / compatibility gates integrated | `3801200` adds a separate four-product consumer, strict four-module `swift-api-digester` baseline, and canonical five-tool MCP golden. Integration aggregate gate passed on Xcode 27 / Swift 6.4. |
 | 2026-08-20 | Wave 0 / RecoveryV1 integrated | `9e5bf73`–`59caa59` move default runtime, login staging, saved accounts, future history URL, and preferences behind one RecoveryV1 owner; preparation is owner-only and precedes admission, legacy home is rejected, and Settings no longer advertises it. |
 | 2026-08-20 | Wave 0/1 integration green | Compatibility aggregate passed; the full package suite passed 541 tests and the ReviewMonitor app scheme passed 17 tests on the integrated branch. Working tree and both lockfiles remained clean. |
+| 2026-08-20 | Wave 0/1 branch review | Review MCP run `83224844-0A69-44C7-B703-6C12D4F74294` reviewed the complete `v0.6.2...HEAD` diff and reported zero findings. |
+| 2026-08-20 | Wave 2 source mapping | Upstream `3b45c290` proves review command deltas carry thread/turn/item identity while standalone command/process deltas carry only connection-scoped handles. Wave 2 excludes unregistered standalone traffic instead of porting historical string-equality correlation. |
 
 ## Remaining decisions
 
@@ -125,6 +127,9 @@ The proposed Phase 2 gate now includes:
 | Wave 0 / RecoveryV1 environment | 4 hours; 4 production + 4 test files | `CodexReviewHost` composition/runtime paths | Integrated at `9e5bf73`–`59caa59` |
 | Wave 1 / #103 log viewport | 3 hours; 2 production + 2 test files | ReviewUI native scroll/layout | Integrated at `03bf36e` |
 | Wave 1 / compatibility gates | 5 hours; 10 files | external consumer/API/MCP contract tests | Integrated at `3801200` |
+| Wave 2 / #104 + #105 event contract | 18 hours; 9 production + 8 test/gate files | attempt-scoped current-v2 decoder/terminal reducer | Ready for worker |
 
 The committed worker contract is
 [recovery-wave-0-1-task-brief-2026-08-20.md](recovery-wave-0-1-task-brief-2026-08-20.md).
+Wave 2 uses
+[recovery-wave-2-task-brief-2026-08-20.md](recovery-wave-2-task-brief-2026-08-20.md).
