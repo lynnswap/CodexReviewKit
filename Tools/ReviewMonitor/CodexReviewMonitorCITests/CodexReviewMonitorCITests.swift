@@ -41,18 +41,19 @@ struct CodexReviewMonitorCITests {
         )
     }
 
-    @Test func hostedUnitTestExplicitIntegrationOverrideAdmitsEmbeddedServer() {
+    @Test func hostedUnitTestEnvironmentOverrideCannotAdmitProductionStore() {
         let environment = [
             ReviewMonitorLaunchEnvironment.xctestBundlePathKey: "/tmp/HostedUnitTests.xctest",
-            ReviewMonitorLaunchEnvironment.testPortKey: "50104",
+            CodexReviewStoreTestEnvironment.portKey: "50104",
         ]
         let context = ReviewMonitorLaunchContext(
             environment: environment,
             arguments: []
         )
 
-        #expect(context.launchMode == .application)
-        #expect(context.shouldStartEmbeddedServer)
+        #expect(context.launchMode == .xctest)
+        #expect(context.integrationTestEnvironment == nil)
+        #expect(context.shouldStartEmbeddedServer == false)
     }
 
     @Test func lifecycleUsesInjectedStoreWithoutTimingDelays() async {
@@ -109,7 +110,7 @@ struct CodexReviewMonitorCITests {
                 capturedShowSettings = showSettings
                 return recorder.makeWindowController()
             },
-            makeSettingsWindowController: {
+            makeSettingsWindowController: { _ in
                 settingsWindowController
             }
         )
@@ -210,7 +211,7 @@ struct CodexReviewMonitorCITests {
             makeWindowController: { _, _ in
                 CountingWindowController()
             },
-            makeSettingsWindowController: {
+            makeSettingsWindowController: { _ in
                 settingsWindowController
             }
         )
@@ -256,10 +257,54 @@ struct CodexReviewMonitorCITests {
             Issue.record("Preview store creation should not request a presentation anchor.")
             return nil
         }
-
         #expect(didRequestPresentationAnchor == false)
         #expect(didCallLiveStoreFactory == false)
         #expect(context.shouldStartEmbeddedServer == false)
+    }
+
+    @Test func liveCompositionKeepsHostedXCTestStoreOffProductionFactories() {
+        let runtimePreferencesStore = FailingRuntimePreferencesStore()
+        var didCallProductionFactory = false
+        var didCallIntegrationFactory = false
+        let composition = ReviewMonitorAppComposition.live(
+            runtimePreferencesStore: runtimePreferencesStore,
+            makeLiveStore: { _, _ in
+                didCallProductionFactory = true
+                Issue.record("Hosted XCTest must not build a production live store.")
+                return CodexReviewStore.makePreviewStore()
+            },
+            makeIntegrationTestStore: { _, _, _ in
+                didCallIntegrationFactory = true
+                Issue.record("Hosted XCTest requires an explicitly injected integration environment.")
+                return CodexReviewStore.makePreviewStore()
+            }
+        )
+        let context = ReviewMonitorLaunchContext(
+            environment: [
+                ReviewMonitorLaunchEnvironment.xctestBundlePathKey: "/tmp/HostedUnitTests.xctest",
+                CodexReviewStoreTestEnvironment.portKey: "50104",
+            ],
+            arguments: []
+        )
+        var didRequestPresentationAnchor = false
+
+        _ = composition.makeStore(context) {
+            didRequestPresentationAnchor = true
+            Issue.record("Hosted XCTest inert store creation must not request a presentation anchor.")
+            return nil
+        }
+        let settingsWindowController = composition.makeSettingsWindowController(context)
+        let settingsTabViewController = settingsWindowController.contentViewController
+            as? NSTabViewController
+        let runtimeViewController = settingsTabViewController?.tabViewItems.first?.viewController
+            as? ReviewMonitorRuntimeSettingsViewController
+
+        #expect(context.launchMode == .xctest)
+        #expect(context.shouldStartEmbeddedServer == false)
+        #expect(didRequestPresentationAnchor == false)
+        #expect(didCallProductionFactory == false)
+        #expect(didCallIntegrationFactory == false)
+        #expect(runtimeViewController?.formState.mcpPort == "9417")
     }
 
     @Test func liveCompositionPassesLoadedRuntimePreferencesToApplicationStoreFactory() {
@@ -308,6 +353,83 @@ struct CodexReviewMonitorCITests {
         }
         #expect(capturedAuthenticationConfiguration?.presentationAnchorProvider() == nil)
         #expect(didRequestPresentationAnchor)
+    }
+
+    @Test func liveCompositionPassesCompleteIsolatedEnvironmentToIntegrationFactory() throws {
+        let suiteName = "ReviewMonitorIntegrationTests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        let expectedRuntimePreferences = CodexReviewRuntime.Preferences(mcpPort: 50104)
+        try CodexReviewRuntime.UserDefaultsPreferencesStore(defaults: defaults)
+            .save(expectedRuntimePreferences)
+        let isolatedBaseURL = FileManager.default.temporaryDirectory
+            .appending(path: "review-monitor-integration-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let integrationEnvironment = ReviewMonitorIntegrationTestEnvironment(
+            processEnvironment: [
+                "HOME": isolatedBaseURL.path,
+                CodexReviewStoreTestEnvironment.portKey: "50104",
+            ],
+            baseDirectoryURL: isolatedBaseURL,
+            preferencesSuiteName: suiteName
+        )
+        let productionPreferencesStore = FailingRuntimePreferencesStore()
+        let expectedStore = CodexReviewStore.makePreviewStore()
+        var didCallProductionFactory = false
+        var capturedEnvironment: ReviewMonitorIntegrationTestEnvironment?
+        var capturedPreferences: CodexReviewRuntime.Preferences?
+        let composition = ReviewMonitorAppComposition.live(
+            runtimePreferencesStore: productionPreferencesStore,
+            makeLiveStore: { _, _ in
+                didCallProductionFactory = true
+                Issue.record("Integration override must not fall back to the production store factory.")
+                return CodexReviewStore.makePreviewStore()
+            },
+            makeIntegrationTestStore: { preferences, _, environment in
+                capturedPreferences = preferences
+                capturedEnvironment = environment
+                return expectedStore
+            }
+        )
+        let context = ReviewMonitorLaunchContext(
+            environment: [
+                ReviewMonitorLaunchEnvironment.xctestBundlePathKey: "/tmp/HostedUnitTests.xctest",
+            ],
+            arguments: [],
+            integrationTestEnvironment: integrationEnvironment
+        )
+
+        let store = composition.makeStore(context) { nil }
+        let settingsWindowController = composition.makeSettingsWindowController(context)
+        let tabViewController = try #require(
+            settingsWindowController.contentViewController as? NSTabViewController
+        )
+        let runtimeViewController = try #require(
+            tabViewController.tabViewItems.first?.viewController
+                as? ReviewMonitorRuntimeSettingsViewController
+        )
+
+        #expect(store === expectedStore)
+        #expect(context.launchMode == .application)
+        #expect(context.shouldStartEmbeddedServer)
+        #expect(didCallProductionFactory == false)
+        #expect(capturedEnvironment == integrationEnvironment)
+        #expect(capturedPreferences == expectedRuntimePreferences)
+        #expect(runtimeViewController.formState.mcpPort == "50104")
+        #expect(
+            integrationEnvironment.recoveryDirectoryURL
+                == isolatedBaseURL.appending(path: "RecoveryV1", directoryHint: .isDirectory)
+        )
+        #expect(
+            integrationEnvironment.legacyCodexHomeURL
+                == isolatedBaseURL.appending(path: ".codex_review", directoryHint: .isDirectory)
+        )
+        #expect(
+            FileManager.default.fileExists(
+                atPath: integrationEnvironment.recoveryDirectoryURL.path
+            ) == false
+        )
     }
 
     @Test func liveCompositionBuildsLifecycleFromLaunchContext() async {

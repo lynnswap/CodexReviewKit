@@ -12,6 +12,7 @@ package enum CodexReviewRecoveryEnvironmentError: Error, Equatable, LocalizedErr
     case directoryPermissionsMismatch(URL, actual: Int)
     case invalidLoginStagingDirectory(URL)
     case directoryRemovalFailed(URL, message: String)
+    case loginStagingRollbackFailed(URL, preparation: String, cleanup: String)
 
     package var errorDescription: String? {
         switch self {
@@ -33,6 +34,8 @@ package enum CodexReviewRecoveryEnvironmentError: Error, Equatable, LocalizedErr
             "RecoveryV1 cannot remove an unowned login staging directory at \(url.path)."
         case .directoryRemovalFailed(let url, let message):
             "Unable to remove the RecoveryV1 login staging directory at \(url.path): \(message)"
+        case .loginStagingRollbackFailed(let url, let preparation, let cleanup):
+            "Unable to roll back the RecoveryV1 login staging directory at \(url.path) after preparation failed (preparation: \(preparation); cleanup: \(cleanup))."
         }
     }
 }
@@ -48,6 +51,10 @@ package struct CodexReviewRecoveryEnvironment: Equatable, Sendable {
 
     package var codexSQLiteHomeURL: URL {
         AppServerCodexHome.sqliteHomeURL(for: codexHomeURL)
+    }
+
+    package var recoveryTrustRootURL: URL {
+        legacyCodexHomeURL.deletingLastPathComponent()
     }
 
     private let legacyCodexHomeURL: URL
@@ -109,19 +116,53 @@ package struct CodexReviewRecoveryEnvironment: Equatable, Sendable {
         }.value
     }
 
+    package func prepareLoginStagingCodexHome() async throws -> URL {
+        try await prepareLoginStagingCodexHome(sessionID: UUID())
+    }
+
     package func prepareLoginStagingCodexHome(sessionID: UUID) async throws -> URL {
         let url = loginStagingCodexHomeURL(sessionID: sessionID)
-        try await Task.detached(priority: .utility) {
+        let preparationTask = Task.detached(priority: .utility) {
             try Self.validateDirectoryURL(url)
+            try Task.checkCancellation()
             for directoryURL in Self.codexRuntimeDirectoryURLs(codexHomeURL: url) {
-                try Self.prepareOwnerOnlyDirectory(at: directoryURL)
+                try Self.prepareOwnerOnlyDirectory(
+                    at: directoryURL,
+                    trustedRootURL: recoveryTrustRootURL
+                )
+                try Task.checkCancellation()
             }
-        }.value
-        return url
+        }
+        do {
+            try await withTaskCancellationHandler {
+                try await preparationTask.value
+                try Task.checkCancellation()
+            } onCancel: {
+                preparationTask.cancel()
+            }
+            return url
+        } catch {
+            let preparationError = error
+            do {
+                try await removeLoginStagingCodexHome(at: url)
+            } catch {
+                throw CodexReviewRecoveryEnvironmentError.loginStagingRollbackFailed(
+                    url,
+                    preparation: preparationError.localizedDescription,
+                    cleanup: error.localizedDescription
+                )
+            }
+            throw preparationError
+        }
     }
 
     package func removeLoginStagingCodexHome(at url: URL) async throws {
         try await Task.detached(priority: .utility) {
+            try Self.validateExistingDirectoryChain(
+                from: recoveryTrustRootURL,
+                through: loginStagingDirectoryURL,
+                reportedURL: url
+            )
             let stagingRoot = loginStagingDirectoryURL.standardizedFileURL.resolvingSymlinksInPath()
             let candidate = url.standardizedFileURL.resolvingSymlinksInPath()
             guard candidate != stagingRoot,
@@ -158,6 +199,7 @@ package struct CodexReviewRecoveryEnvironment: Equatable, Sendable {
             )
         }
 
+        let recoveryTrustRootURL = recoveryTrustRootURL.standardizedFileURL
         let resolvedLegacyURL = legacyCodexHomeURL.standardizedFileURL.resolvingSymlinksInPath()
         let recoveryDirectoryURLs = [
             recoveryDirectoryURL,
@@ -174,17 +216,29 @@ package struct CodexReviewRecoveryEnvironment: Equatable, Sendable {
         }
 
         for directoryURL in recoveryDirectoryURLs {
-            try Self.prepareOwnerOnlyDirectory(at: directoryURL)
+            try Self.prepareOwnerOnlyDirectory(
+                at: directoryURL,
+                trustedRootURL: recoveryTrustRootURL
+            )
         }
         if usesExplicitCodexHome {
-            try Self.prepareExplicitCodexHomeDirectory(at: codexHomeURL)
+            let codexHomeTrustRootURL = codexHomeURL.standardizedFileURL
+                .deletingLastPathComponent()
+            try Self.prepareExplicitCodexHomeDirectory(
+                at: codexHomeURL,
+                trustedRootURL: codexHomeTrustRootURL
+            )
             try Self.prepareOwnerOnlyDirectory(
                 at: codexSQLiteHomeURL,
+                trustedRootURL: codexHomeURL,
                 withIntermediateDirectories: false
             )
         } else {
             for directoryURL in codexRuntimeDirectoryURLs {
-                try Self.prepareOwnerOnlyDirectory(at: directoryURL)
+                try Self.prepareOwnerOnlyDirectory(
+                    at: directoryURL,
+                    trustedRootURL: recoveryTrustRootURL
+                )
             }
         }
     }
@@ -197,10 +251,16 @@ package struct CodexReviewRecoveryEnvironment: Equatable, Sendable {
 
     package static func prepareOwnerOnlyDirectory(
         at url: URL,
+        trustedRootURL: URL,
         withIntermediateDirectories: Bool = true
     ) throws {
         let fileManager = FileManager.default
         do {
+            try validateExistingDirectoryChain(
+                from: trustedRootURL,
+                through: url,
+                reportedURL: url
+            )
             var isDirectory = ObjCBool(false)
             let exists = fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory)
             if exists {
@@ -249,6 +309,11 @@ package struct CodexReviewRecoveryEnvironment: Equatable, Sendable {
         guard resolvedURL.path != "/" else {
             throw CodexReviewRecoveryEnvironmentError.unsafeCodexHome(url)
         }
+        try validateExistingDirectoryChain(
+            from: standardizedURL.deletingLastPathComponent(),
+            through: standardizedURL,
+            reportedURL: url
+        )
 
         let resolvedLegacyURL = legacyCodexHomeURL.standardizedFileURL.resolvingSymlinksInPath()
         if isSameOrDescendant(resolvedURL, of: resolvedLegacyURL) {
@@ -300,9 +365,17 @@ package struct CodexReviewRecoveryEnvironment: Equatable, Sendable {
         try validateDirectoryOwnership(at: parentURL, reportedURL: url)
     }
 
-    private static func prepareExplicitCodexHomeDirectory(at url: URL) throws {
+    private static func prepareExplicitCodexHomeDirectory(
+        at url: URL,
+        trustedRootURL: URL
+    ) throws {
         let fileManager = FileManager.default
         do {
+            try validateExistingDirectoryChain(
+                from: trustedRootURL,
+                through: url,
+                reportedURL: url
+            )
             var isDirectory = ObjCBool(false)
             if fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) {
                 guard isDirectory.boolValue else {
@@ -385,6 +458,51 @@ package struct CodexReviewRecoveryEnvironment: Equatable, Sendable {
                 reportedURL,
                 message: error.localizedDescription
             )
+        }
+    }
+
+    private static func validateExistingDirectoryChain(
+        from trustedRootURL: URL,
+        through targetURL: URL,
+        reportedURL: URL
+    ) throws {
+        let trustedRootURL = trustedRootURL.standardizedFileURL
+        let targetURL = targetURL.standardizedFileURL
+        guard isSameOrDescendant(targetURL, of: trustedRootURL) else {
+            throw CodexReviewRecoveryEnvironmentError.unsafeCodexHome(reportedURL)
+        }
+
+        var componentURLs = [trustedRootURL]
+        var componentURL = trustedRootURL
+        let remainingComponents = targetURL.pathComponents.dropFirst(
+            trustedRootURL.pathComponents.count
+        )
+        for component in remainingComponents {
+            componentURL.append(path: component, directoryHint: .isDirectory)
+            componentURLs.append(componentURL)
+        }
+        for componentURL in componentURLs {
+            var fileStatus = stat()
+            guard lstat(componentURL.path, &fileStatus) == 0 else {
+                let errorCode = errno
+                if errorCode == ENOENT {
+                    return
+                }
+                throw CodexReviewRecoveryEnvironmentError.directoryPreparationFailed(
+                    componentURL,
+                    message: String(cString: strerror(errorCode))
+                )
+            }
+            let fileType = fileStatus.st_mode & mode_t(S_IFMT)
+            guard fileType != mode_t(S_IFLNK) else {
+                throw CodexReviewRecoveryEnvironmentError.symbolicLinkDirectory(componentURL)
+            }
+            guard fileType == mode_t(S_IFDIR) else {
+                throw CodexReviewRecoveryEnvironmentError.directoryPreparationFailed(
+                    componentURL,
+                    message: CocoaError(.fileWriteFileExists).localizedDescription
+                )
+            }
         }
     }
 

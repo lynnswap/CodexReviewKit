@@ -481,11 +481,41 @@ struct CodexReviewHostTests {
             try await environment.prepare()
             Issue.record("Expected a symbolic-link Codex home to be rejected.")
         } catch let error as CodexReviewRecoveryEnvironmentError {
-            #expect(error == .unsafeCodexHome(aliasURL))
+            #expect(error == .symbolicLinkDirectory(aliasURL))
         }
 
         #expect(try posixPermissions(at: targetURL) == 0o700)
         #expect(FileManager.default.fileExists(atPath: environment.recoveryDirectoryURL.path) == false)
+    }
+
+    @Test func recoveryEnvironmentRejectsSymlinkedRecoveryAncestorWithoutWritingTarget() async throws {
+        let homeURL = try temporaryHome()
+        let environment = recoveryEnvironment(homeURL: homeURL)
+        let monitorParentURL = environment.recoveryDirectoryURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        try FileManager.default.createDirectory(
+            at: monitorParentURL,
+            withIntermediateDirectories: true
+        )
+        let redirectedURL = homeURL.appendingPathComponent("redirected-monitor", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: redirectedURL,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: NSNumber(value: 0o700)]
+        )
+        let monitorURL = environment.recoveryDirectoryURL.deletingLastPathComponent()
+        try FileManager.default.createSymbolicLink(at: monitorURL, withDestinationURL: redirectedURL)
+
+        do {
+            try await environment.prepare()
+            Issue.record("Expected a symbolic-link recovery ancestor to be rejected.")
+        } catch let error as CodexReviewRecoveryEnvironmentError {
+            #expect(error == .symbolicLinkDirectory(monitorURL))
+        }
+
+        #expect(try FileManager.default.contentsOfDirectory(atPath: redirectedURL.path).isEmpty)
+        #expect(try posixPermissions(at: redirectedURL) == 0o700)
     }
 
     @Test func recoveryEnvironmentRejectsNonOwnedExplicitCodexHomeWithoutChangingPermissions() async throws {
@@ -510,6 +540,97 @@ struct CodexReviewHostTests {
 
         #expect(try posixPermissions(at: nonOwnedURL) == permissionsBeforePreparation)
         #expect(FileManager.default.fileExists(atPath: environment.recoveryDirectoryURL.path) == false)
+    }
+
+    @Test func recoveryEnvironmentRollsBackPartiallyPreparedLoginStagingHome() async throws {
+        let homeURL = try temporaryHome()
+        let environment = recoveryEnvironment(homeURL: homeURL)
+        try await environment.prepare()
+        let sessionID = UUID()
+        let stagingCodexHomeURL = environment.loginStagingCodexHomeURL(sessionID: sessionID)
+        try FileManager.default.createDirectory(
+            at: stagingCodexHomeURL,
+            withIntermediateDirectories: true
+        )
+        let sqliteURL = AppServerCodexHome.sqliteHomeURL(for: stagingCodexHomeURL)
+        try Data("not a directory".utf8).write(to: sqliteURL)
+
+        do {
+            _ = try await environment.prepareLoginStagingCodexHome(sessionID: sessionID)
+            Issue.record("Expected partial login staging preparation to fail.")
+        } catch let error as CodexReviewRecoveryEnvironmentError {
+            guard case .directoryPreparationFailed(let url, _) = error else {
+                Issue.record("Expected a directory preparation failure, received \(error).")
+                return
+            }
+            #expect(url == sqliteURL)
+        }
+
+        #expect(
+            FileManager.default.fileExists(
+                atPath: stagingCodexHomeURL.path
+            ) == false
+        )
+    }
+
+    @Test func recoveryEnvironmentJoinsCancelledLoginStagingPreparation() async throws {
+        let homeURL = try temporaryHome()
+        let environment = recoveryEnvironment(homeURL: homeURL)
+        try await environment.prepare()
+        let sessionID = UUID()
+        let stagingCodexHomeURL = environment.loginStagingCodexHomeURL(sessionID: sessionID)
+        let startGate = AsyncGate()
+        let preparationTask = Task { @MainActor in
+            await startGate.wait()
+            return try await environment.prepareLoginStagingCodexHome(sessionID: sessionID)
+        }
+
+        preparationTask.cancel()
+        await startGate.open()
+
+        do {
+            _ = try await preparationTask.value
+            Issue.record("Expected login staging preparation cancellation.")
+        } catch is CancellationError {
+        }
+        #expect(FileManager.default.fileExists(atPath: stagingCodexHomeURL.path) == false)
+    }
+
+    @Test func recoveryEnvironmentPreservesPreparationAndRollbackFailures() async throws {
+        let homeURL = try temporaryHome()
+        let environment = recoveryEnvironment(homeURL: homeURL)
+        try FileManager.default.createDirectory(
+            at: environment.recoveryDirectoryURL,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: NSNumber(value: 0o700)]
+        )
+        let redirectedURL = homeURL.appendingPathComponent("redirected-staging", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: redirectedURL,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: NSNumber(value: 0o700)]
+        )
+        try FileManager.default.createSymbolicLink(
+            at: environment.loginStagingDirectoryURL,
+            withDestinationURL: redirectedURL
+        )
+        let sessionID = UUID()
+        let stagingCodexHomeURL = environment.loginStagingCodexHomeURL(sessionID: sessionID)
+
+        do {
+            _ = try await environment.prepareLoginStagingCodexHome(sessionID: sessionID)
+            Issue.record("Expected preparation and rollback to reject the staging symlink.")
+        } catch let error as CodexReviewRecoveryEnvironmentError {
+            guard case .loginStagingRollbackFailed(let url, let preparation, let cleanup) = error else {
+                Issue.record("Expected a compound staging rollback failure, received \(error).")
+                return
+            }
+            #expect(url == stagingCodexHomeURL)
+            #expect(preparation.contains("symbolic-link directory"))
+            #expect(cleanup.contains("symbolic-link directory"))
+        }
+
+        #expect(try FileManager.default.contentsOfDirectory(atPath: redirectedURL.path).isEmpty)
     }
 
     @Test func liveStorePassesRuntimePreferenceMCPPortAndPathToHTTPServerFactory() async throws {

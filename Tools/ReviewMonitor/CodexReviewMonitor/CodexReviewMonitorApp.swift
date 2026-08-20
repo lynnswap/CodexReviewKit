@@ -16,23 +16,43 @@ enum ReviewMonitorLaunchMode: Sendable {
     case preview
 }
 
+struct ReviewMonitorIntegrationTestEnvironment: Equatable, Sendable {
+    var processEnvironment: [String: String]
+    var baseDirectoryURL: URL
+    var preferencesSuiteName: String
+
+    var recoveryDirectoryURL: URL {
+        baseDirectoryURL.appending(path: "RecoveryV1", directoryHint: .isDirectory)
+    }
+
+    var legacyCodexHomeURL: URL {
+        baseDirectoryURL.appending(path: ".codex_review", directoryHint: .isDirectory)
+    }
+}
+
 struct ReviewMonitorLaunchContext: Sendable {
     var environment: [String: String]
     var arguments: [String]
+    var integrationTestEnvironment: ReviewMonitorIntegrationTestEnvironment?
     var launchMode: ReviewMonitorLaunchMode
     var requestsPreviewContent: Bool
 
     init(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         arguments: [String] = CommandLine.arguments,
+        integrationTestEnvironment: ReviewMonitorIntegrationTestEnvironment? = nil,
         launchMode: ReviewMonitorLaunchMode? = nil
     ) {
         self.environment = environment
         self.arguments = arguments
-        self.launchMode = launchMode ?? ReviewMonitorLaunchEnvironment.launchMode(
-            environment: environment,
-            arguments: arguments
-        )
+        self.integrationTestEnvironment = integrationTestEnvironment
+        self.launchMode = launchMode
+            ?? (integrationTestEnvironment == nil
+                ? ReviewMonitorLaunchEnvironment.launchMode(
+                    environment: environment,
+                    arguments: arguments
+                )
+                : .application)
         requestsPreviewContent = ReviewMonitorLaunchEnvironment.requestsPreviewContent(
             environment: environment,
             arguments: arguments
@@ -53,14 +73,8 @@ enum ReviewMonitorLaunchEnvironment {
     static let xctestSessionIdentifierKey = "XCTestSessionIdentifier"
     static let xcodeRunningForPlaygroundsKey = "XCODE_RUNNING_FOR_PLAYGROUNDS"
     static let xcodeRunningForPreviewsKey = "XCODE_RUNNING_FOR_PREVIEWS"
-    static let testPortKey = CodexReviewStoreTestEnvironment.portKey
-    static let testCodexCommandKey = CodexReviewStoreTestEnvironment.codexCommandKey
-    static let testDiagnosticsPathKey = CodexReviewStoreTestEnvironment.diagnosticsPathKey
     static let reviewModeArgument = CodexReviewStoreTestEnvironment.reviewModeArgument
     static let mockJobsArgument = CodexReviewStoreTestEnvironment.mockJobsArgument
-    static let testPortArgument = CodexReviewStoreTestEnvironment.portArgument
-    static let testCodexCommandArgument = CodexReviewStoreTestEnvironment.codexCommandArgument
-    static let testDiagnosticsPathArgument = CodexReviewStoreTestEnvironment.diagnosticsPathArgument
 
     static func launchMode(
         environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -68,9 +82,6 @@ enum ReviewMonitorLaunchEnvironment {
     ) -> ReviewMonitorLaunchMode {
         if isRunningInPreviews(environment: environment) {
             return .preview
-        }
-        if hasExplicitTestOverride(environment: environment, arguments: arguments) {
-            return .application
         }
         if isRunningUnderXCTest(environment: environment) {
             return .xctest
@@ -113,18 +124,6 @@ enum ReviewMonitorLaunchEnvironment {
             || isNonEmpty(environment[xctestBundlePathKey])
             || isNonEmpty(environment[xcInjectBundleIntoKey])
             || isNonEmpty(environment[xctestSessionIdentifierKey])
-    }
-
-    private static func hasExplicitTestOverride(
-        environment: [String: String],
-        arguments: [String]
-    ) -> Bool {
-        environment[testPortKey] != nil
-            || environment[testCodexCommandKey] != nil
-            || environment[testDiagnosticsPathKey] != nil
-            || arguments.contains(testPortArgument)
-            || arguments.contains(testCodexCommandArgument)
-            || arguments.contains(testDiagnosticsPathArgument)
     }
 
     private static func isEnabledFlag(_ value: String?) -> Bool {
@@ -215,11 +214,29 @@ private enum ReviewMonitorNativeAuthentication {
 }
 
 @MainActor
+private final class ReviewMonitorInMemoryRuntimePreferencesStore: CodexReviewRuntime.PreferencesStore {
+    private var preferences = CodexReviewRuntime.Preferences.defaults
+
+    func load() -> CodexReviewRuntime.Preferences {
+        preferences
+    }
+
+    func save(_ preferences: CodexReviewRuntime.Preferences) throws {
+        self.preferences = preferences
+    }
+}
+
+@MainActor
 struct ReviewMonitorAppComposition {
     typealias PresentationAnchorProvider = @MainActor () -> NSWindow?
     typealias LiveStoreFactory = (
         CodexReviewRuntime.Preferences,
         CodexReviewNativeAuthentication.Configuration?
+    ) -> CodexReviewStore
+    typealias IntegrationTestStoreFactory = (
+        CodexReviewRuntime.Preferences,
+        CodexReviewNativeAuthentication.Configuration?,
+        ReviewMonitorIntegrationTestEnvironment
     ) -> CodexReviewStore
 
     var makeStore: (ReviewMonitorLaunchContext, @escaping PresentationAnchorProvider) -> CodexReviewStore
@@ -228,7 +245,7 @@ struct ReviewMonitorAppComposition {
         ReviewMonitorLaunchContext
     ) -> ReviewMonitorLifecycleController
     var makeWindowController: (CodexReviewStore, @escaping @MainActor () -> Void) -> NSWindowController
-    var makeSettingsWindowController: () -> NSWindowController
+    var makeSettingsWindowController: (ReviewMonitorLaunchContext) -> NSWindowController
 
     init(
         makeStore: @escaping (
@@ -248,7 +265,7 @@ struct ReviewMonitorAppComposition {
             CodexReviewStore,
             @escaping @MainActor () -> Void
         ) -> NSWindowController,
-        makeSettingsWindowController: @escaping () -> NSWindowController = {
+        makeSettingsWindowController: @escaping (ReviewMonitorLaunchContext) -> NSWindowController = { _ in
             ReviewMonitorSettingsWindowController(
                 runtimePreferencesStore: CodexReviewRuntime.UserDefaultsPreferencesStore()
             )
@@ -267,20 +284,38 @@ struct ReviewMonitorAppComposition {
                 runtimePreferences: runtimePreferences,
                 nativeAuthenticationConfiguration: nativeAuthenticationConfiguration
             )
-        }
+        },
+        makeIntegrationTestStore: IntegrationTestStoreFactory? = nil
     ) -> ReviewMonitorAppComposition {
-        ReviewMonitorAppComposition(
+        let inertRuntimePreferencesStore = ReviewMonitorInMemoryRuntimePreferencesStore()
+        return ReviewMonitorAppComposition(
             makeStore: { context, presentationAnchorProvider in
-                if context.requestsPreviewContent {
+                if context.requestsPreviewContent || context.launchMode == .xctest {
                     return ReviewMonitorPreviewContent.makeStore()
+                }
+                let authenticationConfiguration = CodexReviewNativeAuthentication.Configuration(
+                    callbackScheme: ReviewMonitorNativeAuthentication.callbackScheme,
+                    browserSessionPolicy: .ephemeral,
+                    presentationAnchorProvider: presentationAnchorProvider
+                )
+                if let integrationTestEnvironment = context.integrationTestEnvironment {
+                    guard let makeIntegrationTestStore else {
+                        preconditionFailure(
+                            "ReviewMonitorAppComposition owns integration-test store injection; a complete isolated factory is required."
+                        )
+                    }
+                    let integrationPreferencesStore = integrationRuntimePreferencesStore(
+                        environment: integrationTestEnvironment
+                    )
+                    return makeIntegrationTestStore(
+                        integrationPreferencesStore.load(),
+                        authenticationConfiguration,
+                        integrationTestEnvironment
+                    )
                 }
                 return makeLiveStore(
                     runtimePreferencesStore.load(),
-                    .init(
-                        callbackScheme: ReviewMonitorNativeAuthentication.callbackScheme,
-                        browserSessionPolicy: .ephemeral,
-                        presentationAnchorProvider: presentationAnchorProvider
-                    )
+                    authenticationConfiguration
                 )
             },
             makeWindowController: { store, showSettings in
@@ -289,12 +324,33 @@ struct ReviewMonitorAppComposition {
                     showSettings: showSettings
                 )
             },
-            makeSettingsWindowController: {
-                ReviewMonitorSettingsWindowController(
-                    runtimePreferencesStore: runtimePreferencesStore
+            makeSettingsWindowController: { context in
+                let preferencesStore: any CodexReviewRuntime.PreferencesStore
+                if let integrationTestEnvironment = context.integrationTestEnvironment {
+                    preferencesStore = integrationRuntimePreferencesStore(
+                        environment: integrationTestEnvironment
+                    )
+                } else if context.launchMode == .xctest || context.requestsPreviewContent {
+                    preferencesStore = inertRuntimePreferencesStore
+                } else {
+                    preferencesStore = runtimePreferencesStore
+                }
+                return ReviewMonitorSettingsWindowController(
+                    runtimePreferencesStore: preferencesStore
                 )
             }
         )
+    }
+
+    private static func integrationRuntimePreferencesStore(
+        environment: ReviewMonitorIntegrationTestEnvironment
+    ) -> CodexReviewRuntime.UserDefaultsPreferencesStore {
+        guard let defaults = UserDefaults(suiteName: environment.preferencesSuiteName) else {
+            preconditionFailure(
+                "ReviewMonitorIntegrationTestEnvironment owns a valid isolated preferences suite."
+            )
+        }
+        return CodexReviewRuntime.UserDefaultsPreferencesStore(defaults: defaults)
     }
 }
 
@@ -322,7 +378,7 @@ final class ReviewMonitorAppDelegate: NSObject, NSApplicationDelegate {
         presentationAnchorSource.window = windowController.window
         return windowController
     }()
-    lazy var settingsWindowController = composition.makeSettingsWindowController()
+    lazy var settingsWindowController = composition.makeSettingsWindowController(launchContext)
 
     override init() {
         launchContextProvider = {

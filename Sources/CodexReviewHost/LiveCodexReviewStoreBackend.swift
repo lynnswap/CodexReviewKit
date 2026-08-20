@@ -994,7 +994,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             )
         case .preserveActiveAccount:
             let temporaryCodexHomeURL = try await recoveryEnvironment
-                .prepareLoginStagingCodexHome(sessionID: UUID())
+                .prepareLoginStagingCodexHome()
             do {
                 let runtime = try await appServerRuntimeFactory(temporaryCodexHomeURL)
                 return .init(
@@ -1441,21 +1441,18 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     private func refreshSavedAccountRateLimits(for account: CodexAccount) async {
-        let stagingSessionID = UUID()
-        let temporaryCodexHomeURL = recoveryEnvironment.loginStagingCodexHomeURL(
-            sessionID: stagingSessionID
-        )
+        var temporaryCodexHomeURL: URL?
         var stagingClient: AppServerClient?
         do {
-            _ = try await recoveryEnvironment.prepareLoginStagingCodexHome(
-                sessionID: stagingSessionID
-            )
+            let preparedCodexHomeURL = try await recoveryEnvironment
+                .prepareLoginStagingCodexHome()
+            temporaryCodexHomeURL = preparedCodexHomeURL
             if try CodexReviewAccountRegistry.copySavedAuth(
                 accountKey: account.accountKey,
                 environment: recoveryEnvironment,
-                to: temporaryCodexHomeURL
+                to: preparedCodexHomeURL
             ) {
-                let runtime = try await appServerRuntimeFactory(temporaryCodexHomeURL)
+                let runtime = try await appServerRuntimeFactory(preparedCodexHomeURL)
                 stagingClient = runtime.client
                 let didRefresh = await refreshRateLimits(
                     for: account,
@@ -1464,7 +1461,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 )
                 if didRefresh {
                     try CodexReviewAccountRegistry.saveSharedAuth(
-                        from: temporaryCodexHomeURL,
+                        from: preparedCodexHomeURL,
                         for: account,
                         environment: recoveryEnvironment
                     )
@@ -1944,7 +1941,11 @@ private enum CodexReviewAccountRegistry {
             activeAccountKey: normalizedAccountKey,
             environment: environment
         )
-        try copyAuth(from: savedAuthURL, to: sharedAuthURL(codexHomeURL: environment.codexHomeURL))
+        try copyAuth(
+            from: savedAuthURL,
+            to: sharedAuthURL(codexHomeURL: environment.codexHomeURL),
+            trustedRootURL: environment.codexHomeURL
+        )
     }
 
     static func updateCachedRateLimits(
@@ -1992,7 +1993,8 @@ private enum CodexReviewAccountRegistry {
         }
         try copyAuth(
             from: sourceURL,
-            to: savedAccountAuthURL(accountKey: account.accountKey, environment: environment)
+            to: savedAccountAuthURL(accountKey: account.accountKey, environment: environment),
+            trustedRootURL: environment.recoveryTrustRootURL
         )
     }
 
@@ -2033,7 +2035,8 @@ private enum CodexReviewAccountRegistry {
         }
         try copyAuth(
             from: sourceURL,
-            to: sharedAuthURL(codexHomeURL: destinationCodexHomeURL)
+            to: sharedAuthURL(codexHomeURL: destinationCodexHomeURL),
+            trustedRootURL: environment.recoveryTrustRootURL
         )
         return true
     }
@@ -2078,17 +2081,23 @@ private enum CodexReviewAccountRegistry {
     ) throws {
         let url = registryURL(environment: environment)
         try CodexReviewRecoveryEnvironment.prepareOwnerOnlyDirectory(
-            at: url.deletingLastPathComponent()
+            at: url.deletingLastPathComponent(),
+            trustedRootURL: environment.recoveryTrustRootURL
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(registry).write(to: url, options: .atomic)
     }
 
-    private static func copyAuth(from sourceURL: URL, to destinationURL: URL) throws {
+    private static func copyAuth(
+        from sourceURL: URL,
+        to destinationURL: URL,
+        trustedRootURL: URL
+    ) throws {
         let destinationDirectoryURL = destinationURL.deletingLastPathComponent()
         try CodexReviewRecoveryEnvironment.prepareOwnerOnlyDirectory(
-            at: destinationDirectoryURL
+            at: destinationDirectoryURL,
+            trustedRootURL: trustedRootURL
         )
         let replacementURL = destinationDirectoryURL
             .appendingPathComponent(".\(destinationURL.lastPathComponent).replacement-\(UUID().uuidString)")
