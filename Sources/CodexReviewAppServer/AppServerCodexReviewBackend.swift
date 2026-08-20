@@ -1229,8 +1229,8 @@ private actor AppServerReviewEventSession {
         }
         if emittedCanonicalStart == false,
            notification.envelope.turnID != nil,
-           notification.method == "turn/started"
-            || decoded.events.contains(where: { $0.isTerminal == false }) {
+           (notification.method == "turn/started"
+            || decoded.events.contains(where: { $0.isTerminal == false })) {
             emittedCanonicalStart = true
             if await emit(
                 .started(

@@ -928,6 +928,71 @@ private enum V2IdentityFixture: Equatable {
 
 @Suite("current-v2 review routing integration")
 struct CurrentV2ReviewRoutingIntegrationTests {
+    @Test func canonicalStartIsEmittedOnlyOnceAcrossNonterminalEvents() async throws {
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let attempt = await backend.reviewAttemptForTesting(.init(
+            attemptID: "attempt-1",
+            threadID: "thread-review",
+            turnID: "turn-review",
+            reviewThreadID: "thread-review"
+        ))
+
+        try await transport.emitServerNotification(
+            method: "turn/started",
+            params: V2TurnNotification(
+                threadID: "thread-review",
+                turn: .init(
+                    id: "turn-review",
+                    items: [],
+                    itemsView: "full",
+                    status: "inProgress",
+                    error: nil
+                )
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: V2ItemNotification(
+                threadID: "thread-review",
+                turnID: "turn-review",
+                item: .init(type: "agentMessage", id: "message-1", text: "Progress")
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: V2ItemNotification(
+                threadID: "thread-review",
+                turnID: "turn-review",
+                item: .init(type: "exitedReviewMode", id: "result", review: "No findings.")
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: V2TurnNotification(
+                threadID: "thread-review",
+                turn: .init(
+                    id: "turn-review",
+                    items: [
+                        .init(type: "agentMessage", id: "message-1", text: "Progress"),
+                    ],
+                    itemsView: "summary",
+                    status: "completed",
+                    error: nil
+                )
+            )
+        )
+
+        let events = try await collectEvents(from: attempt.events)
+        let startCount = events.reduce(into: 0) { count, event in
+            if case .started = event {
+                count += 1
+            }
+        }
+        #expect(startCount == 1)
+        #expect(events.last == .completed(summary: "Succeeded.", result: "No findings."))
+    }
+
     @Test func reviewCommandOutputUsesOnlyCanonicalItemDeltas() async throws {
         let transport = FakeJSONRPCTransport()
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
