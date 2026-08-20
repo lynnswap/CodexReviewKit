@@ -76,6 +76,25 @@ struct ReviewAttemptProcessorTests {
 
         #expect(await admission.currentPhase() == .active(run))
         #expect(await admission.cancellationRequest() == nil)
+
+        let retryRequested = InvocationProbe()
+        let retry = Task {
+            try await admission.cancel(
+                .mcpClient(message: "Stop again"),
+                interrupt: { _, _ in await retryRequested.record() },
+                forceClose: {}
+            )
+        }
+        await retryRequested.waitForInvocation()
+        try await admission.recordCanonicalTerminal(
+            .interrupted(.requested(.mcpClient(message: "Stop again"))),
+            for: run
+        )
+
+        #expect(try await retry.value.terminal == .canonical(
+            run: run,
+            terminal: .interrupted(.requested(.mcpClient(message: "Stop again")))
+        ))
     }
 
     @Test func rejectionAfterTerminalCannotRewriteTerminal() async throws {

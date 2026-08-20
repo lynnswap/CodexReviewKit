@@ -438,11 +438,25 @@ package actor ReviewStartAdmission {
         case .failure(let error):
             if let terminal {
                 phase = .terminal(terminal)
-            } else if case .active = phase {
-                requestedCancellation = nil
+            } else if case .active = phase,
+                      let requestFailure = error as? ReviewInterruptRequestFailure,
+                      case .rejected = requestFailure.outcome {
+                resetRejectedCancellationForRetry()
             }
             throw error
         }
+    }
+
+    private func resetRejectedCancellationForRetry() {
+        requestedCancellation = nil
+        cancellationTask = nil
+        interruptRequestTask = nil
+        terminalBarrierTask = nil
+        graceTask = nil
+        forceCloseTask = nil
+        requestResult = nil
+        forceCloseResult = nil
+        cancellationResult = nil
     }
 
     private func finishCancellationAfterTerminal(
