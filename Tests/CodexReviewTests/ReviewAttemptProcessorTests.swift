@@ -403,6 +403,7 @@ struct ReviewAttemptProcessorTests {
                 forceClose: {}
             )
         }
+        #expect(await admission.waitForCancellationAdmission() == .mcpClient(message: "Stop"))
         await threadResponseGate.open()
 
         #expect(try await cancellation.value.terminal == .localCancellation(.mcpClient(message: "Stop")))
@@ -438,6 +439,7 @@ struct ReviewAttemptProcessorTests {
                 }
             )
         }
+        #expect(await admission.waitForCancellationAdmission() == .system(message: "Stop"))
         await graceGate.open()
         await forceClose.waitForInvocation()
 
@@ -473,6 +475,7 @@ struct ReviewAttemptProcessorTests {
                 forceClose: {}
             )
         }
+        #expect(await admission.waitForCancellationAdmission() == .mcpClient(message: "Stop"))
         await reviewDispatchGate.open()
 
         #expect(try await cancellation.value.terminal == .localCancellation(.mcpClient(message: "Stop")))
@@ -551,6 +554,7 @@ struct ReviewAttemptProcessorTests {
                 }
             )
         }
+        #expect(await admission.waitForCancellationAdmission() == .system(message: "Stop"))
         await graceGate.open()
         await forceClose.waitForInvocation()
 
