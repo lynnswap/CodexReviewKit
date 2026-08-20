@@ -268,7 +268,7 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
                 processServerRequest(method: method, object: object)
                 return
             }
-            processNotification(method: method, object: object)
+            try processNotification(method: method, object: object)
         } else if let id = object["id"] as? Int {
             processResponse(id: id, object: object)
         } else {
@@ -329,11 +329,12 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
         return data
     }
 
-    private func processNotification(method: String, object: [String: Any]) {
+    private func processNotification(method: String, object: [String: Any]) throws {
         let params = object["params"] ?? [:]
-        guard let data = try? JSONSerialization.data(withJSONObject: params) else {
-            return
-        }
+        let data = try JSONSerialization.data(
+            withJSONObject: params,
+            options: [.fragmentsAllowed]
+        )
         let notification = JSONRPC.Notification(method: method, params: data)
         for continuation in notificationContinuations.values {
             continuation.yield(notification)

@@ -35,6 +35,23 @@ struct CurrentV2ReviewTerminalReducer: Sendable {
             var itemsView: ItemsView
             var status: String
             var error: ErrorPayload?
+
+            enum CodingKeys: String, CodingKey {
+                case id
+                case items
+                case itemsView
+                case status
+                case error
+            }
+
+            init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                self.id = try container.decode(String.self, forKey: .id)
+                self.items = try container.decode([TerminalItem].self, forKey: .items)
+                self.itemsView = try container.decodeIfPresent(ItemsView.self, forKey: .itemsView) ?? .full
+                self.status = try container.decode(String.self, forKey: .status)
+                self.error = try container.decodeIfPresent(ErrorPayload.self, forKey: .error)
+            }
         }
 
         var threadID: String
@@ -70,7 +87,6 @@ struct CurrentV2ReviewTerminalReducer: Sendable {
     private let outputStrategy: ReviewTerminalOutputStrategy
     private var receipts: [ReviewStableLifecycleReceipt.Key: ReviewStableLifecycleReceipt.Fingerprint] = [:]
     private var reviewMarker: ReviewMarker?
-    private var terminal: ReviewAttemptTerminal?
 
     init(
         identity: CurrentV2ReviewAttemptIdentity,
@@ -122,7 +138,6 @@ struct CurrentV2ReviewTerminalReducer: Sendable {
                 method: notification.method
             )
             let resolved = resolveTerminal(payload.turn)
-            terminal = resolved
             return .accepted(resolved)
         default:
             return .accepted(nil)
@@ -158,17 +173,17 @@ struct CurrentV2ReviewTerminalReducer: Sendable {
         switch outputStrategy {
         case .currentV2:
             if let reviewMarker {
-                let companionItemIDs = Set(
-                    turn.items.compactMap { item -> String? in
-                        guard item.type == "agentMessage",
-                              item.delivery == nil,
-                              item.text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-                        else {
-                            return nil
-                        }
-                        return item.id
-                    }
-                )
+                let companionItemIDs: Set<String>
+                if turn.itemsView == .summary,
+                   turn.items.count == 1,
+                   let item = turn.items.first,
+                   item.type == "agentMessage",
+                   item.delivery == nil,
+                   item.text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                    companionItemIDs = [item.id]
+                } else {
+                    companionItemIDs = []
+                }
                 return try ReviewFinalResult(
                     validating: reviewMarker.review,
                     source: .exitedReviewMode(itemID: reviewMarker.itemID),
