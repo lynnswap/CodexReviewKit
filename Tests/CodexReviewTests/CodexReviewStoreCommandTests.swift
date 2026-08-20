@@ -1161,8 +1161,9 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func cancellationDuringRecoveryPreparationDiscardsHandoffBeforeResume() async throws {
+    @Test func cancellationDuringRecoveryPreparationPropagatesCleanupFailure() async throws {
         let backend = FakeCodexReviewBackend()
+        await backend.failCleanup(message: "unsubscribe failed")
         let preparationGate = AsyncGate()
         await backend.holdPrepareReviewRecovery(with: preparationGate)
         let networkMonitor = ManualCodexReviewNetworkMonitor()
@@ -1201,18 +1202,52 @@ struct CodexReviewStoreCommandTests {
                 }
             })
 
-            let cancel = try await store.cancelReview(
-                jobID: "job-1",
-                cancellation: .mcpClient(message: "Stop")
-            )
+            await #expect(throws: ReviewRuntimeCloseFailure.cleanup("unsubscribe failed")) {
+                try await store.cancelReview(
+                    jobID: "job-1",
+                    cancellation: .mcpClient(message: "Stop")
+                )
+            }
             let read = try await result
             let commands = await backend.recordedCommands()
 
-            #expect(cancel.cancelled)
             #expect(read.core.lifecycle.status == .cancelled)
+            #expect(store.reviewCleanupFailures["job-1"] == .cleanup("unsubscribe failed"))
             #expect(commands.contains {
                 if case .resumeReviewRecovery = $0 { true } else { false }
             } == false)
+        }
+    }
+
+    @Test func cancellationWhileWaitingForRecoveryPropagatesCleanupFailure() async throws {
+        let backend = FakeCodexReviewBackend()
+        await backend.failCleanup(message: "unsubscribe failed")
+        let networkMonitor = ManualCodexReviewNetworkMonitor()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" }),
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: .init(sleep: { _ in })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+            )
+
+            networkMonitor.yield(.init(status: .unsatisfied))
+            try await completeNetworkRecoveryBarrier(backend: backend, store: store)
+
+            await #expect(throws: ReviewRuntimeCloseFailure.cleanup("unsubscribe failed")) {
+                try await store.cancelReview(
+                    jobID: "job-1",
+                    cancellation: .mcpClient(message: "Stop")
+                )
+            }
+            let read = try await result
+
+            #expect(read.core.lifecycle.status == .cancelled)
+            #expect(store.reviewCleanupFailures["job-1"] == .cleanup("unsubscribe failed"))
         }
     }
 

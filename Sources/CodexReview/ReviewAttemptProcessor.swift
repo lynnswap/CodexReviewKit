@@ -317,7 +317,9 @@ package actor ReviewStartAdmission {
         case queued
         case registeredStart(ReviewStartHandleID)
         case activatedStart(ReviewStartHandleID)
+        case preparingInitialRequest
         case preparingThread(RequestDispatch)
+        case recoveryRollbackOutcomeUnknown(threadID: String)
         case startingReview(
             preparedRun: CodexReviewBackendModel.Review.Run,
             dispatch: RequestDispatch
@@ -441,12 +443,32 @@ package actor ReviewStartAdmission {
         if let requestedCancellation {
             throw ReviewStartCancelledBeforeDispatch(cancellation: requestedCancellation)
         }
-        guard case .preparingThread(.notSent) = phase else {
+        switch phase {
+        case .preparingInitialRequest, .preparingThread(.notSent):
+            break
+        case .queued, .registeredStart, .activatedStart,
+             .preparingThread(.outcomeUnknown), .recoveryRollbackOutcomeUnknown,
+             .startingReview, .active, .interrupting, .finishing, .terminal:
             throw ReviewAttemptContractFailure(
                 message: "Thread start dispatch requires one pending not-sent request."
             )
         }
         phase = .preparingThread(.outcomeUnknown)
+    }
+
+    package func admitRecoveryRollbackDispatch(threadID: String) throws {
+        if let terminal {
+            throw startFailure(for: terminal)
+        }
+        if let requestedCancellation {
+            throw ReviewStartCancelledBeforeDispatch(cancellation: requestedCancellation)
+        }
+        guard case .preparingInitialRequest = phase else {
+            throw ReviewAttemptContractFailure(
+                message: "Recovery rollback dispatch requires one pending recovery request."
+            )
+        }
+        phase = .recoveryRollbackOutcomeUnknown(threadID: threadID)
     }
 
     package func recordThreadStartRejectedForRetry() throws {
@@ -915,7 +937,7 @@ package actor ReviewStartAdmission {
                 message: "Start handle \(id.generation) was not activated for dispatch."
             )
         }
-        phase = .preparingThread(.notSent)
+        phase = .preparingInitialRequest
     }
 
     private func resolveStartActivation(_ result: Result<Void, any Error>) {
@@ -960,10 +982,12 @@ package actor ReviewStartAdmission {
             } else if error is CancellationError,
                       let requestedCancellation {
                 switch phase {
-                case .registeredStart, .activatedStart, .preparingThread(.notSent):
+                case .registeredStart, .activatedStart, .preparingInitialRequest,
+                     .preparingThread(.notSent):
                     receiveTerminal(.localCancellation(requestedCancellation))
-                case .queued, .preparingThread(.outcomeUnknown), .startingReview,
-                     .active, .interrupting, .finishing, .terminal:
+                case .queued, .preparingThread(.outcomeUnknown),
+                     .recoveryRollbackOutcomeUnknown, .startingReview, .active,
+                     .interrupting, .finishing, .terminal:
                     break
                 }
             }
@@ -982,7 +1006,9 @@ package actor ReviewStartAdmission {
         ) async throws -> Void,
         forceClose: @escaping @Sendable () async throws -> Void
     ) async throws -> ReviewAttemptCancellationResolution {
-        if case .preparingThread(.notSent) = phase {
+        if case .preparingInitialRequest = phase {
+            startTask?.cancel()
+        } else if case .preparingThread(.notSent) = phase {
             startTask?.cancel()
         } else if case .queued = phase {
             receiveTerminal(.localCancellation(cancellation))
@@ -1419,7 +1445,8 @@ package actor ReviewStartAdmission {
             run
         case .finishing, .terminal:
             registeredRun
-        case .queued, .registeredStart, .activatedStart, .preparingThread:
+        case .queued, .registeredStart, .activatedStart, .preparingInitialRequest,
+             .preparingThread, .recoveryRollbackOutcomeUnknown:
             registeredRun
         }
     }
@@ -1428,19 +1455,22 @@ package actor ReviewStartAdmission {
         switch phase {
         case .active(let run), .interrupting(let run):
             run
-        case .queued, .registeredStart, .activatedStart, .preparingThread,
-             .startingReview, .finishing, .terminal:
+        case .queued, .registeredStart, .activatedStart, .preparingInitialRequest,
+             .preparingThread, .recoveryRollbackOutcomeUnknown, .startingReview,
+             .finishing, .terminal:
             nil
         }
     }
 
     private static func isOutcomeUnknownStartPhase(_ phase: Phase) -> Bool {
         switch phase {
-        case .preparingThread(.outcomeUnknown), .startingReview(_, .outcomeUnknown):
+        case .preparingThread(.outcomeUnknown), .recoveryRollbackOutcomeUnknown,
+             .startingReview(_, .outcomeUnknown):
             true
         case .queued, .registeredStart, .activatedStart,
-             .preparingThread(.notSent), .startingReview(_, .notSent),
-             .active, .interrupting, .finishing, .terminal:
+             .preparingInitialRequest, .preparingThread(.notSent),
+             .startingReview(_, .notSent), .active, .interrupting, .finishing,
+             .terminal:
             false
         }
     }

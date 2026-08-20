@@ -436,9 +436,17 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         await ensureNotificationRouterStarted()
         let token = handoff.token
         let interruptedRun = token.interruptedRun
-        let _: EmptyResponse = try await client.send(AppServerAPI.Thread.Rollback.Request(
-            params: .init(threadID: token.rollbackThreadID, numTurns: 1)
-        ))
+        try await admission.admitRecoveryRollbackDispatch(threadID: token.rollbackThreadID)
+        do {
+            let _: EmptyResponse = try await client.send(AppServerAPI.Thread.Rollback.Request(
+                params: .init(threadID: token.rollbackThreadID, numTurns: 1)
+            ))
+        } catch {
+            if let terminal = streamTerminal(for: error) {
+                try await admission.recordStreamTerminal(terminal)
+            }
+            throw error
+        }
 
         let control = controlsByThreadID[interruptedRun.threadID] ?? AppServerReviewControl(client: client)
         controlsByThreadID[interruptedRun.threadID] = control

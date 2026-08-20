@@ -526,6 +526,9 @@ extension CodexReviewStore {
                 cancellation: cancellation
             )
             await reviewWorkerTasks[jobID]?.value
+            if let cleanupFailure = reviewCleanupFailures[jobID] {
+                throw cleanupFailure
+            }
         case .replacementStart(_, let start):
             let resolution = try await cancel(
                 admission: start.admission,
@@ -846,7 +849,8 @@ extension CodexReviewStore {
             let completion = try await consumeReviewEventLoop(
                 job: job,
                 startRequest: startRequest,
-                inputs: inputs
+                inputs: inputs,
+                initialCleanupAttempt: initialActive
             )
             await inputs.cancel()
             return completion
@@ -864,13 +868,15 @@ extension CodexReviewStore {
     private func consumeReviewEventLoop(
         job: CodexReviewJob,
         startRequest: CodexReviewBackendModel.Review.Start,
-        inputs: ReviewWorkerInputs
+        inputs: ReviewWorkerInputs,
+        initialCleanupAttempt: ReviewActiveAttempt
     ) async throws -> ReviewWorkerAttemptCompletion {
         var recoverySignals = ReviewNetworkRecoverySignals()
         var activeEventSubscriptionID: Int? = inputs.initialEventSubscriptionID
+        var cleanupAttempt = initialCleanupAttempt
         while let input = await inputs.next() {
             if job.isTerminal {
-                return .init(cleanupAttempt: activeAttemptForCleanup(jobID: job.id))
+                return .init(cleanupAttempt: cleanupAttempt)
             }
             switch input {
             case .reviewEvent(let event):
@@ -983,7 +989,7 @@ extension CodexReviewStore {
                           currentCandidate == candidate
                     else {
                         if job.isTerminal {
-                            return .init(cleanupAttempt: nil)
+                            return .init(cleanupAttempt: cleanupAttempt)
                         }
                         throw ReviewAttemptContractFailure(
                             message: "Recovery preparation completed after its ownership changed."
@@ -998,7 +1004,7 @@ extension CodexReviewStore {
                           currentHandoff == handoff
                     else {
                         if job.isTerminal {
-                            return .init(cleanupAttempt: nil)
+                            return .init(cleanupAttempt: cleanupAttempt)
                         }
                         throw ReviewAttemptContractFailure(
                             message: "Recovery handoff changed while detaching the old subscription."
@@ -1044,8 +1050,9 @@ extension CodexReviewStore {
                 case .continueWaiting:
                     continue
                 case .finished:
-                    return .init(cleanupAttempt: nil)
+                    return .init(cleanupAttempt: cleanupAttempt)
                 case .recovered(let recoveredAttempt, let active):
+                    cleanupAttempt = active
                     let subscriptionID = await inputs.subscribe(
                         to: recoveredAttempt,
                         owner: active
@@ -1055,7 +1062,7 @@ extension CodexReviewStore {
                     else {
                         await inputs.cancelActiveEventSubscription()
                         if job.isTerminal {
-                            return .init(cleanupAttempt: nil)
+                            return .init(cleanupAttempt: cleanupAttempt)
                         }
                         throw ReviewAttemptContractFailure(
                             message: "Recovered subscription completed after its active attempt changed."
@@ -1119,7 +1126,7 @@ extension CodexReviewStore {
             return .init(cleanupAttempt: active)
         }
         if job.isTerminal {
-            return .init(cleanupAttempt: activeAttemptForCleanup(jobID: job.id))
+            return .init(cleanupAttempt: cleanupAttempt)
         }
         throw ReviewAttemptContractFailure(
             message: "Review input queue finished without terminal attempt ownership."
@@ -1683,7 +1690,7 @@ private struct ReviewWorkerRecoveryBarrierResolution: Sendable {
 }
 
 private struct ReviewWorkerAttemptCompletion: Sendable {
-    var cleanupAttempt: ReviewActiveAttempt?
+    var cleanupAttempt: ReviewActiveAttempt
 }
 
 private struct ReviewWorkerRecoveryFailure: LocalizedError, @unchecked Sendable {

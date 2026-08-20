@@ -2272,6 +2272,61 @@ struct AppServerClientTests {
         #expect(await events.mailbox.isFinished() == false)
     }
 
+    @Test func backendAdmitsRecoveryRollbackBeforeDispatch() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let rollbackGate = AsyncGate()
+        await transport.holdNextIgnoringCancellation(method: "thread/rollback", gate: rollbackGate)
+        try await transport.enqueue(EmptyResponse(), for: "thread/rollback")
+        try await transport.enqueue(
+            AppServerAPI.Review.Start.Response(
+                turnID: "turn-2",
+                reviewThreadID: "review-thread-1"
+            ),
+            for: "review/start"
+        )
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let interruptedRun = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1",
+            model: "gpt-5"
+        )
+        let reason = CodexReviewBackendModel.CancellationReason(
+            message: "Network unavailable; waiting to reconnect."
+        )
+        let candidate = try await makeRecoveryCandidate(
+            backend: backend,
+            for: interruptedRun,
+            reason: reason
+        )
+        let handoff = try await backend.prepareReviewRecovery(candidate)
+        let admission = ReviewStartAdmission()
+        let registered = try await admission.registerStart { admission in
+            try await backend.resumeReviewRecovery(
+                handoff,
+                request: .init(
+                    jobID: "job-1",
+                    sessionID: "session-1",
+                    request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
+                    model: "gpt-5"
+                ),
+                admission: admission
+            )
+        }
+        try await admission.activateStart(registered.id)
+        await transport.waitForRequest(method: "thread/rollback")
+
+        #expect(await admission.currentPhase() == .recoveryRollbackOutcomeUnknown(
+            threadID: "review-thread-1"
+        ))
+
+        await rollbackGate.open()
+        let recovered = try await registered.task.value
+        #expect(recovered.turnID == "turn-2")
+    }
+
     @Test func backendRecoverReviewRollsBackAndRestartsSameThread() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)

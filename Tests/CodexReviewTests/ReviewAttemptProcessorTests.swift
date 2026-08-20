@@ -970,6 +970,54 @@ struct ReviewAttemptProcessorTests {
         }
     }
 
+    @Test func cancellationAfterOutcomeUnknownRecoveryRollbackDrainsThroughForcedConnectionTerminal() async throws {
+        let graceGate = AsyncGate()
+        let admission = ReviewStartAdmission(closePolicy: controlledClosePolicy(gate: graceGate))
+        let rollbackDispatched = InvocationProbe()
+        let rollbackResponseGate = AsyncGate()
+        let forceClose = InvocationProbe()
+        let connection = ReviewRuntimeCloseFailure.connection("Forced close")
+        let startTask = try await registerAndActivateStart(admission) { admission in
+            try await admission.admitRecoveryRollbackDispatch(threadID: "review-thread-1")
+            await rollbackDispatched.record()
+            await rollbackResponseGate.wait()
+            try Task.checkCancellation()
+            Issue.record("Recovery rollback outlived its typed connection terminal.")
+            return .init(run: canonicalRun)
+        }
+        await rollbackDispatched.waitForInvocation()
+
+        #expect(await admission.currentPhase() == .recoveryRollbackOutcomeUnknown(
+            threadID: "review-thread-1"
+        ))
+        await #expect(throws: ReviewAttemptContractFailure.self) {
+            try await admission.admitThreadStartDispatch()
+        }
+        let cancellation = Task {
+            try await admission.cancel(
+                .system(message: "Stop"),
+                interrupt: { _, _ in Issue.record("Rollback-only attempt interrupted a turn.") },
+                forceClose: {
+                    await forceClose.record()
+                    try await admission.recordStreamTerminal(
+                        .ownerForcedConnectionClose(connection)
+                    )
+                }
+            )
+        }
+        #expect(await admission.waitForCancellationAdmission() == .system(message: "Stop"))
+        await graceGate.open()
+        await forceClose.waitForInvocation()
+
+        #expect(try await cancellation.value.terminal == .stream(
+            .ownerForcedConnectionClose(connection)
+        ))
+        await #expect(throws: CancellationError.self) {
+            try await startTask.value
+        }
+        #expect(await forceClose.invocationCount() == 1)
+    }
+
     @Test func cancellationAfterThreadResponseRefusesNotSentReviewDispatch() async throws {
         let admission = ReviewStartAdmission(closePolicy: controlledClosePolicy(gate: AsyncGate()))
         let prepared = InvocationProbe()
