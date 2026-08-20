@@ -5,6 +5,11 @@ import OSLog
 private let logger = Logger(subsystem: "CodexReviewKit", category: "app-server-transport")
 
 package actor AppServerProcessTransport: JSONRPC.Transport {
+    private enum ReaderTask: Equatable {
+        case stdout
+        case stderr
+    }
+
     package struct Configuration: Sendable {
         package var executable: String
         package var arguments: [String]
@@ -60,6 +65,8 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
     private var pending: [Int: PendingResponse] = [:]
     private var notificationContinuations: [UUID: AsyncThrowingStream<JSONRPC.Notification, Error>.Continuation] = [:]
     private var stderrLogFilter = AppServerStderrLogFilter()
+    private var stdoutReaderTask: Task<Void, Never>? = nil
+    private var stderrReaderTask: Task<Void, Never>? = nil
     private var closed = false
 
     package init(configuration: Configuration = .init()) throws {
@@ -96,21 +103,12 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
         logger.info("Launching codex app-server: \(configuration.executable, privacy: .public) \(configuration.arguments.joined(separator: " "), privacy: .public)")
         logger.info("Using codex app-server home: \(configuration.codexHomeURL.path, privacy: .public)")
         logger.info("codex app-server launched with pid \(process.processIdentifier, privacy: .public)")
-        Task { [weak self, events = stdoutEvents.events] in
-            for await event in events {
-                await self?.receiveStdout(event)
-            }
-        }
-        Task { [weak self, events = stderrEvents.events] in
-            for await event in events {
-                await self?.receiveStderr(event)
-            }
-        }
         stdoutEvents.start()
         stderrEvents.start()
     }
 
     package func send(_ request: JSONRPC.Request) async throws -> Data {
+        ensureReaderTasksStarted()
         try throwIfClosed()
         let payload = try makeRequestPayload(request)
         return try await withTaskCancellationHandler {
@@ -131,13 +129,15 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
     }
 
     package func notify(_ notification: JSONRPC.Notification) async throws {
+        ensureReaderTasksStarted()
         try throwIfClosed()
         let payload = try makeNotificationPayload(notification)
         try stdin.fileHandleForWriting.write(contentsOf: payload)
     }
 
     package func notificationStream() -> AsyncThrowingStream<JSONRPC.Notification, Error> {
-        AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
+        ensureReaderTasksStarted()
+        return AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
             if closed {
                 continuation.finish(throwing: JSONRPC.Error.closed)
                 return
@@ -151,11 +151,29 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
     }
 
     package func close() async {
-        await closeTransport(terminateProcess: true)
+        await closeTransport(terminateProcess: true, readerTask: nil)
     }
 
-    private func closeTransport(terminateProcess: Bool) async {
-        guard closed == false else {
+    private func closeTransport(
+        terminateProcess: Bool,
+        readerTask: ReaderTask?
+    ) async {
+        await closeTransport(
+            terminateProcess: terminateProcess,
+            error: JSONRPC.Error.closed,
+            readerTask: readerTask
+        )
+    }
+
+    private func closeTransport(
+        terminateProcess: Bool,
+        error: any Error,
+        readerTask: ReaderTask?
+    ) async {
+        if closed {
+            if readerTask == nil {
+                await waitForReaderTasks(excluding: nil)
+            }
             return
         }
         closed = true
@@ -166,22 +184,33 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
             logger.info("Terminating codex app-server pid \(self.process.processIdentifier, privacy: .public)")
             await process.terminateAndWait()
         }
-        finishAll(throwing: JSONRPC.Error.closed)
+        finishAll(throwing: error)
+        await waitForReaderTasks(excluding: readerTask)
     }
 
     private func receiveStdout(_ event: AppServerPipeReadEvent) async {
         switch event {
         case .data(let data):
-            receive(data)
+            await receive(data)
         case .end:
             await finishReceiving()
         }
     }
 
-    private func receive(_ data: Data) {
+    private func receive(_ data: Data) async {
         let messages = framer.append(data)
         for message in messages {
-            processMessage(message)
+            do {
+                try processMessage(message)
+            } catch {
+                logger.error("Closing codex app-server after invalid JSON-RPC framing: \(error.localizedDescription, privacy: .public)")
+                await closeTransport(
+                    terminateProcess: true,
+                    error: error,
+                    readerTask: .stdout
+                )
+                return
+            }
         }
     }
 
@@ -209,23 +238,41 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
         }
         logger.info("codex app-server stdout reached EOF")
         for message in framer.finish() {
-            processMessage(message)
+            do {
+                try processMessage(message)
+            } catch {
+                logger.error("Closing codex app-server after invalid trailing JSON-RPC framing: \(error.localizedDescription, privacy: .public)")
+                await closeTransport(
+                    terminateProcess: true,
+                    error: error,
+                    readerTask: .stdout
+                )
+                return
+            }
         }
-        await closeTransport(terminateProcess: true)
+        await closeTransport(terminateProcess: true, readerTask: .stdout)
     }
 
-    private func processMessage(_ data: Data) {
-        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return
+    private func processMessage(_ data: Data) throws {
+        let decoded: Any
+        do {
+            decoded = try JSONSerialization.jsonObject(with: data)
+        } catch {
+            throw JSONRPC.Error.invalidMessage("app-server emitted invalid JSON")
+        }
+        guard let object = decoded as? [String: Any] else {
+            throw JSONRPC.Error.invalidMessage("app-server message must be a JSON object")
         }
         if let method = object["method"] as? String {
             if object.keys.contains("id") {
                 processServerRequest(method: method, object: object)
                 return
             }
-            processNotification(method: method, object: object)
+            try processNotification(method: method, object: object)
         } else if let id = object["id"] as? Int {
             processResponse(id: id, object: object)
+        } else {
+            throw JSONRPC.Error.invalidMessage("app-server message has neither a method nor an integer response id")
         }
     }
 
@@ -282,11 +329,12 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
         return data
     }
 
-    private func processNotification(method: String, object: [String: Any]) {
+    private func processNotification(method: String, object: [String: Any]) throws {
         let params = object["params"] ?? [:]
-        guard let data = try? JSONSerialization.data(withJSONObject: params) else {
-            return
-        }
+        let data = try JSONSerialization.data(
+            withJSONObject: params,
+            options: [.fragmentsAllowed]
+        )
         let notification = JSONRPC.Notification(method: method, params: data)
         for continuation in notificationContinuations.values {
             continuation.yield(notification)
@@ -299,6 +347,51 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
 
     private func removeNotificationContinuation(id: UUID) {
         notificationContinuations.removeValue(forKey: id)
+    }
+
+    private func readerTaskFinished(_ task: ReaderTask) {
+        switch task {
+        case .stdout:
+            stdoutReaderTask = nil
+        case .stderr:
+            stderrReaderTask = nil
+        }
+    }
+
+    private func ensureReaderTasksStarted() {
+        guard closed == false,
+              stdoutReaderTask == nil,
+              stderrReaderTask == nil
+        else {
+            return
+        }
+        let stdoutEvents = stdoutEvents.events
+        let stderrEvents = stderrEvents.events
+        stdoutReaderTask = Task { [weak self, stdoutEvents] in
+            for await event in stdoutEvents {
+                await self?.receiveStdout(event)
+            }
+            await self?.readerTaskFinished(.stdout)
+        }
+        stderrReaderTask = Task { [weak self, stderrEvents] in
+            for await event in stderrEvents {
+                await self?.receiveStderr(event)
+            }
+            await self?.readerTaskFinished(.stderr)
+        }
+    }
+
+    private func waitForReaderTasks(excluding excluded: ReaderTask?) async {
+        let stdoutTask = stdoutReaderTask
+        let stderrTask = stderrReaderTask
+        if excluded != .stdout {
+            stdoutTask?.cancel()
+            await stdoutTask?.value
+        }
+        if excluded != .stderr {
+            stderrTask?.cancel()
+            await stderrTask?.value
+        }
     }
 
     private func finishAll(throwing error: Error) {

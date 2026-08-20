@@ -201,6 +201,7 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(resolved.value(for: ["result", "structuredContent", "jobID"]) == nil)
             #expect(resolved.value(for: ["result", "structuredContent", "logs"]) == nil)
             #expect(resolved.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String == "succeeded")
+            #expect(resolved.value(for: ["result", "structuredContent", "lifecycle", "terminal", "kind"]) as? String == "completed")
             #expect(resolved.value(for: ["result", "structuredContent", "output", "review"]) as? String == "review text")
             let commands = await backend.recordedCommands()
             #expect(commands.contains(.startReview(.init(
@@ -248,6 +249,7 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(running.value(for: ["result", "isError"]) as? Bool == false)
             #expect(running.value(for: ["result", "structuredContent", "jobId"]) as? String == "job-1")
             #expect(running.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String == "running")
+            #expect(running.value(for: ["result", "structuredContent", "lifecycle", "terminal"]) is NSNull)
             #expect(running.value(for: ["result", "structuredContent", "logs"]) == nil)
             #expect(running.value(for: ["result", "structuredContent", "rawLogText"]) == nil)
             #expect(running.value(for: ["result", "structuredContent", "nextAction", "tool"]) as? String == "review_await")
@@ -271,6 +273,7 @@ struct CodexReviewMCPHTTPServerTests {
 
             #expect(awaited.value(for: ["result", "isError"]) as? Bool == false)
             #expect(awaited.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String == "succeeded")
+            #expect(awaited.value(for: ["result", "structuredContent", "lifecycle", "terminal", "kind"]) as? String == "completed")
             #expect(awaited.value(for: ["result", "structuredContent", "output", "review"]) as? String == "review text")
             #expect(awaited.value(for: ["result", "structuredContent", "logs"]) == nil)
         }
@@ -352,6 +355,8 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(resolved.value(for: ["result", "isError"]) as? Bool == true)
             #expect(resolved.value(for: ["result", "structuredContent", "jobId"]) as? String == "job-1")
             #expect(resolved.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String == "failed")
+            #expect(resolved.value(for: ["result", "structuredContent", "lifecycle", "terminal", "kind"]) as? String == "failed")
+            #expect(resolved.value(for: ["result", "structuredContent", "lifecycle", "terminal", "message"]) as? String == "Backend failed")
         }
     }
 
@@ -414,6 +419,108 @@ struct CodexReviewMCPHTTPServerTests {
 
             let items = try #require(response.value(for: ["result", "structuredContent", "items"]) as? [[String: Any]])
             #expect(items.compactMap { $0["jobId"] as? String } == ["job-included"])
+        }
+    }
+
+    @Test func streamableHTTPEncodesEveryLifecycleTerminalShape() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+
+        try await withHTTPServer(store: store) { server in
+            let sessionID = try await initializeSession(endpoint: await server.url)
+            @MainActor func job(
+                id: String,
+                status: ReviewJobState,
+                cancellation: ReviewCancellation? = nil,
+                terminal: ReviewTerminalRecord?
+            ) -> CodexReviewJob {
+                let job = CodexReviewJob.makeForTesting(
+                    id: id,
+                    sessionID: sessionID,
+                    cwd: "/tmp/project",
+                    targetSummary: id,
+                    status: status,
+                    cancellation: cancellation,
+                    summary: id,
+                    errorMessage: status == .failed ? id : nil
+                )
+                job.core.lifecycle.terminal = terminal
+                return job
+            }
+
+            let requested = ReviewCancellation.mcpClient(message: "Stop")
+            let jobs = [
+                job(id: "running", status: .running, terminal: nil),
+                job(id: "completed", status: .succeeded, terminal: .completed),
+                job(id: "failed-null", status: .failed, terminal: .failed(message: nil)),
+                job(id: "failed-message", status: .failed, terminal: .failed(message: "Failure")),
+                job(id: "server", status: .failed, terminal: .interrupted(.server(message: nil))),
+                job(id: "transport", status: .failed, terminal: .interrupted(.transport(message: "Disconnected"))),
+                job(id: "previous", status: .failed, terminal: .interrupted(.previousProcessExit)),
+                job(
+                    id: "requested",
+                    status: .cancelled,
+                    cancellation: requested,
+                    terminal: .interrupted(.requested(requested))
+                ),
+            ]
+            store.loadForTesting(
+                serverState: .running,
+                workspaces: [.init(cwd: "/tmp/project")],
+                jobs: jobs
+            )
+
+            let response = try await postJSONRPC(
+                endpoint: await server.url,
+                sessionID: sessionID,
+                body: [
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": [
+                        "name": "review_list",
+                        "arguments": ["limit": 20],
+                    ],
+                ]
+            )
+            let items = try #require(
+                response.value(for: ["result", "structuredContent", "items"])
+                    as? [[String: Any]]
+            )
+            let itemsByID = Dictionary(uniqueKeysWithValues: items.compactMap { item in
+                (item["jobId"] as? String).map { ($0, item) }
+            })
+            func terminal(_ id: String) throws -> [String: Any]? {
+                let item = try #require(itemsByID[id])
+                let lifecycle = try #require(item["lifecycle"] as? [String: Any])
+                if lifecycle["terminal"] is NSNull {
+                    return nil
+                }
+                return try #require(lifecycle["terminal"] as? [String: Any])
+            }
+
+            #expect(try terminal("running") == nil)
+            #expect(try terminal("completed")?["kind"] as? String == "completed")
+            #expect(try terminal("failed-null")?["kind"] as? String == "failed")
+            #expect(try terminal("failed-null")?["message"] is NSNull)
+            #expect(try terminal("failed-message")?["message"] as? String == "Failure")
+
+            let serverCause = try #require(terminal("server")?["cause"] as? [String: Any])
+            #expect(serverCause["kind"] as? String == "server")
+            #expect(serverCause["source"] is NSNull)
+            #expect(serverCause["message"] is NSNull)
+            let transportCause = try #require(terminal("transport")?["cause"] as? [String: Any])
+            #expect(transportCause["kind"] as? String == "transport")
+            #expect(transportCause["message"] as? String == "Disconnected")
+            let previousCause = try #require(terminal("previous")?["cause"] as? [String: Any])
+            #expect(previousCause["kind"] as? String == "previousProcessExit")
+            #expect(previousCause["message"] is NSNull)
+            let requestedCause = try #require(terminal("requested")?["cause"] as? [String: Any])
+            #expect(requestedCause["kind"] as? String == "requested")
+            #expect(requestedCause["source"] as? String == "mcpClient")
+            #expect(requestedCause["message"] as? String == "Stop")
         }
     }
 
@@ -702,6 +809,10 @@ struct CodexReviewMCPHTTPServerTests {
 
             #expect(response.value(for: ["result", "structuredContent", "jobId"]) as? String == "job-running")
             #expect(response.value(for: ["result", "structuredContent", "cancelled"]) as? Bool == true)
+            #expect(response.value(for: ["result", "structuredContent", "lifecycle", "terminal", "kind"]) as? String == "interrupted")
+            #expect(response.value(for: ["result", "structuredContent", "lifecycle", "terminal", "cause", "kind"]) as? String == "requested")
+            #expect(response.value(for: ["result", "structuredContent", "lifecycle", "terminal", "cause", "source"]) as? String == "mcpClient")
+            #expect(response.value(for: ["result", "structuredContent", "lifecycle", "terminal", "cause", "message"]) as? String == "Stop from MCP")
             #expect(running.core.lifecycle.status == .cancelled)
             #expect(running.core.lifecycle.cancellation?.message == "Stop from MCP")
             #expect(otherSession.cancellationRequested == false)

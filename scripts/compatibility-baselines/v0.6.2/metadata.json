@@ -1,8 +1,8 @@
 {
   "architecture": "arm64",
   "baseline": "v0.6.2 public Swift products",
-  "baselineSHA256": "d2d7ac2c8999d8c7d78a61ee4313e81c506df8ad436b3bea68206ccb2d68caf2",
-  "captureRevision": "0948f454b05c9a190deffb6707ee4b6416217e67",
+  "baselineSHA256": "465956e4233ae545980a42dd03bd34a4de2bedea93c4ce735f15b68a37ded17d",
+  "captureRevision": "d6b877752f8d5b101aa36382ba64d7d6fe786d71",
   "digesterInvocation": "xcrun swift-api-digester -dump-sdk -module CodexReview -module CodexReviewHost -module ReviewUI -module TextTransitions -swift-only -avoid-location -avoid-tool-args -abort-on-module-fail -sdk <xcrun macosx SDK> -target arm64-apple-macosx26.0 -swift-version 6 <SwiftPM module search paths>",
   "macOSSDKVersion": "27.0",
   "modules": [

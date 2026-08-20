@@ -684,7 +684,60 @@ private extension ReviewJobCore.Lifecycle {
             "cancellable": .bool(cancellable),
             "cancellation": cancellation.map { $0.structuredContent() } ?? .null,
             "errorMessage": errorMessage.map(Value.string) ?? .null,
+            "terminal": terminal.map { $0.structuredContent() } ?? .null,
         ])
+    }
+}
+
+private extension ReviewTerminalRecord {
+    func structuredContent() -> Value {
+        switch self {
+        case .completed:
+            return .object([
+                "kind": .string(ReviewTerminalKind.completed.rawValue),
+            ])
+        case .failed(let message):
+            return .object([
+                "kind": .string(ReviewTerminalKind.failed.rawValue),
+                "message": message.map(Value.string) ?? .null,
+            ])
+        case .interrupted(let cause):
+            return .object([
+                "kind": .string(ReviewTerminalKind.interrupted.rawValue),
+                "cause": cause.structuredContent(),
+            ])
+        }
+    }
+}
+
+private extension ReviewInterruptionCause {
+    func structuredContent() -> Value {
+        switch self {
+        case .requested(let cancellation):
+            return .object([
+                "kind": .string("requested"),
+                "source": .string(cancellation.source.rawValue),
+                "message": .string(cancellation.message),
+            ])
+        case .server(let message):
+            return .object([
+                "kind": .string("server"),
+                "source": .null,
+                "message": message.map(Value.string) ?? .null,
+            ])
+        case .transport(let message):
+            return .object([
+                "kind": .string("transport"),
+                "source": .null,
+                "message": .string(message),
+            ])
+        case .previousProcessExit:
+            return .object([
+                "kind": .string("previousProcessExit"),
+                "source": .null,
+                "message": .null,
+            ])
+        }
     }
 }
 

@@ -475,6 +475,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         reason: ReviewCancellation,
         timeoutWarning: String
     ) async {
+        store.recordActiveReviewCancellationRequestsForRuntimeStop(reason: reason)
         let didInterrupt = await runRuntimeShutdownCleanup(timeout: shutdownCleanupTimeout) {
             await appServerBackend.interruptActiveReviewsForShutdown(reason: .init(message: reason.message))
         }

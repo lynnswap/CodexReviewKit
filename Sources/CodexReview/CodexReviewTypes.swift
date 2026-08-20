@@ -316,8 +316,8 @@ enum Event: Equatable, Sendable {
         metadata: ReviewLogEntry.Metadata? = nil
     )
     case completed(summary: String, result: String?)
-    case failed(String)
-    case cancelled(String)
+    case failed(String?)
+    case cancelled(String?)
 }
 }
 
