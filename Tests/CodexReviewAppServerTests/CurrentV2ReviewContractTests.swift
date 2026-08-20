@@ -32,6 +32,7 @@ private enum CurrentV2FixturePin {
           "params": {
             "threadId": "thread-review",
             "turnId": "turn-review",
+            "completedAtMs": 1787187601000,
             "item": {
               "type": "exitedReviewMode",
               "id": "review-result",
@@ -264,17 +265,31 @@ struct CurrentV2ReviewDecoderReducerTests {
         #expect(try reducer.ingest(reviewEnvelope(data)) == .accepted(expected))
     }
 
-    @Test(arguments: ["inProgress", "futureStatus"])
-    func nonterminalOrUnknownTerminalStatusFailsVisibly(_ status: String) throws {
+    @Test func nonterminalTerminalStatusFailsVisibly() throws {
         var reducer = makeReducer()
 
         guard case .accepted(.failed(let message)) = try reducer.ingest(
-            reviewEnvelope(try terminalData(status: status, errorMessage: nil))
+            reviewEnvelope(try terminalData(status: "inProgress", errorMessage: nil))
         ) else {
             Issue.record("Expected invalid-terminal-status failure")
             return
         }
-        #expect(message?.contains("invalid terminal status \(status)") == true)
+        #expect(message?.contains("invalid terminal status inProgress") == true)
+    }
+
+    @Test func unknownTurnStatusIsMalformedAtTheSchemaBoundary() throws {
+        let result = CurrentV2ReviewNotificationDecoder.decode(try notification(
+            try terminalData(status: "futureStatus", errorMessage: nil)
+        ))
+
+        guard case .failure(let failure) = result else {
+            Issue.record("Expected a typed decode failure")
+            return
+        }
+        guard case .malformedKnownEvent = failure.error else {
+            Issue.record("Expected malformed-known-event classification")
+            return
+        }
     }
 
     @Test func canonicalPairNeverRebindsToALaterTurn() throws {
@@ -307,6 +322,107 @@ struct CurrentV2ReviewDecoderReducerTests {
         ))
         #expect(throws: ReviewIngestionError.self) {
             try reducer.ingest(conflict)
+        }
+    }
+
+    @Test func omittedItemsViewDefaultsToFullWithoutSuppressingHistory() throws {
+        var reducer = makeReducer()
+        let marker = try reviewEnvelope(CurrentV2FixturePin.fullReviewNotifications[0])
+        let terminal = try reviewEnvelope(try outerNotificationData(
+            method: "turn/completed",
+            params: [
+                "threadId": "thread-review",
+                "turn": [
+                    "id": "turn-review",
+                    "items": [[
+                        "type": "agentMessage",
+                        "id": "historical-message",
+                        "text": "Historical message",
+                        "delivery": NSNull(),
+                    ]],
+                    "status": "completed",
+                    "error": NSNull(),
+                ] as [String: Any],
+            ]
+        ))
+
+        #expect(try reducer.ingest(marker) == .accepted(nil))
+        guard case .accepted(.completed(let final)) = try reducer.ingest(terminal) else {
+            Issue.record("Expected a completed terminal")
+            return
+        }
+        #expect(final.source == .exitedReviewMode(itemID: "review-result"))
+        #expect(final.suppressedAgentMessageItemIDs.isEmpty)
+    }
+
+    @Test(arguments: ["full", "summary"])
+    func markerSuppressesOnlyTheSingleSummaryCompanion(_ itemsView: String) throws {
+        var reducer = makeReducer()
+        let marker = try reviewEnvelope(CurrentV2FixturePin.fullReviewNotifications[0])
+        let terminal = try reviewEnvelope(try terminalData(
+            status: "completed",
+            items: [
+                [
+                    "type": "agentMessage",
+                    "id": "non-final",
+                    "text": "Non-final message",
+                    "delivery": NSNull(),
+                ],
+                [
+                    "type": "agentMessage",
+                    "id": "terminal-companion",
+                    "text": "No findings.",
+                    "delivery": NSNull(),
+                ],
+            ],
+            itemsView: itemsView
+        ))
+
+        #expect(try reducer.ingest(marker) == .accepted(nil))
+        guard case .accepted(.completed(let final)) = try reducer.ingest(terminal) else {
+            Issue.record("Expected a completed terminal")
+            return
+        }
+        #expect(final.suppressedAgentMessageItemIDs.isEmpty)
+    }
+
+    @Test func autoApprovalUsesReviewIdentityForStableReceipts() throws {
+        let original = try reviewEnvelope(try autoApprovalData(
+            method: "item/autoApprovalReview/started",
+            reviewID: "approval-1",
+            reviewStatus: "inProgress"
+        ))
+        let conflict = try reviewEnvelope(try autoApprovalData(
+            method: "item/autoApprovalReview/started",
+            reviewID: "approval-1",
+            reviewStatus: "approved"
+        ))
+        var reducer = makeReducer()
+
+        #expect(original.stableReceipt?.key.itemID == "approval-1")
+        #expect(try reducer.ingest(original) == .accepted(nil))
+        #expect(try reducer.ingest(original) == .duplicate)
+        #expect(throws: ReviewIngestionError.self) {
+            try reducer.ingest(conflict)
+        }
+    }
+
+    @Test func autoApprovalAcceptsAbsentNullAndStringTargetItemIDs() throws {
+        for targetItemID in [nil, NSNull(), "item-1"] as [Any?] {
+            var params = try autoApprovalParams(
+                reviewID: "approval-1",
+                reviewStatus: "inProgress"
+            )
+            if let targetItemID {
+                params["targetItemId"] = targetItemID
+            }
+            guard case .review = CurrentV2ReviewNotificationDecoder.decode(.init(
+                method: "item/autoApprovalReview/started",
+                params: try JSONSerialization.data(withJSONObject: params)
+            )) else {
+                Issue.record("Expected targetItemId variant to remain schema-valid")
+                continue
+            }
         }
     }
 
@@ -351,10 +467,219 @@ struct CurrentV2ReviewDecoderReducerTests {
         }
     }
 
+    @Test func currentV2MethodRoutingIdentityMatrixMatchesPinnedSchemas() throws {
+        let pair = #"{"threadId":"thread-review","turnId":"turn-review"}"#
+        let fixtures: [(method: String, params: String, identity: V2IdentityFixture)] = [
+            ("warning", #"{"message":"warning"}"#, .optionalThread),
+            ("guardianWarning", #"{"threadId":"thread-review","message":"warning"}"#, .thread),
+            ("deprecationNotice", #"{"summary":"deprecated","details":null}"#, .unscoped),
+            ("configWarning", #"{"summary":"warning"}"#, .unscoped),
+            ("error", #"{"threadId":"thread-review","turnId":"turn-review","error":{"message":"failed"},"willRetry":false}"#, .threadAndTurn),
+            ("thread/closed", #"{"threadId":"thread-review"}"#, .thread),
+            ("thread/status/changed", #"{"threadId":"thread-review","status":{"type":"systemError"}}"#, .thread),
+            ("thread/compacted", pair, .threadAndTurn),
+            ("turn/started", #"{"threadId":"thread-review","turn":{"id":"turn-review","items":[],"status":"inProgress","error":null,"startedAt":null,"completedAt":null,"durationMs":null}}"#, .threadAndTurn),
+            ("turn/completed", #"{"threadId":"thread-review","turn":{"id":"turn-review","items":[],"itemsView":"notLoaded","status":"failed","error":null}}"#, .threadAndTurn),
+            ("turn/diff/updated", #"{"threadId":"thread-review","turnId":"turn-review","diff":"diff"}"#, .threadAndTurn),
+            ("turn/plan/updated", #"{"threadId":"thread-review","turnId":"turn-review","plan":[]}"#, .threadAndTurn),
+            ("item/started", #"{"threadId":"thread-review","turnId":"turn-review","startedAtMs":1,"item":{"type":"userMessage","id":"item-1","clientId":null,"content":[]}}"#, .threadAndTurn),
+            ("item/completed", #"{"threadId":"thread-review","turnId":"turn-review","completedAtMs":2,"item":{"type":"userMessage","id":"item-1","clientId":null,"content":[]}}"#, .threadAndTurn),
+            ("item/autoApprovalReview/started", #"{"threadId":"thread-review","turnId":"turn-review","startedAtMs":1,"reviewId":"review-1","targetItemId":null,"review":{"status":"inProgress","riskLevel":null,"userAuthorization":null,"rationale":null},"action":{"type":"applyPatch","cwd":"/tmp","files":[]}}"#, .threadAndTurn),
+            ("item/autoApprovalReview/completed", #"{"threadId":"thread-review","turnId":"turn-review","startedAtMs":1,"completedAtMs":2,"reviewId":"review-1","targetItemId":null,"decisionSource":"agent","review":{"status":"approved","riskLevel":null,"userAuthorization":null,"rationale":null},"action":{"type":"applyPatch","cwd":"/tmp","files":[]}}"#, .threadAndTurn),
+            ("item/agentMessage/delta", #"{"threadId":"thread-review","turnId":"turn-review","itemId":"item-1","delta":"text"}"#, .threadAndTurn),
+            ("item/plan/delta", #"{"threadId":"thread-review","turnId":"turn-review","itemId":"item-1","delta":"text"}"#, .threadAndTurn),
+            ("item/reasoning/summaryTextDelta", #"{"threadId":"thread-review","turnId":"turn-review","itemId":"item-1","delta":"text","summaryIndex":0}"#, .threadAndTurn),
+            ("item/reasoning/summaryPartAdded", #"{"threadId":"thread-review","turnId":"turn-review","itemId":"item-1","summaryIndex":0}"#, .threadAndTurn),
+            ("item/reasoning/textDelta", #"{"threadId":"thread-review","turnId":"turn-review","itemId":"item-1","delta":"text","contentIndex":0}"#, .threadAndTurn),
+            ("item/commandExecution/outputDelta", #"{"threadId":"thread-review","turnId":"turn-review","itemId":"item-1","delta":"text"}"#, .threadAndTurn),
+            ("item/commandExecution/terminalInteraction", #"{"threadId":"thread-review","turnId":"turn-review","itemId":"item-1","processId":"process-1","stdin":"input"}"#, .threadAndTurn),
+            ("item/fileChange/outputDelta", #"{"threadId":"thread-review","turnId":"turn-review","itemId":"item-1","delta":"text"}"#, .threadAndTurn),
+            ("item/fileChange/patchUpdated", #"{"threadId":"thread-review","turnId":"turn-review","itemId":"item-1","changes":[]}"#, .threadAndTurn),
+            ("item/mcpToolCall/progress", #"{"threadId":"thread-review","turnId":"turn-review","itemId":"item-1","message":"progress"}"#, .threadAndTurn),
+            ("model/rerouted", #"{"threadId":"thread-review","turnId":"turn-review","fromModel":"a","toModel":"b","reason":"highRiskCyberActivity"}"#, .threadAndTurn),
+            ("model/verification", #"{"threadId":"thread-review","turnId":"turn-review","verifications":[]}"#, .threadAndTurn),
+        ]
+
+        for fixture in fixtures {
+            let params = try #require(
+                JSONSerialization.jsonObject(with: Data(fixture.params.utf8))
+                    as? [String: Any]
+            )
+            let valid = CurrentV2ReviewNotificationDecoder.decode(.init(
+                method: fixture.method,
+                params: try JSONSerialization.data(withJSONObject: params)
+            ))
+            switch fixture.identity {
+            case .unscoped, .optionalThread:
+                guard case .globalDiagnostic = valid else {
+                    Issue.record("Expected global routing for \(fixture.method)")
+                    continue
+                }
+            case .thread, .threadAndTurn:
+                guard case .review = valid else {
+                    Issue.record("Expected review routing for \(fixture.method)")
+                    continue
+                }
+            }
+
+            if fixture.identity == .optionalThread {
+                var scoped = params
+                scoped["threadId"] = "thread-review"
+                guard case .review = CurrentV2ReviewNotificationDecoder.decode(.init(
+                    method: fixture.method,
+                    params: try JSONSerialization.data(withJSONObject: scoped)
+                )) else {
+                    Issue.record("Expected optional-thread routing for \(fixture.method)")
+                    continue
+                }
+            }
+
+            guard fixture.identity == .thread || fixture.identity == .threadAndTurn else {
+                continue
+            }
+            var missingThread = params
+            missingThread.removeValue(forKey: "threadId")
+            try expectConnectionIdentityFailure(
+                method: fixture.method,
+                params: missingThread
+            )
+
+            guard fixture.identity == .threadAndTurn else {
+                continue
+            }
+            var missingTurn = params
+            if fixture.method == "turn/started" || fixture.method == "turn/completed" {
+                var turn = try #require(missingTurn["turn"] as? [String: Any])
+                turn.removeValue(forKey: "id")
+                missingTurn["turn"] = turn
+            } else {
+                missingTurn.removeValue(forKey: "turnId")
+            }
+            try expectConnectionIdentityFailure(
+                method: fixture.method,
+                params: missingTurn
+            )
+        }
+    }
+
+    @Test func currentV2ThreadItemClosedUnionMatchesPinnedSchemas() throws {
+        let items = [
+            #"{"type":"userMessage","id":"item-1","content":[]}"#,
+            #"{"type":"hookPrompt","id":"item-1","fragments":[]}"#,
+            #"{"type":"agentMessage","id":"item-1","text":"","delivery":null}"#,
+            #"{"type":"plan","id":"item-1","text":""}"#,
+            #"{"type":"reasoning","id":"item-1","summary":[],"content":[]}"#,
+            #"{"type":"commandExecution","id":"item-1","command":"","commandActions":[],"cwd":"","source":"agent","status":"completed"}"#,
+            #"{"type":"fileChange","id":"item-1","changes":[],"status":"completed"}"#,
+            #"{"type":"mcpToolCall","id":"item-1","arguments":null,"server":"","status":"completed","tool":""}"#,
+            #"{"type":"dynamicToolCall","id":"item-1","arguments":{},"status":"completed","tool":""}"#,
+            #"{"type":"collabAgentToolCall","id":"item-1","agentsStates":{},"receiverThreadIds":[],"senderThreadId":"","status":"completed","tool":"wait"}"#,
+            #"{"type":"subAgentActivity","id":"item-1","agentPath":"worker","agentThreadId":"thread-worker","kind":"interacted"}"#,
+            #"{"type":"webSearch","id":"item-1","query":""}"#,
+            #"{"type":"imageView","id":"item-1","path":""}"#,
+            #"{"type":"sleep","id":"item-1","durationMs":0}"#,
+            #"{"type":"imageGeneration","id":"item-1","result":"","status":"completed"}"#,
+            #"{"type":"enteredReviewMode","id":"item-1","review":""}"#,
+            #"{"type":"exitedReviewMode","id":"item-1","review":""}"#,
+            #"{"type":"contextCompaction","id":"item-1"}"#,
+        ]
+
+        for item in items {
+            let params = Data(#"{"threadId":"thread-review","turnId":"turn-review","completedAtMs":2,"item":\#(item)}"#.utf8)
+            guard case .review = CurrentV2ReviewNotificationDecoder.decode(.init(
+                method: "item/completed",
+                params: params
+            )) else {
+                Issue.record("Expected schema-valid ThreadItem: \(item)")
+                continue
+            }
+        }
+    }
+
+    @Test func currentV2ThreadItemRequiredFieldsAndEnumsRejectMalformedPayloads() {
+        let malformedItems = [
+            #"{"type":"userMessage","id":"item-1"}"#,
+            #"{"type":"hookPrompt","id":"item-1"}"#,
+            #"{"type":"agentMessage","id":"item-1"}"#,
+            #"{"type":"plan","id":"item-1"}"#,
+            #"{"type":"commandExecution","id":"item-1","command":"","commandActions":[],"status":"completed"}"#,
+            #"{"type":"commandExecution","id":"item-1","command":"","commandActions":[],"cwd":"","status":"future"}"#,
+            #"{"type":"fileChange","id":"item-1","status":"completed"}"#,
+            #"{"type":"mcpToolCall","id":"item-1","server":"","status":"completed","tool":""}"#,
+            #"{"type":"dynamicToolCall","id":"item-1","arguments":{},"status":"future","tool":""}"#,
+            #"{"type":"collabAgentToolCall","id":"item-1","agentsStates":{},"receiverThreadIds":[],"senderThreadId":"","status":"completed","tool":"future"}"#,
+            #"{"type":"subAgentActivity","id":"item-1","agentPath":"worker","agentThreadId":"thread-worker","kind":"future"}"#,
+            #"{"type":"webSearch","id":"item-1"}"#,
+            #"{"type":"imageView","id":"item-1"}"#,
+            #"{"type":"sleep","id":"item-1"}"#,
+            #"{"type":"imageGeneration","id":"item-1","status":"completed"}"#,
+            #"{"type":"exitedReviewMode","id":"item-1"}"#,
+        ]
+
+        for item in malformedItems {
+            let params = Data(#"{"threadId":"thread-review","turnId":"turn-review","completedAtMs":2,"item":\#(item)}"#.utf8)
+            guard case .failure(let failure) = CurrentV2ReviewNotificationDecoder.decode(.init(
+                method: "item/completed",
+                params: params
+            )) else {
+                Issue.record("Expected malformed ThreadItem rejection: \(item)")
+                continue
+            }
+            #expect(failure.routedThreadID == "thread-review")
+            #expect(failure.routedTurnID == "turn-review")
+        }
+    }
+
+    @Test func currentV2RequiredPayloadMatrixRejectsMissingOrInvalidFields() {
+        let pair = #"{"threadId":"thread-review","turnId":"turn-review"}"#
+        let malformed: [(String, String)] = [
+            ("warning", #"{}"#),
+            ("guardianWarning", #"{"threadId":"thread-review"}"#),
+            ("deprecationNotice", #"{}"#),
+            ("configWarning", #"{}"#),
+            ("error", #"{"threadId":"thread-review","turnId":"turn-review","error":{"message":"failed"}}"#),
+            ("thread/status/changed", #"{"threadId":"thread-review","status":{}}"#),
+            ("turn/started", #"{"threadId":"thread-review","turn":{"id":"turn-review","items":[]}}"#),
+            ("turn/completed", #"{"threadId":"thread-review","turn":{"id":"turn-review","status":"completed"}}"#),
+            ("turn/diff/updated", pair),
+            ("turn/plan/updated", #"{"threadId":"thread-review","turnId":"turn-review","plan":[{"step":"inspect"}]}"#),
+            ("item/started", #"{"threadId":"thread-review","turnId":"turn-review","item":{"type":"contextCompaction","id":"item-1"}}"#),
+            ("item/completed", #"{"threadId":"thread-review","turnId":"turn-review","item":{"type":"contextCompaction","id":"item-1"}}"#),
+            ("item/autoApprovalReview/started", #"{"threadId":"thread-review","turnId":"turn-review","startedAtMs":1,"review":{"status":"inProgress"},"action":{"type":"applyPatch","cwd":"/tmp","files":[]}}"#),
+            ("item/autoApprovalReview/completed", #"{"threadId":"thread-review","turnId":"turn-review","startedAtMs":1,"completedAtMs":2,"reviewId":"review-1","decisionSource":"future","review":{"status":"approved"},"action":{"type":"applyPatch","cwd":"/tmp","files":[]}}"#),
+            ("item/agentMessage/delta", #"{"threadId":"thread-review","turnId":"turn-review","delta":"text"}"#),
+            ("item/plan/delta", #"{"threadId":"thread-review","turnId":"turn-review","delta":"text"}"#),
+            ("item/reasoning/summaryTextDelta", #"{"threadId":"thread-review","turnId":"turn-review","itemId":"item-1","delta":"text"}"#),
+            ("item/reasoning/summaryPartAdded", #"{"threadId":"thread-review","turnId":"turn-review","itemId":"item-1"}"#),
+            ("item/reasoning/textDelta", #"{"threadId":"thread-review","turnId":"turn-review","itemId":"item-1","delta":"text"}"#),
+            ("item/commandExecution/outputDelta", #"{"threadId":"thread-review","turnId":"turn-review","delta":"text"}"#),
+            ("item/commandExecution/terminalInteraction", #"{"threadId":"thread-review","turnId":"turn-review","itemId":"item-1","stdin":"input"}"#),
+            ("item/fileChange/outputDelta", #"{"threadId":"thread-review","turnId":"turn-review","delta":"text"}"#),
+            ("item/fileChange/patchUpdated", #"{"threadId":"thread-review","turnId":"turn-review","itemId":"item-1"}"#),
+            ("item/mcpToolCall/progress", #"{"threadId":"thread-review","turnId":"turn-review","itemId":"item-1"}"#),
+            ("model/rerouted", #"{"threadId":"thread-review","turnId":"turn-review","fromModel":"a","toModel":"b","reason":"future"}"#),
+            ("model/verification", #"{"threadId":"thread-review","turnId":"turn-review","verifications":["future"]}"#),
+        ]
+
+        for (method, params) in malformed {
+            guard case .failure(let failure) = CurrentV2ReviewNotificationDecoder.decode(.init(
+                method: method,
+                params: Data(params.utf8)
+            )) else {
+                Issue.record("Expected required payload rejection for \(method)")
+                continue
+            }
+            guard case .malformedKnownEvent = failure.error else {
+                Issue.record("Expected malformed-known-event classification for \(method)")
+                continue
+            }
+        }
+    }
+
     @Test func malformedKnownPayloadRetainsItsSelectableAttemptIdentity() throws {
         let malformed = JSONRPC.Notification(
             method: "item/completed",
-            params: Data(#"{"threadId":"thread-review","turnId":"turn-review","item":{"type":"exitedReviewMode","review":"missing id"}}"#.utf8)
+            params: Data(#"{"threadId":"thread-review","turnId":"turn-review","completedAtMs":2,"item":{"type":"exitedReviewMode","review":"missing id"}}"#.utf8)
         )
 
         guard case .failure(let failure) = CurrentV2ReviewNotificationDecoder.decode(malformed) else {
@@ -372,7 +697,7 @@ struct CurrentV2ReviewDecoderReducerTests {
     @Test func unsupportedClosedUnionItemIsAttemptClassified() throws {
         let unsupported = JSONRPC.Notification(
             method: "item/completed",
-            params: Data(#"{"threadId":"thread-review","turnId":"turn-review","item":{"type":"futureItem","id":"item-1"}}"#.utf8)
+            params: Data(#"{"threadId":"thread-review","turnId":"turn-review","completedAtMs":2,"item":{"type":"futureItem","id":"item-1"}}"#.utf8)
         )
 
         guard case .failure(let failure) = CurrentV2ReviewNotificationDecoder.decode(unsupported) else {
@@ -453,6 +778,22 @@ struct CurrentV2ReviewDecoderReducerTests {
         ))
     }
 
+    private func expectConnectionIdentityFailure(
+        method: String,
+        params: [String: Any]
+    ) throws {
+        let result = CurrentV2ReviewNotificationDecoder.decode(.init(
+            method: method,
+            params: try JSONSerialization.data(withJSONObject: params)
+        ))
+        guard case .failure(let failure) = result else {
+            Issue.record("Expected missing routing identity for \(method)")
+            return
+        }
+        #expect(failure.error == .missingRoutingIdentity(method: method))
+        #expect(failure.requiresConnectionContainment)
+    }
+
     private func reviewEnvelope(_ data: Data) throws -> CurrentV2ReviewNotificationEnvelope {
         switch CurrentV2ReviewNotificationDecoder.decode(try notification(data)) {
         case .review(let envelope):
@@ -474,8 +815,16 @@ struct CurrentV2ReviewDecoderReducerTests {
         )
     }
 
-    private func notificationData(method: String, params: String) -> Data {
-        Data("{\"method\":\"\(method)\",\"params\":\(params)}".utf8)
+    private func notificationData(method: String, params: String) throws -> Data {
+        var object = try #require(
+            JSONSerialization.jsonObject(with: Data(params.utf8)) as? [String: Any]
+        )
+        if method == "item/started" {
+            object["startedAtMs"] = 1
+        } else if method == "item/completed" {
+            object["completedAtMs"] = 2
+        }
+        return try outerNotificationData(method: method, params: object)
     }
 
     private func turnCompletedData(turnFragment: String) throws -> Data {
@@ -519,6 +868,40 @@ struct CurrentV2ReviewDecoderReducerTests {
         ])
     }
 
+    private func autoApprovalData(
+        method: String,
+        reviewID: String,
+        reviewStatus: String
+    ) throws -> Data {
+        var params = try autoApprovalParams(
+            reviewID: reviewID,
+            reviewStatus: reviewStatus
+        )
+        if method == "item/autoApprovalReview/completed" {
+            params["completedAtMs"] = 2
+            params["decisionSource"] = "agent"
+        }
+        return try outerNotificationData(method: method, params: params)
+    }
+
+    private func autoApprovalParams(
+        reviewID: String,
+        reviewStatus: String
+    ) throws -> [String: Any] {
+        [
+            "threadId": "thread-review",
+            "turnId": "turn-review",
+            "startedAtMs": 1,
+            "reviewId": reviewID,
+            "review": ["status": reviewStatus],
+            "action": [
+                "type": "applyPatch",
+                "cwd": "/tmp",
+                "files": [],
+            ] as [String: Any],
+        ]
+    }
+
     private func outerNotificationData(
         method: String,
         params: [String: Any]
@@ -534,6 +917,13 @@ struct CurrentV2ReviewDecoderReducerTests {
         init(_ message: String) { self.message = message }
         var errorDescription: String? { message }
     }
+}
+
+private enum V2IdentityFixture: Equatable {
+    case unscoped
+    case optionalThread
+    case thread
+    case threadAndTurn
 }
 
 @Suite("current-v2 review routing integration")
@@ -821,6 +1211,476 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         #expect(await transport.isClosedForTesting() == false)
     }
 
+    @Test func unscopedOptionalThreadWarningLogsAndConnectionContinues() async throws {
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let attempt = await backend.reviewAttemptForTesting(.init(
+            attemptID: "attempt-1",
+            threadID: "thread-review",
+            turnID: "turn-review",
+            reviewThreadID: "thread-review"
+        ))
+
+        try await transport.emitServerNotification(
+            method: "warning",
+            params: V2WarningNotification(message: "Connection warning")
+        )
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: V2ItemNotification(
+                threadID: "thread-review",
+                turnID: "turn-review",
+                item: .init(type: "exitedReviewMode", id: "result", review: "No findings.")
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: V2TurnNotification(
+                threadID: "thread-review",
+                turn: .init(id: "turn-review", items: [], itemsView: "notLoaded", status: "completed")
+            )
+        )
+
+        #expect(try await collectEvents(from: attempt.events) == [
+            .logEntry(
+                kind: .diagnostic,
+                text: "Connection warning",
+                groupID: nil,
+                replacesGroup: false
+            ),
+            .started(
+                turnID: "turn-review",
+                reviewThreadID: "thread-review",
+                model: nil
+            ),
+            .logEntry(
+                kind: .agentMessage,
+                text: "No findings.",
+                groupID: "result",
+                replacesGroup: true,
+                metadata: .init(sourceType: "exitedReviewMode")
+            ),
+            .completed(summary: "Succeeded.", result: "No findings."),
+        ])
+        #expect(await transport.isClosedForTesting() == false)
+    }
+
+    @Test func malformedUnscopedDiagnosticIsBoundedAndConnectionContinues() async throws {
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let attempt = await backend.reviewAttemptForTesting(.init(
+            attemptID: "attempt-1",
+            threadID: "thread-review",
+            turnID: "turn-review",
+            reviewThreadID: "thread-review"
+        ))
+
+        try await transport.emitServerNotification(
+            method: "configWarning",
+            params: V2WarningNotification(message: "wrong field for configWarning")
+        )
+        try await emitCompletedReview(
+            transport: transport,
+            review: "No findings."
+        )
+
+        #expect(try await collectEvents(from: attempt.events).last == .completed(
+            summary: "Succeeded.",
+            result: "No findings."
+        ))
+        #expect(await backend.notificationRouterMetricsForTesting().ignored == 1)
+        #expect(await transport.isClosedForTesting() == false)
+    }
+
+    @Test func subAgentActivityAndSleepAreValidCurrentV2LifecycleItems() async throws {
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let attempt = await backend.reviewAttemptForTesting(.init(
+            attemptID: "attempt-1",
+            threadID: "thread-review",
+            turnID: "turn-review",
+            reviewThreadID: "thread-review"
+        ))
+
+        try await transport.emitServerNotification(
+            method: "item/started",
+            params: V2ItemNotification(
+                threadID: "thread-review",
+                turnID: "turn-review",
+                item: .init(
+                    type: "subAgentActivity",
+                    id: "subagent-1",
+                    activityKind: "started",
+                    agentThreadID: "thread-worker",
+                    agentPath: "workers/reviewer"
+                )
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: V2ItemNotification(
+                threadID: "thread-review",
+                turnID: "turn-review",
+                item: .init(
+                    type: "subAgentActivity",
+                    id: "subagent-1",
+                    activityKind: "interacted",
+                    agentThreadID: "thread-worker",
+                    agentPath: "workers/reviewer"
+                )
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/started",
+            params: V2ItemNotification(
+                threadID: "thread-review",
+                turnID: "turn-review",
+                item: .init(type: "sleep", id: "sleep-1", durationMs: 250)
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: V2ItemNotification(
+                threadID: "thread-review",
+                turnID: "turn-review",
+                item: .init(type: "sleep", id: "sleep-1", durationMs: 250)
+            )
+        )
+        try await emitCompletedReview(transport: transport, review: "No findings.")
+
+        let events = try await collectEvents(from: attempt.events)
+        #expect(events.contains(.logEntry(
+            kind: .event,
+            text: "Subagent workers/reviewer: started.",
+            groupID: "subagent-1",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "subAgentActivity",
+                status: "started",
+                detail: "thread-worker"
+            )
+        )))
+        #expect(events.contains(.logEntry(
+            kind: .event,
+            text: "Subagent workers/reviewer: interacted.",
+            groupID: "subagent-1",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "subAgentActivity",
+                status: "interacted",
+                detail: "thread-worker"
+            )
+        )))
+        #expect(events.contains(.logEntry(
+            kind: .event,
+            text: "Sleeping for 250 ms.",
+            groupID: "sleep-1",
+            replacesGroup: true,
+            metadata: .init(sourceType: "sleep", status: "inProgress", durationMs: 250)
+        )))
+        #expect(events.contains(.logEntry(
+            kind: .event,
+            text: "Slept for 250 ms.",
+            groupID: "sleep-1",
+            replacesGroup: true,
+            metadata: .init(sourceType: "sleep", status: "completed", durationMs: 250)
+        )))
+        #expect(events.last == .completed(summary: "Succeeded.", result: "No findings."))
+    }
+
+    @Test func rawUserMessageContentDecodesAtTheBackendBoundary() async throws {
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let attempt = await backend.reviewAttemptForTesting(.init(
+            attemptID: "attempt-1",
+            threadID: "thread-review",
+            turnID: "turn-review",
+            reviewThreadID: "thread-review"
+        ))
+
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: V2UserMessageNotification(
+                threadID: "thread-review",
+                turnID: "turn-review",
+                completedAtMs: 2,
+                item: .init(
+                    type: "userMessage",
+                    id: "user-1",
+                    content: [.init(
+                        type: "text",
+                        text: "Please review this change",
+                        textElements: []
+                    )]
+                )
+            )
+        )
+        try await emitCompletedReview(transport: transport, review: "No findings.")
+
+        #expect(try await collectEvents(from: attempt.events).last == .completed(
+            summary: "Succeeded.",
+            result: "No findings."
+        ))
+        #expect(await backend.notificationRouterMetricsForTesting().attemptFailures == 0)
+    }
+
+    @Test func threadLifecycleNotificationsCannotCommitAheadOfTurnCompleted() async throws {
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let attempt = await backend.reviewAttemptForTesting(.init(
+            attemptID: "attempt-1",
+            threadID: "thread-review",
+            turnID: "turn-review",
+            reviewThreadID: "thread-review"
+        ))
+
+        try await transport.emitServerNotification(
+            method: "thread/status/changed",
+            params: V2ThreadStatusNotification(
+                threadID: "thread-review",
+                status: .init(type: "notLoaded")
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "thread/closed",
+            params: V2ThreadClosedNotification(threadID: "thread-review")
+        )
+        try await emitCompletedReview(transport: transport, review: "Completed review")
+
+        let events = try await collectEvents(from: attempt.events)
+        #expect(events.prefix(2) == [
+            .logEntry(
+                kind: .diagnostic,
+                text: "Review thread is no longer loaded.",
+                groupID: "thread-review",
+                replacesGroup: false
+            ),
+            .logEntry(
+                kind: .diagnostic,
+                text: "Review thread closed.",
+                groupID: "thread-review",
+                replacesGroup: false
+            ),
+        ])
+        #expect(events.last == .completed(summary: "Succeeded.", result: "Completed review"))
+    }
+
+    @Test func emptyDiffAndPlanReplaceTheirPriorProjection() async throws {
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let attempt = await backend.reviewAttemptForTesting(.init(
+            attemptID: "attempt-1",
+            threadID: "thread-review",
+            turnID: "turn-review",
+            reviewThreadID: "thread-review"
+        ))
+
+        try await transport.emitServerNotification(
+            method: "turn/diff/updated",
+            params: V2DiffNotification(
+                threadID: "thread-review",
+                turnID: "turn-review",
+                diff: "diff --git"
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "turn/diff/updated",
+            params: V2DiffNotification(
+                threadID: "thread-review",
+                turnID: "turn-review",
+                diff: ""
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "turn/plan/updated",
+            params: V2PlanNotification(
+                threadID: "thread-review",
+                turnID: "turn-review",
+                plan: [.init(step: "Inspect", status: "inProgress")]
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "turn/plan/updated",
+            params: V2PlanNotification(
+                threadID: "thread-review",
+                turnID: "turn-review",
+                plan: []
+            )
+        )
+        try await emitCompletedReview(transport: transport, review: "No findings.")
+
+        let events = try await collectEvents(from: attempt.events)
+        let replacements = events.compactMap { event -> (ReviewLogEntry.Kind, String, String?, Bool)? in
+            guard case .logEntry(let kind, let text, let groupID, let replacesGroup, _) = event,
+                  kind == .event || kind == .todoList else {
+                return nil
+            }
+            return (kind, text, groupID, replacesGroup)
+        }
+        #expect(replacements.map(\.0) == [.event, .event, .todoList, .todoList])
+        #expect(replacements.map(\.1) == ["diff --git", "", "[inProgress] Inspect", ""])
+        #expect(replacements.allSatisfy { $0.2 == "turn-review" && $0.3 })
+    }
+
+    @Test func scalarKnownNotificationParamsCloseTheUnroutableConnection() async throws {
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let attempt = await backend.reviewAttemptForTesting(.init(
+            attemptID: "attempt-1",
+            threadID: "thread-review",
+            turnID: "turn-review",
+            reviewThreadID: "thread-review"
+        ))
+
+        try await transport.emitServerNotification(method: "item/completed", params: 1)
+
+        await #expect(throws: BackendReviewEventMailboxError.self) {
+            _ = try await attempt.events.next()
+        }
+        #expect(await backend.notificationRouterMetricsForTesting().connectionFailures == 1)
+        #expect(await transport.isClosedForTesting())
+    }
+
+    @Test func missingGuardianWarningThreadClosesConnectionWithoutReviewMutation() async throws {
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let attempt = await backend.reviewAttemptForTesting(.init(
+            attemptID: "attempt-1",
+            threadID: "thread-review",
+            turnID: "turn-review",
+            reviewThreadID: "thread-review"
+        ))
+
+        try await transport.emitServerNotification(
+            method: "guardianWarning",
+            params: V2WarningNotification(message: "Guardian warning")
+        )
+
+        await #expect(throws: BackendReviewEventMailboxError.self) {
+            _ = try await attempt.events.next()
+        }
+        #expect(await backend.notificationRouterMetricsForTesting().connectionFailures == 1)
+        #expect(await transport.isClosedForTesting())
+    }
+
+    @Test func missingContextCompactedTurnClosesConnectionWithoutReviewMutation() async throws {
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let attempt = await backend.reviewAttemptForTesting(.init(
+            attemptID: "attempt-1",
+            threadID: "thread-review",
+            turnID: "turn-review",
+            reviewThreadID: "thread-review"
+        ))
+
+        try await transport.emitServerNotification(
+            method: "thread/compacted",
+            params: V2ContextCompactedNotification(threadID: "thread-review")
+        )
+
+        await #expect(throws: BackendReviewEventMailboxError.self) {
+            _ = try await attempt.events.next()
+        }
+        #expect(await backend.notificationRouterMetricsForTesting().connectionFailures == 1)
+        #expect(await transport.isClosedForTesting())
+    }
+
+    @MainActor
+    @Test func rawFullDeliveryCommitsOneCanonicalFinalRowEndToEnd() async throws {
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let attempt = await backend.reviewAttemptForTesting(.init(
+            attemptID: "attempt-1",
+            threadID: "thread-review",
+            turnID: "turn-review",
+            reviewThreadID: "thread-review"
+        ))
+
+        try await transport.emitServerNotification(
+            method: "item/started",
+            params: V2ItemNotification(
+                threadID: "thread-review",
+                turnID: "turn-review",
+                item: .init(type: "agentMessage", id: "non-final", text: "")
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: V2ItemNotification(
+                threadID: "thread-review",
+                turnID: "turn-review",
+                item: .init(type: "agentMessage", id: "non-final", text: "Non-final message")
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/started",
+            params: V2ItemNotification(
+                threadID: "thread-review",
+                turnID: "turn-review",
+                item: .init(type: "agentMessage", id: "final", text: "Partial final")
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: V2ItemNotification(
+                threadID: "thread-review",
+                turnID: "turn-review",
+                item: .init(type: "agentMessage", id: "final", text: "Complete final")
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: V2ItemNotification(
+                threadID: "thread-review",
+                turnID: "turn-review",
+                item: .init(type: "exitedReviewMode", id: "review-result", review: "Canonical review")
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: V2TurnNotification(
+                threadID: "thread-review",
+                turn: .init(
+                    id: "turn-review",
+                    items: [.init(type: "agentMessage", id: "final", text: "Complete final")],
+                    itemsView: "summary",
+                    status: "completed"
+                )
+            )
+        )
+        let normalizedEvents = try await collectEvents(from: attempt.events)
+        #expect(normalizedEvents.contains { event in
+            guard case .logEntry(let kind, _, let groupID, let replacesGroup, let metadata) = event else {
+                return false
+            }
+            return kind == .agentMessage
+                && groupID == "review-result"
+                && replacesGroup
+                && metadata?.sourceType == "exitedReviewMode"
+        })
+
+        let storeReviewBackend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: storeReviewBackend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        async let started = store.startReview(
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        )
+        await storeReviewBackend.waitForStartReview()
+        for event in normalizedEvents {
+            await storeReviewBackend.yield(event)
+        }
+        let result = try await started
+
+        let visibleAgentRows = result.logs.filter { $0.kind == .agentMessage }
+        #expect(visibleAgentRows.map(\.groupID) == ["non-final", "review-result"])
+        #expect(visibleAgentRows.map(\.text) == ["Non-final message", "Canonical review"])
+        #expect(visibleAgentRows.contains { $0.groupID == "final" } == false)
+        #expect(result.core.lifecycle.terminal == .completed)
+    }
+
     @Test func conflictingActiveRoutingClosesTheConnectionAndFailsAffectedAttempts() async throws {
         let transport = FakeJSONRPCTransport()
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
@@ -911,7 +1771,8 @@ struct CurrentV2ReviewRoutingIntegrationTests {
                 kind: .agentMessage,
                 text: "No findings.",
                 groupID: "result",
-                replacesGroup: true
+                replacesGroup: true,
+                metadata: .init(sourceType: "exitedReviewMode")
             ),
             .completed(summary: "Succeeded.", result: "No findings."),
         ])
@@ -919,6 +1780,32 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         #expect(metrics.diagnostics == 5)
         #expect(metrics.ignored == 6)
         #expect(await transport.isClosedForTesting() == false)
+    }
+
+    private func emitCompletedReview(
+        transport: FakeJSONRPCTransport,
+        review: String
+    ) async throws {
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: V2ItemNotification(
+                threadID: "thread-review",
+                turnID: "turn-review",
+                item: .init(type: "exitedReviewMode", id: "result", review: review)
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: V2TurnNotification(
+                threadID: "thread-review",
+                turn: .init(
+                    id: "turn-review",
+                    items: [],
+                    itemsView: "notLoaded",
+                    status: "completed"
+                )
+            )
+        )
     }
 
     private func collectEvents(
@@ -979,15 +1866,132 @@ private struct V2StandaloneDeltaNotification: Encodable, Sendable {
     }
 }
 
+private struct V2WarningNotification: Encodable, Sendable {
+    var threadID: String?
+    var message: String
+
+    init(threadID: String? = nil, message: String) {
+        self.threadID = threadID
+        self.message = message
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case threadID = "threadId"
+        case message
+    }
+}
+
+private struct V2ThreadStatusNotification: Encodable, Sendable {
+    struct Status: Encodable, Sendable {
+        var type: String
+    }
+
+    var threadID: String
+    var status: Status
+
+    enum CodingKeys: String, CodingKey {
+        case threadID = "threadId"
+        case status
+    }
+}
+
+private struct V2ThreadClosedNotification: Encodable, Sendable {
+    var threadID: String
+
+    enum CodingKeys: String, CodingKey {
+        case threadID = "threadId"
+    }
+}
+
+private struct V2DiffNotification: Encodable, Sendable {
+    var threadID: String
+    var turnID: String
+    var diff: String
+
+    enum CodingKeys: String, CodingKey {
+        case threadID = "threadId"
+        case turnID = "turnId"
+        case diff
+    }
+}
+
+private struct V2PlanNotification: Encodable, Sendable {
+    struct Step: Encodable, Sendable {
+        var step: String
+        var status: String
+    }
+
+    var threadID: String
+    var turnID: String
+    var plan: [Step]
+
+    enum CodingKeys: String, CodingKey {
+        case threadID = "threadId"
+        case turnID = "turnId"
+        case plan
+    }
+}
+
+private struct V2UserMessageNotification: Encodable, Sendable {
+    struct Item: Encodable, Sendable {
+        struct Content: Encodable, Sendable {
+            var type: String
+            var text: String
+            var textElements: [String]
+
+            enum CodingKeys: String, CodingKey {
+                case type
+                case text
+                case textElements = "text_elements"
+            }
+        }
+
+        var type: String
+        var id: String
+        var content: [Content]
+    }
+
+    var threadID: String
+    var turnID: String
+    var completedAtMs: Int64
+    var item: Item
+
+    enum CodingKeys: String, CodingKey {
+        case threadID = "threadId"
+        case turnID = "turnId"
+        case completedAtMs
+        case item
+    }
+}
+
+private struct V2ContextCompactedNotification: Encodable, Sendable {
+    var threadID: String
+    var turnID: String?
+
+    init(threadID: String, turnID: String? = nil) {
+        self.threadID = threadID
+        self.turnID = turnID
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case threadID = "threadId"
+        case turnID = "turnId"
+    }
+}
+
 private struct V2ItemNotification: Encodable, Sendable {
     var threadID: String
     var turnID: String
     var item: V2Item
+    var startedAtMs: Int64 = 1
+    var completedAtMs: Int64 = 2
 
     enum CodingKeys: String, CodingKey {
         case threadID = "threadId"
         case turnID = "turnId"
         case item
+        case startedAtMs
+        case completedAtMs
     }
 }
 
@@ -1000,11 +2004,13 @@ private struct MalformedV2ItemNotification: Encodable, Sendable {
     var threadID: String
     var turnID: String
     var item: Item
+    var completedAtMs: Int64 = 2
 
     enum CodingKeys: String, CodingKey {
         case threadID = "threadId"
         case turnID = "turnId"
         case item
+        case completedAtMs
     }
 }
 
@@ -1015,10 +2021,16 @@ private struct V2Item: Encodable, Sendable {
     var review: String?
     var command: String?
     var cwd: String?
+    var source: String?
     var status: String?
+    var commandActions: [[String: String]]?
     var aggregatedOutput: String?
     var exitCode: Int?
     var delivery: String?
+    var activityKind: String?
+    var agentThreadID: String?
+    var agentPath: String?
+    var durationMs: Int?
 
     init(
         type: String,
@@ -1030,18 +2042,47 @@ private struct V2Item: Encodable, Sendable {
         status: String? = nil,
         aggregatedOutput: String? = nil,
         exitCode: Int? = nil,
-        delivery: String? = nil
+        delivery: String? = nil,
+        activityKind: String? = nil,
+        agentThreadID: String? = nil,
+        agentPath: String? = nil,
+        durationMs: Int? = nil
     ) {
         self.type = type
         self.id = id
         self.text = text
         self.review = review
         self.command = command
-        self.cwd = cwd
-        self.status = status
+        self.cwd = cwd ?? (type == "commandExecution" ? "/tmp" : nil)
+        self.source = type == "commandExecution" ? "agent" : nil
+        self.status = status ?? (type == "commandExecution" ? "completed" : nil)
+        self.commandActions = type == "commandExecution" ? [] : nil
         self.aggregatedOutput = aggregatedOutput
         self.exitCode = exitCode
         self.delivery = delivery
+        self.activityKind = activityKind
+        self.agentThreadID = agentThreadID
+        self.agentPath = agentPath
+        self.durationMs = durationMs
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case id
+        case text
+        case review
+        case command
+        case cwd
+        case source
+        case status
+        case commandActions
+        case aggregatedOutput
+        case exitCode
+        case delivery
+        case activityKind = "kind"
+        case agentThreadID = "agentThreadId"
+        case agentPath
+        case durationMs
     }
 }
 

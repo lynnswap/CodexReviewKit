@@ -712,6 +712,14 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             notificationRouterMetrics.ignored += 1
             return
         case .failure(let failure):
+            if failure.isGlobalDiagnostic {
+                diagnoseMalformedGlobalNotification(
+                    failure.method,
+                    error: failure.error
+                )
+                notificationRouterMetrics.ignored += 1
+                return
+            }
             await containNotificationDecodeFailure(failure)
             return
         case .globalDiagnostic(let envelope):
@@ -805,6 +813,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     private func containNotificationDecodeFailure(
         _ failure: CurrentV2ReviewNotificationDecodeFailure
     ) async {
+        if failure.requiresConnectionContainment {
+            await failConnection(failure.error)
+            return
+        }
         if let threadID = failure.routedThreadID {
             let attemptIDs = activeReviewAttemptIDsByThreadID[threadID] ?? []
             if attemptIDs.count == 1,
@@ -1721,6 +1733,7 @@ private struct TurnNotificationPayload: Decodable, Sendable {
     var turn: AppServerNotificationTurn?
     var turnID: String?
     var itemID: String?
+    var reviewID: String?
     var item: AppServerThreadItem?
     var startedAtMs: Int64?
     var completedAtMs: Int64?
@@ -1748,6 +1761,7 @@ private struct TurnNotificationPayload: Decodable, Sendable {
         case turn
         case turnID = "turnId"
         case itemID = "itemId"
+        case reviewID = "reviewId"
         case item
         case startedAtMs
         case completedAtMs
@@ -1777,6 +1791,7 @@ private struct TurnNotificationPayload: Decodable, Sendable {
         self.turn = try container.decodeIfPresent(AppServerNotificationTurn.self, forKey: .turn)
         self.turnID = try container.decodeStringIfPresent(forKey: .turnID)
         self.itemID = try container.decodeStringIfPresent(forKey: .itemID)
+        self.reviewID = try container.decodeStringIfPresent(forKey: .reviewID)
         self.item = try container.decodeIfPresent(AppServerThreadItem.self, forKey: .item)
         self.startedAtMs = try container.decodeIfPresent(Int64.self, forKey: .startedAtMs)
         self.completedAtMs = try container.decodeIfPresent(Int64.self, forKey: .completedAtMs)
@@ -1973,29 +1988,46 @@ private func normalizeReviewNotification(
             }
         }.map { [$0] } ?? []
     case "item/autoApprovalReview/started":
-        events = payload.itemID.map {
-            [.logEntry(kind: .diagnostic, text: "Approval review started.", groupID: $0, replacesGroup: false)]
-        } ?? [.logEntry(kind: .diagnostic, text: "Approval review started.", groupID: nil, replacesGroup: false)]
-    case "item/autoApprovalReview/completed":
-        events = payload.itemID.map {
-            [.logEntry(kind: .diagnostic, text: "Approval review completed.", groupID: $0, replacesGroup: false)]
-        } ?? [.logEntry(kind: .diagnostic, text: "Approval review completed.", groupID: nil, replacesGroup: false)]
-    case "turn/diff/updated":
-        guard let diff = payload.diff?.nilIfEmpty else {
+        guard let reviewID = payload.reviewID else {
             throw ReviewIngestionError.malformedKnownEvent(
                 method: notification.method,
-                message: "diff must be a nonempty string"
+                message: "reviewId is required"
+            )
+        }
+        events = [.logEntry(
+            kind: .diagnostic,
+            text: "Approval review started.",
+            groupID: reviewID,
+            replacesGroup: false
+        )]
+    case "item/autoApprovalReview/completed":
+        guard let reviewID = payload.reviewID else {
+            throw ReviewIngestionError.malformedKnownEvent(
+                method: notification.method,
+                message: "reviewId is required"
+            )
+        }
+        events = [.logEntry(
+            kind: .diagnostic,
+            text: "Approval review completed.",
+            groupID: reviewID,
+            replacesGroup: false
+        )]
+    case "turn/diff/updated":
+        guard let diff = payload.diff else {
+            throw ReviewIngestionError.malformedKnownEvent(
+                method: notification.method,
+                message: "diff is required"
             )
         }
         events = [.logEntry(kind: .event, text: diff, groupID: payload.turnID, replacesGroup: true)]
     case "turn/plan/updated":
-        guard let planText = payload.renderedPlan?.nilIfEmpty else {
-            throw ReviewIngestionError.malformedKnownEvent(
-                method: notification.method,
-                message: "plan must contain at least one step"
-            )
-        }
-        events = [.logEntry(kind: .todoList, text: planText, groupID: payload.turnID, replacesGroup: true)]
+        events = [.logEntry(
+            kind: .todoList,
+            text: payload.renderedPlan,
+            groupID: payload.turnID,
+            replacesGroup: true
+        )]
     case "turn/completed":
         events = []
     case "error":
@@ -2008,16 +2040,26 @@ private func normalizeReviewNotification(
             replacesGroup: false
         )]
     case "thread/closed":
-        events = [.failed("Review thread closed.")]
+        events = [.logEntry(
+            kind: .diagnostic,
+            text: "Review thread closed.",
+            groupID: payload.threadID,
+            replacesGroup: false
+        )]
     case "thread/status/changed":
         switch payload.status?.type {
         case "notLoaded":
-            events = [.failed("Review thread is no longer loaded.")]
+            events = [.logEntry(
+                kind: .diagnostic,
+                text: "Review thread is no longer loaded.",
+                groupID: payload.threadID,
+                replacesGroup: false
+            )]
         case "systemError":
             events = [.logEntry(
                 kind: .diagnostic,
                 text: "Review thread entered a system error state.",
-                groupID: payload.turnID,
+                groupID: payload.threadID,
                 replacesGroup: false
             )]
         default:
@@ -2100,30 +2142,34 @@ private extension TurnNotificationPayload {
     }
 
     var reasoningSummaryGroupKey: String? {
-        guard let itemID else {
+        guard let itemID,
+              let summaryIndex
+        else {
             return nil
         }
         return reasoningSummaryGroupID(
             itemID: itemID,
-            summaryIndex: summaryIndex ?? 0
+            summaryIndex: summaryIndex
         )
     }
 
     var rawReasoningGroupKey: String? {
-        guard let itemID else {
+        guard let itemID,
+              let contentIndex
+        else {
             return nil
         }
         return rawReasoningGroupID(
             itemID: itemID,
-            contentIndex: contentIndex ?? 0
+            contentIndex: contentIndex
         )
     }
 
-    var renderedPlan: String? {
+    var renderedPlan: String {
         let steps = plan.map { step in
             "[\(step.status)] \(step.step)"
         }
-        return steps.joined(separator: "\n").nilIfEmpty
+        return steps.joined(separator: "\n")
     }
 
     var diagnosticText: String? {
@@ -2169,7 +2215,7 @@ private struct AppServerCommandAction: Decodable, Sendable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.type = try container.decodeStringIfPresent(forKey: .type) ?? "unknown"
+        self.type = try container.decode(String.self, forKey: .type)
         self.command = try container.decodeStringIfPresent(forKey: .command)
         self.name = try container.decodeStringIfPresent(forKey: .name)
         self.path = try container.decodeStringIfPresent(forKey: .path)
@@ -2222,8 +2268,8 @@ private struct AppServerCommandLifecycle: Sendable {
         fallback: AppServerCommandLifecycle? = nil
     ) {
         self.itemID = item.id
-        self.command = item.command ?? fallback?.command
-        self.cwd = item.cwd ?? fallback?.cwd
+        self.command = item.command?.nilIfEmpty ?? fallback?.command
+        self.cwd = item.cwd?.nilIfEmpty ?? fallback?.cwd
         self.startedAt = startedAt ?? fallback?.startedAt
         self.completedAt = completedAt ?? fallback?.completedAt
         self.durationMs = item.durationMs ?? fallback?.durationMs
@@ -2332,6 +2378,9 @@ private struct AppServerThreadItem: Decodable, Sendable {
     var error: AppServerNotificationValue?
     var success: Bool?
     var prompt: String?
+    var activityKind: String?
+    var agentThreadID: String?
+    var agentPath: String?
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -2358,6 +2407,9 @@ private struct AppServerThreadItem: Decodable, Sendable {
         case error
         case success
         case prompt
+        case activityKind = "kind"
+        case agentThreadID = "agentThreadId"
+        case agentPath
     }
 
     init(from decoder: Decoder) throws {
@@ -2380,12 +2432,20 @@ private struct AppServerThreadItem: Decodable, Sendable {
         self.query = try container.decodeStringIfPresent(forKey: .query)
         self.path = try container.decodeStringIfPresent(forKey: .path)
         self.review = try container.decodeStringIfPresent(forKey: .review)
-        self.summary = try container.decodeIfPresent([String].self, forKey: .summary) ?? []
-        self.content = try container.decodeIfPresent([String].self, forKey: .content) ?? []
+        if self.type == "reasoning" {
+            self.summary = try container.decode([String].self, forKey: .summary)
+            self.content = try container.decode([String].self, forKey: .content)
+        } else {
+            self.summary = nil
+            self.content = nil
+        }
         self.result = try container.decodeIfPresent(AppServerNotificationValue.self, forKey: .result)
         self.error = try container.decodeIfPresent(AppServerNotificationValue.self, forKey: .error)
         self.success = try container.decodeIfPresent(Bool.self, forKey: .success)
         self.prompt = try container.decodeStringIfPresent(forKey: .prompt)
+        self.activityKind = try container.decodeStringIfPresent(forKey: .activityKind)
+        self.agentThreadID = try container.decodeStringIfPresent(forKey: .agentThreadID)
+        self.agentPath = try container.decodeStringIfPresent(forKey: .agentPath)
     }
 
     func startedEvents(
@@ -2398,7 +2458,7 @@ private struct AppServerThreadItem: Decodable, Sendable {
         case "enteredReviewMode":
             return review.map { [.logEntry(kind: .progress, text: "Reviewing \($0)", groupID: id, replacesGroup: true)] } ?? []
         case "commandExecution":
-            return (command ?? lifecycle?.command).map {
+            return (command?.nilIfEmpty ?? lifecycle?.command).map {
                 [logEntry(
                     kind: .command,
                     text: "$ \($0)",
@@ -2416,10 +2476,14 @@ private struct AppServerThreadItem: Decodable, Sendable {
             return [logEntry(kind: .toolCall, text: "Dynamic tool \(toolLabel) started.", replacesGroup: true, title: toolLabel, status: "started")]
         case "collabAgentToolCall":
             return [logEntry(kind: .toolCall, text: "Collab tool \(toolLabel) started.", replacesGroup: true, title: toolLabel, status: "started")]
+        case "subAgentActivity":
+            return [try subAgentActivityEvent(method: "item/started")]
         case "webSearch":
             return [logEntry(kind: .toolCall, text: "Web search: \(query ?? "started")", replacesGroup: true, title: "Web search", status: "started")]
         case "imageView":
             return [logEntry(kind: .toolCall, text: "View image: \(path ?? "image")", replacesGroup: true, title: "Image view", status: "started")]
+        case "sleep":
+            return [try sleepEvent(method: "item/started", status: "inProgress")]
         case "imageGeneration":
             return [logEntry(kind: .toolCall, text: "Image generation started.", replacesGroup: true, title: "Image generation", status: "started")]
         case "fileChange":
@@ -2463,11 +2527,19 @@ private struct AppServerThreadItem: Decodable, Sendable {
                 [.logEntry(kind: .agentMessage, text: $0, groupID: id, replacesGroup: true)]
             } ?? []
         case "exitedReviewMode":
-            return review.map { [.logEntry(kind: .agentMessage, text: $0, groupID: id, replacesGroup: true)] } ?? []
+            return review.map {
+                [.logEntry(
+                    kind: .agentMessage,
+                    text: $0,
+                    groupID: id,
+                    replacesGroup: true,
+                    metadata: .init(sourceType: "exitedReviewMode")
+                )]
+            } ?? []
         case "commandExecution":
             if let output = aggregatedOutput?.nilIfEmpty ?? lifecycle?.streamedOutputIfAvailable {
                 var events: [CodexReviewBackendModel.Review.Event] = []
-                if let command = command ?? lifecycle?.command {
+                if let command = command?.nilIfEmpty ?? lifecycle?.command {
                     events.append(logEntry(
                         kind: .command,
                         text: "$ \(command)",
@@ -2491,7 +2563,7 @@ private struct AppServerThreadItem: Decodable, Sendable {
                 ))
                 return events
             }
-            if let command = command ?? lifecycle?.command {
+            if let command = command?.nilIfEmpty ?? lifecycle?.command {
                 return [logEntry(
                     kind: .command,
                     text: "$ \(command)",
@@ -2514,10 +2586,14 @@ private struct AppServerThreadItem: Decodable, Sendable {
             return [logEntry(kind: .toolCall, text: "Dynamic tool \(toolLabel) \(status ?? "completed").\(resultSuffix)", replacesGroup: true, title: toolLabel, status: completedStatus)]
         case "collabAgentToolCall":
             return [logEntry(kind: .toolCall, text: "Collab tool \(toolLabel) \(status ?? "completed").\(promptSuffix)", replacesGroup: true, title: toolLabel, status: completedStatus, detail: prompt)]
+        case "subAgentActivity":
+            return [try subAgentActivityEvent(method: "item/completed")]
         case "webSearch":
             return [logEntry(kind: .toolCall, text: "Web search completed: \(query ?? "search").", replacesGroup: true, title: "Web search", status: completedStatus)]
         case "imageView":
             return [logEntry(kind: .toolCall, text: "Image viewed: \(path ?? "image").", replacesGroup: true, title: "Image view", status: completedStatus)]
+        case "sleep":
+            return [try sleepEvent(method: "item/completed", status: "completed")]
         case "imageGeneration":
             return [logEntry(kind: .toolCall, text: "Image generation \(status ?? "completed").\(resultSuffix)", replacesGroup: true, title: "Image generation", status: completedStatus)]
         case "fileChange":
@@ -2571,6 +2647,56 @@ private struct AppServerThreadItem: Decodable, Sendable {
         )
     }
 
+    private func subAgentActivityEvent(
+        method: String
+    ) throws -> CodexReviewBackendModel.Review.Event {
+        guard let activityKind,
+              let agentThreadID,
+              let agentPath
+        else {
+            throw ReviewIngestionError.malformedKnownEvent(
+                method: method,
+                message: "subAgentActivity requires kind, agentThreadId, and agentPath"
+            )
+        }
+        return .logEntry(
+            kind: .event,
+            text: "Subagent \(agentPath): \(activityKind).",
+            groupID: id,
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "subAgentActivity",
+                status: activityKind,
+                detail: agentThreadID
+            )
+        )
+    }
+
+    private func sleepEvent(
+        method: String,
+        status: String
+    ) throws -> CodexReviewBackendModel.Review.Event {
+        guard let durationMs else {
+            throw ReviewIngestionError.malformedKnownEvent(
+                method: method,
+                message: "sleep requires durationMs"
+            )
+        }
+        return .logEntry(
+            kind: .event,
+            text: status == "completed"
+                ? "Slept for \(durationMs) ms."
+                : "Sleeping for \(durationMs) ms.",
+            groupID: id,
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "sleep",
+                status: status,
+                durationMs: durationMs
+            )
+        )
+    }
+
     private func metadata(
         title: String?,
         status explicitStatus: String?,
@@ -2603,8 +2729,8 @@ private struct AppServerThreadItem: Decodable, Sendable {
             status: resolvedStatus,
             detail: detail?.nilIfEmpty,
             itemID: isLifecycleItem ? id : nil,
-            command: command ?? lifecycle?.command,
-            cwd: cwd ?? lifecycle?.cwd,
+            command: command?.nilIfEmpty ?? lifecycle?.command,
+            cwd: cwd?.nilIfEmpty ?? lifecycle?.cwd?.nilIfEmpty,
             exitCode: exitCode,
             startedAt: isLifecycleItem ? resolvedStartedAt : nil,
             completedAt: isLifecycleItem ? resolvedCompletedAt : nil,

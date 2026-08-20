@@ -423,6 +423,42 @@ struct AppServerClientTests {
         }
     }
 
+    @Test func processTransportDeliversScalarNotificationParamsToTheDecoderBoundary() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "codex-review-scalar-notification-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let executable = directory.appending(path: "app-server-stub.sh")
+        let script = """
+        #!/bin/sh
+        printf '{"method":"item/completed","params":1}\\n'
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let transport = try AppServerProcessTransport(configuration: .init(
+            executable: executable.path,
+            arguments: [],
+            environment: [
+                "HOME": directory.path,
+                "PATH": "/bin:/usr/bin",
+            ]
+        ))
+        let notifications = await transport.notificationStream()
+        var iterator = notifications.makeAsyncIterator()
+
+        let notification = try #require(try await iterator.next())
+        await transport.close()
+
+        #expect(notification.method == "item/completed")
+        #expect(try JSONSerialization.jsonObject(
+            with: notification.params,
+            options: [.fragmentsAllowed]
+        ) as? Int == 1)
+    }
+
     @Test func processTransportWritesCodexJSONRPCLiteMessages() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appending(path: "codex-review-jsonrpc-lite-\(UUID().uuidString)")
@@ -1266,6 +1302,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "review-thread",
                 turnID: "turn-old",
                 item: .init(type: "enteredReviewMode", id: "review-item-1", review: "current changes")
@@ -1628,7 +1665,7 @@ struct AppServerClientTests {
         #expect(await backend.notificationRouterMetricsForTesting().routed == 2)
     }
 
-    @Test func backendBroadcastsThreadlessErrorsWithoutTerminalizingActiveReviews() async throws {
+    @Test func backendMissingErrorIdentityClosesConnectionAndFailsActiveReviews() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
@@ -1655,68 +1692,14 @@ struct AppServerClientTests {
             params: TestErrorNotification(message: "App-server failed.", willRetry: false)
         )
 
-        let expectedError = CodexReviewBackendModel.Review.Event.logEntry(
-            kind: .error,
-            text: "App-server failed.",
-            groupID: nil,
-            replacesGroup: false
-        )
-        #expect(try await firstIterator.next() == expectedError)
-        #expect(try await secondIterator.next() == expectedError)
-        #expect(await backend.notificationRouterMetricsForTesting().decoded == 1)
-        #expect(await backend.notificationRouterMetricsForTesting().routed == 2)
-
-        for (threadID, turnID, review) in [
-            ("thread-1", "turn-1", "First review"),
-            ("thread-2", "turn-2", "Second review"),
-        ] {
-            try await transport.emitServerNotification(
-                method: "item/completed",
-                params: TestItemNotification(
-                    threadID: threadID,
-                    turnID: turnID,
-                    item: .init(type: "exitedReviewMode", id: "result", review: review)
-                )
-            )
-            try await transport.emitServerNotification(
-                method: "turn/completed",
-                params: TestTurnNotification(
-                    threadID: threadID,
-                    turn: .init(id: turnID, status: "completed")
-                )
-            )
+        await #expect(throws: BackendReviewEventMailboxError.self) {
+            _ = try await firstIterator.next()
         }
-
-        #expect(try await firstIterator.next() == .started(
-            turnID: "turn-1",
-            reviewThreadID: "thread-1",
-            model: nil
-        ))
-        #expect(try await firstIterator.next() == .logEntry(
-            kind: .agentMessage,
-            text: "First review",
-            groupID: "result",
-            replacesGroup: true
-        ))
-        #expect(try await firstIterator.next() == .completed(
-            summary: "Succeeded.",
-            result: "First review"
-        ))
-        #expect(try await secondIterator.next() == .started(
-            turnID: "turn-2",
-            reviewThreadID: "thread-2",
-            model: nil
-        ))
-        #expect(try await secondIterator.next() == .logEntry(
-            kind: .agentMessage,
-            text: "Second review",
-            groupID: "result",
-            replacesGroup: true
-        ))
-        #expect(try await secondIterator.next() == .completed(
-            summary: "Succeeded.",
-            result: "Second review"
-        ))
+        await #expect(throws: BackendReviewEventMailboxError.self) {
+            _ = try await secondIterator.next()
+        }
+        #expect(await backend.notificationRouterMetricsForTesting().connectionFailures == 1)
+        #expect(await transport.isClosedForTesting())
     }
 
     @Test func backendBuffersTerminalNotificationEmittedDuringReviewStart() async throws {
@@ -2426,6 +2409,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "commandExecution", id: "cmd-1", command: "swift test")
@@ -2539,6 +2523,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "commandExecution", id: "cmd-1", command: "swift test")
@@ -2555,6 +2540,7 @@ struct AppServerClientTests {
                 status: "inProgress",
                 itemID: "cmd-1",
                 command: "swift test",
+                startedAt: Date(timeIntervalSince1970: 0),
                 commandStatus: "inProgress"
             )
         ))
@@ -2582,6 +2568,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "enteredReviewMode", id: "stale-review", review: "stale changes")
@@ -2667,6 +2654,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-new",
                 item: .init(type: "enteredReviewMode", id: "review-item-1", review: "current changes")
@@ -2679,6 +2667,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
+                lifecycle: .completed,
                 threadID: "thread-1",
                 turnID: "turn-new",
                 item: .init(type: "exitedReviewMode", id: "review-item-1", review: "final review text")
@@ -2702,7 +2691,8 @@ struct AppServerClientTests {
             kind: .agentMessage,
             text: "final review text",
             groupID: "review-item-1",
-            replacesGroup: true
+            replacesGroup: true,
+            metadata: .init(sourceType: "exitedReviewMode")
         ))
         #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "final review text"))
     }
@@ -2724,6 +2714,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-new",
                 item: .init(type: "enteredReviewMode", id: "review-item-1", review: "current changes")
@@ -2743,6 +2734,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
+                lifecycle: .completed,
                 threadID: "thread-1",
                 turnID: "turn-new",
                 item: .init(type: "exitedReviewMode", id: "review-item-1", review: "final review text")
@@ -2766,7 +2758,8 @@ struct AppServerClientTests {
             kind: .agentMessage,
             text: "final review text",
             groupID: "review-item-1",
-            replacesGroup: true
+            replacesGroup: true,
+            metadata: .init(sourceType: "exitedReviewMode")
         ))
         #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "final review text"))
     }
@@ -2788,6 +2781,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-new",
                 item: .init(type: "enteredReviewMode", id: "review-item-1", review: "current changes")
@@ -2805,6 +2799,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
+                lifecycle: .completed,
                 threadID: "thread-1",
                 turnID: "turn-new",
                 item: .init(type: "exitedReviewMode", id: "review-item-1", review: "final review text")
@@ -2827,7 +2822,8 @@ struct AppServerClientTests {
             kind: .agentMessage,
             text: "final review text",
             groupID: "review-item-1",
-            replacesGroup: true
+            replacesGroup: true,
+            metadata: .init(sourceType: "exitedReviewMode")
         ))
         #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "final review text"))
     }
@@ -2841,6 +2837,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-ignored",
                 item: .init(type: "commandExecution", id: "cmd-ignored", command: "git diff")
@@ -2858,7 +2855,7 @@ struct AppServerClientTests {
         #expect(try await iterator.next() == nil)
     }
 
-    @Test func backendFailsWhenReviewThreadBecomesNotLoaded() async throws {
+    @Test func backendWaitsForTurnCompletedAfterReviewThreadBecomesNotLoaded() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
@@ -2876,9 +2873,40 @@ struct AppServerClientTests {
             method: "thread/status/changed",
             params: TestThreadStatusNotification(threadID: "thread-1", status: .init(type: "notLoaded"))
         )
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: TestItemNotification(
+                lifecycle: .completed,
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(type: "exitedReviewMode", id: "review-item-1", review: "final review text")
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-1", status: "completed"))
+        )
 
         var iterator = events.makeAsyncIterator()
-        #expect(try await iterator.next() == .failed("Review thread is no longer loaded."))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .diagnostic,
+            text: "Review thread is no longer loaded.",
+            groupID: "thread-1",
+            replacesGroup: false
+        ))
+        #expect(try await iterator.next() == .started(
+            turnID: "turn-1",
+            reviewThreadID: "thread-1",
+            model: nil
+        ))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .agentMessage,
+            text: "final review text",
+            groupID: "review-item-1",
+            replacesGroup: true,
+            metadata: .init(sourceType: "exitedReviewMode")
+        ))
+        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "final review text"))
         #expect(try await iterator.next() == nil)
     }
 
@@ -2925,7 +2953,7 @@ struct AppServerClientTests {
         #expect(try await iterator.next() == .logEntry(
             kind: .diagnostic,
             text: "Review thread entered a system error state.",
-            groupID: nil,
+            groupID: "thread-1",
             replacesGroup: false
         ))
         #expect(try await iterator.next() == .started(
@@ -2943,7 +2971,7 @@ struct AppServerClientTests {
         #expect(try await iterator.next() == nil)
     }
 
-    @Test func backendFailsWhenReviewThreadCloses() async throws {
+    @Test func backendWaitsForTurnCompletedAfterReviewThreadCloses() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
@@ -2961,9 +2989,40 @@ struct AppServerClientTests {
             method: "thread/closed",
             params: TestThreadClosedNotification(threadID: "thread-1")
         )
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: TestItemNotification(
+                lifecycle: .completed,
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(type: "exitedReviewMode", id: "review-item-1", review: "final review text")
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-1", status: "completed"))
+        )
 
         var iterator = events.makeAsyncIterator()
-        #expect(try await iterator.next() == .failed("Review thread closed."))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .diagnostic,
+            text: "Review thread closed.",
+            groupID: "thread-1",
+            replacesGroup: false
+        ))
+        #expect(try await iterator.next() == .started(
+            turnID: "turn-1",
+            reviewThreadID: "thread-1",
+            model: nil
+        ))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .agentMessage,
+            text: "final review text",
+            groupID: "review-item-1",
+            replacesGroup: true,
+            metadata: .init(sourceType: "exitedReviewMode")
+        ))
+        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "final review text"))
         #expect(try await iterator.next() == nil)
     }
 
@@ -3015,6 +3074,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "commandExecution", id: "cmd-1", command: "git diff"),
@@ -3081,6 +3141,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "commandExecution", id: "cmd-1", command: "git status"),
@@ -3177,6 +3238,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
+                lifecycle: .completed,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "agentMessage", id: "message-1", text: "Continuing.")
@@ -3221,6 +3283,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-new",
                 item: .init(type: "enteredReviewMode", id: "review-item-1", review: "current changes")
@@ -3254,6 +3317,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-old",
                 item: .init(type: "enteredReviewMode", id: "review-item-1", review: "current changes")
@@ -3266,6 +3330,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
+                lifecycle: .completed,
                 threadID: "thread-1",
                 turnID: "turn-old",
                 item: .init(type: "exitedReviewMode", id: "review-item-1", review: "final review text")
@@ -3288,7 +3353,8 @@ struct AppServerClientTests {
             kind: .agentMessage,
             text: "final review text",
             groupID: "review-item-1",
-            replacesGroup: true
+            replacesGroup: true,
+            metadata: .init(sourceType: "exitedReviewMode")
         ))
         #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "final review text"))
     }
@@ -3310,6 +3376,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-old",
                 item: .init(type: "enteredReviewMode", id: "review-item-1", review: "current changes")
@@ -3327,6 +3394,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
+                lifecycle: .completed,
                 threadID: "thread-1",
                 turnID: "turn-old",
                 item: .init(type: "exitedReviewMode", id: "review-item-1", review: "final review text")
@@ -3355,7 +3423,8 @@ struct AppServerClientTests {
             kind: .agentMessage,
             text: "final review text",
             groupID: "review-item-1",
-            replacesGroup: true
+            replacesGroup: true,
+            metadata: .init(sourceType: "exitedReviewMode")
         ))
         #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "final review text"))
     }
@@ -3378,6 +3447,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "review-turn",
                 item: .init(type: "enteredReviewMode", id: "review-item-1", review: "current changes")
@@ -3444,6 +3514,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "commandExecution", id: "cmd-1", command: "swift test")
@@ -3456,6 +3527,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
+                lifecycle: .completed,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "commandExecution", id: "cmd-1", aggregatedOutput: "Tests passed")
@@ -3464,6 +3536,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "commandExecution", id: "cmd-2", command: "pwd")
@@ -3472,6 +3545,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
+                lifecycle: .completed,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "commandExecution", id: "cmd-2", command: "pwd")
@@ -3480,6 +3554,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "mcpToolCall", id: "tool-1", status: "inProgress", server: "codex_review", tool: "review_read")
@@ -3497,6 +3572,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
+                lifecycle: .completed,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(
@@ -3532,6 +3608,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
+                lifecycle: .completed,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(
@@ -3567,6 +3644,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "contextCompaction", id: "compact-1")
@@ -3575,6 +3653,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
+                lifecycle: .completed,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "contextCompaction", id: "compact-1")
@@ -3603,6 +3682,7 @@ struct AppServerClientTests {
                 status: "inProgress",
                 itemID: "cmd-1",
                 command: "swift test",
+                startedAt: Date(timeIntervalSince1970: 0),
                 commandStatus: "inProgress"
             )
         ))
@@ -3623,6 +3703,9 @@ struct AppServerClientTests {
                 status: "completed",
                 itemID: "cmd-1",
                 command: "swift test",
+                startedAt: Date(timeIntervalSince1970: 0),
+                completedAt: Date(timeIntervalSince1970: 0),
+                durationMs: 0,
                 commandStatus: "completed"
             )
         ))
@@ -3636,6 +3719,9 @@ struct AppServerClientTests {
                 status: "completed",
                 itemID: "cmd-1",
                 command: "swift test",
+                startedAt: Date(timeIntervalSince1970: 0),
+                completedAt: Date(timeIntervalSince1970: 0),
+                durationMs: 0,
                 commandStatus: "completed"
             )
         ))
@@ -3649,6 +3735,7 @@ struct AppServerClientTests {
                 status: "inProgress",
                 itemID: "cmd-2",
                 command: "pwd",
+                startedAt: Date(timeIntervalSince1970: 0),
                 commandStatus: "inProgress"
             )
         ))
@@ -3662,6 +3749,9 @@ struct AppServerClientTests {
                 status: "completed",
                 itemID: "cmd-2",
                 command: "pwd",
+                startedAt: Date(timeIntervalSince1970: 0),
+                completedAt: Date(timeIntervalSince1970: 0),
+                durationMs: 0,
                 commandStatus: "completed"
             )
         ))
@@ -3770,14 +3860,24 @@ struct AppServerClientTests {
             text: "Automatically compacting context",
             groupID: "compact-1",
             replacesGroup: true,
-            metadata: .init(sourceType: "contextCompaction", status: "inProgress", itemID: "compact-1")
+            metadata: .init(
+                sourceType: "contextCompaction",
+                status: "inProgress",
+                itemID: "compact-1",
+                startedAt: Date(timeIntervalSince1970: 0)
+            )
         ))
         #expect(try await iterator.next() == .logEntry(
             kind: .contextCompaction,
             text: "Context automatically compacted",
             groupID: "compact-1",
             replacesGroup: true,
-            metadata: .init(sourceType: "contextCompaction", status: "completed", itemID: "compact-1")
+            metadata: .init(
+                sourceType: "contextCompaction",
+                status: "completed",
+                itemID: "compact-1",
+                completedAt: Date(timeIntervalSince1970: 0)
+            )
         ))
         #expect(try await iterator.next() == .failed(
             ReviewIngestionError.missingFinalReview.localizedDescription
@@ -3801,6 +3901,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
+                lifecycle: .completed,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "exitedReviewMode", id: "review-item-1", review: "final review text")
@@ -3817,7 +3918,8 @@ struct AppServerClientTests {
             kind: .agentMessage,
             text: "final review text",
             groupID: "review-item-1",
-            replacesGroup: true
+            replacesGroup: true,
+            metadata: .init(sourceType: "exitedReviewMode")
         ))
         #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "final review text"))
     }
@@ -3844,6 +3946,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "agentMessage", id: "non-final", text: "")
@@ -3852,6 +3955,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
+                lifecycle: .completed,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "agentMessage", id: "non-final", text: "Complete non-final message")
@@ -3860,6 +3964,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "agentMessage", id: "final", text: "Partial final")
@@ -3868,6 +3973,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
+                lifecycle: .completed,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "agentMessage", id: "final", text: "Complete final")
@@ -3876,6 +3982,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
+                lifecycle: .completed,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "exitedReviewMode", id: "review-result", review: "Canonical review")
@@ -3918,7 +4025,8 @@ struct AppServerClientTests {
             kind: .agentMessage,
             text: "Canonical review",
             groupID: "review-result",
-            replacesGroup: true
+            replacesGroup: true,
+            metadata: .init(sourceType: "exitedReviewMode")
         ))
         #expect(try await iterator.next() == .logEntry(
             kind: .agentMessage,
@@ -3944,6 +4052,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(
@@ -3961,6 +4070,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
+                lifecycle: .completed,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(
@@ -4006,7 +4116,7 @@ struct AppServerClientTests {
             replacesGroup: true,
             metadata: .init(
                 sourceType: "commandExecution",
-                status: "succeeded",
+                status: "completed",
                 itemID: "cmd-1",
                 command: "cat Sources/ThreadItem.ts",
                 exitCode: 0,
@@ -4014,7 +4124,7 @@ struct AppServerClientTests {
                 completedAt: completedAt,
                 durationMs: 3_000,
                 commandActions: [action],
-                commandStatus: "succeeded"
+                commandStatus: "completed"
             )
         ))
         #expect(try await iterator.next() == .logEntry(
@@ -4024,7 +4134,7 @@ struct AppServerClientTests {
             replacesGroup: true,
             metadata: .init(
                 sourceType: "commandExecution",
-                status: "succeeded",
+                status: "completed",
                 itemID: "cmd-1",
                 command: "cat Sources/ThreadItem.ts",
                 exitCode: 0,
@@ -4032,7 +4142,7 @@ struct AppServerClientTests {
                 completedAt: completedAt,
                 durationMs: 3_000,
                 commandActions: [action],
-                commandStatus: "succeeded"
+                commandStatus: "completed"
             )
         ))
     }
@@ -4048,6 +4158,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(
@@ -4061,6 +4172,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
+                lifecycle: .completed,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(
@@ -4141,6 +4253,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "contextCompaction", id: "compact-1"),
@@ -4150,6 +4263,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
+                lifecycle: .completed,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "contextCompaction", id: "compact-1"),
@@ -4197,6 +4311,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
+                lifecycle: .completed,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(
@@ -4258,6 +4373,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "commandExecution", id: "cmd-1", command: "swift test"),
@@ -4267,6 +4383,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
+                lifecycle: .completed,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "commandExecution", id: "cmd-1", command: "swift test"),
@@ -4317,6 +4434,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "commandExecution", id: "cmd-1", command: "swift test"),
@@ -4335,6 +4453,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
+                lifecycle: .completed,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "commandExecution", id: "cmd-1", command: "swift test", exitCode: 0),
@@ -4372,14 +4491,14 @@ struct AppServerClientTests {
             replacesGroup: true,
             metadata: .init(
                 sourceType: "commandExecution",
-                status: "succeeded",
+                status: "completed",
                 itemID: "cmd-1",
                 command: "swift test",
                 exitCode: 0,
                 startedAt: Date(timeIntervalSince1970: 2),
                 completedAt: Date(timeIntervalSince1970: 5.25),
                 durationMs: 3_250,
-                commandStatus: "succeeded"
+                commandStatus: "completed"
             )
         ))
         #expect(try await iterator.next() == .logEntry(
@@ -4389,14 +4508,14 @@ struct AppServerClientTests {
             replacesGroup: true,
             metadata: .init(
                 sourceType: "commandExecution",
-                status: "succeeded",
+                status: "completed",
                 itemID: "cmd-1",
                 command: "swift test",
                 exitCode: 0,
                 startedAt: Date(timeIntervalSince1970: 2),
                 completedAt: Date(timeIntervalSince1970: 5.25),
                 durationMs: 3_250,
-                commandStatus: "succeeded"
+                commandStatus: "completed"
             )
         ))
     }
@@ -4410,6 +4529,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "commandExecution", id: "cmd-1", command: "swift test"),
@@ -4466,6 +4586,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "enteredReviewMode", id: "review-item-1", review: "current changes")
@@ -4474,6 +4595,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "commandExecution", id: "cmd-1", command: "git diff"),
@@ -4492,6 +4614,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
+                lifecycle: .completed,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "exitedReviewMode", id: "review-item-1", review: "final review text")
@@ -4572,7 +4695,8 @@ struct AppServerClientTests {
             kind: .agentMessage,
             text: "final review text",
             groupID: "review-item-1",
-            replacesGroup: true
+            replacesGroup: true,
+            metadata: .init(sourceType: "exitedReviewMode")
         ))
         #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "final review text"))
         #expect(try await iterator.next() == nil)
@@ -4588,6 +4712,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "commandExecution", id: "cmd-1", command: "git diff"),
@@ -4615,6 +4740,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
+                lifecycle: .completed,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "exitedReviewMode", id: "review-item-1", review: "final review text")
@@ -4685,7 +4811,8 @@ struct AppServerClientTests {
             kind: .agentMessage,
             text: "final review text",
             groupID: "review-item-1",
-            replacesGroup: true
+            replacesGroup: true,
+            metadata: .init(sourceType: "exitedReviewMode")
         ))
         #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "final review text"))
         #expect(try await iterator.next() == nil)
@@ -4700,6 +4827,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "commandExecution", id: "cmd-1", command: "git diff")
@@ -4718,6 +4846,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
+                lifecycle: .completed,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "commandExecution", id: "cmd-1", command: "git diff")
@@ -4736,6 +4865,7 @@ struct AppServerClientTests {
                 status: "inProgress",
                 itemID: "cmd-1",
                 command: "git diff",
+                startedAt: Date(timeIntervalSince1970: 0),
                 commandStatus: "inProgress"
             )
         ))
@@ -4749,6 +4879,9 @@ struct AppServerClientTests {
                 status: "completed",
                 itemID: "cmd-1",
                 command: "git diff",
+                startedAt: Date(timeIntervalSince1970: 0),
+                completedAt: Date(timeIntervalSince1970: 0),
+                durationMs: 0,
                 commandStatus: "completed"
             )
         ))
@@ -4763,6 +4896,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "webSearch", id: "web-1", query: "TextKit 2 markdown")
@@ -4771,6 +4905,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
+                lifecycle: .completed,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "imageView", id: "image-1", status: "completed", path: "/tmp/screenshot.png")
@@ -4779,6 +4914,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "fileChange", id: "file-1", path: "Sources/App.swift")
@@ -4791,6 +4927,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
+                lifecycle: .completed,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "hookPrompt", id: "hook-1", status: "completed", prompt: "Allow command?")
@@ -4865,11 +5002,13 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
+                lifecycle: .completed,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(
                     type: "mcpToolCall",
                     id: "tool-error",
+                    status: "failed",
                     server: "codex_review",
                     tool: "review_read",
                     error: "denied"
@@ -4879,11 +5018,13 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
+                lifecycle: .completed,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(
                     type: "dynamicToolCall",
                     id: "tool-success-false",
+                    status: "failed",
                     namespace: "web",
                     tool: "search",
                     result: "no matches",
@@ -4896,7 +5037,7 @@ struct AppServerClientTests {
         #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
         #expect(try await iterator.next() == .logEntry(
             kind: .toolCall,
-            text: "codex_review.review_read completed. Error: denied",
+            text: "codex_review.review_read failed. Error: denied",
             groupID: "tool-error",
             replacesGroup: true,
             metadata: .init(
@@ -4910,7 +5051,7 @@ struct AppServerClientTests {
         ))
         #expect(try await iterator.next() == .logEntry(
             kind: .toolCall,
-            text: "Dynamic tool web.search completed. Result: no matches",
+            text: "Dynamic tool web.search failed. Result: no matches",
             groupID: "tool-success-false",
             replacesGroup: true,
             metadata: .init(
@@ -4941,6 +5082,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "enteredReviewMode", id: "review-item-1", review: "current changes")
@@ -4953,6 +5095,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
+                lifecycle: .completed,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "exitedReviewMode", id: "review-item-1", review: "final review text")
@@ -4988,6 +5131,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
+                lifecycle: .started,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "enteredReviewMode", id: "review-item-1", review: "current changes")
@@ -4996,6 +5140,7 @@ struct AppServerClientTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
+                lifecycle: .completed,
                 threadID: "thread-1",
                 turnID: "turn-1",
                 item: .init(type: "exitedReviewMode", id: "review-item-1", review: "final review text")
@@ -5019,7 +5164,8 @@ struct AppServerClientTests {
             kind: .agentMessage,
             text: "final review text",
             groupID: "review-item-1",
-            replacesGroup: true
+            replacesGroup: true,
+            metadata: .init(sourceType: "exitedReviewMode")
         ))
         #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "final review text"))
         #expect(try await iterator.next() == nil)
@@ -5300,8 +5446,8 @@ private struct TestDeltaNotification: Encodable, Sendable {
     var turnID: String
     var itemID: String
     var delta: String
-    var summaryIndex: Int? = nil
-    var contentIndex: Int? = nil
+    var summaryIndex: Int? = 0
+    var contentIndex: Int? = 0
 
     enum CodingKeys: String, CodingKey {
         case threadID = "threadId"
@@ -5347,6 +5493,11 @@ private struct TestPlanNotification: Encodable, Sendable {
 }
 
 private struct TestItemNotification: Encodable, Sendable {
+    enum Lifecycle: Equatable, Sendable {
+        case started
+        case completed
+    }
+
     var threadID: String
     var turnID: String
     var item: TestItem
@@ -5354,6 +5505,7 @@ private struct TestItemNotification: Encodable, Sendable {
     var completedAtMs: Int64?
 
     init(
+        lifecycle: Lifecycle,
         threadID: String,
         turnID: String,
         item: TestItem,
@@ -5362,9 +5514,17 @@ private struct TestItemNotification: Encodable, Sendable {
     ) {
         self.threadID = threadID
         self.turnID = turnID
+        var item = item
+        item.applySchemaDefaults(for: lifecycle)
         self.item = item
-        self.startedAtMs = startedAtMs
-        self.completedAtMs = completedAtMs
+        switch lifecycle {
+        case .started:
+            self.startedAtMs = startedAtMs ?? 0
+            self.completedAtMs = completedAtMs
+        case .completed:
+            self.startedAtMs = startedAtMs
+            self.completedAtMs = completedAtMs ?? 0
+        }
     }
 
     enum CodingKeys: String, CodingKey {
@@ -5401,6 +5561,9 @@ private struct TestItem: Encodable, Sendable {
     var prompt: String?
     var summary: [String]?
     var content: [String]?
+    var fragments: [String]?
+    var changes: [String]?
+    var arguments: String?
 
     init(
         type: String,
@@ -5430,7 +5593,7 @@ private struct TestItem: Encodable, Sendable {
     ) {
         self.type = type
         self.id = id
-        self.text = text
+        self.text = text ?? (type == "agentMessage" || type == "plan" ? "" : nil)
         self.review = review
         self.command = command
         self.cwd = cwd
@@ -5442,16 +5605,38 @@ private struct TestItem: Encodable, Sendable {
         self.commandActions = commandActions
         self.status = status
         self.namespace = namespace
-        self.server = server
-        self.tool = tool
-        self.query = query
-        self.path = path
-        self.result = result
+        self.server = server ?? (type == "mcpToolCall" ? "" : nil)
+        self.tool = tool ?? (["mcpToolCall", "dynamicToolCall"].contains(type) ? "" : nil)
+        self.query = query ?? (type == "webSearch" ? "" : nil)
+        self.path = path ?? (type == "imageView" ? "" : nil)
+        self.result = result ?? (type == "imageGeneration" ? "" : nil)
         self.error = error
         self.success = success
         self.prompt = prompt
         self.summary = summary
-        self.content = content
+        self.content = content ?? (type == "userMessage" ? [] : nil)
+        self.fragments = type == "hookPrompt" ? [] : nil
+        self.changes = type == "fileChange" ? [] : nil
+        self.arguments = ["mcpToolCall", "dynamicToolCall"].contains(type) ? "" : nil
+    }
+
+    mutating func applySchemaDefaults(for lifecycle: TestItemNotification.Lifecycle) {
+        let lifecycleStatus = lifecycle == .started ? "inProgress" : "completed"
+        switch type {
+        case "commandExecution":
+            command = command ?? ""
+            cwd = cwd ?? ""
+            commandActions = commandActions ?? []
+            source = source ?? "agent"
+            status = status ?? lifecycleStatus
+        case "fileChange", "mcpToolCall", "dynamicToolCall":
+            status = status ?? lifecycleStatus
+        case "reasoning":
+            summary = summary ?? []
+            content = content ?? []
+        default:
+            break
+        }
     }
 }
 
@@ -5523,12 +5708,14 @@ private struct TestMessageNotification: Encodable, Sendable {
     var turnID: String
     var itemID: String? = nil
     var message: String
+    var changes: [String] = []
 
     enum CodingKeys: String, CodingKey {
         case threadID = "threadId"
         case turnID = "turnId"
         case itemID = "itemId"
         case message
+        case changes
     }
 }
 
