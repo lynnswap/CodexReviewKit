@@ -49,7 +49,7 @@ PY
 
 IFS=$'\t' read -r expected_swift expected_xcode expected_sdk expected_arch expected_digester_sha expected_baseline_sha <<<"$metadata_values"
 
-current_swift="$(swift --version 2>&1 | paste -sd '|' -)"
+current_swift="$(swift --version 2>&1 | sed '/^Target:/d' | paste -sd '|' -)"
 current_xcode="$(xcodebuild -version | paste -sd '|' -)"
 current_sdk="$(xcrun --sdk macosx --show-sdk-version)"
 current_arch="$(uname -m)"
