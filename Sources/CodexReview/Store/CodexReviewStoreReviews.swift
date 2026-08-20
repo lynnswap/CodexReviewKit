@@ -701,12 +701,22 @@ extension CodexReviewStore {
         }
     }
 
-    package func closeActiveReviewSessions(reason: ReviewCancellation) async {
+    package func closeActiveReviewSessions(reason: ReviewCancellation) async throws {
         let jobIDs = orderedJobs
             .filter { $0.isTerminal == false }
             .map(\.id)
+        var firstError: (any Error)?
         for jobID in jobIDs {
-            _ = try? await cancelReview(jobID: jobID, cancellation: reason)
+            do {
+                _ = try await cancelReview(jobID: jobID, cancellation: reason)
+            } catch {
+                if firstError == nil {
+                    firstError = error
+                }
+            }
+        }
+        if let firstError {
+            throw firstError
         }
     }
 

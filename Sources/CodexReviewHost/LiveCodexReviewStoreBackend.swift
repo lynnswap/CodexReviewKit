@@ -599,7 +599,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         }
         let runtimeStore = appServerBackend == nil ? nil : attachedStore
         if let runtimeStore {
-            await runtimeStore.closeActiveReviewSessions(
+            try await runtimeStore.closeActiveReviewSessions(
                 reason: .system(message: "Account switched.")
             )
         }
@@ -626,7 +626,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             || auth.persistedActiveAccountKey == accountKey
         let runtimeStore = removedActiveAccount && appServerBackend != nil ? attachedStore : nil
         if let runtimeStore {
-            await runtimeStore.closeActiveReviewSessions(
+            try await runtimeStore.closeActiveReviewSessions(
                 reason: .system(message: "Account removed.")
             )
         }
@@ -695,7 +695,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         }
         let shouldRecycleRuntime = attachedStore != nil && appServerBackend != nil
         if shouldRecycleRuntime {
-            await attachedStore?.closeActiveReviewSessions(reason: .system(message: "Signed out."))
+            try await attachedStore?.closeActiveReviewSessions(reason: .system(message: "Signed out."))
         }
         if let appServerBackend {
             _ = try await appServerBackend.logout(.init(account.accountKey))

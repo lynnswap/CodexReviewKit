@@ -2791,7 +2791,7 @@ struct CodexReviewStoreCommandTests {
             )
             try await seedQueuedAttemptOwnership(in: store, for: running)
 
-            await store.closeActiveReviewSessions(reason: .system(message: "Account switched."))
+            try await store.closeActiveReviewSessions(reason: .system(message: "Account switched."))
 
             #expect(running.core.lifecycle.status == .cancelled)
             async let result = store.startReview(
@@ -2803,6 +2803,32 @@ struct CodexReviewStoreCommandTests {
 
             #expect(read.jobID == "job-1")
             #expect(read.core.lifecycle.status == .succeeded)
+        }
+    }
+
+    @Test func closeActiveReviewSessionsPropagatesBarrierFailure() async throws {
+        let backend = FakeCodexReviewBackend()
+        await backend.failInterrupts(message: "Interrupt rejected")
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+            try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
+
+            await #expect(throws: ReviewInterruptRequestFailure.self) {
+                try await store.closeActiveReviewSessions(
+                    reason: .system(message: "Account switched.")
+                )
+            }
+            #expect(try store.readReview(jobID: "job-1").cancellable)
+
+            await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
+            _ = try await result
         }
     }
 

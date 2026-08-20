@@ -374,11 +374,31 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         )
         do {
             try await client.close()
-        } catch let failure as ReviewRuntimeCloseFailure {
-            throw failure
         } catch {
-            throw ReviewRuntimeCloseFailure.connection(error.localizedDescription)
+            throw Self.reviewRuntimeCloseFailure(for: error)
         }
+    }
+
+    package static func reviewRuntimeCloseFailure(
+        for error: any Error
+    ) -> ReviewRuntimeCloseFailure {
+        if let failure = error as? ReviewRuntimeCloseFailure {
+            return failure
+        }
+        if let processError = error as? AppServerProcessTransportError,
+           case .processDidNotTerminate = processError {
+            return .process(processError.localizedDescription)
+        }
+        if let jsonRPCError = error as? JSONRPC.Error,
+           case .transportTerminated(let termination) = jsonRPCError {
+            switch termination {
+            case .processExit, .processFailure:
+                return .process(jsonRPCError.localizedDescription)
+            case .ownerClose:
+                break
+            }
+        }
+        return .connection(error.localizedDescription)
     }
 
     package func prepareReviewRecovery(

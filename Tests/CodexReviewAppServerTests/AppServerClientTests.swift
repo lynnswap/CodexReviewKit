@@ -544,6 +544,14 @@ struct AppServerClientTests {
         }
     }
 
+    @Test func backendClassifiesProcessCloseFailureAsProcessFailure() {
+        let error = AppServerProcessTransportError.processDidNotTerminate(42)
+
+        #expect(AppServerCodexReviewBackend.reviewRuntimeCloseFailure(for: error) == .process(
+            error.localizedDescription
+        ))
+    }
+
     @Test func spontaneousProcessExitReplaysTypedCauseToLateSubscriber() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appending(path: "codex-review-process-exit-\(UUID().uuidString)")

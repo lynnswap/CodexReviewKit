@@ -953,11 +953,11 @@ private final class AppServerSpawnedProcess: @unchecked Sendable {
     }
 }
 
-private enum AppServerProcessTransportError: LocalizedError {
+package enum AppServerProcessTransportError: LocalizedError, Equatable, Sendable {
     case executableNotFound(command: String, path: String?)
     case processDidNotTerminate(pid_t)
 
-    var errorDescription: String? {
+    package var errorDescription: String? {
         switch self {
         case .executableNotFound(let command, let path):
             let resolvedPath = path?.trimmingCharacters(in: .whitespacesAndNewlines)

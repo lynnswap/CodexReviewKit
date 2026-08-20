@@ -1070,6 +1070,75 @@ struct CodexReviewHostTests {
         #expect(await secondTransport.recordedRequests().map(\.method).contains("account/read"))
     }
 
+    @Test func liveStoreSwitchAccountPreservesCredentialsWhenReviewBarrierFails() async throws {
+        let homeURL = try temporaryHome()
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "first@example.com",
+            accounts: ["first@example.com", "second@example.com"]
+        )
+        try writeSavedAccountAuth(homeURL: homeURL, accountKey: "second@example.com")
+
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(
+            AppServerAPI.Account.Read.Response(account: .init(email: "first@example.com", planType: "pro")),
+            for: "account/read"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await transport.enqueue(
+            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
+                limitID: "codex",
+                primary: .init(usedPercent: 10, windowDurationMins: 300)
+            )),
+            for: "account/rateLimits/read"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Thread.Start.Response(threadID: "thread-first", model: "gpt-5"),
+            for: "thread/start"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Review.Start.Response(turnID: "turn-first"),
+            for: "review/start"
+        )
+        await transport.enqueueFailure(
+            .responseError(code: -32_000, message: "Interrupt rejected"),
+            for: "turn/interrupt"
+        )
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        async let reviewRead = store.startReview(
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        )
+        await waitUntil { store.jobs.first?.core.run.turnID == "turn-first" }
+
+        await #expect(throws: ReviewInterruptRequestFailure.self) {
+            try await store.switchAccount(CodexAccount(email: "second@example.com"))
+        }
+        #expect(store.auth.selectedAccount?.accountKey == "first@example.com")
+        #expect(try activeAccountKey(homeURL: homeURL) == "first@example.com")
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: HostTurnNotification(
+                threadID: "thread-first",
+                turnID: "turn-first",
+                status: "interrupted",
+                errorMessage: "Review ended."
+            )
+        )
+        _ = try await reviewRead
+    }
+
     @Test func liveStoreSignOutRestartsRuntimeAndCancelsRunningReviews() async throws {
         let homeURL = try temporaryHome()
         let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
