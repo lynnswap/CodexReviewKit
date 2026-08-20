@@ -12,7 +12,7 @@
     "TextTransitions"
   ],
   "publishedReleaseRevision": "82bddbcb1310a091eff742b36ab90781a4cbee5a",
-  "recoveryDesignRevision": "b47d83c117e11bdf244d4dba2a6ab07ef92b3ce6",
+  "recoveryDesignRevision": "18499aa795d6af7716a5d94c92d4c7210fc3b821",
   "swiftPMBuildSystem": "swiftbuild",
   "swiftAPIDigesterSHA256": "63f3ca45b1cc6ee81ccf2b6a11e9de3e7deeef85438915403ad5fa0bd5bccde8",
   "swiftVersion": "swift-driver version: 1.168.5 Apple Swift version 6.4 (swiftlang-6.4.0.27.1 clang-2100.3.27.1)|Target: arm64-apple-macosx27.0.0",
