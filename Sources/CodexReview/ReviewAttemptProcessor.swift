@@ -162,6 +162,7 @@ package actor ReviewStartAdmission {
     private var startFailed = false
     private var requestResult: Result<Void, ReviewInterruptRequestFailure>?
     private var forceCloseResult: Result<Void, ReviewRuntimeCloseFailure>?
+    private var graceDidExpire = false
     private var cancellationResult: Result<ReviewAttemptCancellationResolution, any Error>?
     private var terminalWaiters: [UUID: CheckedContinuation<ReviewAttemptBarrierTerminal?, Never>] = [:]
     private var activeRunWaiters: [CheckedContinuation<CodexReviewBackendModel.Review.Run?, Never>] = []
@@ -507,6 +508,7 @@ package actor ReviewStartAdmission {
         forceCloseTask = nil
         requestResult = nil
         forceCloseResult = nil
+        graceDidExpire = false
         cancellationResult = nil
     }
 
@@ -615,7 +617,7 @@ package actor ReviewStartAdmission {
                 self.terminal = terminal
             }
         case .graceExpired:
-            break
+            graceDidExpire = true
         case .forceClose(let result):
             forceCloseResult = result
         }
@@ -659,7 +661,10 @@ package actor ReviewStartAdmission {
         guard cancellationResult == nil else {
             return
         }
-        if case .failure(let closeFailure)? = forceCloseResult, terminal == nil {
+        if graceDidExpire, forceCloseResult == nil {
+            return
+        }
+        if case .failure(let closeFailure)? = forceCloseResult {
             resolveCancellation(.failure(closeFailure))
             return
         }
@@ -745,6 +750,9 @@ package actor ReviewStartAdmission {
     private func drainCancellationTasks() async {
         if terminal == nil {
             terminalBarrierTask?.cancel()
+        }
+        if case .failure? = forceCloseResult {
+            interruptRequestTask?.cancel()
         }
         graceTask?.cancel()
         await interruptRequestTask?.value
