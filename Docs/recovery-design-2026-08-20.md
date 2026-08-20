@@ -729,7 +729,10 @@ string `"api-key"`.
 
 - The saved-account registry allocates one canonical UUID-backed
   `SavedAccountID` before login dispatch and records it in a durable pending
-  authentication manifest. Crash replay of that operation reuses the ID.
+  authentication manifest. Its only valid serialized form is the lowercase
+  hyphenated UUID string; generation, raw-value construction, and Codable decode
+  all enforce that form. Crash replay of that operation reuses the ID, and the
+  public `CodexAccount` normalization therefore preserves exactly the same key.
 - Provider is `.chatGPT`, `.apiKey`, or legacy registry/runtime-only
   `.amazonBedrock`. `lastKnownEmail` is optional presentation metadata only. A
   nil read does not erase a previously known email; a new nil-email account
@@ -786,13 +789,40 @@ one validated, crash-safe conversion to RegistryV2 before auth/runtime
 admission; it never edits v0 in place or treats decode failure as no accounts.
 A durable migration journal assigns and preserves generated IDs across crash,
 maps `activeAccountKey` only when it identifies exactly one entry, copies each
-email-keyed mutable `auth.json` into one verified immutable revision, and then
-atomically publishes v2. Duplicate normalized keys, ambiguous active mapping,
+legacy mutable `auth.json` into one verified immutable revision, and then
+atomically publishes v2. The v0 source key is exactly the nonempty result of
+`accountKey.map(normalized).flatMap(nonempty)`, otherwise the nonempty normalized
+email; if both are empty the entry is invalid. Its directory uses Foundation's
+existing percent-encoding with
+`CharacterSet.alphanumerics.union("-._~")` (including Unicode alphanumerics) and
+special `.`/`..` encoding.
+API key and Bedrock therefore resolve their fixed legacy keys rather than email.
+No migration path is reconstructed from presentation text. Duplicate normalized keys, ambiguous active mapping,
 multiple API-key entries, missing/corrupt referenced artifacts, or unsafe paths
 produce a typed auth-migration failure while leaving v0 untouched and durable
 review history readable. Existing `.amazonBedrock` entries are preserved as a
 registry/runtime-selectable provider (no new login UI); they are not silently
 dropped or counted as the API-key slot.
+
+Before copying artifacts, `registry-v0.json` stores immutable original bytes and
+the owner durably creates `registry-migration-journal.json`:
+
+```text
+source registry SHA-256
+phase: prepared | artifactsCopied | v2Published
+entries[]: source index, normalized legacy key, encoded source directory,
+           assigned SavedAccountID, provider, source artifact relative path,
+           desired revision ID/hash/byte count
+resolved active SavedAccountID?
+complete desired RegistryV2 bytes/hash
+```
+
+All assigned IDs and revision IDs are fixed in `prepared`, so every crash replay
+reuses them. `artifactsCopied` is written only after all revision files/directories
+are durable; `v2Published` follows atomic `registry.json` replacement. Journal
+and immutable v0 backup are removed only after v2 reference validation. Existing
+numeric/current-main account schema 0/1 import is a separate Wave 7 adapter and
+never reuses this in-place RecoveryV1 migration locator.
 
 `.addAccount` closes and awaits the staging app-server, writes one immutable
 artifact revision, and atomically adds its metadata while leaving active ID,
@@ -820,6 +850,36 @@ A valid state never has both an old runtime lease and an activation journal:
 journal creation is admitted only after durable lease removal. Startup that
 finds both treats it as persistence inconsistency and fails auth/runtime
 admission rather than guessing an order.
+
+One Wave 3-owned `AuthenticationActivationOperation` actor linearizes the
+transferred LoginSession cancellation intent and journal commit:
+
+```text
+prepared(candidate, cancellationIntent)
+→ quiescingOldRuntime
+→ readyToCommit(latestRegistry)
+→ committingJournal
+→ committed
+→ startingReplacement
+→ terminal
+```
+
+It installs `committingJournal` synchronously before the first journal-write
+await. Cancellation accepted before that transition wins: no journal is
+created, the candidate remains an unreferenced cleanup item, and after old-
+runtime quiescence the owner starts exactly one replacement for the previous
+active account. If that restart fails, runtime state becomes visibly failed; it
+never activates the cancelled candidate. Cancellation after `committingJournal`
+loses to success/activation-pending and cannot rewrite the commit. LoginSession
+transfers its root/cancel ownership into this actor and cannot independently
+persist cancellation afterward.
+
+On startup, forward-completing an activation journal applies desired shared
+bytes/registry, keeps the journal, and passes the desired active ID into the one
+primary `PreparedRuntime` start. That runtime's authoritative account read is
+the validation; only a match publishes the runtime and removes the journal.
+Failure retains `.committedActivationPending` and the same ID/journal. It does
+not create a second isolated validation runtime or a second primary start.
 
 The shared auth file is a runtime working copy because app-server may refresh
 tokens. A durable runtime lease records active saved ID, runtime generation, and
@@ -923,6 +983,14 @@ same revision/journal rules apply: `.signIn` activates after durable adoption;
 deletes only after all writers complete. ReviewMonitor never reloads or decodes
 the API key itself.
 
+The secret-bearing API-key request uses `AppServerClient.sendOneShot`; it
+allocates one request ID, performs no app-server-overload retry, and calls the
+transport's `sendOneShot` once. The process transport atomically calls
+`writeGate.admitWrite()` immediately before stdin write. A false decision sends
+zero bytes; after true, state remains `.mayHaveBeenWritten` even if write/
+response fails. Generic `send` and its overload retry are never used for raw
+credentials.
+
 ### Startup and shutdown
 
 Startup order:
@@ -941,12 +1009,15 @@ Startup order:
 6. Before primary runtime/MCP admission, recover authentication in this order:
    migrate RegistryV0→V2; reject the invalid simultaneous old-lease+journal
    state; reconcile a leftover runtime lease; forward-complete an activation
-   journal; reconcile pending authentication/staging; then materialize the
-   registry active artifact into the shared Codex home.
-7. Only after history is loaded and auth recovery is authoritative, open MCP
-   admission and start the primary app-server runtime/live ingestion. Auth
-   recovery failure remains visible without replacing the already loaded
-   history UI.
+   journal; reconcile pending authentication/staging; materialize exactly one
+   desired active artifact into the shared home; then start and account-read-
+   validate exactly one un-published primary `PreparedRuntime` against that
+   artifact. Journal completion uses this same prepared runtime and never
+   recopies shared auth after it starts.
+7. Only after history and auth recovery are authoritative, atomically publish
+   that prepared runtime, open MCP admission, and begin live ingestion. There is
+   no second primary start. Auth recovery failure closes the un-published handle
+   and remains visible without replacing the already loaded history UI.
 
 Preview/XCTest compositions that intentionally keep the embedded runtime inert
 still execute steps 1–4 against a unique temporary database. Their synchronous
@@ -1377,7 +1448,10 @@ package struct CodexReviewAPIKey: Sendable,
 
 package struct SavedAccountID: RawRepresentable, Hashable, Codable, Sendable {
     package let rawValue: String
-    package init(rawValue: String)
+    package init()
+    package init?(rawValue: String)
+    package init(from decoder: any Decoder) throws
+    package func encode(to encoder: any Encoder) throws
 }
 
 package enum SavedAccountProvider: String, Codable, Sendable {
@@ -1415,6 +1489,24 @@ package actor AuthenticationWriteGate {
     // transitions to mayHaveBeenWritten; false proves cancellation prevented it.
     package func admitWrite() -> Bool
     package func snapshot() -> AuthenticationWriteAdmission
+}
+
+// CodexReviewAppServer. Secret-bearing requests use only this non-retrying path.
+package extension AppServerClient {
+    func sendOneShot<Request: AppServerAPI.Request>(
+        _ request: Request,
+        writeGate: AuthenticationWriteGate
+    ) async throws -> Request.Response
+}
+
+package enum JSONRPC {
+    package protocol Transport: Sendable {
+        // Existing send/notify/stream/close requirements remain unchanged.
+        func sendOneShot(
+            _ request: Request,
+            writeGate: AuthenticationWriteGate
+        ) async throws -> Data
+    }
 }
 
 package struct AuthenticationClosePolicy: Sendable {
@@ -1517,6 +1609,23 @@ package struct CodexExecutableResolver: Sendable {
         configuredPath: String?,
         environment: [String: String]
     ) throws -> URL
+}
+
+package extension AppServerProcessTransport {
+    package struct Configuration: Sendable {
+        package let executableURL: URL
+        package let arguments: [String]
+        package let environment: [String: String]
+        package let codexHomeURL: URL
+
+        // There is no optional executable or discovery fallback initializer.
+        package init(
+            executableURL: URL,
+            arguments: [String]? = nil,
+            environment: [String: String],
+            codexHomeURL: URL
+        ) throws
+    }
 }
 
 // ReviewUI
@@ -1945,6 +2054,9 @@ Within the recovery branch:
   post-reload update/read is required. API-key pre/post-write cancellation,
   response/connection loss, same-home reconciliation, and pending-admission
   debt are continuation-controlled without secret replay.
+- Secret-bearing API-key send has one request ID/stdin write, never retries an
+  overload response, and atomically resolves cancel-before-write versus
+  may-have-written at the transport boundary.
 - Immutable artifact, registry, pending manifest, activation journal, and
   runtime-lease crash points; hash/reference corruption fails closed; add-
   account keeps shared bytes/runtime unchanged; sign-in forward-completes one
@@ -1952,16 +2064,24 @@ Within the recovery branch:
 - RegistryV0 migration-journal crash points preserve order/non-secret metadata,
   generated IDs, and Amazon Bedrock; ambiguous active key, duplicate key,
   multiple API-key entries, and missing artifact fail without changing v0.
+  Blank/whitespace account keys fall back to normalized email, and Unicode/
+  `.`/`..` keys reproduce the exact existing Foundation directory encoding.
 - Provider-event and reconciliation grace expiry each trigger owned close/read,
   never fabricate success/cancellation, and leave finite typed debt. Staging
   process close failure retains and joins the real resource Task.
 - Journal-committed `.committedActivationPending` rejects reauthentication and
   forward-completes the same saved ID after restart. Simultaneous old runtime
   lease + activation journal is rejected as an impossible persisted state.
+- Cancellation before activation `committingJournal` creates no journal and
+  restarts the previous account runtime exactly once after quiescence;
+  cancellation after that linearization loses to activation-pending.
 - Executable precedence including installed ChatGPT.app/Codex.app bundle
   identity, classic/Safari bundle rejection, invalid explicit no-fallback,
   PATH order/empty components, injected home, symlink deduplication, total
   failure, and proof that transport performs no second discovery.
+- `AppServerProcessTransport.Configuration` cannot be constructed without the
+  validated URL; primary/staging configurations receive the identical URL and
+  session-source probing does not trigger discovery.
 - Runtime transition matrix coverage for explicit cancel, stop, same-account
   restart, account change/reconciliation, recoverable network loss,
   nonrecoverable protocol/process death, and application termination.
