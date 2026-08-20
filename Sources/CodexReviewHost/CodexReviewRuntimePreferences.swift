@@ -2,6 +2,10 @@ import Foundation
 
 public enum CodexReviewRuntime {}
 
+package extension CodexReviewRuntime {
+    static let recoveryRuntimePreferencesKey = "codexReview.recoveryV1.runtimePreferences"
+}
+
 public extension CodexReviewRuntime {
     struct Preferences: Codable, Equatable, Sendable {
         public static let defaults = Preferences()
@@ -205,7 +209,7 @@ public extension CodexReviewRuntime {
 
         public init(
             defaults: UserDefaults = .standard,
-            key: String = "codexReview.runtimePreferences"
+            key: String = "codexReview.recoveryV1.runtimePreferences"
         ) {
             self.defaults = defaults
             self.key = key

@@ -166,6 +166,180 @@ struct CodexReviewHostTests {
         ))
     }
 
+    @Test func recoveryEnvironmentResolvesVersionedRuntimePaths() throws {
+        let homeURL = try temporaryHome()
+        let environment = recoveryEnvironment(homeURL: homeURL)
+        let recoveryURL = recoveryDirectoryURL(homeURL: homeURL)
+
+        #expect(environment.recoveryDirectoryURL == recoveryURL)
+        #expect(environment.codexHomeURL == recoveryURL.appendingPathComponent("CodexHome", isDirectory: true))
+        #expect(
+            environment.loginStagingDirectoryURL
+                == recoveryURL.appendingPathComponent("LoginStaging", isDirectory: true)
+        )
+        #expect(
+            environment.savedAccountsDirectoryURL
+                == recoveryURL.appendingPathComponent("SavedAccounts", isDirectory: true)
+        )
+        #expect(environment.historyDatabaseURL == recoveryURL.appendingPathComponent("review-history.sqlite"))
+    }
+
+    @Test func runtimePreferencesDefaultStoreDoesNotReadOrOverwriteLegacyKey() throws {
+        let suiteName = "CodexReviewRuntime.RecoveryPreferencesTests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        let legacyKey = "codexReview.runtimePreferences"
+        let legacyPreferences = CodexReviewRuntime.Preferences(mcpPort: 50101)
+        let legacyData = try JSONEncoder().encode(legacyPreferences)
+        defaults.set(legacyData, forKey: legacyKey)
+        let store = CodexReviewRuntime.UserDefaultsPreferencesStore(defaults: defaults)
+
+        #expect(store.load() == .defaults)
+
+        let recoveryPreferences = CodexReviewRuntime.Preferences(mcpPort: 50102)
+        try store.save(recoveryPreferences)
+
+        #expect(defaults.data(forKey: legacyKey) == legacyData)
+        let recoveryData = try #require(
+            defaults.data(forKey: CodexReviewRuntime.recoveryRuntimePreferencesKey)
+        )
+        #expect(try JSONDecoder().decode(CodexReviewRuntime.Preferences.self, from: recoveryData) == recoveryPreferences)
+    }
+
+    @Test func liveStorePreparesIsolatedRecoveryEnvironmentBeforeAdmission() async throws {
+        let homeURL = try temporaryHome()
+        let environment = recoveryEnvironment(homeURL: homeURL)
+        let legacyCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let suiteName = "CodexReviewRuntime.RecoveryProbeTests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        let preferencesStore = CodexReviewRuntime.UserDefaultsPreferencesStore(defaults: defaults)
+        try preferencesStore.save(.init(mcpPort: 50103))
+        let runtimePreferences = preferencesStore.load()
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
+        try await transport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        var didCheckMCPBind = false
+        var capturedCodexHomeURL: URL?
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            recoveryEnvironment: environment,
+            runtimePreferences: runtimePreferences,
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            mcpHTTPServerFactory: { _, configuration in
+                #expect(configuration.port == 50103)
+                return NoopMCPHTTPServer(endpoint: configuration.url())
+            },
+            mcpHTTPServerBindChecker: { configuration in
+                #expect(configuration.port == 50103)
+                for directoryURL in recoveryOwnedDirectories(environment) {
+                    let permissions = try posixPermissions(at: directoryURL)
+                    #expect(permissions == 0o700)
+                }
+                didCheckMCPBind = true
+            },
+            transportFactory: { codexHomeURL in
+                #expect(didCheckMCPBind)
+                capturedCodexHomeURL = codexHomeURL
+                for directoryURL in recoveryOwnedDirectories(environment) {
+                    let permissions = try posixPermissions(at: directoryURL)
+                    #expect(permissions == 0o700)
+                }
+                return transport
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+
+        #expect(store.serverState == .running)
+        #expect(capturedCodexHomeURL == environment.codexHomeURL)
+        #expect(FileManager.default.fileExists(atPath: legacyCodexHomeURL.path) == false)
+        #expect(FileManager.default.fileExists(atPath: environment.historyDatabaseURL.path) == false)
+        await store.stop()
+    }
+
+    @Test func liveStoreRejectsLegacyCodexHomeBeforeAdmission() async throws {
+        let homeURL = try temporaryHome()
+        let environment = recoveryEnvironment(homeURL: homeURL)
+        let legacyCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try FileManager.default.createDirectory(at: legacyCodexHomeURL, withIntermediateDirectories: true)
+        let sentinelURL = legacyCodexHomeURL.appendingPathComponent("sentinel")
+        try Data("legacy".utf8).write(to: sentinelURL)
+        var didCheckMCPBind = false
+        var didCreateAppServer = false
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            recoveryEnvironment: environment,
+            runtimePreferences: .init(codexHomePath: legacyCodexHomeURL.path),
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            mcpHTTPServerBindChecker: { _ in
+                didCheckMCPBind = true
+            },
+            transportFactory: { _ in
+                didCreateAppServer = true
+                return FakeJSONRPCTransport()
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+
+        guard case .failed(let message) = store.serverState else {
+            Issue.record("Expected legacy Codex home admission to fail.")
+            return
+        }
+        #expect(message.contains("read-only migration input"))
+        #expect(didCheckMCPBind == false)
+        #expect(didCreateAppServer == false)
+        #expect(try Data(contentsOf: sentinelURL) == Data("legacy".utf8))
+        #expect(FileManager.default.fileExists(atPath: environment.recoveryDirectoryURL.path) == false)
+    }
+
+    @Test func liveStoreSurfacesDirectoryPreparationFailureBeforeAdmission() async throws {
+        let homeURL = try temporaryHome()
+        let recoveryURL = homeURL.appendingPathComponent("RecoveryV1")
+        try Data("not a directory".utf8).write(to: recoveryURL)
+        let environment = CodexReviewRecoveryEnvironment(
+            recoveryDirectoryURL: recoveryURL,
+            legacyCodexHomeURL: homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        )
+        var didCheckMCPBind = false
+        var didCreateAppServer = false
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            recoveryEnvironment: environment,
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            mcpHTTPServerBindChecker: { _ in
+                didCheckMCPBind = true
+            },
+            transportFactory: { _ in
+                didCreateAppServer = true
+                return FakeJSONRPCTransport()
+            }
+        )
+
+        await #expect(throws: CodexReviewRecoveryEnvironmentError.self) {
+            try await environment.prepare()
+        }
+        await store.start(forceRestartIfNeeded: true)
+
+        guard case .failed(let message) = store.serverState else {
+            Issue.record("Expected RecoveryV1 preparation to fail.")
+            return
+        }
+        #expect(message.contains("Unable to prepare the RecoveryV1 directory"))
+        #expect(didCheckMCPBind == false)
+        #expect(didCreateAppServer == false)
+    }
+
     @Test func liveStoreUsesRuntimePreferenceCodexHome() async throws {
         let homeURL = try temporaryHome()
         let configuredCodexHomeURL = homeURL.appendingPathComponent("custom-codex-home", isDirectory: true)
@@ -179,6 +353,7 @@ struct CodexReviewHostTests {
         try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
+            recoveryEnvironment: recoveryEnvironment(homeURL: homeURL),
             runtimePreferences: .init(codexHomePath: configuredCodexHomeURL.path),
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
             transportFactory: { codexHomeURL in
@@ -190,6 +365,10 @@ struct CodexReviewHostTests {
         await store.start(forceRestartIfNeeded: true)
 
         #expect(store.serverState == .running)
+        #expect(try posixPermissions(at: configuredCodexHomeURL) == 0o700)
+        #expect(FileManager.default.fileExists(
+            atPath: recoveryEnvironment(homeURL: homeURL).historyDatabaseURL.path
+        ) == false)
         await store.stop()
     }
 
@@ -206,6 +385,7 @@ struct CodexReviewHostTests {
         var capturedConfiguration: CodexReviewMCPHTTPServer.Configuration?
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
+            recoveryEnvironment: recoveryEnvironment(homeURL: homeURL),
             runtimePreferences: .init(
                 mcpPort: 54321,
                 mcpPath: "custom-mcp"
@@ -242,6 +422,7 @@ struct CodexReviewHostTests {
         var didLaunchAppServer = false
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
+            recoveryEnvironment: recoveryEnvironment(homeURL: homeURL),
             runtimePreferences: .init(mcpHost: "127.0.0.1", mcpPort: port),
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
             mcpHTTPServerFactory: { _, configuration in
@@ -285,6 +466,7 @@ struct CodexReviewHostTests {
         var didLaunchAppServer = false
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
+            recoveryEnvironment: recoveryEnvironment(homeURL: homeURL),
             runtimePreferences: .init(mcpHost: "127.0.0.1", mcpPort: port),
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
             mcpHTTPServerFactory: { _, configuration in
@@ -336,6 +518,7 @@ struct CodexReviewHostTests {
         )
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
+            recoveryEnvironment: recoveryEnvironment(homeURL: homeURL),
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
             transport: FakeJSONRPCTransport()
         )
@@ -378,6 +561,7 @@ struct CodexReviewHostTests {
         )
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
+            recoveryEnvironment: recoveryEnvironment(homeURL: homeURL),
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
             transport: FakeJSONRPCTransport()
         )
@@ -401,6 +585,7 @@ struct CodexReviewHostTests {
     }
 
     @Test func liveStoreSkipsRateLimitRefreshForUnsupportedActiveAccount() async throws {
+        let homeURL = try temporaryHome()
         let transport = FakeJSONRPCTransport()
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await transport.enqueue(
@@ -413,7 +598,8 @@ struct CodexReviewHostTests {
         )
         try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
         let store = CodexReviewStore.makeLiveStoreForTesting(
-            environment: ["HOME": try temporaryHome().path],
+            environment: ["HOME": homeURL.path],
+            recoveryEnvironment: recoveryEnvironment(homeURL: homeURL),
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
             transport: transport
         )
@@ -433,6 +619,7 @@ struct CodexReviewHostTests {
     }
 
     @Test func liveStoreCancelsLoginWhenAuthenticationSessionIsClosed() async throws {
+        let homeURL = try temporaryHome()
         let transport = FakeJSONRPCTransport()
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
@@ -452,7 +639,8 @@ struct CodexReviewHostTests {
         try await transport.enqueue(AppServerAPI.Account.Login.Cancel.Response(), for: "account/login/cancel")
         let sessions = FakeWebAuthenticationSessions()
         let store = CodexReviewStore.makeLiveStoreForTesting(
-            environment: ["HOME": try temporaryHome().path],
+            environment: ["HOME": homeURL.path],
+            recoveryEnvironment: recoveryEnvironment(homeURL: homeURL),
             nativeAuthenticationConfiguration: .init(
                 callbackScheme: "lynnpd.CodexReviewMonitor.auth",
                 browserSessionPolicy: .ephemeral,
@@ -486,6 +674,7 @@ struct CodexReviewHostTests {
     }
 
     @Test func liveStoreCancelsLoginWhenAuthenticationSessionSetupFails() async throws {
+        let homeURL = try temporaryHome()
         let transport = FakeJSONRPCTransport()
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
@@ -504,7 +693,8 @@ struct CodexReviewHostTests {
         )
         try await transport.enqueue(AppServerAPI.Account.Login.Cancel.Response(), for: "account/login/cancel")
         let store = CodexReviewStore.makeLiveStoreForTesting(
-            environment: ["HOME": try temporaryHome().path],
+            environment: ["HOME": homeURL.path],
+            recoveryEnvironment: recoveryEnvironment(homeURL: homeURL),
             nativeAuthenticationConfiguration: .init(
                 callbackScheme: "lynnpd.CodexReviewMonitor.auth",
                 browserSessionPolicy: .ephemeral,
@@ -533,7 +723,8 @@ struct CodexReviewHostTests {
 
     @Test func liveStoreAddsAccountWithoutSwitchingExistingActiveAccount() async throws {
         let homeURL = try temporaryHome()
-        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let environment = recoveryEnvironment(homeURL: homeURL)
+        let mainCodexHomeURL = environment.codexHomeURL
         let mainTransport = FakeJSONRPCTransport()
         try await mainTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await mainTransport.enqueue(
@@ -602,6 +793,7 @@ struct CodexReviewHostTests {
         let externalURLOpener = FakeExternalURLOpener()
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
+            recoveryEnvironment: environment,
             nativeAuthenticationConfiguration: .init(
                 callbackScheme: "lynnpd.CodexReviewMonitor.auth",
                 browserSessionPolicy: .ephemeral,
@@ -613,6 +805,9 @@ struct CodexReviewHostTests {
                 if codexHomeURL == mainCodexHomeURL {
                     return mainTransport
                 }
+                #expect(codexHomeURL.deletingLastPathComponent() == environment.loginStagingDirectoryURL)
+                let stagingPermissions = try posixPermissions(at: codexHomeURL)
+                #expect(stagingPermissions == 0o700)
                 let runtimeIndex = nonPrimaryRuntimeIndex
                 nonPrimaryRuntimeIndex += 1
                 try FileManager.default.createDirectory(at: codexHomeURL, withIntermediateDirectories: true)
@@ -685,6 +880,12 @@ struct CodexReviewHostTests {
         #expect(store.auth.selectedAccount?.accountKey == "active@example.com")
         #expect(store.auth.persistedAccounts.first { $0.accountKey == "new@example.com" }?.rateLimits.first?.usedPercent == 44)
         #expect(try savedAccountAuth(homeURL: homeURL, accountKey: "new@example.com") == Data("{\"tokens\":{\"id_token\":\"refreshed-token\"}}".utf8))
+        #expect(
+            try posixPermissions(
+                at: environment.savedAccountsDirectoryURL
+                    .appendingPathComponent("new%40example.com", isDirectory: true)
+            ) == 0o700
+        )
         #expect(await refreshTransport.recordedRequests().map(\.method) == [
             "initialize",
             "account/read",
@@ -694,7 +895,7 @@ struct CodexReviewHostTests {
 
     @Test func liveStoreDoesNotApplySavedAccountRateLimitsFromDifferentAuth() async throws {
         let homeURL = try temporaryHome()
-        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let mainCodexHomeURL = recoveryEnvironment(homeURL: homeURL).codexHomeURL
         try writeRegistry(
             homeURL: homeURL,
             activeAccountKey: "active@example.com",
@@ -737,6 +938,7 @@ struct CodexReviewHostTests {
 
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
+            recoveryEnvironment: recoveryEnvironment(homeURL: homeURL),
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
             transportFactory: { codexHomeURL in
                 if codexHomeURL == mainCodexHomeURL {
@@ -761,7 +963,7 @@ struct CodexReviewHostTests {
 
     @Test func liveStoreAddAccountActivatesNewLoginWhenPersistedAccountsHaveNoActiveAccount() async throws {
         let homeURL = try temporaryHome()
-        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let mainCodexHomeURL = recoveryEnvironment(homeURL: homeURL).codexHomeURL
         try writeRegistry(
             homeURL: homeURL,
             activeAccountKey: nil,
@@ -798,6 +1000,7 @@ struct CodexReviewHostTests {
         let sessions = FakeWebAuthenticationSessions()
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
+            recoveryEnvironment: recoveryEnvironment(homeURL: homeURL),
             nativeAuthenticationConfiguration: .init(
                 callbackScheme: "lynnpd.CodexReviewMonitor.auth",
                 browserSessionPolicy: .ephemeral,
@@ -843,7 +1046,7 @@ struct CodexReviewHostTests {
 
     @Test func liveStoreAddAccountSetupFailureRecordsAuthenticationFailure() async throws {
         let homeURL = try temporaryHome()
-        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let mainCodexHomeURL = recoveryEnvironment(homeURL: homeURL).codexHomeURL
         try writeRegistry(
             homeURL: homeURL,
             activeAccountKey: "active@example.com",
@@ -881,6 +1084,7 @@ struct CodexReviewHostTests {
         var isolatedCodexHomeURL: URL?
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
+            recoveryEnvironment: recoveryEnvironment(homeURL: homeURL),
             nativeAuthenticationConfiguration: .init(
                 callbackScheme: "lynnpd.CodexReviewMonitor.auth",
                 browserSessionPolicy: .ephemeral,
@@ -920,6 +1124,7 @@ struct CodexReviewHostTests {
     }
 
     @Test func liveStoreIgnoresNonCodexRateLimitNotifications() async throws {
+        let homeURL = try temporaryHome()
         let transport = FakeJSONRPCTransport()
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await transport.enqueue(
@@ -940,7 +1145,8 @@ struct CodexReviewHostTests {
             for: "account/rateLimits/read"
         )
         let store = CodexReviewStore.makeLiveStoreForTesting(
-            environment: ["HOME": try temporaryHome().path],
+            environment: ["HOME": homeURL.path],
+            recoveryEnvironment: recoveryEnvironment(homeURL: homeURL),
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
             transport: transport
         )
@@ -975,7 +1181,7 @@ struct CodexReviewHostTests {
 
     @Test func liveStoreSwitchingAccountRestartsRuntimeAndCancelsRunningReviews() async throws {
         let homeURL = try temporaryHome()
-        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let mainCodexHomeURL = recoveryEnvironment(homeURL: homeURL).codexHomeURL
         try writeRegistry(
             homeURL: homeURL,
             activeAccountKey: "first@example.com",
@@ -1027,6 +1233,7 @@ struct CodexReviewHostTests {
         var mainTransports = [firstTransport, secondTransport]
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
+            recoveryEnvironment: recoveryEnvironment(homeURL: homeURL),
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
             transportFactory: { codexHomeURL in
                 #expect(codexHomeURL == mainCodexHomeURL)
@@ -1055,7 +1262,7 @@ struct CodexReviewHostTests {
 
     @Test func liveStoreSignOutRestartsRuntimeAndCancelsRunningReviews() async throws {
         let homeURL = try temporaryHome()
-        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let mainCodexHomeURL = recoveryEnvironment(homeURL: homeURL).codexHomeURL
         try writeRegistry(
             homeURL: homeURL,
             activeAccountKey: "active@example.com",
@@ -1098,6 +1305,7 @@ struct CodexReviewHostTests {
         var mainTransports = [firstTransport, secondTransport]
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
+            recoveryEnvironment: recoveryEnvironment(homeURL: homeURL),
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
             transportFactory: { codexHomeURL in
                 #expect(codexHomeURL == mainCodexHomeURL)
@@ -1129,7 +1337,7 @@ struct CodexReviewHostTests {
 
     @Test func liveStoreSwitchAccountFailsWhenSavedAuthIsMissing() async throws {
         let homeURL = try temporaryHome()
-        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let mainCodexHomeURL = recoveryEnvironment(homeURL: homeURL).codexHomeURL
         let originalAuth = Data("{\"tokens\":{\"id_token\":\"first\"}}".utf8)
         try writeRegistry(
             homeURL: homeURL,
@@ -1159,6 +1367,7 @@ struct CodexReviewHostTests {
         )
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
+            recoveryEnvironment: recoveryEnvironment(homeURL: homeURL),
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
             transport: transport
         )
@@ -1175,7 +1384,7 @@ struct CodexReviewHostTests {
 
     @Test func liveStoreStopLetsHTTPServerCancelSessionsBeforeDroppingBackend() async throws {
         let homeURL = try temporaryHome()
-        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let mainCodexHomeURL = recoveryEnvironment(homeURL: homeURL).codexHomeURL
         let interruptGate = AsyncGate()
         let transport = FakeJSONRPCTransport()
         await transport.holdNext(method: "turn/interrupt", gate: interruptGate)
@@ -1191,6 +1400,7 @@ struct CodexReviewHostTests {
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
+            recoveryEnvironment: recoveryEnvironment(homeURL: homeURL),
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
             mcpHTTPServerFactory: { store, _ in
                 CodexReviewMCPHTTPServer(
@@ -1254,6 +1464,7 @@ struct CodexReviewHostTests {
         try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-1"), for: "review/start")
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
+            recoveryEnvironment: recoveryEnvironment(homeURL: homeURL),
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
             shutdownCleanupTimeout: .milliseconds(20),
             transport: transport
@@ -1307,6 +1518,7 @@ struct CodexReviewHostTests {
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
+            recoveryEnvironment: recoveryEnvironment(homeURL: homeURL),
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
             shutdownCleanupTimeout: .seconds(1),
             networkMonitor: networkMonitor,
@@ -1362,6 +1574,7 @@ struct CodexReviewHostTests {
         try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
+            recoveryEnvironment: recoveryEnvironment(homeURL: homeURL),
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
             transport: transport
         )
@@ -1386,7 +1599,7 @@ struct CodexReviewHostTests {
 
     @Test func liveStoreCleansIsolatedLoginRuntimeWhenMainNotificationStreamCloses() async throws {
         let homeURL = try temporaryHome()
-        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let mainCodexHomeURL = recoveryEnvironment(homeURL: homeURL).codexHomeURL
         try writeRegistry(
             homeURL: homeURL,
             activeAccountKey: "active@example.com",
@@ -1417,6 +1630,7 @@ struct CodexReviewHostTests {
         var isolatedCodexHomeURL: URL?
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
+            recoveryEnvironment: recoveryEnvironment(homeURL: homeURL),
             nativeAuthenticationConfiguration: .init(
                 callbackScheme: "lynnpd.CodexReviewMonitor.auth",
                 browserSessionPolicy: .ephemeral,
@@ -1464,11 +1678,15 @@ struct CodexReviewHostTests {
 
     @Test func liveStoreRemovingActiveAccountClearsSharedAuthAndRestartsSignedOutRuntime() async throws {
         let homeURL = try temporaryHome()
-        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let mainCodexHomeURL = recoveryEnvironment(homeURL: homeURL).codexHomeURL
         try writeRegistry(
             homeURL: homeURL,
             activeAccountKey: "active@example.com",
             accounts: ["active@example.com"]
+        )
+        try FileManager.default.createDirectory(
+            at: mainCodexHomeURL,
+            withIntermediateDirectories: true
         )
         try Data("{\"tokens\":{\"id_token\":\"test\"}}".utf8)
             .write(to: mainCodexHomeURL.appendingPathComponent("auth.json"))
@@ -1505,6 +1723,7 @@ struct CodexReviewHostTests {
         var mainTransports = [firstTransport, secondTransport]
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
+            recoveryEnvironment: recoveryEnvironment(homeURL: homeURL),
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
             transportFactory: { codexHomeURL in
                 #expect(codexHomeURL == mainCodexHomeURL)
@@ -1533,6 +1752,7 @@ struct CodexReviewHostTests {
         var isolatedCodexHomeURL: URL?
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
+            recoveryEnvironment: recoveryEnvironment(homeURL: homeURL),
             nativeAuthenticationConfiguration: .init(
                 callbackScheme: "lynnpd.CodexReviewMonitor.auth",
                 browserSessionPolicy: .ephemeral,
@@ -1555,7 +1775,7 @@ struct CodexReviewHostTests {
 
     @Test func liveStoreClosesIsolatedLoginRuntimeWhenLoginStartFails() async throws {
         let homeURL = try temporaryHome()
-        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let mainCodexHomeURL = recoveryEnvironment(homeURL: homeURL).codexHomeURL
         try writeRegistry(
             homeURL: homeURL,
             activeAccountKey: "active@example.com",
@@ -1581,6 +1801,7 @@ struct CodexReviewHostTests {
         var isolatedCodexHomeURL: URL?
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
+            recoveryEnvironment: recoveryEnvironment(homeURL: homeURL),
             nativeAuthenticationConfiguration: .init(
                 callbackScheme: "lynnpd.CodexReviewMonitor.auth",
                 browserSessionPolicy: .ephemeral,
@@ -1607,7 +1828,7 @@ struct CodexReviewHostTests {
 
     @Test func liveStoreClosesIsolatedLoginRuntimeWhenLoginCompletionFails() async throws {
         let homeURL = try temporaryHome()
-        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let mainCodexHomeURL = recoveryEnvironment(homeURL: homeURL).codexHomeURL
         try writeRegistry(
             homeURL: homeURL,
             activeAccountKey: "active@example.com",
@@ -1642,6 +1863,7 @@ struct CodexReviewHostTests {
         var isolatedCodexHomeURL: URL?
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
+            recoveryEnvironment: recoveryEnvironment(homeURL: homeURL),
             nativeAuthenticationConfiguration: .init(
                 callbackScheme: "lynnpd.CodexReviewMonitor.auth",
                 browserSessionPolicy: .ephemeral,
@@ -1677,12 +1899,14 @@ struct CodexReviewHostTests {
 
     @Test func liveStoreRemovesOnlyEncodedSavedAccountDirectory() async throws {
         let homeURL = try temporaryHome()
-        let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let environment = recoveryEnvironment(homeURL: homeURL)
         let account = CodexAccount(email: "../outside@example.com")
-        let rawFallbackDirectoryURL = codexHomeURL.appendingPathComponent("outside@example.com", isDirectory: true)
+        let rawFallbackDirectoryURL = environment.recoveryDirectoryURL
+            .appendingPathComponent("outside@example.com", isDirectory: true)
         try FileManager.default.createDirectory(at: rawFallbackDirectoryURL, withIntermediateDirectories: true)
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
+            recoveryEnvironment: environment,
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
             transport: FakeJSONRPCTransport()
         )
@@ -1695,10 +1919,10 @@ struct CodexReviewHostTests {
 
     @Test func liveStoreEncodesSpecialSavedAccountDirectoryNames() async throws {
         let homeURL = try temporaryHome()
-        let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
-        let accountsURL = codexHomeURL.appendingPathComponent("accounts", isDirectory: true)
+        let environment = recoveryEnvironment(homeURL: homeURL)
+        let accountsURL = environment.savedAccountsDirectoryURL
         try FileManager.default.createDirectory(at: accountsURL, withIntermediateDirectories: true)
-        let sentinelURL = codexHomeURL.appendingPathComponent("sentinel.txt")
+        let sentinelURL = environment.recoveryDirectoryURL.appendingPathComponent("sentinel.txt")
         try Data("keep".utf8).write(to: sentinelURL)
 
         let dotAccount = CodexAccount(email: ".")
@@ -1709,6 +1933,7 @@ struct CodexReviewHostTests {
         try FileManager.default.createDirectory(at: dotDotDirectoryURL, withIntermediateDirectories: true)
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
+            recoveryEnvironment: environment,
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
             transport: FakeJSONRPCTransport()
         )
@@ -1720,7 +1945,7 @@ struct CodexReviewHostTests {
         try await store.removeAccount(accountKey: dotAccount.accountKey)
         try await store.removeAccount(accountKey: dotDotAccount.accountKey)
 
-        #expect(FileManager.default.fileExists(atPath: codexHomeURL.path))
+        #expect(FileManager.default.fileExists(atPath: environment.recoveryDirectoryURL.path))
         #expect(FileManager.default.fileExists(atPath: accountsURL.path))
         #expect(FileManager.default.fileExists(atPath: sentinelURL.path))
         #expect(FileManager.default.fileExists(atPath: dotDirectoryURL.path) == false)
@@ -1869,6 +2094,40 @@ private func temporaryHome() throws -> URL {
     return url
 }
 
+private func recoveryEnvironment(homeURL: URL) -> CodexReviewRecoveryEnvironment {
+    CodexReviewRecoveryEnvironment(
+        recoveryDirectoryURL: recoveryDirectoryURL(homeURL: homeURL),
+        legacyCodexHomeURL: homeURL.appendingPathComponent(
+            ".codex_review",
+            isDirectory: true
+        )
+    )
+}
+
+private func recoveryDirectoryURL(homeURL: URL) -> URL {
+    homeURL
+        .appendingPathComponent("Library", isDirectory: true)
+        .appendingPathComponent("Application Support", isDirectory: true)
+        .appendingPathComponent("CodexReviewMonitor", isDirectory: true)
+        .appendingPathComponent("RecoveryV1", isDirectory: true)
+}
+
+private func recoveryOwnedDirectories(
+    _ environment: CodexReviewRecoveryEnvironment
+) -> [URL] {
+    [
+        environment.recoveryDirectoryURL,
+        environment.codexHomeURL,
+        environment.loginStagingDirectoryURL,
+        environment.savedAccountsDirectoryURL,
+    ]
+}
+
+private func posixPermissions(at url: URL) throws -> Int {
+    let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+    return try #require(attributes[.posixPermissions] as? NSNumber).intValue & 0o777
+}
+
 private func writeRegistry(
     homeURL: URL,
     activeAccountKey: String?,
@@ -1893,9 +2152,8 @@ private func writeRegistryRecords(
     activeAccountKey: String?,
     records: [[String: Any]]
 ) throws {
-    let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
-    let registryURL = codexHomeURL
-        .appendingPathComponent("accounts", isDirectory: true)
+    let registryURL = recoveryDirectoryURL(homeURL: homeURL)
+        .appendingPathComponent("SavedAccounts", isDirectory: true)
         .appendingPathComponent("registry.json")
     try FileManager.default.createDirectory(
         at: registryURL.deletingLastPathComponent(),
@@ -1909,9 +2167,8 @@ private func writeRegistryRecords(
 }
 
 private func writeSavedAccountAuth(homeURL: URL, accountKey: String) throws {
-    let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
-    let authURL = codexHomeURL
-        .appendingPathComponent("accounts", isDirectory: true)
+    let authURL = recoveryDirectoryURL(homeURL: homeURL)
+        .appendingPathComponent("SavedAccounts", isDirectory: true)
         .appendingPathComponent(pathComponent(forAccountKey: accountKey), isDirectory: true)
         .appendingPathComponent("auth.json")
     try FileManager.default.createDirectory(
@@ -1923,16 +2180,18 @@ private func writeSavedAccountAuth(homeURL: URL, accountKey: String) throws {
 
 private func savedAccountAuth(homeURL: URL, accountKey: String) throws -> Data {
     try Data(contentsOf: homeURL
-        .appendingPathComponent(".codex_review", isDirectory: true)
-        .appendingPathComponent("accounts", isDirectory: true)
+        .appendingPathComponent("Library", isDirectory: true)
+        .appendingPathComponent("Application Support", isDirectory: true)
+        .appendingPathComponent("CodexReviewMonitor", isDirectory: true)
+        .appendingPathComponent("RecoveryV1", isDirectory: true)
+        .appendingPathComponent("SavedAccounts", isDirectory: true)
         .appendingPathComponent(pathComponent(forAccountKey: accountKey), isDirectory: true)
         .appendingPathComponent("auth.json"))
 }
 
 private func activeAccountKey(homeURL: URL) throws -> String? {
-    let registryURL = homeURL
-        .appendingPathComponent(".codex_review", isDirectory: true)
-        .appendingPathComponent("accounts", isDirectory: true)
+    let registryURL = recoveryDirectoryURL(homeURL: homeURL)
+        .appendingPathComponent("SavedAccounts", isDirectory: true)
         .appendingPathComponent("registry.json")
     let data = try Data(contentsOf: registryURL)
     let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
