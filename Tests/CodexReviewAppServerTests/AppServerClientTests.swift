@@ -241,7 +241,6 @@ private actor DeferredNotificationCloseTransport: JSONRPC.Transport {
     private var notificationStreamWaiters: [CheckedContinuation<Void, Never>] = []
     private var notificationContinuation: AsyncThrowingStream<JSONRPC.Notification, Error>.Continuation?
     private var closeCallCount = 0
-    private var closeWaiters: [CheckedContinuation<Void, Never>] = []
     private var sendCallCount = 0
 
     init(closeFailure: ReviewRuntimeCloseFailure? = nil) {
@@ -301,26 +300,8 @@ private actor DeferredNotificationCloseTransport: JSONRPC.Transport {
 
     func close() async throws {
         closeCallCount += 1
-        let waiters = closeWaiters
-        closeWaiters.removeAll(keepingCapacity: false)
-        for waiter in waiters {
-            waiter.resume()
-        }
         if let closeFailure {
             throw closeFailure
-        }
-    }
-
-    func waitForCloseCall() async {
-        if closeCallCount > 0 {
-            return
-        }
-        await withCheckedContinuation { continuation in
-            if closeCallCount > 0 {
-                continuation.resume()
-            } else {
-                closeWaiters.append(continuation)
-            }
         }
     }
 
@@ -2061,7 +2042,8 @@ struct AppServerClientTests {
                 throw error
             }
         }
-        await transport.waitForCloseCall()
+        await backend.waitForRuntimeOwnerCloseCallersForTesting(2)
+        await backend.waitForClientCloseResultBeforeRouterWaitForTesting()
         #expect(await firstCompletion.hasCompleted() == false)
         #expect(await secondCompletion.hasCompleted() == false)
         #expect(await transport.recordedCloseCallCount() == 1)
@@ -2133,7 +2115,8 @@ struct AppServerClientTests {
                 throw error
             }
         }
-        await transport.waitForCloseCall()
+        await backend.waitForRuntimeOwnerCloseCallersForTesting(1)
+        await backend.waitForClientCloseResultBeforeRouterWaitForTesting()
         #expect(await completion.hasCompleted() == false)
         await transport.finishNotificationStream(throwing: JSONRPC.Error.closed)
 
@@ -2184,12 +2167,13 @@ struct AppServerClientTests {
                 throw error
             }
         }
-        await transport.waitForCloseCall()
+        await backend.waitForRuntimeOwnerCloseCallersForTesting(1)
         #expect(await operationCompletion.hasCompleted() == false)
         #expect(await closeCompletion.hasCompleted() == false)
 
         await notificationStreamGate.open()
         let attempt = await operation.value
+        await backend.waitForClientCloseResultBeforeRouterWaitForTesting()
         #expect(await operationCompletion.hasCompleted())
         #expect(await closeCompletion.hasCompleted() == false)
 
@@ -2252,12 +2236,13 @@ struct AppServerClientTests {
                 throw error
             }
         }
-        await transport.waitForCloseCall()
+        await backend.waitForRuntimeOwnerCloseCallersForTesting(1)
         #expect(await startCompletion.hasCompleted() == false)
         #expect(await closeCompletion.hasCompleted() == false)
 
         await threadStartBarrier.open()
         let attempt = try await start.value
+        await backend.waitForClientCloseResultBeforeRouterWaitForTesting()
         #expect(await startCompletion.hasCompleted())
         #expect(await closeCompletion.hasCompleted() == false)
 
@@ -2336,7 +2321,7 @@ struct AppServerClientTests {
                 throw error
             }
         }
-        await transport.waitForCloseCall()
+        await backend.waitForRuntimeOwnerCloseCallersForTesting(1)
         #expect(await recoveryCompletion.hasCompleted() == false)
         #expect(await closeCompletion.hasCompleted() == false)
 
@@ -2347,6 +2332,7 @@ struct AppServerClientTests {
 
         await reviewStartBarrier.open()
         let recoveredAttempt = try await recovery.value
+        await backend.waitForClientCloseResultBeforeRouterWaitForTesting()
         #expect(await recoveryCompletion.hasCompleted())
         #expect(await closeCompletion.hasCompleted() == false)
 
@@ -2404,12 +2390,13 @@ struct AppServerClientTests {
                 throw error
             }
         }
-        await transport.waitForCloseCall()
+        await backend.waitForRuntimeOwnerCloseCallersForTesting(1)
         #expect(await interruptCompletion.hasCompleted() == false)
         #expect(await closeCompletion.hasCompleted() == false)
 
         await interruptBarrier.open()
         try await interrupt.value
+        await backend.waitForClientCloseResultBeforeRouterWaitForTesting()
         #expect(await interruptCompletion.hasCompleted())
         #expect(await closeCompletion.hasCompleted() == false)
 

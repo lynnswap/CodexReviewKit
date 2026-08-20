@@ -97,6 +97,58 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         let sessions: [AppServerReviewEventSession]
     }
 
+    // Test-only acknowledgements emitted by the lifecycle owner. They do not
+    // participate in admission, close ordering, or result assembly.
+    private struct LifecycleTestingObservation {
+        var closeCallerCount = 0
+        var closeCallerWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+        var clientCloseResultRecorded = false
+        var clientCloseResultWaiters: [CheckedContinuation<Void, Never>] = []
+
+        mutating func recordCloseCaller() {
+            closeCallerCount += 1
+            let count = closeCallerCount
+            let ready = closeCallerWaiters.filter { count >= $0.0 }
+            closeCallerWaiters.removeAll { count >= $0.0 }
+            for (_, waiter) in ready {
+                waiter.resume()
+            }
+        }
+
+        mutating func appendCloseCallerWaiter(
+            count: Int,
+            continuation: CheckedContinuation<Void, Never>
+        ) {
+            if closeCallerCount >= count {
+                continuation.resume()
+            } else {
+                closeCallerWaiters.append((count, continuation))
+            }
+        }
+
+        mutating func recordClientCloseResult() {
+            guard clientCloseResultRecorded == false else {
+                return
+            }
+            clientCloseResultRecorded = true
+            let waiters = clientCloseResultWaiters
+            clientCloseResultWaiters.removeAll(keepingCapacity: false)
+            for waiter in waiters {
+                waiter.resume()
+            }
+        }
+
+        mutating func appendClientCloseResultWaiter(
+            _ continuation: CheckedContinuation<Void, Never>
+        ) {
+            if clientCloseResultRecorded {
+                continuation.resume()
+            } else {
+                clientCloseResultWaiters.append(continuation)
+            }
+        }
+    }
+
     private enum LifecycleState {
         case open
         case closing(Task<Void, any Error>)
@@ -120,6 +172,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     private var unmatchedReviewNotificationsByThreadID: [String: [AppServerRoutedReviewNotification]] = [:]
     private var completedReviewEventSessionMetricsByThreadID: [String: AppServerReviewEventSessionMetrics] = [:]
     private var lifecycleState: LifecycleState = .open
+    private var lifecycleTestingObservation = LifecycleTestingObservation()
     private var reviewOperationRegistry = ReviewOperationRegistry()
     private var notificationRouterStartTask: Task<Void, Never>?
     private var notificationRouterTask: Task<Void, Never>?
@@ -519,6 +572,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     // Only AppServerRuntimeOwnerLifecycleHandle can enter this transition. The
     // notification router never owns that handle, so close cannot await itself.
     private func closeFromRuntimeOwnerAndWait() async throws {
+        lifecycleTestingObservation.recordCloseCaller()
         let closeTask: Task<Void, any Error>
         switch lifecycleState {
         case .open:
@@ -537,6 +591,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                 await self.waitForAdmittedReviewOperations()
                 let clientCloseResult = await clientCloseTask.value
                 let ownedLifecycle = self.ownedLifecycleSnapshot()
+                self.lifecycleTestingObservation.recordClientCloseResult()
                 await ownedLifecycle.routerStartTask?.value
                 await ownedLifecycle.routerTask?.value
                 for session in ownedLifecycle.sessions {
@@ -765,6 +820,23 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
 
     package func notificationRouterIsRunningForTesting() -> Bool {
         notificationRouterTask != nil
+    }
+
+    // These continuation-backed observations acknowledge owner transitions;
+    // tests never infer them from Task scheduling or resource-side callbacks.
+    package func waitForRuntimeOwnerCloseCallersForTesting(_ count: Int) async {
+        await withCheckedContinuation { continuation in
+            lifecycleTestingObservation.appendCloseCallerWaiter(
+                count: count,
+                continuation: continuation
+            )
+        }
+    }
+
+    package func waitForClientCloseResultBeforeRouterWaitForTesting() async {
+        await withCheckedContinuation { continuation in
+            lifecycleTestingObservation.appendClientCloseResultWaiter(continuation)
+        }
     }
 
     package func detachReviewEventStreamForTesting(threadID: String, subscriptionID: Int) async {
