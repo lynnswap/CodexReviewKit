@@ -756,23 +756,20 @@ struct CodexReviewMCPHTTPServerTests {
     }
 
     @Test func streamableHTTPCancelsReviewByTransportScopedSelector() async throws {
-        let backend = FakeCodexReviewBackend()
+        let run = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "thread-1",
+            model: "gpt-5"
+        )
+        let backend = FakeCodexReviewBackend(nextRun: run)
         let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-running" })
         )
 
         try await withHTTPServer(store: store) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
-            let running = CodexReviewJob.makeForTesting(
-                id: "job-running",
-                sessionID: sessionID,
-                cwd: "/tmp/project",
-                targetSummary: "Uncommitted changes",
-                threadID: "thread-1",
-                turnID: "turn-1",
-                status: .running,
-                summary: "Running"
-            )
             let otherSession = CodexReviewJob.makeForTesting(
                 id: "job-other-session",
                 sessionID: "other-session",
@@ -786,26 +783,40 @@ struct CodexReviewMCPHTTPServerTests {
             store.loadForTesting(
                 serverState: .running,
                 workspaces: [.init(cwd: "/tmp/project")],
-                jobs: [running, otherSession]
+                jobs: [otherSession]
             )
-            let response = try await postJSONRPC(
-                endpoint: await server.url,
+            async let started = store.startReview(
                 sessionID: sessionID,
-                body: [
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "method": "tools/call",
-                    "params": [
-                        "name": "review_cancel",
-                        "arguments": [
-                            "sessionID": "other-session",
-                            "cwd": "/tmp/project",
-                            "statuses": ["running"],
-                            "reason": "Stop from MCP",
-                        ],
-                    ],
-                ]
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .zero
             )
+            await backend.waitForStartReview()
+            _ = try await started
+            let running = try #require(store.job(id: "job-running"))
+
+            let endpoint = await server.url
+            let requestBody = try makeJSONBody([
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": [
+                    "name": "review_cancel",
+                    "arguments": [
+                        "sessionID": "other-session",
+                        "cwd": "/tmp/project",
+                        "statuses": ["running"],
+                        "reason": "Stop from MCP",
+                    ],
+                ],
+            ])
+            async let responseData = postJSONRPCData(
+                endpoint: endpoint,
+                sessionID: sessionID,
+                bodyData: requestBody
+            )
+            await backend.waitForInterruptReview()
+            await backend.yield(.cancelled("Stop from MCP"), for: run)
+            let response = try decodeSSEJSON(from: try await responseData)
 
             #expect(response.value(for: ["result", "structuredContent", "jobId"]) as? String == "job-running")
             #expect(response.value(for: ["result", "structuredContent", "cancelled"]) as? Bool == true)
