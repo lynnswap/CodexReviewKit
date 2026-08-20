@@ -119,6 +119,37 @@ package struct ReviewAttemptCancellationResolution: Equatable, Sendable {
     }
 }
 
+package struct ReviewAttemptRecoveryBarrier: Equatable, Sendable {
+    package var run: CodexReviewBackendModel.Review.Run
+    package var terminal: ReviewAttemptBarrierTerminal
+    package var cancellation: ReviewCancellation
+    package var requestFailure: ReviewInterruptRequestFailure?
+
+    fileprivate init(
+        run: CodexReviewBackendModel.Review.Run,
+        terminal: ReviewAttemptBarrierTerminal,
+        cancellation: ReviewCancellation,
+        requestFailure: ReviewInterruptRequestFailure?
+    ) {
+        self.run = run
+        self.terminal = terminal
+        self.cancellation = cancellation
+        self.requestFailure = requestFailure
+    }
+}
+
+package struct ReviewRecoverySupersededByTerminal: LocalizedError, Equatable, Sendable {
+    package var terminal: ReviewAttemptBarrierTerminal
+
+    package init(terminal: ReviewAttemptBarrierTerminal) {
+        self.terminal = terminal
+    }
+
+    package var errorDescription: String? {
+        "Recovery was superseded by \(terminal.diagnosticDescription)."
+    }
+}
+
 /// Owns one review attempt from the first dispatch admission through terminal and cleanup.
 /// Store cancellation and backend request dispatch both consult this actor; there is no
 /// call-site startup-cancellation mirror.
@@ -159,6 +190,7 @@ package actor ReviewStartAdmission {
     private var forceCloseTask: Task<Void, Never>?
     private var cleanupTasksByAttemptID: [String: Task<Void, any Error>] = [:]
     private var terminal: ReviewAttemptBarrierTerminal?
+    private var registeredRun: CodexReviewBackendModel.Review.Run?
     private var startFailed = false
     private var requestResult: Result<Void, ReviewInterruptRequestFailure>?
     private var forceCloseResult: Result<Void, ReviewRuntimeCloseFailure>?
@@ -252,6 +284,7 @@ package actor ReviewStartAdmission {
         guard terminal == nil else {
             return
         }
+        registeredRun = run
         phase = .active(run)
         resumeActiveRunWaiters(returning: run)
     }
@@ -288,6 +321,65 @@ package actor ReviewStartAdmission {
     }
 
     package func cancel(
+        _ cancellation: ReviewCancellation,
+        interrupt: @escaping @Sendable (
+            CodexReviewBackendModel.Review.Run,
+            CodexReviewBackendModel.CancellationReason
+        ) async throws -> Void,
+        forceClose: @escaping @Sendable () async throws -> Void
+    ) async throws -> ReviewAttemptCancellationResolution {
+        let resolution = try await joinedCancellationResolution(
+            cancellation,
+            interrupt: interrupt,
+            forceClose: forceClose
+        )
+        if let requestFailure = resolution.requestFailure,
+           case .outcomeUnknown = requestFailure.outcome,
+           case .connection(let connectionFailure) = resolution.terminal {
+            throw ReviewInterruptRequestFailure(
+                outcome: requestFailure.outcome,
+                secondaryBarrierDiagnostic: connectionFailure.localizedDescription
+            )
+        }
+        return resolution
+    }
+
+    package func interruptForRecovery(
+        _ cancellation: ReviewCancellation,
+        interrupt: @escaping @Sendable (
+            CodexReviewBackendModel.Review.Run,
+            CodexReviewBackendModel.CancellationReason
+        ) async throws -> Void,
+        forceClose: @escaping @Sendable () async throws -> Void
+    ) async throws -> ReviewAttemptRecoveryBarrier {
+        guard let run = activeRun ?? canonicalRunForTerminal ?? registeredRun else {
+            throw ReviewAttemptContractFailure(
+                message: "Recovery interruption requires one canonical review run."
+            )
+        }
+        let resolution = try await joinedCancellationResolution(
+            cancellation,
+            interrupt: interrupt,
+            forceClose: forceClose
+        )
+        switch resolution.terminal {
+        case .canonical(_, let terminal) where terminal.kind != .interrupted:
+            throw ReviewRecoverySupersededByTerminal(terminal: resolution.terminal)
+        case .canonical, .connection:
+            return .init(
+                run: run,
+                terminal: resolution.terminal,
+                cancellation: cancellation,
+                requestFailure: resolution.requestFailure
+            )
+        case .localCancellation:
+            throw ReviewAttemptContractFailure(
+                message: "A dispatched review recovery cannot complete locally."
+            )
+        }
+    }
+
+    private func joinedCancellationResolution(
         _ cancellation: ReviewCancellation,
         interrupt: @escaping @Sendable (
             CodexReviewBackendModel.Review.Run,
@@ -390,6 +482,7 @@ package actor ReviewStartAdmission {
     ) {
         switch result {
         case .success(let attempt):
+            registeredRun = attempt.run
             if terminal == nil {
                 phase = .active(attempt.run)
                 resumeActiveRunWaiters(returning: attempt.run)
@@ -698,9 +791,12 @@ package actor ReviewStartAdmission {
                 }
                 switch terminal {
                 case .connection(let connectionFailure):
-                    resolveCancellation(.failure(ReviewInterruptRequestFailure(
-                        outcome: requestFailure.outcome,
-                        secondaryBarrierDiagnostic: connectionFailure.localizedDescription
+                    resolveCancellation(.success(.init(
+                        terminal: terminal,
+                        requestFailure: ReviewInterruptRequestFailure(
+                            outcome: requestFailure.outcome,
+                            secondaryBarrierDiagnostic: connectionFailure.localizedDescription
+                        )
                     )))
                 case .canonical, .localCancellation:
                     resolveCancellation(.success(.init(

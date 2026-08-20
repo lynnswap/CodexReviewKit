@@ -351,14 +351,11 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         await session.requestCancellation(message: reason.message)
         do {
             _ = try await sendTurnInterrupt(for: run)
-            await session.waitForTerminalBarrier()
         } catch {
             let failure = Self.interruptRequestFailure(for: error)
             if case .rejected = failure.outcome {
                 await session.clearCancellationRequest()
-                throw failure
             }
-            await session.waitForTerminalBarrier()
             throw failure
         }
     }
@@ -374,14 +371,13 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     package func beginReviewRecovery(
-        _ run: CodexReviewBackendModel.Review.Run,
-        reason _: CodexReviewBackendModel.CancellationReason
+        _ barrier: ReviewAttemptRecoveryBarrier
     ) async throws -> CodexReviewBackendModel.Review.RecoveryToken {
-        _ = try await client.initialize()
-        await ensureNotificationRouterStarted()
-        let interruption = try await sendTurnInterrupt(for: run) { retryInterruption in
-            await self.markInterruptionTurnAbandoned(retryInterruption, canonicalThreadID: run.threadID)
-        }
+        let run = barrier.run
+        let interruption = AppServerReviewInterruption(
+            threadID: appServerTurnThreadID(for: run),
+            turnID: run.turnID ?? ""
+        )
         markTurnAbandoned(run.turnID)
         markAttemptAbandoned(run, interruption: interruption)
         if let session = unregisterReviewEventSession(for: run) {
@@ -399,7 +395,8 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
 
     package func resumeReviewRecovery(
         _ token: CodexReviewBackendModel.Review.RecoveryToken,
-        request: CodexReviewBackendModel.Review.Start
+        request: CodexReviewBackendModel.Review.Start,
+        admission: ReviewStartAdmission
     ) async throws -> BackendReviewAttempt {
         _ = try await client.initialize()
         await ensureNotificationRouterStarted()
@@ -423,6 +420,14 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             isRunFinalized: false
         )
         registerReviewEventSession(session, for: provisionalRun)
+        await admission.recordPreparedThread(provisionalRun)
+        guard await admission.admitReviewStartDispatch(for: provisionalRun) else {
+            _ = unregisterReviewEventSession(for: provisionalRun)
+            await session.abandon()
+            throw ReviewStartCancelledBeforeDispatch(
+                cancellation: await admission.cancellationRequest() ?? .system()
+            )
+        }
 
         let review: AppServerAPI.Review.Start.Response
         reviewStartRequestsInFlight += 1
@@ -433,6 +438,9 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         } catch {
             reviewStartRequestsInFlight -= 1
             _ = unregisterReviewEventSession(for: provisionalRun)
+            if let terminal = Self.connectionTerminal(for: error) {
+                await admission.recordConnectionTerminal(terminal)
+            }
             await session.abandon()
             discardUnmatchedReviewNotificationsIfIdle()
             throw error
@@ -453,6 +461,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         )
         await session.bufferStartupNotifications(takeUnmatchedReviewNotifications(for: recoveredRun))
         await session.finalizeRun()
+        await admission.recordActiveRun(recoveredRun)
         reviewStartRequestsInFlight -= 1
         discardUnmatchedReviewNotificationsIfIdle()
 
@@ -506,36 +515,6 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         reviewThreadIDsForCleanupByThreadID.removeValue(forKey: run.threadID)
         if failureMessages.isEmpty == false {
             throw ReviewRuntimeCloseFailure.cleanup(failureMessages.joined(separator: "; "))
-        }
-    }
-
-    package func cleanupActiveReviewsForShutdown(reason: CodexReviewBackendModel.CancellationReason) async throws {
-        let runs = await activeReviewRunsForShutdown()
-        guard runs.isEmpty == false else {
-            return
-        }
-        for run in runs {
-            if Task.isCancelled {
-                return
-            }
-            try await interruptReview(run, reason: reason)
-            if Task.isCancelled {
-                return
-            }
-            try await cleanupReview(run)
-        }
-    }
-
-    package func interruptActiveReviewsForShutdown(reason: CodexReviewBackendModel.CancellationReason) async throws {
-        let runs = await activeReviewRunsForShutdown()
-        guard runs.isEmpty == false else {
-            return
-        }
-        for run in runs {
-            if Task.isCancelled {
-                return
-            }
-            try await interruptReview(run, reason: reason)
         }
     }
 
@@ -655,29 +634,11 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         noteReviewThreadIDForCleanup(interruption.threadID, canonicalThreadID: run.threadID)
     }
 
-    private func markInterruptionTurnAbandoned(
-        _ interruption: AppServerReviewInterruption,
-        canonicalThreadID: String
-    ) {
-        markTurnAbandoned(interruption.turnID)
-        noteReviewThreadIDForCleanup(interruption.threadID, canonicalThreadID: canonicalThreadID)
-    }
-
     private func markTurnAbandoned(_ turnID: String?) {
         guard let turnID = turnID?.nilIfEmpty else {
             return
         }
         abandonedTurnIDs.insert(turnID)
-    }
-
-    private func activeReviewRunsForShutdown() async -> [CodexReviewBackendModel.Review.Run] {
-        let sessions = Array(reviewEventSessionsByAttemptID.values)
-        var runsByAttemptID: [String: CodexReviewBackendModel.Review.Run] = [:]
-        for session in sessions {
-            let run = await session.currentRun()
-            runsByAttemptID[run.attemptID] = run
-        }
-        return Array(runsByAttemptID.values)
     }
 
     private func bufferUnmatchedReviewNotification(_ notification: AppServerRoutedReviewNotification) -> Bool {
@@ -708,11 +669,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     private func sendTurnInterrupt(
-        for run: CodexReviewBackendModel.Review.Run,
-        willInterruptActiveTurn: (@Sendable (AppServerReviewInterruption) async -> Void)? = nil
+        for run: CodexReviewBackendModel.Review.Run
     ) async throws -> AppServerReviewInterruption {
         if let control = controlsByThreadID[run.threadID],
-           let interruption = try await control.interrupt(willInterruptActiveTurn: willInterruptActiveTurn) {
+           let interruption = try await control.interrupt() {
             return interruption
         }
         let threadID = appServerTurnThreadID(for: run)
@@ -1096,8 +1056,6 @@ private actor AppServerReviewEventSession {
     private var isRunFinalized: Bool
     private var isDrainingStartupNotifications = false
     private var pendingStartupNotifications: [AppServerRoutedReviewNotification] = []
-    private var terminalBarrierResolved = false
-    private var terminalBarrierWaiters: [CheckedContinuation<Void, Never>] = []
     private var metrics = AppServerReviewEventSessionMetrics()
 
     init(
@@ -1165,19 +1123,6 @@ private actor AppServerReviewEventSession {
         cancellationRequestedMessage = nil
     }
 
-    func waitForTerminalBarrier() async {
-        if terminalBarrierResolved {
-            return
-        }
-        await withCheckedContinuation { continuation in
-            if terminalBarrierResolved {
-                continuation.resume()
-            } else {
-                terminalBarrierWaiters.append(continuation)
-            }
-        }
-    }
-
     func receive(_ notification: AppServerRoutedReviewNotification) async {
         metrics.routed += 1
         guard finished == false else {
@@ -1218,7 +1163,6 @@ private actor AppServerReviewEventSession {
         pendingStartupNotifications.removeAll(keepingCapacity: true)
         await emitPrecedingEvents(precedingEvents)
         if let error {
-            resolveTerminalBarrier()
             await mailbox.fail(error)
         } else {
             await mailbox.finish()
@@ -1506,22 +1450,9 @@ private actor AppServerReviewEventSession {
             event = .failed(message)
         }
         noteEmission(event)
-        resolveTerminalBarrier()
         await mailbox.append(event)
         recordReviewEvent(event, controlThreadID: controlThreadID)
         await mailbox.finish()
-    }
-
-    private func resolveTerminalBarrier() {
-        guard terminalBarrierResolved == false else {
-            return
-        }
-        terminalBarrierResolved = true
-        let waiters = terminalBarrierWaiters
-        terminalBarrierWaiters.removeAll(keepingCapacity: false)
-        for waiter in waiters {
-            waiter.resume()
-        }
     }
 
     private func shouldCloseActiveCommandsBeforeEvents(

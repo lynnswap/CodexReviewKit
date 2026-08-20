@@ -34,9 +34,79 @@ private extension AppServerCodexReviewBackend {
         try await beginReviewRecovery(attempt.run, reason: reason)
     }
 
+    func beginReviewRecovery(
+        _ run: CodexReviewBackendModel.Review.Run,
+        reason: CodexReviewBackendModel.CancellationReason
+    ) async throws -> CodexReviewBackendModel.Review.RecoveryToken {
+        let barrier = try await makeRecoveryBarrier(backend: self, for: run, reason: reason)
+        return try await beginReviewRecovery(barrier)
+    }
+
+    func resumeReviewRecovery(
+        _ token: CodexReviewBackendModel.Review.RecoveryToken,
+        request: CodexReviewBackendModel.Review.Start
+    ) async throws -> BackendReviewAttempt {
+        let admission = ReviewStartAdmission()
+        let task = await admission.start { admission in
+            try await self.resumeReviewRecovery(
+                token,
+                request: request,
+                admission: admission
+            )
+        }
+        return try await task.value
+    }
+
     func cleanupReview(_ attempt: BackendReviewAttempt) async throws {
         try await cleanupReview(attempt.run)
     }
+}
+
+private func makeRecoveryBarrier(
+    backend: AppServerCodexReviewBackend,
+    for run: CodexReviewBackendModel.Review.Run,
+    reason: CodexReviewBackendModel.CancellationReason
+) async throws -> ReviewAttemptRecoveryBarrier {
+    let admission = ReviewStartAdmission()
+    let startTask = await admission.start { admission in
+        #expect(await admission.admitThreadStartDispatch())
+        let provisionalRun = CodexReviewBackendModel.Review.Run(
+            attemptID: run.attemptID,
+            threadID: run.threadID,
+            reviewThreadID: run.threadID,
+            model: run.model
+        )
+        await admission.recordPreparedThread(provisionalRun)
+        #expect(await admission.admitReviewStartDispatch(for: provisionalRun))
+        await admission.recordActiveRun(run)
+        return .init(run: run)
+    }
+    _ = try await startTask.value
+
+    let requestOutcome = RecoveryRequestOutcomeProbe()
+    let cancellation = ReviewCancellation.system(message: reason.message)
+    let recovery = Task {
+        try await admission.interruptForRecovery(
+            cancellation,
+            interrupt: { run, reason in
+                do {
+                    try await backend.interruptReview(run, reason: reason)
+                    await requestOutcome.record(.success(()))
+                } catch {
+                    await requestOutcome.record(.failure(error))
+                    throw error
+                }
+            },
+            forceClose: {}
+        )
+    }
+    if case .success = await requestOutcome.wait() {
+        try await admission.recordCanonicalTerminal(
+            .interrupted(.requested(cancellation)),
+            for: run
+        )
+    }
+    return try await recovery.value
 }
 
 private extension BackendReviewAttempt {
@@ -2036,7 +2106,7 @@ struct AppServerClientTests {
         ))
     }
 
-    @Test func backendInterruptAckDoesNotSynthesizeTerminalBeforeEventStreamRegistration() async throws {
+    @Test func backendInterruptReturnsAfterAckWhileCanonicalTerminalRemainsPending() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
@@ -2050,8 +2120,13 @@ struct AppServerClientTests {
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         ))
 
-        async let cancellation: Void = backend.interruptReview(run, reason: .init(message: "Stop"))
+        let interruptReturned = AsyncGate()
+        let cancellation = Task {
+            try await backend.interruptReview(run, reason: .init(message: "Stop"))
+            await interruptReturned.open()
+        }
         await transport.waitForResponseDelivery(method: "turn/interrupt")
+        await interruptReturned.wait()
         #expect(await run.events.isFinished() == false)
         try await transport.emitServerNotification(
             method: "turn/completed",
@@ -2060,11 +2135,33 @@ struct AppServerClientTests {
                 turn: .init(id: "turn-1", status: "interrupted", error: .init(message: "Stop"))
             )
         )
-        try await cancellation
+        try await cancellation.value
 
         var iterator = await eventSequence(backend, run).makeAsyncIterator()
         #expect(try await iterator.next() == .cancelled("Stop"))
         #expect(try await iterator.next() == nil)
+    }
+
+    @Test func backendInterruptOutcomeUnknownReturnsBeforeSessionTerminal() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        await transport.enqueueFailure(JSONRPC.Error.closed, for: "turn/interrupt")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let run = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "thread-1",
+            model: "gpt-5"
+        )
+        let events = await eventSequence(backend, run)
+
+        do {
+            try await backend.interruptReview(run, reason: .init(message: "Stop"))
+            Issue.record("Expected outcome-unknown interrupt failure.")
+        } catch let failure as ReviewInterruptRequestFailure {
+            #expect(failure.outcome == .outcomeUnknown(message: JSONRPC.Error.closed.localizedDescription))
+        }
+        #expect(await events.mailbox.isFinished() == false)
     }
 
     @Test func backendRecoverReviewRollsBackAndRestartsSameThread() async throws {
@@ -2505,10 +2602,10 @@ struct AppServerClientTests {
         )
         let events = await eventSequence(backend, run)
 
-        await #expect(throws: JSONRPC.Error.responseError(
+        await #expect(throws: ReviewInterruptRequestFailure(outcome: .rejected(
             code: -32602,
             message: "expected active turn id turn-old but found turn-active"
-        )) {
+        ))) {
             try await backend.beginReviewRecovery(
                 run,
                 reason: .init(message: "Network unavailable; waiting to reconnect.")
@@ -2568,12 +2665,10 @@ struct AppServerClientTests {
         ))
     }
 
-    @Test func backendCanonicalTerminalWinsWhileRecoveryInterruptIsInFlight() async throws {
+    @Test func backendCanonicalTerminalIsDeliveredWhileInterruptAckIsInFlight() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
-        try await transport.enqueue(EmptyResponse(), for: "thread/rollback")
-        try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-2", reviewThreadID: "thread-1"), for: "review/start")
         let interruptGate = AsyncGate()
         await transport.holdNext(method: "turn/interrupt", gate: interruptGate)
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
@@ -2587,16 +2682,12 @@ struct AppServerClientTests {
         var initialIterator = initialEvents.makeAsyncIterator()
         defer { withExtendedLifetime(initialEvents) {} }
 
-        async let recovered = backend.resumeReviewRecovery(
-            run,
-            request: CodexReviewBackendModel.Review.Start(
-                jobID: "job-1",
-                sessionID: "session-1",
-                request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
-                model: "gpt-5"
-            ),
-            reason: .init(message: "Network unavailable; waiting to reconnect.")
-        )
+        let interruption = Task {
+            try await backend.interruptReview(
+                run,
+                reason: .init(message: "Network unavailable; waiting to reconnect.")
+            )
+        }
         let interruptRequested = await waitUntil {
             await transport.recordedRequests().contains { $0.method == "turn/interrupt" }
         }
@@ -2612,28 +2703,9 @@ struct AppServerClientTests {
         #expect(try await initialIterator.next() == .failed("Old turn failed"))
 
         await interruptGate.open()
-        let recoveredRun = try await recovered
-        #expect(recoveredRun.turnID == "turn-2")
-        let recoveredEvents = await eventSequence(backend, recoveredRun)
-        var iterator = recoveredEvents.makeAsyncIterator()
-
-        try await transport.emitServerNotification(
-            method: "turn/started",
-            params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-2"))
-        )
-        #expect(try await iterator.next() == .started(
-            turnID: "turn-2",
-            reviewThreadID: "thread-1",
-            model: nil
-        ))
-
-        try await transport.emitServerNotification(
-            method: "turn/completed",
-            params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-2", status: "completed"))
-        )
-        #expect(try await iterator.next() == .failed(
-            ReviewIngestionError.missingFinalReview.localizedDescription
-        ))
+        try await interruption.value
+        let methods = await transport.recordedRequests().map(\.method)
+        #expect(methods == ["initialize", "turn/interrupt"])
     }
 
     @Test func backendIgnoresStaleInterruptedTurnNotificationsWhileRollbackIsInFlight() async throws {
@@ -3228,7 +3300,7 @@ struct AppServerClientTests {
         #expect(try await iterator.next() == nil)
     }
 
-    @Test func backendInterruptAckWaitsForCanonicalTerminalToFinishEventStream() async throws {
+    @Test func backendInterruptAckReturnsBeforeCanonicalTerminalWithActiveStream() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
@@ -3250,8 +3322,13 @@ struct AppServerClientTests {
 
         #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
 
-        async let cancellation: Void = backend.interruptReview(run, reason: .init(message: "Stop"))
+        let interruptReturned = AsyncGate()
+        let cancellation = Task {
+            try await backend.interruptReview(run, reason: .init(message: "Stop"))
+            await interruptReturned.open()
+        }
         await transport.waitForResponseDelivery(method: "turn/interrupt")
+        await interruptReturned.wait()
         #expect(await run.events.isFinished() == false)
         try await transport.emitServerNotification(
             method: "turn/completed",
@@ -3260,7 +3337,7 @@ struct AppServerClientTests {
                 turn: .init(id: "turn-1", status: "interrupted", error: .init(message: "Stop"))
             )
         )
-        try await cancellation
+        try await cancellation.value
 
         #expect(try await iterator.next() == .cancelled("Stop"))
         #expect(try await iterator.next() == nil)
@@ -6000,5 +6077,35 @@ private actor CallCounter {
 
     func value() -> Int {
         count
+    }
+}
+
+private actor RecoveryRequestOutcomeProbe {
+    private var outcome: Result<Void, any Error>?
+    private var waiters: [CheckedContinuation<Result<Void, any Error>, Never>] = []
+
+    func record(_ outcome: Result<Void, any Error>) {
+        guard self.outcome == nil else {
+            return
+        }
+        self.outcome = outcome
+        let waiters = waiters
+        self.waiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume(returning: outcome)
+        }
+    }
+
+    func wait() async -> Result<Void, any Error> {
+        if let outcome {
+            return outcome
+        }
+        return await withCheckedContinuation { continuation in
+            if let outcome {
+                continuation.resume(returning: outcome)
+            } else {
+                waiters.append(continuation)
+            }
+        }
     }
 }

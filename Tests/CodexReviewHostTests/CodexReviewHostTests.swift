@@ -1394,10 +1394,23 @@ struct CodexReviewHostTests {
             )
         }
         try #require(await waitUntil(timeout: .seconds(2)) { store.jobs.first?.core.run.turnID == "turn-1" })
+        let jobID = try #require(store.jobs.first?.id)
 
         networkMonitor.yield(.init(status: .unsatisfied))
         try #require(await waitUntil(timeout: .seconds(2)) {
             await transport.recordedRequests().map(\.method).contains("turn/interrupt")
+        })
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: HostTurnNotification(
+                threadID: "review-thread-1",
+                turnID: "turn-1",
+                status: "interrupted",
+                errorMessage: "Network unavailable; waiting to reconnect."
+            )
+        )
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            store.reviewRecoveryWaitingJobIDs.contains(jobID)
         })
 
         let stopFinished = CompletionFlag()

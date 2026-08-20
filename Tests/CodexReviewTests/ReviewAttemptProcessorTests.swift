@@ -187,6 +187,97 @@ struct ReviewAttemptProcessorTests {
         #expect(await admission.currentPhase() == .terminal(.connection(connection)))
     }
 
+    @Test func recoveryAckWaitsForInterruptedTerminalAndReturnsBarrier() async throws {
+        let (admission, run) = try await makeActiveAdmission()
+        let requestAccepted = InvocationProbe()
+        let recoveryCancellation = ReviewCancellation.system(message: "Recover")
+
+        let recovery = Task {
+            try await admission.interruptForRecovery(
+                recoveryCancellation,
+                interrupt: { _, _ in await requestAccepted.record() },
+                forceClose: {}
+            )
+        }
+        await requestAccepted.waitForInvocation()
+        #expect(await admission.currentPhase() == .interrupting(run))
+        try await admission.recordCanonicalTerminal(
+            .interrupted(.requested(recoveryCancellation)),
+            for: run
+        )
+
+        let barrier = try await recovery.value
+        #expect(barrier.run == run)
+        #expect(barrier.terminal == .canonical(
+            run: run,
+            terminal: .interrupted(.requested(recoveryCancellation))
+        ))
+    }
+
+    @Test func recoveryOutcomeUnknownConnectionReturnsBarrierDiagnostic() async throws {
+        let (admission, run) = try await makeActiveAdmission()
+        let requestFailed = InvocationProbe()
+        let requestFailure = ReviewInterruptRequestFailure(
+            outcome: .outcomeUnknown(message: "Response lost")
+        )
+        let connection = ReviewRuntimeCloseFailure.connection("Connection ended")
+
+        let recovery = Task {
+            try await admission.interruptForRecovery(
+                .system(message: "Recover"),
+                interrupt: { _, _ in
+                    await requestFailed.record()
+                    throw requestFailure
+                },
+                forceClose: {}
+            )
+        }
+        await requestFailed.waitForInvocation()
+        await admission.recordConnectionTerminal(connection)
+
+        let barrier = try await recovery.value
+        #expect(barrier.run == run)
+        #expect(barrier.terminal == .connection(connection))
+        #expect(barrier.requestFailure?.outcome == requestFailure.outcome)
+        #expect(barrier.requestFailure?.secondaryBarrierDiagnostic == connection.localizedDescription)
+    }
+
+    @Test func recoveryNaturalTerminalSupersedesReplacement() async throws {
+        let (admission, run) = try await makeActiveAdmission()
+        let requestAccepted = InvocationProbe()
+        let recovery = Task {
+            try await admission.interruptForRecovery(
+                .system(message: "Recover"),
+                interrupt: { _, _ in await requestAccepted.record() },
+                forceClose: {}
+            )
+        }
+        await requestAccepted.waitForInvocation()
+        try await admission.recordCanonicalTerminal(.completed, for: run)
+
+        await #expect(throws: ReviewRecoverySupersededByTerminal(
+            terminal: .canonical(run: run, terminal: .completed)
+        )) {
+            try await recovery.value
+        }
+    }
+
+    @Test func recoveryRejectionReturnsAttemptToActive() async throws {
+        let (admission, run) = try await makeActiveAdmission()
+        let rejection = ReviewInterruptRequestFailure(
+            outcome: .rejected(code: -32_000, message: "Not active")
+        )
+
+        await #expect(throws: rejection) {
+            try await admission.interruptForRecovery(
+                .system(message: "Recover"),
+                interrupt: { _, _ in throw rejection },
+                forceClose: {}
+            )
+        }
+        #expect(await admission.currentPhase() == .active(run))
+    }
+
     @Test func graceExpiryForceClosesOnceAndAwaitsConnectionAndRequestCompletion() async throws {
         let graceGate = AsyncGate()
         let (admission, _) = try await makeActiveAdmission(

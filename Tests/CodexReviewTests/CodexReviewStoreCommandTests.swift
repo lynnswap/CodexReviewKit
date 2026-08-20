@@ -900,14 +900,176 @@ struct CodexReviewStoreCommandTests {
             )
 
             networkMonitor.yield(.init(status: .unsatisfied))
-            try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
+            try await completeNetworkRecoveryBarrier(backend: backend, store: store)
 
             let running = try store.readReview(jobID: "job-1")
             #expect(running.core.lifecycle.status == .running)
             #expect(running.core.output.summary == "Network unavailable; waiting to reconnect.")
             _ = try await store.cancelReview(jobID: "job-1", cancellation: .mcpClient(message: "Stop"))
-            await backend.yield(.cancelled("Stop"))
             _ = try await result
+        }
+    }
+
+    @Test func networkRecoveryAckDoesNotTokenizeBeforeCanonicalTerminal() async throws {
+        let backend = FakeCodexReviewBackend()
+        let networkMonitor = ManualCodexReviewNetworkMonitor()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" }),
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: .init(sleep: { _ in })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+            )
+            try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running) != nil)
+            let run = try #require(store.activeRuns["job-1"])
+            let reason = CodexReviewBackendModel.CancellationReason(
+                message: "Network unavailable; waiting to reconnect."
+            )
+
+            networkMonitor.yield(.init(status: .unsatisfied))
+            try await backend.waitForInterruptReview(run: run, reason: reason, timeout: .seconds(2))
+
+            let commandsBeforeTerminal = await backend.recordedCommands()
+            #expect(commandsBeforeTerminal.contains { if case .beginReviewRecovery = $0 { true } else { false } } == false)
+            #expect(store.reviewRecoveryWaitingJobIDs.contains("job-1") == false)
+
+            await backend.yield(.cancelled(reason.message), for: run)
+            try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
+            let barrierPublished = await waitUntil(timeout: .seconds(2)) {
+                store.reviewRecoveryWaitingJobIDs.contains("job-1")
+            }
+            #expect(barrierPublished)
+            let waiting = try store.readReview(jobID: "job-1")
+            #expect(waiting.core.lifecycle.status == .running)
+            #expect(waiting.core.lifecycle.terminal == nil)
+
+            _ = try await store.cancelReview(
+                jobID: "job-1",
+                cancellation: .mcpClient(message: "Stop")
+            )
+            _ = try await result
+        }
+    }
+
+    @Test func networkRecoveryTerminalBeforeAckDrainsRequestBeforeTokenization() async throws {
+        let backend = FakeCodexReviewBackend()
+        let interruptGate = AsyncGate()
+        await backend.holdInterruptReview(with: interruptGate)
+        let networkMonitor = ManualCodexReviewNetworkMonitor()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" }),
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: .init(sleep: { _ in })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+            )
+            try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running) != nil)
+            let run = try #require(store.activeRuns["job-1"])
+            let reason = CodexReviewBackendModel.CancellationReason(
+                message: "Network unavailable; waiting to reconnect."
+            )
+
+            networkMonitor.yield(.init(status: .unsatisfied))
+            try await backend.waitForInterruptReview(run: run, reason: reason, timeout: .seconds(2))
+            await backend.yield(.cancelled(reason.message), for: run)
+
+            let commandsBeforeAck = await backend.recordedCommands()
+            #expect(commandsBeforeAck.contains { if case .beginReviewRecovery = $0 { true } else { false } } == false)
+            await interruptGate.open()
+            try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
+            let barrierPublished = await waitUntil(timeout: .seconds(2)) {
+                store.reviewRecoveryWaitingJobIDs.contains("job-1")
+            }
+            #expect(barrierPublished)
+
+            _ = try await store.cancelReview(
+                jobID: "job-1",
+                cancellation: .mcpClient(message: "Stop")
+            )
+            _ = try await result
+        }
+    }
+
+    @Test func networkRecoveryRejectionMintsNoTokenAndFailsProduct() async throws {
+        let backend = FakeCodexReviewBackend()
+        await backend.failInterrupts(message: "Recovery rejected")
+        let networkMonitor = ManualCodexReviewNetworkMonitor()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" }),
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: .init(sleep: { _ in })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+            )
+            try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running) != nil)
+            let run = try #require(store.activeRuns["job-1"])
+            let reason = CodexReviewBackendModel.CancellationReason(
+                message: "Network unavailable; waiting to reconnect."
+            )
+
+            networkMonitor.yield(.init(status: .unsatisfied))
+            try await backend.waitForInterruptReview(run: run, reason: reason, timeout: .seconds(2))
+            let read = try await result
+
+            #expect(read.core.lifecycle.status == .failed)
+            #expect(read.core.lifecycle.errorMessage == "Recovery rejected")
+            let commands = await backend.recordedCommands()
+            #expect(commands.contains { if case .beginReviewRecovery = $0 { true } else { false } } == false)
+            #expect(commands.contains { if case .resumeReviewRecovery = $0 { true } else { false } } == false)
+        }
+    }
+
+    @Test func naturalCompletionDuringRecoveryInterruptSuppressesReplacement() async throws {
+        let backend = FakeCodexReviewBackend()
+        let interruptGate = AsyncGate()
+        await backend.holdInterruptReview(with: interruptGate)
+        let networkMonitor = ManualCodexReviewNetworkMonitor()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" }),
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: .init(sleep: { _ in })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+            )
+            try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running) != nil)
+            let run = try #require(store.activeRuns["job-1"])
+            let reason = CodexReviewBackendModel.CancellationReason(
+                message: "Network unavailable; waiting to reconnect."
+            )
+
+            networkMonitor.yield(.init(status: .unsatisfied))
+            try await backend.waitForInterruptReview(run: run, reason: reason, timeout: .seconds(2))
+            await backend.yield(
+                .completed(summary: "Succeeded.", result: "natural review"),
+                for: run
+            )
+
+            let commandsBeforeAck = await backend.recordedCommands()
+            #expect(commandsBeforeAck.contains { if case .beginReviewRecovery = $0 { true } else { false } } == false)
+            await interruptGate.open()
+            let read = try await result
+
+            #expect(read.core.lifecycle.status == .succeeded)
+            #expect(read.core.output.lastAgentMessage == "natural review")
+            let commands = await backend.recordedCommands()
+            #expect(commands.contains { if case .beginReviewRecovery = $0 { true } else { false } } == false)
+            #expect(commands.contains { if case .resumeReviewRecovery = $0 { true } else { false } } == false)
         }
     }
 
@@ -942,11 +1104,15 @@ struct CodexReviewStoreCommandTests {
             )
 
             networkMonitor.yield(.init(status: .unsatisfied))
-            try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
+            try await completeNetworkRecoveryBarrier(
+                backend: backend,
+                store: store,
+                beforeTerminal: { run in
+                    await backend.yield(.message("completed review text"), for: run)
+                }
+            )
             _ = try await running
 
-            await backend.yield(.message("completed review text"), for: initialRun)
-            await backend.yield(.completed(summary: "Succeeded.", result: nil), for: initialRun)
             networkMonitor.yield(.satisfied())
             try await backend.waitForResumeReviewRecovery(timeout: .seconds(2))
             try #require(await waitForRunAttemptActivation(store: store, run: recoveredRun))
@@ -1005,15 +1171,19 @@ struct CodexReviewStoreCommandTests {
             )
 
             networkMonitor.yield(.init(status: .unsatisfied))
-            try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
+            try await completeNetworkRecoveryBarrier(
+                backend: backend,
+                store: store,
+                beforeTerminal: { run in
+                    await backend.yield(.message("completed during settle"), for: run)
+                }
+            )
             await sleeper.blockFutureSleeps()
             networkMonitor.yield(.satisfied())
             #expect(await waitUntil {
                 store.job(id: "job-1")?.core.output.summary == "Network restored; restarting review."
             })
 
-            await backend.yield(.message("completed during settle"), for: initialRun)
-            await backend.yield(.completed(summary: "Succeeded.", result: nil), for: initialRun)
             await settleGate.open()
             try await backend.waitForResumeReviewRecovery(timeout: .seconds(2))
             try #require(await waitForRunAttemptActivation(store: store, run: recoveredRun))
@@ -1072,7 +1242,7 @@ struct CodexReviewStoreCommandTests {
             )
 
             networkMonitor.yield(.init(status: .unsatisfied))
-            try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
+            try await completeNetworkRecoveryBarrier(backend: backend, store: store)
             await sleeper.blockFutureSleeps()
             networkMonitor.yield(.satisfied())
             #expect(await waitUntil {
@@ -1137,7 +1307,7 @@ struct CodexReviewStoreCommandTests {
             ), for: initialRun)
 
             networkMonitor.yield(.init(status: .unsatisfied))
-            try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
+            try await completeNetworkRecoveryBarrier(backend: backend, store: store)
             _ = try await running
             networkMonitor.yield(.satisfied())
             try await backend.waitForResumeReviewRecovery(timeout: .seconds(2))
@@ -1196,7 +1366,7 @@ struct CodexReviewStoreCommandTests {
             })
 
             networkMonitor.yield(.init(status: .unsatisfied))
-            try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
+            try await completeNetworkRecoveryBarrier(backend: backend, store: store)
             let commandsAfterInterrupt = await backend.recordedCommands()
             let interruptedRuns = commandsAfterInterrupt.compactMap { command -> CodexReviewBackendModel.Review.Run? in
                 if case .beginReviewRecovery(let run, _) = command {
@@ -1256,9 +1426,13 @@ struct CodexReviewStoreCommandTests {
             )
 
             networkMonitor.yield(.init(status: .unsatisfied))
-            try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
-            await backend.yield(.message("stale aborted output"), for: initialRun)
-            await backend.yield(.cancelled("Network lost"), for: initialRun)
+            try await completeNetworkRecoveryBarrier(
+                backend: backend,
+                store: store,
+                beforeTerminal: { run in
+                    await backend.yield(.message("stale aborted output"), for: run)
+                }
+            )
             networkMonitor.yield(.satisfied())
             try await backend.waitForResumeReviewRecovery(timeout: .seconds(2))
             #expect(await waitUntil {
@@ -1320,7 +1494,7 @@ struct CodexReviewStoreCommandTests {
             } != nil)
 
             networkMonitor.yield(.init(status: .unsatisfied))
-            try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
+            try await completeNetworkRecoveryBarrier(backend: backend, store: store)
             networkMonitor.yield(.satisfied())
             try await backend.waitForResumeReviewRecovery(timeout: .seconds(2))
             try #require(await waitForRunAttemptActivation(store: store, run: recoveredRun))
@@ -1369,12 +1543,11 @@ struct CodexReviewStoreCommandTests {
             )
 
             networkMonitor.yield(.init(status: .unsatisfied))
-            try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
+            try await completeNetworkRecoveryBarrier(backend: backend, store: store)
             networkMonitor.yield(.satisfied())
             try await backend.waitForResumeReviewRecovery(timeout: .seconds(2))
             try #require(await waitForRunAttemptActivation(store: store, run: recoveredRun))
 
-            await backend.yield(.completed(summary: "Succeeded.", result: "stale review"), for: initialRun)
             await backend.yield(.completed(summary: "Succeeded.", result: "recovered review"), for: recoveredRun)
 
             let read = try await result
@@ -1416,10 +1589,9 @@ struct CodexReviewStoreCommandTests {
             )
 
             networkMonitor.yield(.init(status: .unsatisfied))
-            try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
+            try await completeNetworkRecoveryBarrier(backend: backend, store: store)
             networkMonitor.yield(.satisfied())
             try await backend.waitForResumeReviewRecovery(timeout: .seconds(2))
-            await backend.yield(.cancelled("Network lost"), for: initialRun)
             await recoverGate.open()
             try #require(await waitForRunAttemptActivation(store: store, run: recoveredRun))
 
@@ -1462,8 +1634,7 @@ struct CodexReviewStoreCommandTests {
             )
 
             networkMonitor.yield(.init(status: .unsatisfied))
-            try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
-            await backend.finishEvents(for: initialRun)
+            try await completeNetworkRecoveryBarrier(backend: backend, store: store)
             networkMonitor.yield(.satisfied())
             try await backend.waitForResumeReviewRecovery(timeout: .seconds(2))
             try #require(await waitForRunAttemptActivation(store: store, run: recoveredRun))
@@ -1509,17 +1680,34 @@ struct CodexReviewStoreCommandTests {
             )
 
             networkMonitor.yield(.init(status: .unsatisfied))
-            try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
+            try await completeNetworkRecoveryBarrier(backend: backend, store: store)
+            let oldAdmission = try #require(store.reviewStartAdmissions["job-1"])
             networkMonitor.yield(.satisfied())
             try await backend.waitForResumeReviewRecovery(timeout: .seconds(2))
 
-            let cancel = try await store.cancelReview(jobID: "job-1", cancellation: .mcpClient(message: "Stop"))
-            #expect(cancel.cancelled)
+            let recoveredAdmission = try #require(store.reviewStartAdmissions["job-1"])
+            #expect(recoveredAdmission !== oldAdmission)
+            let cancelTask = Task { @MainActor in
+                try await store.cancelReview(
+                    jobID: "job-1",
+                    cancellation: .mcpClient(message: "Stop")
+                )
+            }
+            #expect(await recoveredAdmission.waitForCancellationAdmission() == .mcpClient(message: "Stop"))
             await recoverGate.open()
+            _ = try #require(await recoveredAdmission.waitForActiveRun())
+            try await backend.waitForInterruptReview(
+                run: recoveredRun,
+                reason: .init(message: "Stop"),
+                timeout: .seconds(2)
+            )
+            await backend.yield(.cancelled("Stop"), for: recoveredRun)
+            let cancel = try await cancelTask.value
+            #expect(cancel.cancelled)
 
             let read = try await result
             #expect(read.core.lifecycle.status == .cancelled)
-            #expect(read.core.run.turnID == "turn-1")
+            #expect(read.core.run.turnID == "turn-2")
 
             let commands = await backend.recordedCommands()
             #expect(commands.contains(.interruptReview(
@@ -1557,9 +1745,8 @@ struct CodexReviewStoreCommandTests {
             )
 
             networkMonitor.yield(.init(status: .unsatisfied))
-            try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
+            try await completeNetworkRecoveryBarrier(backend: backend, store: store)
             _ = try await running
-            await backend.finishEvents(for: initialRun)
 
             let cancel = try await store.cancelReview(jobID: "job-1", cancellation: .mcpClient(message: "Stop"))
             let cleanedUp = await waitUntil {
@@ -1678,7 +1865,7 @@ struct CodexReviewStoreCommandTests {
             )
 
             networkMonitor.yield(.init(status: .unsatisfied))
-            try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
+            try await completeNetworkRecoveryBarrier(backend: backend, store: store)
             _ = try await running
 
             let locallyCancelledJobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
@@ -1780,9 +1967,8 @@ struct CodexReviewStoreCommandTests {
             )
 
             networkMonitor.yield(.init(status: .unsatisfied))
-            try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
+            try await completeNetworkRecoveryBarrier(backend: backend, store: store)
             _ = try await store.cancelReview(jobID: "job-1", cancellation: .mcpClient(message: "Stop"))
-            await backend.finishEvents(for: initialRun)
 
             let read = try await result
             #expect(read.core.lifecycle.status == .cancelled)
@@ -1820,9 +2006,13 @@ struct CodexReviewStoreCommandTests {
             )
 
             networkMonitor.yield(.init(status: .unsatisfied))
-            try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
-            await backend.yield(.message("stale old attempt output"), for: initialRun)
-            await backend.yield(.completed(summary: "Succeeded.", result: nil), for: initialRun)
+            try await completeNetworkRecoveryBarrier(
+                backend: backend,
+                store: store,
+                beforeTerminal: { run in
+                    await backend.yield(.message("stale old attempt output"), for: run)
+                }
+            )
 
             networkMonitor.yield(.satisfied())
             try await backend.waitForResumeReviewRecovery(timeout: .seconds(2))
@@ -1902,7 +2092,7 @@ struct CodexReviewStoreCommandTests {
             )
 
             networkMonitor.yield(.init(status: .requiresConnection))
-            try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
+            try await completeNetworkRecoveryBarrier(backend: backend, store: store)
             networkMonitor.yield(.satisfied())
             let read = try await result
 
@@ -2108,7 +2298,10 @@ struct CodexReviewStoreCommandTests {
             #expect(failedBeforeOutageConfirmed == false)
 
             await debounceGate.open()
-            try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
+            try await completeNetworkRecoveryAfterConnectionTerminal(
+                backend: backend,
+                store: store
+            )
             networkMonitor.yield(.satisfied())
             try await backend.waitForResumeReviewRecovery(timeout: .seconds(2))
             try #require(await waitForRunAttemptActivation(store: store, run: recoveredRun))
@@ -2568,10 +2761,57 @@ private func withStoreCommandTestCleanup(
 }
 
 @MainActor
+private func completeNetworkRecoveryBarrier(
+    backend: FakeCodexReviewBackend,
+    store: CodexReviewStore,
+    jobID: String = "job-1",
+    beforeTerminal: @MainActor (CodexReviewBackendModel.Review.Run) async -> Void = { _ in }
+) async throws {
+    let becameActive = await waitUntil(timeout: .seconds(2)) {
+        store.activeRuns[jobID] != nil
+    }
+    guard becameActive else {
+        throw FakeCodexReviewBackendError(message: "Review did not become active before recovery.")
+    }
+    guard let run = store.activeRuns[jobID] else {
+        throw FakeCodexReviewBackendError(message: "Missing active run for recovery barrier.")
+    }
+    let reason = CodexReviewBackendModel.CancellationReason(
+        message: "Network unavailable; waiting to reconnect."
+    )
+    try await backend.waitForInterruptReview(run: run, reason: reason, timeout: .seconds(2))
+    await beforeTerminal(run)
+    await backend.yield(.cancelled(reason.message), for: run)
+    try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
+    let barrierPublished = await waitUntil(timeout: .seconds(2)) {
+        store.reviewRecoveryWaitingJobIDs.contains(jobID)
+    }
+    guard barrierPublished else {
+        throw FakeCodexReviewBackendError(message: "Store did not publish recovery barrier.")
+    }
+}
+
+@MainActor
+private func completeNetworkRecoveryAfterConnectionTerminal(
+    backend: FakeCodexReviewBackend,
+    store: CodexReviewStore,
+    jobID: String = "job-1"
+) async throws {
+    try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
+    let barrierPublished = await waitUntil(timeout: .seconds(2)) {
+        store.reviewRecoveryWaitingJobIDs.contains(jobID)
+    }
+    guard barrierPublished else {
+        throw FakeCodexReviewBackendError(message: "Store did not publish connection recovery barrier.")
+    }
+}
+
+@MainActor
 private func cleanupStoreCommandTest(
     backend: FakeCodexReviewBackend,
     store: CodexReviewStore
 ) async {
+    await backend.releaseHeldOperationsForCleanup()
     await backend.finishEventMailboxes()
     await store.cancelAndDrainReviewWorkersForTesting()
     await backend.finishEventMailboxes()
