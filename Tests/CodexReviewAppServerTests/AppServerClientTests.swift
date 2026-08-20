@@ -116,6 +116,13 @@ private func interruptAndDeliverCanonicalTerminal(
     )
 }
 
+private func controlledReviewClosePolicy(gate: AsyncGate) -> ReviewRuntimeClosePolicy {
+    ReviewRuntimeClosePolicy(terminalGrace: .seconds(10)) { _ in
+        await gate.wait()
+        try Task.checkCancellation()
+    }
+}
+
 @Suite("app-server client")
 struct AppServerClientTests {
     @Test func processTransportConfigurationResolvesCodexFromProvidedPath() throws {
@@ -1059,6 +1066,165 @@ struct AppServerClientTests {
         #expect(object["sessionStartSource"] as? String == "startup")
         #expect(object["threadSource"] as? String == "user")
         #expect(object["sandbox"] == nil)
+    }
+
+    @Test func backendAdmissionRefusesThreadStartBeforeDispatch() async throws {
+        let transport = FakeJSONRPCTransport()
+        let initializeGate = AsyncGate()
+        await transport.holdNextIgnoringCancellation(method: "initialize", gate: initializeGate)
+        try await enqueueInitialize(transport)
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let admission = ReviewStartAdmission(
+            closePolicy: controlledReviewClosePolicy(gate: AsyncGate())
+        )
+        let startTask = await admission.start { admission in
+            try await backend.startReview(
+                .init(
+                    jobID: "job-1",
+                    sessionID: "session-1",
+                    request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+                ),
+                admission: admission
+            )
+        }
+        await transport.waitForRequest(method: "initialize")
+
+        let cancellation = Task {
+            try await admission.cancel(
+                .mcpClient(message: "Stop"),
+                interrupt: { _, _ in Issue.record("Pre-dispatch cancellation sent interrupt.") },
+                forceClose: { Issue.record("Pre-dispatch cancellation force-closed connection.") }
+            )
+        }
+        await initializeGate.open()
+
+        #expect(try await cancellation.value.terminal == .localCancellation(
+            .mcpClient(message: "Stop")
+        ))
+        await #expect(throws: ReviewStartCancelledBeforeDispatch.self) {
+            try await startTask.value
+        }
+        #expect(await transport.recordedRequests().map(\.method) == ["initialize"])
+    }
+
+    @Test func backendAdmissionCleansPreparedThreadBeforeRefusingReviewDispatch() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        let threadGate = AsyncGate()
+        await transport.holdNextIgnoringCancellation(method: "thread/start", gate: threadGate)
+        try await transport.enqueue(
+            AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"),
+            for: "thread/start"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Thread.Unsubscribe.Response(status: .unsubscribed),
+            for: "thread/unsubscribe"
+        )
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let admission = ReviewStartAdmission(
+            closePolicy: controlledReviewClosePolicy(gate: AsyncGate())
+        )
+        let startTask = await admission.start { admission in
+            try await backend.startReview(
+                .init(
+                    jobID: "job-1",
+                    sessionID: "session-1",
+                    request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+                ),
+                admission: admission
+            )
+        }
+        await transport.waitForRequest(method: "thread/start")
+
+        let cancellation = Task {
+            try await admission.cancel(
+                .mcpClient(message: "Stop"),
+                interrupt: { _, _ in Issue.record("Thread-only cancellation sent empty-turn interrupt.") },
+                forceClose: { Issue.record("Prepared-thread cancellation force-closed connection.") }
+            )
+        }
+        await threadGate.open()
+
+        #expect(try await cancellation.value.terminal == .localCancellation(
+            .mcpClient(message: "Stop")
+        ))
+        await #expect(throws: ReviewStartCancelledBeforeDispatch.self) {
+            try await startTask.value
+        }
+        let methods = await transport.recordedRequests().map(\.method)
+        #expect(methods.contains("review/start") == false)
+        #expect(Array(methods.suffix(3)) == [
+            "thread/backgroundTerminals/clean",
+            "thread/unsubscribe",
+            "thread/delete",
+        ])
+    }
+
+    @Test func backendAdmissionJoinsOutcomeUnknownReviewStartBeforeInterrupt() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(
+            AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"),
+            for: "thread/start"
+        )
+        let reviewGate = AsyncGate()
+        await transport.holdNextIgnoringCancellation(method: "review/start", gate: reviewGate)
+        try await transport.enqueue(
+            AppServerAPI.Review.Start.Response(turnID: "turn-1", reviewThreadID: "thread-1"),
+            for: "review/start"
+        )
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let admission = ReviewStartAdmission(
+            closePolicy: controlledReviewClosePolicy(gate: AsyncGate())
+        )
+        let startTask = await admission.start { admission in
+            try await backend.startReview(
+                .init(
+                    jobID: "job-1",
+                    sessionID: "session-1",
+                    request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+                ),
+                admission: admission
+            )
+        }
+        await transport.waitForRequest(method: "review/start")
+
+        let cancellation = Task {
+            try await admission.cancel(
+                .mcpClient(message: "Stop"),
+                interrupt: { run, reason in
+                    try await backend.interruptReview(run, reason: reason)
+                },
+                forceClose: {
+                    try await backend.forceCloseReviewConnection()
+                }
+            )
+        }
+        await reviewGate.open()
+        let attempt = try await startTask.value
+        await transport.waitForResponseDelivery(method: "turn/interrupt")
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: "thread-1",
+                turn: .init(id: "turn-1", status: "interrupted", error: .init(message: "Stop"))
+            )
+        )
+        try await admission.recordCanonicalTerminal(
+            .interrupted(.requested(.mcpClient(message: "Stop"))),
+            for: attempt.run
+        )
+        let resolution = try await cancellation.value
+
+        #expect(resolution.terminal == .canonical(
+            run: attempt.run,
+            terminal: .interrupted(.requested(.mcpClient(message: "Stop")))
+        ))
+        let methods = await transport.recordedRequests().map(\.method)
+        let reviewIndex = try #require(methods.firstIndex(of: "review/start"))
+        let interruptIndex = try #require(methods.firstIndex(of: "turn/interrupt"))
+        #expect(reviewIndex < interruptIndex)
     }
 
     @Test func backendUsesLegacySandboxWhenProcessDoesNotSupportModernSessionSource() async throws {

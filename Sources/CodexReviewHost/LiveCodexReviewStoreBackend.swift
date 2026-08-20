@@ -12,59 +12,6 @@ private let defaultExternalURLOpener: ExternalURLOpener = { url in
     _ = NSWorkspace.shared.open(url)
 }
 
-private actor RuntimeShutdownCleanupRace {
-    private var result: Bool?
-    private var continuation: CheckedContinuation<Bool, Never>?
-
-    func finish(_ value: Bool) {
-        guard result == nil else {
-            return
-        }
-        result = value
-        continuation?.resume(returning: value)
-        continuation = nil
-    }
-
-    func wait() async -> Bool {
-        if let result {
-            return result
-        }
-        return await withCheckedContinuation { continuation in
-            if let result {
-                continuation.resume(returning: result)
-            } else {
-                self.continuation = continuation
-            }
-        }
-    }
-}
-
-private func runRuntimeShutdownCleanup(
-    timeout: Duration,
-    operation: @escaping @Sendable () async -> Void
-) async -> Bool {
-    let race = RuntimeShutdownCleanupRace()
-    let operationTask = Task {
-        await operation()
-        await race.finish(true)
-    }
-    let timeoutTask = Task {
-        do {
-            try await Task.sleep(for: timeout)
-        } catch {
-            return
-        }
-        await race.finish(false)
-    }
-    let result = await race.wait()
-    if result {
-        timeoutTask.cancel()
-    } else {
-        operationTask.cancel()
-    }
-    return result
-}
-
 private struct PendingLoginRuntimeCleanup {
     var client: AppServerClient?
     var codexHomeURL: URL?
@@ -129,6 +76,7 @@ public extension CodexReviewStore {
         shutdownCleanupTimeout: Duration = .seconds(2),
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
         networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
+        reviewRuntimeClosePolicy: ReviewRuntimeClosePolicy = .production,
         transport: any JSONRPC.Transport
     ) -> CodexReviewStore {
         makeLiveStoreForTesting(
@@ -143,6 +91,7 @@ public extension CodexReviewStore {
             shutdownCleanupTimeout: shutdownCleanupTimeout,
             networkMonitor: networkMonitor,
             networkRecoveryPolicy: networkRecoveryPolicy,
+            reviewRuntimeClosePolicy: reviewRuntimeClosePolicy,
             transportFactory: { _ in transport }
         )
     }
@@ -163,6 +112,7 @@ public extension CodexReviewStore {
         shutdownCleanupTimeout: Duration = .seconds(2),
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
         networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
+        reviewRuntimeClosePolicy: ReviewRuntimeClosePolicy = .production,
         transportFactory: @escaping @MainActor @Sendable (URL) async throws -> any JSONRPC.Transport
     ) -> CodexReviewStore {
         CodexReviewStore(
@@ -186,7 +136,8 @@ public extension CodexReviewStore {
                 }
             ),
             networkMonitor: networkMonitor,
-            networkRecoveryPolicy: networkRecoveryPolicy
+            networkRecoveryPolicy: networkRecoveryPolicy,
+            reviewRuntimeClosePolicy: reviewRuntimeClosePolicy
         )
     }
 }
@@ -475,28 +426,20 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     private func cancelActiveReviewsForRuntimeTeardown(
         store: CodexReviewStore,
-        appServerBackend: AppServerCodexReviewBackend,
         reason: ReviewCancellation,
         timeoutWarning: String
     ) async {
-        let didInterrupt = await runRuntimeShutdownCleanup(timeout: shutdownCleanupTimeout) {
-            do {
-                try await appServerBackend.interruptActiveReviewsForShutdown(
-                    reason: .init(message: reason.message)
-                )
-            } catch {
-                logger.error("Failed to interrupt active reviews during runtime teardown: \(error.localizedDescription, privacy: .public)")
-            }
+        var cancellationFailure: (any Error)?
+        do {
+            _ = try await store.requestActiveReviewCancellationsForRuntimeStop(reason: reason)
+        } catch {
+            cancellationFailure = error
+            logger.error("Failed to cancel active reviews during runtime teardown: \(error.localizedDescription, privacy: .public)")
         }
-        let locallyCancelledJobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
-            reason: reason,
-            cancelWorkers: false
-        )
-        store.cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
         let didDrainReviewWorkers = await store.drainReviewWorkersForRuntimeStop(
             timeout: shutdownCleanupTimeout
         )
-        if didInterrupt == false || didDrainReviewWorkers == false {
+        if cancellationFailure != nil || didDrainReviewWorkers == false {
             logger.warning("\(timeoutWarning, privacy: .public)")
         }
     }
@@ -511,11 +454,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             return
         }
         logger.info("Stopping review runtime")
-        if let appServerBackend {
+        if appServerBackend != nil {
             let reason = ReviewCancellation.system(message: "Review runtime stopped.")
             await cancelActiveReviewsForRuntimeTeardown(
                 store: store,
-                appServerBackend: appServerBackend,
                 reason: reason,
                 timeoutWarning: "Timed out cleaning active reviews before stopping runtime"
             )
@@ -659,6 +601,12 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         guard auth.persistedAccounts.contains(where: { $0.accountKey == accountKey }) else {
             return
         }
+        let runtimeStore = appServerBackend == nil ? nil : attachedStore
+        if let runtimeStore {
+            await runtimeStore.closeActiveReviewSessions(
+                reason: .system(message: "Account switched.")
+            )
+        }
         try CodexReviewAccountRegistry.activateAccount(
             accountKey,
             accounts: auth.persistedAccounts,
@@ -670,17 +618,22 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         )
         auth.selectPersistedAccount(auth.persistedAccounts.first(where: { $0.accountKey == accountKey })?.id)
         auth.updatePhase(.signedOut)
-        guard let attachedStore, appServerBackend != nil else {
+        guard let runtimeStore else {
             return
         }
-        await attachedStore.closeActiveReviewSessions(reason: .system(message: "Account switched."))
-        await stop(store: attachedStore)
-        await start(store: attachedStore, forceRestartIfNeeded: true)
+        await stop(store: runtimeStore)
+        await start(store: runtimeStore, forceRestartIfNeeded: true)
     }
 
     func removeAccount(auth: CodexReviewAuthModel, accountKey: String) async throws {
         let removedActiveAccount = auth.selectedAccount?.accountKey == accountKey
             || auth.persistedActiveAccountKey == accountKey
+        let runtimeStore = removedActiveAccount && appServerBackend != nil ? attachedStore : nil
+        if let runtimeStore {
+            await runtimeStore.closeActiveReviewSessions(
+                reason: .system(message: "Account removed.")
+            )
+        }
         if removedActiveAccount, let appServerBackend {
             _ = try? await appServerBackend.logout(.init(accountKey))
         }
@@ -707,12 +660,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         if removedActiveAccount {
             auth.selectPersistedAccount(nil)
             auth.updatePhase(.signedOut)
-            guard let attachedStore, appServerBackend != nil else {
+            guard let runtimeStore else {
                 return
             }
-            await attachedStore.closeActiveReviewSessions(reason: .system(message: "Account removed."))
-            await stop(store: attachedStore)
-            await start(store: attachedStore, forceRestartIfNeeded: true)
+            await stop(store: runtimeStore)
+            await start(store: runtimeStore, forceRestartIfNeeded: true)
         }
     }
 
@@ -1192,11 +1144,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             return
         }
         let message = "Review runtime stopped unexpectedly: \(error.localizedDescription)"
-        if let appServerBackend {
+        if appServerBackend != nil {
             let reason = ReviewCancellation.system(message: message)
             await cancelActiveReviewsForRuntimeTeardown(
                 store: store,
-                appServerBackend: appServerBackend,
                 reason: reason,
                 timeoutWarning: "Timed out cleaning active reviews after runtime failure"
             )

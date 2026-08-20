@@ -154,7 +154,11 @@ public final class CodexReviewStore {
         if backend.handlesActiveReviewStopCleanup {
             locallyCancelledJobIDs = []
         } else {
-            locallyCancelledJobIDs = await requestActiveReviewCancellationsForRuntimeStop()
+            do {
+                locallyCancelledJobIDs = try await requestActiveReviewCancellationsForRuntimeStop()
+            } catch {
+                locallyCancelledJobIDs = []
+            }
         }
         await backend.stop(store: self)
         let remainingLocallyCancelledJobIDs = cancelActiveReviewsLocallyForRuntimeStop(cancelWorkers: false)

@@ -123,12 +123,22 @@ extension CodexReviewStore {
 
     package func requestActiveReviewCancellationsForRuntimeStop(
         reason: ReviewCancellation = .system(message: "Review runtime stopped.")
-    ) async -> [String] {
+    ) async throws -> [String] {
         let activeJobIDs = orderedJobs
             .filter { $0.isTerminal == false }
             .map(\.id)
+        var firstError: (any Error)?
         for jobID in activeJobIDs {
-            _ = try? await cancelReview(jobID: jobID, cancellation: reason)
+            do {
+                _ = try await cancelReview(jobID: jobID, cancellation: reason)
+            } catch {
+                if firstError == nil {
+                    firstError = error
+                }
+            }
+        }
+        if let firstError {
+            throw firstError
         }
         return activeJobIDs
     }
