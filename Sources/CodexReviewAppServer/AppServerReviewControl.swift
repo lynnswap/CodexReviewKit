@@ -86,45 +86,11 @@ package final class AppServerReviewControl: @unchecked Sendable {
     private func sendInterrupt(
         threadID: String,
         turnID: String,
-        willInterruptActiveTurn: (@Sendable (AppServerReviewInterruption) async -> Void)?
+        willInterruptActiveTurn _: (@Sendable (AppServerReviewInterruption) async -> Void)?
     ) async throws -> AppServerReviewInterruption {
-        do {
-            let _: EmptyResponse = try await client.send(AppServerAPI.Turn.Interrupt.Request(
-                params: .init(threadID: threadID, turnID: turnID)
-            ))
-            return .init(threadID: threadID, turnID: turnID)
-        } catch {
-            guard let activeTurnID = Self.activeTurnID(from: error),
-                  activeTurnID != turnID
-            else {
-                throw error
-            }
-            let activeInterruption = AppServerReviewInterruption(threadID: threadID, turnID: activeTurnID)
-            if let willInterruptActiveTurn {
-                await willInterruptActiveTurn(activeInterruption)
-            }
-            let _: EmptyResponse = try await client.send(AppServerAPI.Turn.Interrupt.Request(
-                params: .init(threadID: threadID, turnID: activeTurnID)
-            ))
-            setPhase(.reviewStarted(turnThreadID: threadID, turnID: activeTurnID))
-            return activeInterruption
-        }
-    }
-
-    private func setPhase(_ phase: Phase) {
-        phaseLock.lock()
-        defer { phaseLock.unlock() }
-        self.phase = phase
-    }
-
-    private static func activeTurnID(from error: Error) -> String? {
-        guard case JSONRPC.Error.responseError(_, let message) = error,
-              let range = message.range(of: " but found ")
-        else {
-            return nil
-        }
-        return String(message[range.upperBound...])
-            .trimmingCharacters(in: CharacterSet(charactersIn: "` ").union(.whitespacesAndNewlines))
-            .nilIfEmpty
+        let _: EmptyResponse = try await client.send(AppServerAPI.Turn.Interrupt.Request(
+            params: .init(threadID: threadID, turnID: turnID)
+        ))
+        return .init(threadID: threadID, turnID: turnID)
     }
 }

@@ -94,8 +94,8 @@ extension CodexReviewStore {
 
         reviewWorkerTasks.removeAll(keepingCapacity: false)
         runtimeStopDetachedReviewWorkerTasks.removeAll(keepingCapacity: false)
-        startingJobIDs.removeAll(keepingCapacity: false)
-        startupCancellations.removeAll(keepingCapacity: false)
+        reviewStartAdmissions.removeAll(keepingCapacity: false)
+        reviewCleanupFailures.removeAll(keepingCapacity: false)
         activeRuns.removeAll(keepingCapacity: false)
         reviewRecoveryWaitingJobIDs.removeAll(keepingCapacity: false)
 

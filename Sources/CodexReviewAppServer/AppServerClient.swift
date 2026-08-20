@@ -133,8 +133,8 @@ package actor AppServerClient {
         await transport.notificationStream()
     }
 
-    package func close() async {
-        await transport.close()
+    package func close() async throws {
+        try await transport.close()
     }
 
     private func allocateRequestID() -> Int {

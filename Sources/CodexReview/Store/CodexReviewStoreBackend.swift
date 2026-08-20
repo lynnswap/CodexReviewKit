@@ -24,7 +24,7 @@ package struct CodexReviewStoreSeed {
 }
 
 @MainActor
-package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend {
+package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend, Sendable {
     var seed: CodexReviewStoreSeed { get }
     var isActive: Bool { get }
     var handlesActiveReviewStopCleanup: Bool { get }
@@ -44,8 +44,12 @@ package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend {
     func refreshAccountRateLimits(auth: CodexReviewAuthModel, accountKey: String) async
     func requiresCurrentSessionRecovery(auth: CodexReviewAuthModel, accountKey: String) -> Bool
 
-    func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt
+    func startReview(
+        _ request: CodexReviewBackendModel.Review.Start,
+        admission: ReviewStartAdmission
+    ) async throws -> BackendReviewAttempt
     func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws
+    func forceCloseReviewConnection() async throws
     func beginReviewRecovery(
         _ run: CodexReviewBackendModel.Review.Run,
         reason: CodexReviewBackendModel.CancellationReason
@@ -54,7 +58,7 @@ package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend {
         _ token: CodexReviewBackendModel.Review.RecoveryToken,
         request: CodexReviewBackendModel.Review.Start
     ) async throws -> BackendReviewAttempt
-    func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async
+    func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws
 }
 
 extension CodexReviewStoreBackend {

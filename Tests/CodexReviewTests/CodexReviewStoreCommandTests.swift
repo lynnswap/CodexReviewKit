@@ -112,10 +112,15 @@ struct CodexReviewStoreCommandTests {
                 jobID: "job-1",
                 timeout: .seconds(1)
             )
-            _ = try await store.cancelReview(
-                jobID: "job-1",
-                cancellation: .mcpClient(message: "Stop")
-            )
+            let cancellation = Task { @MainActor in
+                try await store.cancelReview(
+                    jobID: "job-1",
+                    cancellation: .mcpClient(message: "Stop")
+                )
+            }
+            await backend.waitForInterruptReview()
+            await backend.yield(.cancelled("Stop"))
+            _ = try await cancellation.value
             let final = try await awaited
 
             #expect(final.core.lifecycle.status == .cancelled)
@@ -732,11 +737,13 @@ struct CodexReviewStoreCommandTests {
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
             try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
-            let cancel = try await store.cancelReview(
+            async let pendingCancel = store.cancelReview(
                 jobID: "job-1",
                 cancellation: .mcpClient(message: "Stop")
             )
+            await backend.waitForInterruptReview()
             await backend.yield(.cancelled("Stop"))
+            let cancel = try await pendingCancel
             _ = try await result
 
             #expect(cancel.cancelled)
@@ -778,11 +785,13 @@ struct CodexReviewStoreCommandTests {
             #expect(await waitUntil {
                 store.job(id: "job-1")?.logText.hasSuffix(delta) == true
             })
-            _ = try await store.cancelReview(
+            async let cancel = store.cancelReview(
                 jobID: "job-1",
                 cancellation: .mcpClient(message: "Stop")
             )
+            await backend.waitForInterruptReview()
             await backend.yield(.cancelled("Stop"))
+            _ = try await cancel
             let read = try await result
             let job = try #require(store.job(id: "job-1"))
 
@@ -790,6 +799,38 @@ struct CodexReviewStoreCommandTests {
             #expect(job.cappedLogBytes <= 256 * 1024)
             #expect(job.logText.hasSuffix(delta))
             #expect(job.lastLogMutation == .reload)
+        }
+    }
+
+    @Test func cancellationPreservesTypedCleanupFailureAfterTerminal() async throws {
+        let backend = FakeCodexReviewBackend()
+        await backend.failCleanup(message: "unsubscribe failed")
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+            try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
+            let cancellation = Task { @MainActor in
+                try await store.cancelReview(
+                    jobID: "job-1",
+                    cancellation: .mcpClient(message: "Stop")
+                )
+            }
+            await backend.waitForInterruptReview()
+            await backend.yield(.cancelled("Stop"))
+
+            await #expect(throws: ReviewRuntimeCloseFailure.cleanup("unsubscribe failed")) {
+                try await cancellation.value
+            }
+            let read = try await result
+
+            #expect(read.core.lifecycle.status == .cancelled)
+            #expect(store.reviewCleanupFailures["job-1"] == .cleanup("unsubscribe failed"))
         }
     }
 
@@ -1601,6 +1642,7 @@ struct CodexReviewStoreCommandTests {
             let inFlight = try store.readReview(jobID: "job-1")
 
             #expect(inFlight.core.lifecycle.status == .running)
+            await backend.yield(.cancelled("Review runtime stopped."), for: run)
             await interruptGate.open()
             await stopTask.value
 
@@ -1814,9 +1856,14 @@ struct CodexReviewStoreCommandTests {
             try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
 
             networkMonitor.yield(.init(status: .unsatisfied))
-            _ = try await store.cancelReview(jobID: "job-1", cancellation: .mcpClient(message: "Stop"))
-            await debounceGate.open()
+            async let cancellation = store.cancelReview(
+                jobID: "job-1",
+                cancellation: .mcpClient(message: "Stop")
+            )
+            await backend.waitForInterruptReview()
             await backend.yield(.cancelled("Stop"))
+            _ = try await cancellation
+            await debounceGate.open()
             let read = try await result
 
             #expect(read.core.lifecycle.status == .cancelled)
@@ -1964,7 +2011,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func cancelledReviewStaysCancelledWhenStreamClosesWithError() async throws {
+    @Test func acceptedInterruptFollowedByConnectionLossUsesTransportTerminal() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -1976,15 +2023,18 @@ struct CodexReviewStoreCommandTests {
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
             try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
-            _ = try await store.cancelReview(
+            async let cancellation = store.cancelReview(
                 jobID: "job-1",
                 cancellation: .mcpClient(message: "Stop")
             )
+            await backend.waitForInterruptReview()
             await backend.finishEvents(throwing: StreamClosedError())
+            let cancel = try await cancellation
             let read = try await result
 
-            #expect(read.core.lifecycle.status == .cancelled)
-            #expect(read.core.output.summary == "Stop")
+            #expect(cancel.cancelled == false)
+            #expect(read.core.lifecycle.status == .failed)
+            #expect(read.core.lifecycle.terminal?.kind == .interrupted)
         }
     }
 
@@ -2071,7 +2121,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func reviewStartCancellationInterruptsBackendRun() async throws {
+    @Test func eventConsumerCancellationIsAWorkerTerminalNotARequestedInterrupt() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -2086,16 +2136,14 @@ struct CodexReviewStoreCommandTests {
             await backend.finishEvents(throwing: CancellationError())
             let read = try await result
 
-            #expect(read.core.lifecycle.status == .cancelled)
+            #expect(read.core.lifecycle.status == .failed)
+            #expect(read.core.lifecycle.terminal?.kind == .interrupted)
             let commands = await backend.recordedCommands()
-            #expect(commands.contains(.interruptReview(
-                .init(threadID: "thread-1", turnID: "turn-1", reviewThreadID: "review-thread-1"),
-                .init(message: "Cancellation requested.")
-            )))
+            #expect(commands.contains { if case .interruptReview = $0 { true } else { false } } == false)
         }
     }
 
-    @Test func reviewStartTaskCancellationInterruptsBackendRun() async throws {
+    @Test func callerTaskCancellationDoesNotAbandonOrTerminalizeBackendRun() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -2109,14 +2157,13 @@ struct CodexReviewStoreCommandTests {
                 )
             }
             task.cancel()
+            await backend.waitForStartReview()
+            await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
             let read = try await task.value
 
-            #expect(read.core.lifecycle.status == .cancelled)
+            #expect(read.core.lifecycle.status == .succeeded)
             let commands = await backend.recordedCommands()
-            #expect(commands.contains(.interruptReview(
-                .init(threadID: "thread-1", turnID: "turn-1", reviewThreadID: "review-thread-1"),
-                .init(message: "Cancellation requested.")
-            )))
+            #expect(commands.contains { if case .interruptReview = $0 { true } else { false } } == false)
         }
     }
 
@@ -2133,7 +2180,7 @@ struct CodexReviewStoreCommandTests {
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
             try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
-            await #expect(throws: FakeCodexReviewBackendError.self) {
+            await #expect(throws: ReviewInterruptRequestFailure.self) {
                 try await store.cancelReview(
                     jobID: "job-1",
                     cancellation: .mcpClient(message: "Stop")
@@ -2150,7 +2197,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func cancelledReviewIgnoresBufferedTerminalEvents() async throws {
+    @Test func canonicalCompletionWinsWhileCancellationIsPending() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -2162,21 +2209,28 @@ struct CodexReviewStoreCommandTests {
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
             try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
-            _ = try await store.cancelReview(
+            async let cancellation = store.cancelReview(
                 jobID: "job-1",
                 cancellation: .mcpClient(message: "Stop")
             )
+            await backend.waitForInterruptReview()
             await backend.yield(.completed(summary: "Succeeded.", result: "late result"))
+            let cancel = try await cancellation
             let read = try await result
 
-            #expect(read.core.lifecycle.status == .cancelled)
-            #expect(read.core.output.summary == "Stop")
-            #expect(read.core.output.lastAgentMessage == nil)
+            #expect(cancel.cancelled == false)
+            #expect(read.core.lifecycle.status == .succeeded)
+            #expect(read.core.output.lastAgentMessage == "late result")
         }
     }
 
-    @Test func terminalEventDuringPendingCancellationKeepsCancelledState() async throws {
-        let backend = FakeCodexReviewBackend()
+    @Test func canonicalFailureBeforeInterruptAckWins() async throws {
+        let run = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1"
+        )
+        let backend = FakeCodexReviewBackend(nextRun: run)
         let interruptGate = AsyncGate()
         await backend.holdInterruptReview(with: interruptGate)
         let store = CodexReviewStore.makeTestingStore(
@@ -2188,6 +2242,7 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
+            try #require(await waitForRunAttemptActivation(store: store, run: run))
             async let cancel = store.cancelReview(jobID: "job-1", cancellation: .mcpClient(message: "Stop"))
             try await backend.waitForInterruptReview(timeout: .seconds(2))
             await backend.yield(.completed(summary: "Reviewer failed to output a response.", result: nil))
@@ -2195,8 +2250,8 @@ struct CodexReviewStoreCommandTests {
             _ = try await cancel
             let read = try await result
 
-            #expect(read.core.lifecycle.status == .cancelled)
-            #expect(read.core.output.summary == "Stop")
+            #expect(read.core.lifecycle.status == .failed)
+            #expect(read.core.output.summary == ReviewIngestionError.missingFinalReview.localizedDescription)
             #expect(read.core.output.hasFinalReview == false)
         }
     }
@@ -2215,11 +2270,14 @@ struct CodexReviewStoreCommandTests {
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
             try await backend.waitForStartReview(timeout: .seconds(2))
-            let cancel = try await store.cancelReview(jobID: "job-1", cancellation: .mcpClient(message: "Stop"))
-            let cancelledDuringStartup = try #require(store.jobs.first)
-            #expect(cancel.core.lifecycle.status == .cancelled)
-            #expect(cancelledDuringStartup.core.lifecycle.status == .cancelled)
+            async let pendingCancel = store.cancelReview(
+                jobID: "job-1",
+                cancellation: .mcpClient(message: "Stop")
+            )
             await gate.open()
+            await backend.waitForInterruptReview()
+            await backend.yield(.cancelled("Stop"))
+            let cancel = try await pendingCancel
             let read = try await result
 
             #expect(cancel.cancelled)

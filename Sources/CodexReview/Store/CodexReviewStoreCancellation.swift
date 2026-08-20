@@ -192,8 +192,7 @@ extension CodexReviewStore {
             }
             activeRuns.removeValue(forKey: jobID)
             reviewRecoveryWaitingJobIDs.remove(jobID)
-            startingJobIDs.remove(jobID)
-            startupCancellations.removeValue(forKey: jobID)
+            reviewStartAdmissions.removeValue(forKey: jobID)
         }
     }
 

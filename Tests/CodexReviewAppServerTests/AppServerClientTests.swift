@@ -34,8 +34,8 @@ private extension AppServerCodexReviewBackend {
         try await beginReviewRecovery(attempt.run, reason: reason)
     }
 
-    func cleanupReview(_ attempt: BackendReviewAttempt) async {
-        await cleanupReview(attempt.run)
+    func cleanupReview(_ attempt: BackendReviewAttempt) async throws {
+        try await cleanupReview(attempt.run)
     }
 }
 
@@ -78,6 +78,42 @@ private func eventSequence(
 ) async -> BackendReviewEventSequence {
     let attempt = await backend.reviewAttemptForTesting(run)
     return BackendReviewEventSequence(mailbox: attempt.events)
+}
+
+private func interruptAndDeliverCanonicalTerminal(
+    backend: AppServerCodexReviewBackend,
+    transport: FakeJSONRPCTransport,
+    run: CodexReviewBackendModel.Review.Run,
+    reason: CodexReviewBackendModel.CancellationReason
+) async throws {
+    async let cancellation: Void = backend.interruptReview(run, reason: reason)
+    await transport.waitForResponseDelivery(method: "turn/interrupt")
+    try await transport.emitServerNotification(
+        method: "turn/completed",
+        params: TestTurnNotification(
+            threadID: run.reviewThreadID ?? run.threadID,
+            turn: .init(
+                id: run.turnID ?? "",
+                status: "interrupted",
+                error: .init(message: reason.message)
+            )
+        )
+    )
+    try await cancellation
+}
+
+private func interruptAndDeliverCanonicalTerminal(
+    backend: AppServerCodexReviewBackend,
+    transport: FakeJSONRPCTransport,
+    run attempt: BackendReviewAttempt,
+    reason: CodexReviewBackendModel.CancellationReason
+) async throws {
+    try await interruptAndDeliverCanonicalTerminal(
+        backend: backend,
+        transport: transport,
+        run: attempt.run,
+        reason: reason
+    )
 }
 
 @Suite("app-server client")
@@ -330,7 +366,7 @@ struct AppServerClientTests {
         }
         #expect(Darwin.kill(childPID, 0) == 0)
 
-        await transport.close()
+        try await transport.close()
 
         let childExited = await waitUntil(timeout: .seconds(2)) {
             Darwin.kill(childPID, 0) != 0 && errno == ESRCH
@@ -376,7 +412,7 @@ struct AppServerClientTests {
             method: "test/request",
             params: Data("{}".utf8)
         ))
-        await transport.close()
+        try await transport.close()
 
         let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
         #expect(object["value"] as? String == "done")
@@ -450,7 +486,7 @@ struct AppServerClientTests {
         var iterator = notifications.makeAsyncIterator()
 
         let notification = try #require(try await iterator.next())
-        await transport.close()
+        try await transport.close()
 
         #expect(notification.method == "item/completed")
         #expect(try JSONSerialization.jsonObject(
@@ -503,7 +539,7 @@ struct AppServerClientTests {
         let notificationWritten = await waitUntil(timeout: .seconds(2)) {
             FileManager.default.fileExists(atPath: notificationFile.path)
         }
-        await transport.close()
+        try await transport.close()
 
         #expect(notificationWritten)
         let request = try #require(JSONSerialization.jsonObject(
@@ -668,7 +704,7 @@ struct AppServerClientTests {
         #expect(params.turnID == "turn-1")
     }
 
-    @Test func runningInterruptRetriesWithCurrentActiveTurnID() async throws {
+    @Test func runningInterruptRejectsCanonicalMismatchWithoutErrorTextRebinding() async throws {
         let transport = FakeJSONRPCTransport()
         await transport.enqueueFailure(
             .responseError(
@@ -677,20 +713,21 @@ struct AppServerClientTests {
             ),
             for: "turn/interrupt"
         )
-        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         let client = AppServerClient(transport: transport)
         let control = AppServerReviewControl(client: client)
 
         control.recordReviewStarted(turnThreadID: "thread-1", turnID: "turn-old")
-        let interruption = try await control.interrupt()
-        #expect(interruption == .init(threadID: "thread-1", turnID: "turn-new"))
+        await #expect(throws: JSONRPC.Error.responseError(
+            code: -32602,
+            message: "expected active turn id turn-old but found turn-new"
+        )) {
+            try await control.interrupt()
+        }
 
         let requests = await transport.recordedRequests()
-        #expect(requests.map(\.method) == ["turn/interrupt", "turn/interrupt"])
+        #expect(requests.map(\.method) == ["turn/interrupt"])
         let first = try JSONDecoder().decode(AppServerAPI.Turn.Interrupt.Params.self, from: requests[0].params)
-        let second = try JSONDecoder().decode(AppServerAPI.Turn.Interrupt.Params.self, from: requests[1].params)
         #expect(first.turnID == "turn-old")
-        #expect(second.turnID == "turn-new")
     }
 
     @Test func initializeSendsInitializedNotificationOnce() async throws {
@@ -1255,7 +1292,12 @@ struct AppServerClientTests {
         var iterator = events.makeAsyncIterator()
         #expect(try await iterator.next() == .started(turnID: "turn-old", reviewThreadID: "review-thread", model: nil))
 
-        try await backend.interruptReview(run, reason: .init())
+        try await interruptAndDeliverCanonicalTerminal(
+            backend: backend,
+            transport: transport,
+            run: run,
+            reason: .init()
+        )
 
         let request = try #require(await transport.recordedRequests().last)
         let params = try JSONDecoder().decode(AppServerAPI.Turn.Interrupt.Params.self, from: request.params)
@@ -1276,7 +1318,12 @@ struct AppServerClientTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         ))
-        try await backend.interruptReview(run, reason: .init(message: "Stop"))
+        try await interruptAndDeliverCanonicalTerminal(
+            backend: backend,
+            transport: transport,
+            run: run,
+            reason: .init(message: "Stop")
+        )
 
         let request = try #require(await transport.recordedRequests().last)
         #expect(request.method == "turn/interrupt")
@@ -1356,7 +1403,12 @@ struct AppServerClientTests {
         #expect(try await iterator.next() == .messageDelta("review text", itemID: "message-1"))
         #expect(await backend.reviewEventSessionMetricsForTesting(threadID: "review-thread")?.routed == 2)
 
-        try await backend.interruptReview(run, reason: .init(message: "Stop"))
+        try await interruptAndDeliverCanonicalTerminal(
+            backend: backend,
+            transport: transport,
+            run: run,
+            reason: .init(message: "Stop")
+        )
         let interruptRequest = try #require(await transport.recordedRequests().last)
         #expect(interruptRequest.method == "turn/interrupt")
         let interruptParams = try JSONDecoder().decode(AppServerAPI.Turn.Interrupt.Params.self, from: interruptRequest.params)
@@ -1409,7 +1461,7 @@ struct AppServerClientTests {
         await #expect(throws: BackendReviewEventMailboxError.self) {
             _ = try await iterator.next()
         }
-        await transport.close()
+        try await transport.close()
     }
 
     @Test func backendPreservesBufferedEventsBeforeNotificationStreamError() async throws {
@@ -1461,7 +1513,12 @@ struct AppServerClientTests {
         #expect(try await iterator.next() == .started(turnID: "turn-new", reviewThreadID: "review-thread", model: nil))
         #expect(try await iterator.next() == .messageDelta("review text", itemID: "message-1"))
 
-        try await backend.interruptReview(run, reason: .init(message: "Stop"))
+        try await interruptAndDeliverCanonicalTerminal(
+            backend: backend,
+            transport: transport,
+            run: run,
+            reason: .init(message: "Stop")
+        )
         let interruptRequest = try #require(await transport.recordedRequests().last)
         #expect(interruptRequest.method == "turn/interrupt")
         let interruptParams = try JSONDecoder().decode(AppServerAPI.Turn.Interrupt.Params.self, from: interruptRequest.params)
@@ -1504,7 +1561,12 @@ struct AppServerClientTests {
 
         #expect(try await iterator.next() == .started(turnID: "turn-old", reviewThreadID: "review-thread", model: nil))
         #expect(await backend.reviewEventSessionMetricsForTesting(threadID: "review-thread")?.routed == 1)
-        try await backend.interruptReview(run, reason: .init(message: "Stop"))
+        try await interruptAndDeliverCanonicalTerminal(
+            backend: backend,
+            transport: transport,
+            run: run,
+            reason: .init(message: "Stop")
+        )
         let interruptRequest = try #require(await transport.recordedRequests().last)
         #expect(interruptRequest.method == "turn/interrupt")
         let interruptParams = try JSONDecoder().decode(AppServerAPI.Turn.Interrupt.Params.self, from: interruptRequest.params)
@@ -1546,7 +1608,12 @@ struct AppServerClientTests {
         var iterator = await eventSequence(backend, run).makeAsyncIterator()
 
         #expect(try await iterator.next() == .started(turnID: "turn-response", reviewThreadID: "thread-1", model: nil))
-        try await backend.interruptReview(run, reason: .init(message: "Stop"))
+        try await interruptAndDeliverCanonicalTerminal(
+            backend: backend,
+            transport: transport,
+            run: run,
+            reason: .init(message: "Stop")
+        )
         let interruptRequest = try #require(await transport.recordedRequests().last)
         #expect(interruptRequest.method == "turn/interrupt")
         let interruptParams = try JSONDecoder().decode(AppServerAPI.Turn.Interrupt.Params.self, from: interruptRequest.params)
@@ -1730,7 +1797,7 @@ struct AppServerClientTests {
         ))
     }
 
-    @Test func backendBuffersCancellationBeforeEventStreamRegistration() async throws {
+    @Test func backendInterruptAckDoesNotSynthesizeTerminalBeforeEventStreamRegistration() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
@@ -1744,7 +1811,17 @@ struct AppServerClientTests {
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         ))
 
-        try await backend.interruptReview(run, reason: .init(message: "Stop"))
+        async let cancellation: Void = backend.interruptReview(run, reason: .init(message: "Stop"))
+        await transport.waitForResponseDelivery(method: "turn/interrupt")
+        #expect(await run.events.isFinished() == false)
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: "thread-1",
+                turn: .init(id: "turn-1", status: "interrupted", error: .init(message: "Stop"))
+            )
+        )
+        try await cancellation
 
         var iterator = await eventSequence(backend, run).makeAsyncIterator()
         #expect(try await iterator.next() == .cancelled("Stop"))
@@ -2145,16 +2222,23 @@ struct AppServerClientTests {
         #expect(recoveryInterruptRequested)
 
         async let cancellation: Void = backend.interruptReview(run, reason: .init(message: "Stop"))
-        let cancellationInterruptRequested = await waitUntil {
-            await transport.recordedRequests().filter { $0.method == "turn/interrupt" }.count == 2
-        }
-        #expect(cancellationInterruptRequested)
-
         await interruptGate.open()
         do {
             _ = try await recovery
             Issue.record("Expected recovery interrupt to fail.")
         } catch {}
+        let cancellationInterruptRequested = await waitUntil {
+            await transport.recordedRequests().filter { $0.method == "turn/interrupt" }.count == 2
+        }
+        #expect(cancellationInterruptRequested)
+
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: "thread-1",
+                turn: .init(id: "turn-1", status: "interrupted", error: .init(message: "Stop"))
+            )
+        )
         try await cancellation
 
         #expect(try await iterator.next() == .cancelled("Stop"))
@@ -2163,7 +2247,7 @@ struct AppServerClientTests {
         #expect(interruptRequests.count == 2)
     }
 
-    @Test func backendSuppressesRecoveryInterruptRetriedToActiveTurn() async throws {
+    @Test func backendRecoveryInterruptRejectsMismatchWithoutRebinding() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         await transport.enqueueFailure(
@@ -2173,7 +2257,6 @@ struct AppServerClientTests {
             ),
             for: "turn/interrupt"
         )
-        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
         let run = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
@@ -2183,79 +2266,22 @@ struct AppServerClientTests {
         )
         let events = await eventSequence(backend, run)
 
-        _ = try await backend.beginReviewRecovery(
-            run,
-            reason: .init(message: "Network unavailable; waiting to reconnect.")
-        )
+        await #expect(throws: JSONRPC.Error.responseError(
+            code: -32602,
+            message: "expected active turn id turn-old but found turn-active"
+        )) {
+            try await backend.beginReviewRecovery(
+                run,
+                reason: .init(message: "Network unavailable; waiting to reconnect.")
+            )
+        }
         let requests = await transport.recordedRequests()
         let interruptRequests = requests.filter { $0.method == "turn/interrupt" }
         let interruptTurnIDs = try interruptRequests.map { request in
             try JSONDecoder().decode(AppServerAPI.Turn.Interrupt.Params.self, from: request.params).turnID
         }
-        #expect(interruptTurnIDs == ["turn-old", "turn-active"])
+        #expect(interruptTurnIDs == ["turn-old"])
 
-        try await transport.emitServerNotification(
-            method: "turn/completed",
-            params: TestTurnNotification(
-                threadID: "thread-1",
-                turn: .init(id: "turn-active", status: "interrupted", error: .init(message: "Network unavailable"))
-            )
-        )
-        let ignoredInterruptedTurn = await waitUntil {
-            await backend.notificationRouterMetricsForTesting().ignored == 1
-        }
-        #expect(ignoredInterruptedTurn)
-        _ = events
-    }
-
-    @Test func backendSuppressesActiveTurnTerminalWhileRecoveryRetryInterruptIsInFlight() async throws {
-        let transport = FakeJSONRPCTransport()
-        try await enqueueInitialize(transport)
-        await transport.enqueueFailure(
-            .responseError(
-                code: -32602,
-                message: "expected active turn id turn-old but found turn-active"
-            ),
-            for: "turn/interrupt"
-        )
-        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
-        let firstInterruptGate = AsyncGate()
-        await firstInterruptGate.open()
-        let retryInterruptGate = AsyncGate()
-        await transport.holdNext(method: "turn/interrupt", gate: firstInterruptGate)
-        await transport.holdNext(method: "turn/interrupt", gate: retryInterruptGate)
-        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
-        let run = CodexReviewBackendModel.Review.Run(
-            threadID: "thread-1",
-            turnID: "turn-old",
-            reviewThreadID: "thread-1",
-            model: "gpt-5"
-        )
-        let events = await eventSequence(backend, run)
-
-        async let recovery: CodexReviewBackendModel.Review.RecoveryToken = backend.beginReviewRecovery(
-            run,
-            reason: .init(message: "Network unavailable; waiting to reconnect.")
-        )
-        let retryInterruptRequested = await waitUntil {
-            await transport.recordedRequests().filter { $0.method == "turn/interrupt" }.count == 2
-        }
-        #expect(retryInterruptRequested)
-
-        try await transport.emitServerNotification(
-            method: "turn/completed",
-            params: TestTurnNotification(
-                threadID: "thread-1",
-                turn: .init(id: "turn-active", status: "interrupted", error: .init(message: "Network unavailable"))
-            )
-        )
-        let ignoredTerminal = await waitUntil {
-            await backend.notificationRouterMetricsForTesting().ignored == 1
-        }
-        #expect(ignoredTerminal)
-
-        await retryInterruptGate.open()
-        _ = try await recovery
         _ = events
     }
 
@@ -2303,7 +2329,7 @@ struct AppServerClientTests {
         ))
     }
 
-    @Test func backendIgnoresStaleTerminalWhileRecoveryInterruptIsInFlight() async throws {
+    @Test func backendCanonicalTerminalWinsWhileRecoveryInterruptIsInFlight() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
@@ -2319,6 +2345,7 @@ struct AppServerClientTests {
             model: "gpt-5"
         )
         let initialEvents = await eventSequence(backend, run)
+        var initialIterator = initialEvents.makeAsyncIterator()
         defer { withExtendedLifetime(initialEvents) {} }
 
         async let recovered = backend.resumeReviewRecovery(
@@ -2343,10 +2370,7 @@ struct AppServerClientTests {
                 turn: .init(id: "turn-1", status: "failed", error: .init(message: "Old turn failed"))
             )
         )
-        let ignoredStaleTerminal = await waitUntil {
-            await backend.notificationRouterMetricsForTesting().ignored == 1
-        }
-        #expect(ignoredStaleTerminal)
+        #expect(try await initialIterator.next() == .failed("Old turn failed"))
 
         await interruptGate.open()
         let recoveredRun = try await recovered
@@ -2426,71 +2450,6 @@ struct AppServerClientTests {
         let recoveredEvents = await eventSequence(backend, recoveredRun)
         var iterator = recoveredEvents.makeAsyncIterator()
 
-        try await transport.emitServerNotification(
-            method: "turn/started",
-            params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-2"))
-        )
-        #expect(try await iterator.next() == .started(
-            turnID: "turn-2",
-            reviewThreadID: "thread-1",
-            model: nil
-        ))
-    }
-
-    @Test func backendSuppressesRetriedActiveTurnNotificationsDuringRollback() async throws {
-        let transport = FakeJSONRPCTransport()
-        try await enqueueInitialize(transport)
-        await transport.enqueueFailure(
-            .responseError(
-                code: -32602,
-                message: "expected active turn id turn-old but found turn-active"
-            ),
-            for: "turn/interrupt"
-        )
-        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
-        try await transport.enqueue(EmptyResponse(), for: "thread/rollback")
-        try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-2", reviewThreadID: "thread-1"), for: "review/start")
-        let rollbackGate = AsyncGate()
-        await transport.holdNext(method: "thread/rollback", gate: rollbackGate)
-        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
-        let run = CodexReviewBackendModel.Review.Run(
-            threadID: "thread-1",
-            turnID: "turn-old",
-            reviewThreadID: "thread-1",
-            model: "gpt-5"
-        )
-        let initialEvents = await eventSequence(backend, run)
-        defer { withExtendedLifetime(initialEvents) {} }
-
-        async let recovered = backend.resumeReviewRecovery(
-            run,
-            request: CodexReviewBackendModel.Review.Start(
-                jobID: "job-1",
-                sessionID: "session-1",
-                request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
-                model: "gpt-5"
-            ),
-            reason: .init(message: "Network unavailable; waiting to reconnect.")
-        )
-        let rollbackRequested = await waitUntil {
-            await transport.recordedRequests().contains { $0.method == "thread/rollback" }
-        }
-        #expect(rollbackRequested)
-
-        try await transport.emitServerNotification(
-            method: "turn/started",
-            params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-active"))
-        )
-        let ignoredStaleNotification = await waitUntil {
-            await backend.notificationRouterMetricsForTesting().ignored == 1
-        }
-        #expect(ignoredStaleNotification)
-
-        await rollbackGate.open()
-        let recoveredRun = try await recovered
-        #expect(recoveredRun.turnID == "turn-2")
-        let recoveredEvents = await eventSequence(backend, recoveredRun)
-        var iterator = recoveredEvents.makeAsyncIterator()
         try await transport.emitServerNotification(
             method: "turn/started",
             params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-2"))
@@ -2605,6 +2564,10 @@ struct AppServerClientTests {
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         try await transport.enqueue(EmptyResponse(), for: "thread/rollback")
         try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-2", reviewThreadID: "review-thread-2"), for: "review/start")
+        try await transport.enqueue(
+            AppServerAPI.Thread.Unsubscribe.Response(status: .unsubscribed),
+            for: "thread/unsubscribe"
+        )
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
         let run = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
@@ -2623,7 +2586,7 @@ struct AppServerClientTests {
             ),
             reason: .init(message: "Network unavailable; waiting to reconnect.")
         )
-        await backend.cleanupReview(recovered)
+        try await backend.cleanupReview(recovered)
 
         let deleteThreadIDs = try await transport.recordedRequests()
             .filter { $0.method == "thread/delete" }
@@ -3026,7 +2989,7 @@ struct AppServerClientTests {
         #expect(try await iterator.next() == nil)
     }
 
-    @Test func backendInterruptFinishesReviewEventStream() async throws {
+    @Test func backendInterruptAckWaitsForCanonicalTerminalToFinishEventStream() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
@@ -3048,7 +3011,17 @@ struct AppServerClientTests {
 
         #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
 
-        try await backend.interruptReview(run, reason: .init(message: "Stop"))
+        async let cancellation: Void = backend.interruptReview(run, reason: .init(message: "Stop"))
+        await transport.waitForResponseDelivery(method: "turn/interrupt")
+        #expect(await run.events.isFinished() == false)
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: "thread-1",
+                turn: .init(id: "turn-1", status: "interrupted", error: .init(message: "Stop"))
+            )
+        )
+        try await cancellation
 
         #expect(try await iterator.next() == .cancelled("Stop"))
         #expect(try await iterator.next() == nil)
@@ -3098,7 +3071,16 @@ struct AppServerClientTests {
             )
         ))
 
-        try await backend.interruptReview(run, reason: .init(message: "Stop"))
+        async let cancellation: Void = backend.interruptReview(run, reason: .init(message: "Stop"))
+        await transport.waitForResponseDelivery(method: "turn/interrupt")
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: "thread-1",
+                turn: .init(id: "turn-1", status: "interrupted", error: .init(message: "Stop"))
+            )
+        )
+        try await cancellation
 
         guard case .logEntry(let kind, let text, let groupID, let replacesGroup, let metadata) = try await iterator.next()
         else {
@@ -3175,7 +3157,16 @@ struct AppServerClientTests {
         }
         #expect(routedOutput)
 
-        try await backend.interruptReview(run, reason: .init(message: "Stop"))
+        async let cancellation: Void = backend.interruptReview(run, reason: .init(message: "Stop"))
+        await transport.waitForResponseDelivery(method: "turn/interrupt")
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: "thread-1",
+                turn: .init(id: "turn-1", status: "interrupted", error: .init(message: "Stop"))
+            )
+        )
+        try await cancellation
 
         var sawClosedOutput = false
         while let event = try await iterator.next() {
@@ -3293,7 +3284,12 @@ struct AppServerClientTests {
         var iterator = events.makeAsyncIterator()
         #expect(try await iterator.next() == .started(turnID: "turn-old", reviewThreadID: "thread-1", model: nil))
 
-        try await backend.interruptReview(run, reason: .init())
+        try await interruptAndDeliverCanonicalTerminal(
+            backend: backend,
+            transport: transport,
+            run: run,
+            reason: .init()
+        )
 
         let request = try #require(await transport.recordedRequests().last)
         let params = try JSONDecoder().decode(AppServerAPI.Turn.Interrupt.Params.self, from: request.params)
@@ -3477,7 +3473,12 @@ struct AppServerClientTests {
         ))
         #expect(try await iterator.next() == .messageDelta("review output", itemID: "message-1"))
 
-        try await backend.interruptReview(run, reason: .init())
+        try await interruptAndDeliverCanonicalTerminal(
+            backend: backend,
+            transport: transport,
+            run: run,
+            reason: .init()
+        )
 
         let params = try JSONDecoder().decode(
             AppServerAPI.Turn.Interrupt.Params.self,
@@ -4563,7 +4564,7 @@ struct AppServerClientTests {
                 delta: "tail output\n"
             )
         )
-        await transport.close()
+        try await transport.close()
 
         #expect(try await iterator.next() == .logEntry(
             kind: .commandOutput,
@@ -4572,7 +4573,9 @@ struct AppServerClientTests {
             replacesGroup: false,
             metadata: .init(sourceType: "commandExecution", title: "Command output", itemID: "cmd-1")
         ))
-        #expect(try await iterator.next() == nil)
+        await #expect(throws: BackendReviewEventMailboxError.self) {
+            _ = try await iterator.next()
+        }
     }
 
     @Test func backendReviewExitCompletesMissingCommandCompletion() async throws {
@@ -5288,6 +5291,10 @@ struct AppServerClientTests {
         try await enqueueInitialize(transport)
         try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1"), for: "thread/start")
         await transport.enqueueFailure(.responseError(code: -32602, message: "invalid target"), for: "review/start")
+        try await transport.enqueue(
+            AppServerAPI.Thread.Unsubscribe.Response(status: .unsubscribed),
+            for: "thread/unsubscribe"
+        )
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
 
         await #expect(throws: JSONRPC.Error.responseError(code: -32602, message: "invalid target")) {
