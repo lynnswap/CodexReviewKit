@@ -153,11 +153,11 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         control.recordThreadStarted(threadID: thread.threadID)
         await admission.recordPreparedThread(provisionalRun)
 
-        guard await admission.admitReviewStartDispatch(for: provisionalRun) else {
+        do {
+            try await admission.admitReviewStartDispatch(for: provisionalRun)
+        } catch {
             try await cleanupReview(provisionalRun)
-            throw ReviewStartCancelledBeforeDispatch(
-                cancellation: await admission.cancellationRequest() ?? .system()
-            )
+            throw error
         }
 
         let review: AppServerAPI.Review.Start.Response
@@ -262,11 +262,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         _ request: AppServerAPI.Thread.Start.Request,
         admission: ReviewStartAdmission
     ) async throws -> AppServerAPI.Thread.Start.Response {
-        guard await admission.admitThreadStartDispatch() else {
-            throw ReviewStartCancelledBeforeDispatch(
-                cancellation: await admission.cancellationRequest() ?? .system()
-            )
-        }
+        try await admission.admitThreadStartDispatch()
         do {
             return try await client.send(request)
         } catch {
@@ -440,12 +436,12 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         )
         registerReviewEventSession(session, for: provisionalRun)
         await admission.recordPreparedThread(provisionalRun)
-        guard await admission.admitReviewStartDispatch(for: provisionalRun) else {
+        do {
+            try await admission.admitReviewStartDispatch(for: provisionalRun)
+        } catch {
             _ = unregisterReviewEventSession(for: provisionalRun)
             await session.abandon()
-            throw ReviewStartCancelledBeforeDispatch(
-                cancellation: await admission.cancellationRequest() ?? .system()
-            )
+            throw error
         }
 
         let review: AppServerAPI.Review.Start.Response

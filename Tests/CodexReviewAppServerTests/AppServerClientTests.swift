@@ -70,7 +70,7 @@ private func makeRecoveryCandidate(
 ) async throws -> ReviewRecoveryCandidate {
     let admission = ReviewStartAdmission()
     let registered = try await admission.registerStart { admission in
-        #expect(await admission.admitThreadStartDispatch())
+        try await admission.admitThreadStartDispatch()
         let provisionalRun = CodexReviewBackendModel.Review.Run(
             attemptID: run.attemptID,
             threadID: run.threadID,
@@ -78,7 +78,7 @@ private func makeRecoveryCandidate(
             model: run.model
         )
         await admission.recordPreparedThread(provisionalRun)
-        #expect(await admission.admitReviewStartDispatch(for: provisionalRun))
+        try await admission.admitReviewStartDispatch(for: provisionalRun)
         await admission.recordActiveRun(run)
         return .init(run: run)
     }

@@ -506,11 +506,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         _ request: CodexReviewBackendModel.Review.Start,
         admission: ReviewStartAdmission
     ) async throws -> BackendReviewAttempt {
-        guard await admission.admitThreadStartDispatch() else {
-            throw ReviewStartCancelledBeforeDispatch(
-                cancellation: await admission.cancellationRequest() ?? .system()
-            )
-        }
+        try await admission.admitThreadStartDispatch()
         commands.append(.startReview(request))
         let waiters = Array(startReviewWaiters.values)
         startReviewWaiters.removeAll(keepingCapacity: false)
@@ -524,11 +520,11 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
             model: nextRun.model
         )
         await admission.recordPreparedThread(provisionalRun)
-        guard await admission.admitReviewStartDispatch(for: provisionalRun) else {
+        do {
+            try await admission.admitReviewStartDispatch(for: provisionalRun)
+        } catch {
             commands.append(.cleanupReview(provisionalRun))
-            throw ReviewStartCancelledBeforeDispatch(
-                cancellation: await admission.cancellationRequest() ?? .system()
-            )
+            throw error
         }
         if let startReviewGate {
             await startReviewGate.wait()
@@ -624,11 +620,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
             model: recoveredRun.model
         )
         await admission.recordPreparedThread(provisionalRun)
-        guard await admission.admitReviewStartDispatch(for: provisionalRun) else {
-            throw ReviewStartCancelledBeforeDispatch(
-                cancellation: await admission.cancellationRequest() ?? .system()
-            )
-        }
+        try await admission.admitReviewStartDispatch(for: provisionalRun)
         commands.append(.resumeReviewRecovery(handoff, request))
         let waiters = Array(resumeReviewRecoveryWaiters.values)
         resumeReviewRecoveryWaiters.removeAll(keepingCapacity: false)

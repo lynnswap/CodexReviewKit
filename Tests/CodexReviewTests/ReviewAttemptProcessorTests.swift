@@ -349,6 +349,45 @@ struct ReviewAttemptProcessorTests {
         }
     }
 
+    @Test func startupForceCloseFailureReturnsWithoutWaitingForStartResponse() async throws {
+        let graceGate = AsyncGate()
+        let startResponseGate = AsyncGate()
+        let startDispatched = InvocationProbe()
+        let forceCloseStarted = InvocationProbe()
+        let forceFailure = ReviewRuntimeCloseFailure.process("Process remained alive")
+        let admission = ReviewStartAdmission(
+            closePolicy: controlledClosePolicy(gate: graceGate)
+        )
+        let registered = try await admission.registerStart { admission in
+            try await admission.admitThreadStartDispatch()
+            await startDispatched.record()
+            await startResponseGate.waitIgnoringCancellation()
+            return .init(run: canonicalRun)
+        }
+        try await admission.activateStart(registered.id)
+        await startDispatched.waitForInvocation()
+
+        let cancellation = Task {
+            try await admission.cancel(
+                .system(message: "Stop"),
+                interrupt: { _, _ in Issue.record("A startup-only attempt was interrupted.") },
+                forceClose: {
+                    await forceCloseStarted.record()
+                    throw forceFailure
+                }
+            )
+        }
+        #expect(await admission.waitForCancellationAdmission() == .system(message: "Stop"))
+        await graceGate.open()
+        await forceCloseStarted.waitForInvocation()
+
+        await #expect(throws: forceFailure) {
+            try await cancellation.value
+        }
+        await startResponseGate.open()
+        _ = try await registered.task.value
+    }
+
     @Test func terminalFirstForceCloseFailureCancelsPendingRequestAndPreservesTerminal() async throws {
         let graceGate = AsyncGate()
         let (admission, run) = try await makeActiveAdmission(
@@ -411,7 +450,7 @@ struct ReviewAttemptProcessorTests {
         await requestStarted.waitForInvocation()
         let second = Task {
             try await admission.cancel(
-                .mcpClient(message: "Stop"),
+                .system(message: "Runtime stop"),
                 interrupt: { _, _ in
                     Issue.record("Duplicate caller installed a second interrupt operation.")
                 },
@@ -425,6 +464,9 @@ struct ReviewAttemptProcessorTests {
         await requestGate.open()
 
         #expect(try await first.value == second.value)
+        #expect(await admission.waitForInterruptionAdmission() == .terminalCancellation(
+            .mcpClient(message: "Stop")
+        ))
         #expect(await requestStarted.invocationCount() == 1)
     }
 
@@ -602,6 +644,13 @@ struct ReviewAttemptProcessorTests {
                 forceClose: {}
             )
         }
+        let duplicateCancellation = Task {
+            try await admission.cancel(
+                .system(message: "Runtime stop"),
+                interrupt: { _, _ in Issue.record("Duplicate joined cancellation sent a request.") },
+                forceClose: {}
+            )
+        }
         #expect(await admission.waitForCancellationAdmission() == .mcpClient(message: "Stop"))
         try await admission.recordCanonicalTerminal(
             .interrupted(.server(message: "network recovery")),
@@ -616,7 +665,8 @@ struct ReviewAttemptProcessorTests {
         }
         #expect(product.resolved.run == run)
         #expect(product.productTerminal == .interrupted(.requested(.mcpClient(message: "Stop"))))
-        _ = try await cancellation.value
+        _ = try await (cancellation.value, duplicateCancellation.value)
+        #expect(await admission.waitForCancellationAdmission() == .mcpClient(message: "Stop"))
         #expect(await requestStarted.invocationCount() == 1)
     }
 
@@ -711,8 +761,10 @@ struct ReviewAttemptProcessorTests {
             return .init(run: canonicalRun)
         }
 
-        #expect(await admission.admitThreadStartDispatch())
-        #expect(await admission.admitThreadStartDispatch() == false)
+        try await admission.admitThreadStartDispatch()
+        await #expect(throws: ReviewAttemptContractFailure.self) {
+            try await admission.admitThreadStartDispatch()
+        }
 
         await startGate.open()
         _ = try await startTask.value
@@ -726,10 +778,12 @@ struct ReviewAttemptProcessorTests {
             return .init(run: canonicalRun)
         }
 
-        #expect(await admission.admitThreadStartDispatch())
+        try await admission.admitThreadStartDispatch()
         try await admission.recordThreadStartRejectedForRetry()
-        #expect(await admission.admitThreadStartDispatch())
-        #expect(await admission.admitThreadStartDispatch() == false)
+        try await admission.admitThreadStartDispatch()
+        await #expect(throws: ReviewAttemptContractFailure.self) {
+            try await admission.admitThreadStartDispatch()
+        }
 
         await startGate.open()
         _ = try await startTask.value
@@ -742,11 +796,13 @@ struct ReviewAttemptProcessorTests {
             await startGate.waitIgnoringCancellation()
             return .init(run: canonicalRun)
         }
-        #expect(await admission.admitThreadStartDispatch())
+        try await admission.admitThreadStartDispatch()
         await admission.recordPreparedThread(provisionalRun)
 
-        #expect(await admission.admitReviewStartDispatch(for: provisionalRun))
-        #expect(await admission.admitReviewStartDispatch(for: provisionalRun) == false)
+        try await admission.admitReviewStartDispatch(for: provisionalRun)
+        await #expect(throws: ReviewAttemptContractFailure.self) {
+            try await admission.admitReviewStartDispatch(for: provisionalRun)
+        }
 
         await startGate.open()
         _ = try await startTask.value
@@ -774,11 +830,7 @@ struct ReviewAttemptProcessorTests {
             await entered.record()
             await dispatchGate.wait()
             try Task.checkCancellation()
-            guard await admission.admitThreadStartDispatch() else {
-                throw ReviewStartCancelledBeforeDispatch(
-                    cancellation: await admission.cancellationRequest() ?? .system()
-                )
-            }
+            try await admission.admitThreadStartDispatch()
             Issue.record("Thread request was dispatched after cancellation.")
             return .init(run: canonicalRun)
         }
@@ -796,22 +848,44 @@ struct ReviewAttemptProcessorTests {
         }
     }
 
+    @Test func streamTerminalAfterActivationBeforeDispatchRemainsAuthoritative() async throws {
+        let admission = ReviewStartAdmission(closePolicy: controlledClosePolicy(gate: AsyncGate()))
+        let operationEntered = InvocationProbe()
+        let dispatchGate = AsyncGate()
+        let failure = ReviewAttemptStreamFailure.unexpectedConnection(
+            .connection("Connection ended before dispatch")
+        )
+        let registered = try await admission.registerStart { admission in
+            await operationEntered.record()
+            await dispatchGate.waitIgnoringCancellation()
+            try await admission.admitThreadStartDispatch()
+            Issue.record("A terminal attempt admitted a backend write.")
+            return .init(run: canonicalRun)
+        }
+        try await admission.activateStart(registered.id)
+        await operationEntered.waitForInvocation()
+
+        try await admission.recordStreamTerminal(failure)
+        await dispatchGate.open()
+
+        await #expect(throws: failure) {
+            try await registered.task.value
+        }
+        #expect(await admission.currentPhase() == .terminal(.stream(failure)))
+    }
+
     @Test func cancellationAfterThreadDispatchRefusesReviewDispatchAfterResponse() async throws {
         let graceGate = AsyncGate()
         let admission = ReviewStartAdmission(closePolicy: controlledClosePolicy(gate: graceGate))
         let threadDispatched = InvocationProbe()
         let threadResponseGate = AsyncGate()
         let startTask = try await registerAndActivateStart(admission) { admission in
-            #expect(await admission.admitThreadStartDispatch())
+            try await admission.admitThreadStartDispatch()
             await threadDispatched.record()
             await threadResponseGate.waitIgnoringCancellation()
             let provisional = provisionalRun
             await admission.recordPreparedThread(provisional)
-            guard await admission.admitReviewStartDispatch(for: provisional) else {
-                throw ReviewStartCancelledBeforeDispatch(
-                    cancellation: await admission.cancellationRequest() ?? .system()
-                )
-            }
+            try await admission.admitReviewStartDispatch(for: provisional)
             Issue.record("Review request was dispatched after cancellation.")
             return .init(run: canonicalRun)
         }
@@ -841,7 +915,7 @@ struct ReviewAttemptProcessorTests {
         let forceClose = InvocationProbe()
         let connection = ReviewRuntimeCloseFailure.connection("Forced close")
         let startTask = try await registerAndActivateStart(admission) { admission in
-            #expect(await admission.admitThreadStartDispatch())
+            try await admission.admitThreadStartDispatch()
             await threadDispatched.record()
             await threadResponseGate.wait()
             try Task.checkCancellation()
@@ -879,15 +953,11 @@ struct ReviewAttemptProcessorTests {
         let prepared = InvocationProbe()
         let reviewDispatchGate = AsyncGate()
         let startTask = try await registerAndActivateStart(admission) { admission in
-            #expect(await admission.admitThreadStartDispatch())
+            try await admission.admitThreadStartDispatch()
             await admission.recordPreparedThread(provisionalRun)
             await prepared.record()
             await reviewDispatchGate.waitIgnoringCancellation()
-            guard await admission.admitReviewStartDispatch(for: provisionalRun) else {
-                throw ReviewStartCancelledBeforeDispatch(
-                    cancellation: await admission.cancellationRequest() ?? .system()
-                )
-            }
+            try await admission.admitReviewStartDispatch(for: provisionalRun)
             Issue.record("Review request was dispatched after cancellation.")
             return .init(run: canonicalRun)
         }
@@ -916,9 +986,9 @@ struct ReviewAttemptProcessorTests {
         let reviewResponseGate = AsyncGate()
         let interruptCalled = InvocationProbe()
         let startTask = try await registerAndActivateStart(admission) { admission in
-            #expect(await admission.admitThreadStartDispatch())
+            try await admission.admitThreadStartDispatch()
             await admission.recordPreparedThread(provisionalRun)
-            #expect(await admission.admitReviewStartDispatch(for: provisionalRun))
+            try await admission.admitReviewStartDispatch(for: provisionalRun)
             await reviewDispatched.record()
             await reviewResponseGate.waitIgnoringCancellation()
             await admission.recordActiveRun(canonicalRun)
@@ -957,9 +1027,9 @@ struct ReviewAttemptProcessorTests {
         let forceClose = InvocationProbe()
         let connection = ReviewRuntimeCloseFailure.connection("Forced close")
         let startTask = try await registerAndActivateStart(admission) { admission in
-            #expect(await admission.admitThreadStartDispatch())
+            try await admission.admitThreadStartDispatch()
             await admission.recordPreparedThread(provisionalRun)
-            #expect(await admission.admitReviewStartDispatch(for: provisionalRun))
+            try await admission.admitReviewStartDispatch(for: provisionalRun)
             await reviewDispatched.record()
             await reviewResponseGate.wait()
             try Task.checkCancellation()
@@ -1038,9 +1108,9 @@ private func makeActiveAdmission(
         closePolicy: closePolicy ?? controlledClosePolicy(gate: AsyncGate())
     )
     let startTask = try await registerAndActivateStart(admission) { admission in
-        #expect(await admission.admitThreadStartDispatch())
+        try await admission.admitThreadStartDispatch()
         await admission.recordPreparedThread(provisionalRun)
-        #expect(await admission.admitReviewStartDispatch(for: provisionalRun))
+        try await admission.admitReviewStartDispatch(for: provisionalRun)
         await admission.recordActiveRun(canonicalRun)
         return .init(run: canonicalRun)
     }
