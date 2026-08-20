@@ -61,6 +61,7 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
     private let stderr: Pipe
     private let stdoutEvents: AppServerPipeReadEventSource
     private let stderrEvents: AppServerPipeReadEventSource
+    private let closeCompletionForTesting: (@Sendable () async throws -> Void)?
     private var framer = JSONRPC.Framer()
     private var pending: [Int: PendingResponse] = [:]
     private var notificationContinuations: [UUID: AsyncThrowingStream<JSONRPC.Notification, Error>.Continuation] = [:]
@@ -68,8 +69,12 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
     private var stdoutReaderTask: Task<Void, Never>? = nil
     private var stderrReaderTask: Task<Void, Never>? = nil
     private var closed = false
+    private var closeTask: Task<Void, any Error>?
 
-    package init(configuration: Configuration = .init()) throws {
+    package init(
+        configuration: Configuration = .init(),
+        closeCompletionForTesting: (@Sendable () async throws -> Void)? = nil
+    ) throws {
         guard FileManager.default.isExecutableFile(atPath: configuration.executable) else {
             throw AppServerProcessTransportError.executableNotFound(
                 command: configuration.executable,
@@ -100,6 +105,7 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
         )
         self.stdoutEvents = stdoutEvents
         self.stderrEvents = stderrEvents
+        self.closeCompletionForTesting = closeCompletionForTesting
         logger.info("Launching codex app-server: \(configuration.executable, privacy: .public) \(configuration.arguments.joined(separator: " "), privacy: .public)")
         logger.info("Using codex app-server home: \(configuration.codexHomeURL.path, privacy: .public)")
         logger.info("codex app-server launched with pid \(process.processIdentifier, privacy: .public)")
@@ -170,27 +176,44 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
         error: any Error,
         readerTask: ReaderTask?
     ) async throws {
-        if closed {
-            if readerTask == nil {
-                await waitForReaderTasks(excluding: nil)
+        let task: Task<Void, any Error>
+        if let closeTask {
+            task = closeTask
+        } else {
+            closed = true
+            stdoutEvents.cancel()
+            stderrEvents.cancel()
+            try? stdin.fileHandleForWriting.close()
+            let newTask = Task<Void, any Error> {
+                try await self.performCloseTransport(
+                    terminateProcess: terminateProcess,
+                    error: error
+                )
             }
-            return
+            closeTask = newTask
+            task = newTask
         }
-        closed = true
-        stdoutEvents.cancel()
-        stderrEvents.cancel()
-        try? stdin.fileHandleForWriting.close()
+
+        let result = await task.result
+        await waitForReaderTasks(excluding: readerTask)
+        try result.get()
+    }
+
+    private func performCloseTransport(
+        terminateProcess: Bool,
+        error: any Error
+    ) async throws {
         var processCloseError: (any Error)?
         if terminateProcess {
             logger.info("Terminating codex app-server pid \(self.process.processIdentifier, privacy: .public)")
             do {
                 try await process.terminateAndWait()
+                try await closeCompletionForTesting?()
             } catch {
                 processCloseError = error
             }
         }
         finishAll(throwing: processCloseError ?? error)
-        await waitForReaderTasks(excluding: readerTask)
         if let processCloseError {
             throw processCloseError
         }
