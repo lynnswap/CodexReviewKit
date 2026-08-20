@@ -43,6 +43,13 @@ open until Wave 4 proves commit-before-cleanup.
 
 - `AppServerCodexReviewBackend.interruptReview` currently finishes the event
   stream immediately after interrupt ACK.
+- `AppServerCodexReviewBackend.beginReviewRecovery` currently treats interrupt
+  ACK as recovery completion, marks the turn/attempt abandoned, and unregisters
+  the event session before a canonical/connection terminal can arrive.
+- the Store clears and cancels the active event subscription before invoking
+  recovery, removing the input that must satisfy the old attempt barrier.
+- recovery currently records a recovered run on the predecessor's admission;
+  one terminal attempt owner is thereby reused for a different attempt ID.
 - `CodexReviewStore.cancelReview` immediately commits local cancellation and
   cancels its worker after the request returns.
 - runtime stop races worker drain against a sleep, cancels the drain Task on
@@ -78,7 +85,7 @@ queued
      )
   -> active(canonicalPair)
   -> interrupting(
-       requestedBy,
+       purpose: terminalCancellation(requestedBy) | recoverableTransition(trigger),
        requestTask,
        terminalBarrierTask,
        graceTask,
@@ -106,15 +113,25 @@ interrupts and awaits the returned canonical pair, and on connection loss it
 resolves through the typed connection terminal. Cancelling the caller Task does
 not abandon either request or fabricate cancellation.
 
-Use one store-created `ReviewStartAdmission` actor/value plus the registered
-start Task. The backend must atomically ask that admission immediately before
-both the `thread/start` and `review/start` writes. A pre-recorded cancellation
+Use one store-created `ReviewStartAdmission` actor per attempt plus the
+registered start Task. The backend must atomically ask that admission
+immediately before both the `thread/start` and `review/start` writes. A pre-recorded cancellation
 refuses the relevant write and proves `.notSent`; admission of either write
 irreversibly records that stage as `.outcomeUnknown` until response/connection
 resolution.
 Store cancellation and backend dispatch consult this same value—there is no duplicated
 `startingJobIDs`/`startupCancellations` truth. The backend returns an immutable
 attempt value and never publishes directly into the store.
+
+The same admission owns both terminal cancellation and recoverable interruption.
+`AppServerCodexReviewBackend.interruptReview` is request-scoped and returns after
+ACK (or throws typed rejection/outcome-unknown); it never waits for the event
+stream barrier and never finishes, abandons, unregisters, or cleans up the
+session. Remove the backend-owned `beginReviewRecovery` lifecycle shortcut.
+The Store asks the current admission to begin a recoverable transition, and the
+admission runs the ACK-only backend operation while it waits independently for
+the canonical/connection terminal. Thus request completion and semantic
+completion have exactly one owner each and cannot wait on each other twice.
 
 The processor accepts three independently ordered inputs:
 
@@ -139,6 +156,9 @@ Rules:
   in-flight attempt may not;
 - a review already in `waitingForConnectivity` has no live attempt barrier and
   may commit explicit requested cancellation while preventing recovery;
+- cancellation received while the old attempt's recovery barrier is still
+  active joins that admission's one request/barrier Task, issues no second
+  interrupt, and suppresses any replacement after the barrier;
 - one cancellation command owns admission. Repeated callers join the same
   outcome rather than issuing a second interrupt.
 
@@ -162,6 +182,35 @@ diagnostic and does not reverse the terminal.
 `thread/status/changed`, `thread/closed`, `item/completed`, and interrupt ACK
 are never substituted for the canonical turn terminal. A known-dead connection
 is a distinct typed terminal input, not an inferred successful cancellation.
+
+For recovery, a canonical `completed` or `failed` terminal is a natural product
+terminal and no token/replacement is produced. A canonical `interrupted`
+terminal, or a typed connection terminal that the trigger policy classifies as
+recoverable, closes the old attempt and yields one recovery token while the
+product remains nonterminal. A nonrecoverable connection/process/protocol
+terminal closes the product and yields no token. If explicit cancellation joined
+the recovery first, a natural completed/failed terminal still wins; otherwise
+an acknowledged recovery interrupt followed by the interrupted/connection
+barrier commits requested product cancellation and suppresses replacement. If
+the recovery request remained outcome-unknown and only connection loss
+satisfied the barrier, retain the typed transport outcome and original request
+failure rather than fabricating requested cancellation; replacement is still
+suppressed.
+
+The Store must keep the old `activeEventSubscriptionID`, mailbox consumer, and
+AppServer session registered until this classification and all owned request/
+force-close Tasks have joined. Only then may it cancel/detach the subscription,
+finish/unregister the session, and publish the recovery token. ACK alone never
+marks a turn/attempt abandoned. Recoverable teardown preserves the source thread
+and does not invoke destructive review cleanup.
+
+`resumeReviewRecovery` always receives a newly constructed
+`ReviewStartAdmission` for a newly generated attempt ID and consults it before
+the replacement `review/start` write. The predecessor admission remains
+terminal and immutable; `recordActiveRun` is never called on it. Store
+publication replaces the `(attempt, admission)` pair atomically only after the
+old barrier/teardown. Cancellation before the replacement write is therefore a
+fresh `.notSent` decision, not state inherited from the old attempt.
 
 Remove the current `AppServerReviewControl` behavior that parses an active-turn
 ID from a rejection string and retries interruption against that other turn.
@@ -266,9 +315,11 @@ Do not encode these differences as different call-site cancellation sequences.
 One runtime transition command carries the trigger/purpose into the owner.
 
 Same-account restart and recoverable transport loss obtain a recovery token and
-must not run destructive thread cleanup. They detach the old event session,
-close the old runtime, and move directly to `recovering` when the replacement
-runtime is authoritative; they do not wait for a network-monitor edge. Exactly
+must not run destructive thread cleanup. They keep the old event session and
+Store subscription alive through the attempt barrier, detach them only after
+that barrier and their owned Tasks join, close the old runtime, and move
+directly to `recovering` when the replacement runtime is authoritative; they do
+not wait for a network-monitor edge. Exactly
 one resume/start consumes the token. Calling
 `start(forceRestartIfNeeded: true)` while already running is this restart path,
 not an initial-start shortcut.
@@ -321,6 +372,30 @@ package enum ReviewInterruptRequestOutcome: Sendable {
     case outcomeUnknown(message: String)
 }
 
+package enum ReviewAttemptRecoveryTrigger: Sendable {
+    case sameAccountRestart
+    case recoverableNetworkLoss
+}
+
+package enum ReviewAttemptInterruptionPurpose: Sendable {
+    case terminalCancellation(ReviewCancellation)
+    case recoverableTransition(ReviewAttemptRecoveryTrigger)
+}
+
+package enum ReviewAttemptBarrierTerminal: Sendable {
+    case canonical(
+        run: CodexReviewBackendModel.Review.Run,
+        terminal: ReviewTerminalRecord
+    )
+    case connection(ReviewRuntimeCloseFailure)
+    case localCancellation(ReviewCancellation)
+}
+
+package enum ReviewRecoveryDisposition: Sendable {
+    case productTerminal(ReviewAttemptBarrierTerminal)
+    case replacement(CodexReviewBackendModel.Review.RecoveryToken)
+}
+
 package struct ReviewInterruptRequestFailure: LocalizedError, Sendable {
     package let outcome: ReviewInterruptRequestOutcome
     package let secondaryBarrierDiagnostic: String?
@@ -351,6 +426,39 @@ package enum ReviewClosePrimaryFailure: LocalizedError, Sendable {
 package struct ReviewCloseError: LocalizedError, Sendable {
     package let primary: ReviewClosePrimaryFailure
     package let secondaryPhysicalDatabaseClose: ReviewPersistenceError?
+}
+
+package actor ReviewStartAdmission {
+    // Existing terminal cancellation joins this operation if recovery is
+    // already waiting; it never installs a second request/barrier pair.
+    package func beginRecovery(
+        trigger: ReviewAttemptRecoveryTrigger,
+        interrupt: @escaping @Sendable (
+            CodexReviewBackendModel.Review.Run,
+            CodexReviewBackendModel.CancellationReason
+        ) async throws -> Void,
+        forceClose: @escaping @Sendable () async throws -> Void
+    ) async throws -> ReviewRecoveryDisposition
+}
+
+package protocol CodexReviewBackend: Sendable {
+    func startReview(
+        _ request: CodexReviewBackendModel.Review.Start,
+        admission: ReviewStartAdmission
+    ) async throws -> BackendReviewAttempt
+
+    // Resolves only the turn/interrupt request response. The attempt admission
+    // owns and awaits the independent semantic terminal barrier.
+    func interruptReview(
+        _ run: CodexReviewBackendModel.Review.Run,
+        reason: CodexReviewBackendModel.CancellationReason
+    ) async throws
+
+    func resumeReviewRecovery(
+        _ token: CodexReviewBackendModel.Review.RecoveryToken,
+        request: CodexReviewBackendModel.Review.Start,
+        admission: ReviewStartAdmission
+    ) async throws -> BackendReviewAttempt
 }
 
 @MainActor
@@ -529,6 +637,7 @@ Expected tests:
 
 - focused store cancellation/close state tests
 - AppServer interrupt ordering and process transport close tests
+- recovery subscription/session barrier and fresh-attempt admission tests
 - Host runtime start/restart/stop reentrancy tests
 - MCP admitted-handler drain tests
 - ReviewUI close-and-await tests
@@ -553,10 +662,13 @@ prove these current failures:
 3. interrupt request is explicitly rejected;
 4. request transport outcome is unknown, then terminal or connection loss
    resolves it;
-5. stop timeout currently returns with an unfinished worker;
-6. start/restart completion publishes after close begins;
-7. concurrent close callers currently execute shutdown more than once;
-8. application termination cannot report a close failure.
+5. recovery ACK currently unregisters/abandons the event session before terminal;
+6. Store recovery currently cancels its terminal-producing subscription first;
+7. a recovered run currently reuses the predecessor admission;
+8. stop timeout currently returns with an unfinished worker;
+9. start/restart completion publishes after close begins;
+10. concurrent close callers currently execute shutdown more than once;
+11. application termination cannot report a close failure.
 
 Then commit green checkpoints:
 
@@ -581,6 +693,15 @@ Then commit green checkpoints:
 - cancellation before thread dispatch, after outcome-unknown thread dispatch,
   after thread response but before review dispatch, and after outcome-unknown
   review dispatch;
+- recovery ACK before/after terminal keeps the old subscription/session alive
+  until canonical/connection barrier completion;
+- canonical completed/failed during recovery suppresses replacement; canonical
+  interrupted and policy-recoverable connection terminal create exactly one
+  token; nonrecoverable terminal creates none;
+- cancellation during recovery joins the same request/barrier with one interrupt
+  and prevents replacement;
+- replacement uses a fresh admission/attempt ID, and cancellation before its
+  `review/start` dispatch is proven `.notSent` without mutating the predecessor;
 - queued, starting, active, waiting-for-connectivity, recovering, and already
   terminal review cancellation;
 - user, MCP, session-close, runtime-stop, restart, account-transition, network,

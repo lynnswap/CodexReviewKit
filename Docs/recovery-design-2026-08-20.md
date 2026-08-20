@@ -584,6 +584,60 @@ Only one `ReviewExecutionPhase` transition owner may start/recover attempts.
 Network monitor events, app-server terminal events, and cancel commands enter
 that owner; call sites do not independently restart or rewrite history.
 
+`ReviewStartAdmission` is created once per attempt and is that attempt's
+lifecycle owner from the first request-dispatch decision through its canonical
+or connection terminal. The AppServer backend's `interruptReview` operation is
+request-scoped: success means only that `turn/interrupt` was acknowledged. It
+does not wait for a semantic terminal, finish or abandon an event mailbox,
+unregister the attempt, create a recovery token, or clean up its thread. The
+admission retains the interrupt request Task, terminal-barrier Task, grace Task,
+and any force-close Task and joins them before releasing the attempt. There is
+no separate backend-owned `beginReviewRecovery` lifecycle shortcut; recovery is
+a purpose passed into the same admission-owned interruption operation.
+
+A recoverable transition keeps the current Store event subscription and the
+AppServer event session registered while that admission waits. Neither owner
+may clear its active subscription ID, cancel the mailbox consumer, mark the
+attempt/turn abandoned, or unregister the session merely because the interrupt
+request was acknowledged. The matching canonical terminal continues to enter
+the Wave 2 reducer through that subscription; a typed connection/process
+terminal enters the same admission directly. Only after one of those barriers
+has won and every request/force-close handle has joined may the Store detach the
+old subscription and the backend finish/unregister the old attempt session.
+Recoverable teardown preserves the source thread needed for continuation and
+does not run destructive review cleanup.
+
+The recovery barrier produces one typed disposition:
+
+- canonical `completed` or `failed` is a natural product terminal and suppresses
+  recovery, even if a recovery request or its acknowledgement arrived first;
+- canonical `interrupted`, or a typed connection terminal classified
+  recoverable by the fixed trigger policy below, closes only the old attempt and
+  permits one replacement while the product review remains nonterminal;
+- a nonrecoverable connection/process/protocol terminal closes the product with
+  its typed failure and permits no replacement.
+
+If explicit user/MCP/system cancellation is admitted while recovery is waiting
+on the old attempt, it joins that admission's already-recorded request/barrier
+Task; it does not issue a second interrupt or locally fabricate a terminal. A
+natural `completed`/`failed` terminal that wins the owner ordering remains
+authoritative. Otherwise an acknowledged recovery interrupt followed by the
+interrupted/connection barrier commits the requested product interruption and
+suppresses replacement. If the recovery request remained outcome-unknown and
+only connection loss satisfied the barrier, the typed transport outcome and
+request failure remain visible rather than fabricating requested cancellation;
+replacement is still suppressed. Once the old barrier has completed and the
+product is merely `waitingForConnectivity`, there is no live attempt to
+interrupt; cancellation commits locally and prevents recovery admission.
+
+Each replacement has a newly allocated attempt ID and a newly constructed
+`ReviewStartAdmission`. `resumeReviewRecovery` receives that fresh admission and
+must ask it immediately before the replacement `review/start` write. The old
+terminal admission is immutable and cannot be reset to active or reused for the
+new run. The Store publishes the new admission/run pair atomically only after
+the old attempt barrier and teardown completed; cancellation before replacement
+dispatch is therefore proven by the new admission as `.notSent`.
+
 Runtime transitions use this fixed product policy:
 
 | Trigger | Current attempt | Product review | Next attempt | Duration | MCP waiter |
@@ -2429,6 +2483,14 @@ Within the recovery branch:
 - Runtime transition matrix coverage for explicit cancel, stop, same-account
   restart, account change/reconciliation, recoverable network loss,
   nonrecoverable protocol/process death, and application termination.
+- Recovery interrupt acknowledgement before/after canonical terminal, proving
+  that acknowledgement never detaches the old event subscription/session;
+  canonical `completed`/`failed` suppress replacement while canonical
+  `interrupted` and a policy-recoverable connection terminal permit exactly one.
+- Cancellation racing an in-progress recovery joins the old admission's one
+  request/barrier, issues no duplicate interrupt, and prevents replacement;
+  after the barrier, a replacement uses a distinct attempt ID and fresh
+  `ReviewStartAdmission`, including cancellation-before-dispatch proof.
 - Application close failure preserves the last rendered error snapshot and
   requires an explicit Cancel Quit / Quit Anyway decision; post-close
   start/restart no-op and mutation rejection are deterministic.
