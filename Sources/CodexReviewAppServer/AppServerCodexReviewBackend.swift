@@ -407,6 +407,18 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         return .outcomeUnknown(message: error.localizedDescription)
     }
 
+    private nonisolated static func interruptRequestFailure(
+        for error: any Error
+    ) -> ReviewInterruptRequestFailure {
+        if let failure = error as? ReviewInterruptRequestFailure {
+            return failure
+        }
+        if case JSONRPC.Error.responseError(let code, let message) = error {
+            return .init(outcome: .rejected(code: code, message: message))
+        }
+        return .init(outcome: .outcomeUnknown(message: error.localizedDescription))
+    }
+
     private nonisolated static func connectionFailure(
         for error: any Error
     ) -> ReviewRuntimeCloseFailure? {
@@ -455,6 +467,30 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         } catch {
             await session.clearCancellationRequest()
             throw error
+        }
+    }
+
+    package func interruptReview(
+        _ requestAdmission: ReviewInterruptRequestAdmission,
+        reason _: CodexReviewBackendModel.CancellationReason
+    ) async throws {
+        do {
+            _ = try await client.initialize()
+            let run = requestAdmission.run
+            guard abandonedReviewAttemptIDs.contains(run.attemptID) == false else {
+                throw ReviewInterruptRequestFailure(outcome: .rejected(
+                    code: nil,
+                    message: "Review attempt \(run.attemptID) is no longer active."
+                ))
+            }
+            let _: EmptyResponse = try await client.send(AppServerAPI.Turn.Interrupt.Request(
+                params: .init(
+                    threadID: requestAdmission.threadID,
+                    turnID: requestAdmission.turnID
+                )
+            ))
+        } catch {
+            throw Self.interruptRequestFailure(for: error)
         }
     }
 
