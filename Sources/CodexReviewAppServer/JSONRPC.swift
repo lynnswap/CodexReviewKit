@@ -27,7 +27,7 @@ package enum JSONRPC {
         func send(_ request: Request) async throws -> Data
         func notify(_ notification: Notification) async throws
         func notificationStream() async -> AsyncThrowingStream<Notification, Swift.Error>
-        func close() async
+        func close() async throws
     }
 
     package enum Error: Swift.Error, Equatable, Sendable, LocalizedError {
