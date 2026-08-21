@@ -44,6 +44,8 @@ private actor HostCloseFailureTransport: JSONRPC.Transport {
 struct CodexReviewHostTests {
     @Test func hostStartsAndStopsRuntimeWithFakeBackend() async throws {
         let backend = FakeCodexReviewBackend()
+        let interruptGate = AsyncGate()
+        await backend.holdInterruptReview(with: interruptGate)
         let host = CodexReviewHost(
             backend: backend,
             endpoint: URL(string: "http://localhost:9417/mcp")
@@ -53,7 +55,31 @@ struct CodexReviewHostTests {
         #expect(host.store.serverState == .running)
         #expect(host.store.serverURL == URL(string: "http://localhost:9417/mcp"))
 
-        try await host.stop()
+        let firstReview = Task { @MainActor in
+            try await host.store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        await backend.waitForStartReview()
+        let stopTask = Task { @MainActor in try await host.stop() }
+        try await backend.waitForInterruptReview(timeout: .seconds(2))
+
+        let rejectedReview = try await host.store.startReview(
+            sessionID: "session-after-stop",
+            request: .init(cwd: "/tmp/other-project", target: .uncommittedChanges)
+        )
+        #expect(rejectedReview.core.lifecycle.status == .failed)
+        await host.store.signIn()
+        let startCallCount = await backend.recordedCommands().filter {
+            if case .startReview = $0 { true } else { false }
+        }.count
+        #expect(startCallCount == 1)
+        #expect(await backend.recordedCommands().contains { if case .startLogin = $0 { true } else { false } } == false)
+
+        await interruptGate.open()
+        try await stopTask.value
+        _ = try await firstReview.value
         #expect(host.store.serverState == .stopped)
     }
 
@@ -110,7 +136,6 @@ struct CodexReviewHostTests {
         let host = CodexReviewHost(backend: backend)
 
         await host.start()
-        await host.store.refreshAuthentication()
 
         #expect(host.store.auth.selectedAccount?.accountKey == "review@example.com")
         #expect(host.store.auth.selectedAccount?.email == "review@example.com")
@@ -238,6 +263,55 @@ struct CodexReviewHostTests {
         await store.stop()
     }
 
+    @Test func liveStoreCommitsInitialAccountPersistenceAndRateLimitsWithRuntimePublication() async throws {
+        let homeURL = try temporaryHome()
+        let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try FileManager.default.createDirectory(at: codexHomeURL, withIntermediateDirectories: true)
+        let sharedAuth = Data("{\"tokens\":{\"id_token\":\"active-token\"}}".utf8)
+        try sharedAuth.write(to: codexHomeURL.appendingPathComponent("auth.json"))
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(
+            AppServerAPI.Account.Read.Response(
+                account: .init(email: "active@example.com", planType: "pro")
+            ),
+            for: "account/read"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await transport.enqueue(
+            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
+                limitID: "codex",
+                primary: .init(usedPercent: 17, windowDurationMins: 300)
+            )),
+            for: "account/rateLimits/read"
+        )
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            mcpHTTPServerFactory: nil,
+            transportFactory: { _ in transport }
+        )
+
+        await store.start()
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            store.auth.selectedAccount?.rateLimits.first?.usedPercent == 17
+        })
+
+        #expect(store.serverState == .running)
+        #expect(store.auth.selectedAccount?.accountKey == "active@example.com")
+        #expect(store.auth.selectedAccount?.rateLimits.first?.usedPercent == 17)
+        #expect(try activeAccountKey(homeURL: homeURL) == "active@example.com")
+        #expect(try savedAccountAuth(homeURL: homeURL, accountKey: "active@example.com") == sharedAuth)
+        #expect(await transport.recordedRequests().map(\.method).filter {
+            $0 == "account/rateLimits/read"
+        }.count == 1)
+        await store.stop()
+    }
+
     @Test func liveStorePassesRuntimePreferenceMCPPortAndPathToHTTPServerFactory() async throws {
         let homeURL = try temporaryHome()
         let transport = FakeJSONRPCTransport()
@@ -278,6 +352,151 @@ struct CodexReviewHostTests {
         #expect(capturedConfiguration?.endpoint == "/custom-mcp")
         #expect(serverURL.path == "/custom-mcp")
         await store.stop()
+    }
+
+    @Test func liveStoreRestartReplacesOnlyAppServerAndRetainsMCPListener() async throws {
+        let homeURL = try temporaryHome()
+        let firstTransport = FakeJSONRPCTransport()
+        let secondTransport = FakeJSONRPCTransport()
+        for transport in [firstTransport, secondTransport] {
+            try await enqueueRuntimeStartResponses(transport)
+        }
+        let server = ControlledMCPHTTPServer(
+            endpoint: try #require(URL(string: "http://127.0.0.1:19435/mcp"))
+        )
+        var transports = [firstTransport, secondTransport]
+        var serverFactoryCallCount = 0
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            mcpHTTPServerFactory: { _, _ in
+                serverFactoryCallCount += 1
+                return server
+            },
+            mcpHTTPServerBindChecker: { _ in },
+            transportFactory: { _ in transports.removeFirst() }
+        )
+
+        await store.start()
+        let firstURL = store.serverURL
+        await store.restart()
+
+        #expect(store.serverState == .running)
+        #expect(store.serverURL == firstURL)
+        #expect(serverFactoryCallCount == 1)
+        #expect(server.startCallCount == 1)
+        #expect(server.stopCallCount == 0)
+        #expect(await firstTransport.isClosedForTesting())
+        #expect(transports.isEmpty)
+
+        await store.stop()
+        #expect(server.stopCallCount == 1)
+    }
+
+    @Test func liveStoreStopInvalidatesHeldMCPURLPublication() async throws {
+        let homeURL = try temporaryHome()
+        let firstTransport = FakeJSONRPCTransport()
+        let secondTransport = FakeJSONRPCTransport()
+        for transport in [firstTransport, secondTransport] {
+            try await enqueueRuntimeStartResponses(transport)
+        }
+        let urlRelease = AsyncGate()
+        let firstServer = ControlledMCPHTTPServer(
+            endpoint: try #require(URL(string: "http://127.0.0.1:19438/mcp"))
+        )
+        firstServer.holdURLRead(with: urlRelease)
+        let secondServer = ControlledMCPHTTPServer(
+            endpoint: try #require(URL(string: "http://127.0.0.1:19439/mcp"))
+        )
+        var transports = [firstTransport, secondTransport]
+        var servers = [firstServer, secondServer]
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            mcpHTTPServerFactory: { _, _ in servers.removeFirst() },
+            mcpHTTPServerBindChecker: { _ in },
+            transportFactory: { _ in transports.removeFirst() }
+        )
+
+        let startTask = Task { @MainActor in await store.start() }
+        await firstServer.waitForURLRead()
+        let stopTask = Task { @MainActor in await store.stop() }
+        await firstServer.waitForURLReadCancellation()
+        await urlRelease.open()
+        await stopTask.value
+        await startTask.value
+
+        #expect(store.serverState == .stopped)
+        #expect(store.serverURL == nil)
+        #expect(firstServer.stopCallCount == 1)
+
+        await store.start()
+        #expect(store.serverState == .running)
+        #expect(store.serverURL == secondServer.endpoint)
+        #expect(secondServer.startCallCount == 1)
+        #expect(servers.isEmpty)
+        #expect(transports.isEmpty)
+        await store.stop()
+    }
+
+    @Test func liveStorePublishesBeforeHeldInitialRateLimitAndSuppressesStaleResult() async throws {
+        let homeURL = try temporaryHome()
+        let rateLimitRelease = AsyncGate()
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(
+            AppServerAPI.Account.Read.Response(
+                account: .init(email: "stale@example.com", planType: "pro")
+            ),
+            for: "account/read"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await transport.enqueue(
+            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
+                limitID: "codex",
+                primary: .init(usedPercent: 9, windowDurationMins: 300)
+            )),
+            for: "account/rateLimits/read"
+        )
+        await transport.holdNextIgnoringCancellation(
+            method: "account/rateLimits/read",
+            gate: rateLimitRelease
+        )
+        let stopFinished = CompletionFlag()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            mcpHTTPServerFactory: nil,
+            transportFactory: { _ in transport }
+        )
+
+        let startTask = Task { @MainActor in await store.start() }
+        await transport.waitForRequestCount(5)
+        #expect(store.serverState == .running)
+        #expect(store.auth.selectedAccount?.accountKey == "stale@example.com")
+        #expect(store.auth.selectedAccount?.rateLimits.isEmpty == true)
+        #expect(await transport.notificationStreamCount() == 1)
+
+        let stopTask = Task { @MainActor in
+            await store.stop()
+            await stopFinished.complete()
+        }
+        await Task.yield()
+
+        #expect(await stopFinished.isCompleted() == false)
+        #expect(store.auth.selectedAccount?.rateLimits.isEmpty == true)
+
+        await rateLimitRelease.open()
+        await stopTask.value
+        await startTask.value
+
+        #expect(store.serverState == .stopped)
+        #expect(store.auth.selectedAccount?.rateLimits.isEmpty == true)
+        #expect(await transport.isClosedForTesting())
     }
 
     @Test func liveStoreKeepsThrowingMCPStopAtItsNonthrowingBoundary() async throws {
@@ -329,6 +548,13 @@ struct CodexReviewHostTests {
     @Test func liveStoreStopsMCPServerAfterItsStartFails() async throws {
         let homeURL = try temporaryHome()
         let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
+        try await transport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
         let server = ControlledMCPHTTPServer(
             endpoint: try #require(URL(string: "http://127.0.0.1:19434/mcp")),
             startFailure: .injected
@@ -1342,6 +1568,13 @@ struct CodexReviewHostTests {
         let jobBeforeInterruptCompletes = try #require(store.jobs.first)
         #expect(jobBeforeInterruptCompletes.cancellationRequested)
         #expect(jobBeforeInterruptCompletes.core.lifecycle.cancellation?.message == "Review runtime stopped.")
+        let rejectedReview = try await store.startReview(
+            sessionID: "session-after-stop",
+            request: .init(cwd: "/tmp/other-project", target: .uncommittedChanges)
+        )
+        #expect(rejectedReview.core.lifecycle.status == .failed)
+        #expect(rejectedReview.core.lifecycle.errorMessage == "Review runtime is not running.")
+        #expect(await transport.recordedRequests().map(\.method).filter { $0 == "thread/start" }.count == 1)
         await interruptGate.open()
         await stopTask.value
         let result = try await reviewRead
@@ -1473,23 +1706,21 @@ struct CodexReviewHostTests {
 
     @Test func liveStoreMarksRuntimeFailedWhenAppServerNotificationStreamCloses() async throws {
         let homeURL = try temporaryHome()
-        let transport = FakeJSONRPCTransport()
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
-        try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
-        try await transport.enqueue(
-            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
-            for: "config/read"
-        )
-        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        let firstTransport = FakeJSONRPCTransport()
+        let secondTransport = FakeJSONRPCTransport()
+        for transport in [firstTransport, secondTransport] {
+            try await enqueueRuntimeStartResponses(transport)
+        }
+        var transports = [firstTransport, secondTransport]
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
-            transport: transport
+            transportFactory: { _ in transports.removeFirst() }
         )
 
         await store.start(forceRestartIfNeeded: true)
-        await transport.waitForNotificationStreamCount(1)
-        await transport.finishNotificationStreams(throwing: JSONRPC.Error.closed)
+        await firstTransport.waitForNotificationStreamCount(1)
+        await firstTransport.finishNotificationStreams(throwing: JSONRPC.Error.closed)
         await waitUntil {
             if case .failed = store.serverState {
                 return true
@@ -1503,6 +1734,11 @@ struct CodexReviewHostTests {
         }
         #expect(message.contains("JSON-RPC transport is closed"))
         #expect(store.serverURL == nil)
+
+        await store.start()
+        #expect(store.serverState == .running)
+        #expect(transports.isEmpty)
+        await store.stop()
     }
 
     @Test func liveStoreCleansIsolatedLoginRuntimeWhenMainNotificationStreamCloses() async throws {
@@ -2042,6 +2278,19 @@ private func writeSavedAccountAuth(homeURL: URL, accountKey: String) throws {
     try Data("{\"tokens\":{\"id_token\":\"\(accountKey)\"}}".utf8).write(to: authURL)
 }
 
+private func enqueueRuntimeStartResponses(
+    _ transport: FakeJSONRPCTransport,
+    model: String = "gpt-5"
+) async throws {
+    try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+    try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
+    try await transport.enqueue(
+        AppServerAPI.Config.Read.Response(config: .init(model: model)),
+        for: "config/read"
+    )
+    try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+}
+
 private func savedAccountAuth(homeURL: URL, accountKey: String) throws -> Data {
     try Data(contentsOf: homeURL
         .appendingPathComponent(".codex_review", isDirectory: true)
@@ -2106,6 +2355,9 @@ private final class ControlledMCPHTTPServer: CodexReviewMCPHTTPServing {
     private let stopFailure: HostCloseFailure?
     private(set) var startCallCount = 0
     private(set) var stopCallCount = 0
+    private var urlGate: AsyncGate?
+    private var urlReadStartedGate = AsyncGate()
+    private var urlReadCancellationGate = AsyncGate()
 
     init(
         endpoint: URL,
@@ -2119,8 +2371,32 @@ private final class ControlledMCPHTTPServer: CodexReviewMCPHTTPServing {
 
     var url: URL {
         get async {
-            endpoint
+            await urlReadStartedGate.open()
+            if let urlGate {
+                let cancellationGate = urlReadCancellationGate
+                await withTaskCancellationHandler {
+                    await urlGate.waitIgnoringCancellation()
+                } onCancel: {
+                    Task { await cancellationGate.open() }
+                }
+                self.urlGate = nil
+            }
+            return endpoint
         }
+    }
+
+    func holdURLRead(with gate: AsyncGate) {
+        urlGate = gate
+        urlReadStartedGate = AsyncGate()
+        urlReadCancellationGate = AsyncGate()
+    }
+
+    func waitForURLRead() async {
+        await urlReadStartedGate.wait()
+    }
+
+    func waitForURLReadCancellation() async {
+        await urlReadCancellationGate.wait()
     }
 
     func start() async throws {

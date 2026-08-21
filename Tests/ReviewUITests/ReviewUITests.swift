@@ -6695,12 +6695,15 @@ func makeStore(backend: AuthActionBackend) -> CodexReviewStore {
 final class CountingStartBackend: PreviewCodexReviewStoreBackend {
     private var startCalls = 0
 
-    override func start(
-        store _: CodexReviewStore,
-        forceRestartIfNeeded _: Bool
-    ) async {
-        isActive = true
+    override func prepareRuntime(
+        generation: ReviewRuntimeGeneration,
+        purpose: ReviewRuntimeTransitionPurpose
+    ) async throws -> PreparedRuntime {
         startCalls += 1
+        return try await super.prepareRuntime(
+            generation: generation,
+            purpose: purpose
+        )
     }
 
     override func stop(store _: CodexReviewStore) async {
@@ -6730,13 +6733,6 @@ final class AuthActionBackend: PreviewCodexReviewStoreBackend {
                 initialAccounts: initialAccount.map { [$0] } ?? []
             )
         )
-    }
-
-    override func start(
-        store _: CodexReviewStore,
-        forceRestartIfNeeded _: Bool
-    ) async {
-        isActive = true
     }
 
     override func stop(store _: CodexReviewStore) async {
@@ -6773,12 +6769,6 @@ final class FailingCancellationBackend: PreviewCodexReviewStoreBackend {
                 shouldAutoStartEmbeddedServer: false
             )
         )
-    }
-
-    override func start(
-        store _: CodexReviewStore,
-        forceRestartIfNeeded _: Bool
-    ) async {
     }
 
     override func stop(store _: CodexReviewStore) async {
@@ -6822,12 +6812,6 @@ final class BlockingSettingsBackend: PreviewCodexReviewStoreBackend {
                 initialSettingsSnapshot: snapshot
             )
         )
-    }
-
-    override func start(
-        store _: CodexReviewStore,
-        forceRestartIfNeeded _: Bool
-    ) async {
     }
 
     override func stop(store _: CodexReviewStore) async {

@@ -37,6 +37,9 @@ public final class CodexReviewStore {
     @ObservationIgnored package var reviewTerminalWaiters: [String: [ReviewTerminalWaiter]] = [:]
     @ObservationIgnored package var closedSessions: Set<String> = []
     @ObservationIgnored package var accountRateLimitAutoRefreshDriver: CodexReviewStoreRateLimitAutoRefreshDriver?
+    @ObservationIgnored package var runtimeState: ReviewStoreRuntimeState = .stopped(
+        .init(rawValue: 0)
+    )
 
     package init(
         backend: any CodexReviewStoreBackend = PreviewCodexReviewStoreBackend(),
@@ -78,6 +81,12 @@ public final class CodexReviewStore {
 
     isolated deinit {
         accountRateLimitAutoRefreshDriver?.cancel()
+        switch runtimeState {
+        case .acquiring(_, let task), .transitioning(_, _, let task):
+            task.cancel()
+        case .stopped, .running, .failed:
+            break
+        }
         for task in reviewWorkerTasks.values {
             task.cancel()
         }
@@ -126,25 +135,307 @@ public final class CodexReviewStore {
     }
 
     public func start(forceRestartIfNeeded: Bool = false) async {
-        switch serverState {
-        case .stopped, .failed:
-            break
-        case .starting:
+        switch runtimeState {
+        case .acquiring:
+            return
+        case .transitioning(_, _, let task):
+            await task.value
             return
         case .running where forceRestartIfNeeded == false:
             return
-        case .running:
+        case .running(let generation, let runtime, let mcpGeneration):
+            await beginRuntimeReplacement(
+                previousGeneration: generation,
+                previousRuntime: runtime,
+                retainedMCPGeneration: mcpGeneration,
+                retainedMCPServerURL: serverURL
+            )
+            return
+        case .failed(let generation, let retainedMCPGeneration, let retainedMCPServerURL):
+            await beginRuntimeReplacement(
+                previousGeneration: generation,
+                previousRuntime: nil,
+                retainedMCPGeneration: retainedMCPGeneration,
+                retainedMCPServerURL: retainedMCPServerURL
+            )
+            return
+        case .stopped:
             break
         }
+        guard case .stopped(let previousGeneration) = runtimeState else {
+            return
+        }
+        let generation = previousGeneration.successor()
         serverState = .starting
         serverURL = nil
         writeDiagnosticsIfNeeded()
-        await backend.start(store: self, forceRestartIfNeeded: forceRestartIfNeeded)
-        await settingsService.refreshIfRunning(serverState: serverState)
-        startAccountRateLimitAutoRefresh()
+        let task = Task<Void, Never> { @MainActor [weak self] in
+            await self?.performRuntimeAcquisition(generation: generation)
+        }
+        runtimeState = .acquiring(generation: generation, task: task)
+        await task.value
     }
 
     public func stop() async {
+        let previousState = runtimeState
+        switch previousState {
+        case .stopped:
+            transitionToStopped()
+            return
+        case .transitioning(_, .stop, let task):
+            await task.value
+            return
+        case .acquiring, .running, .transitioning, .failed:
+            break
+        }
+        let invalidatedGeneration = previousState.generation.successor()
+        let task = Task<Void, Never> { @MainActor [weak self] in
+            await self?.performRuntimeStop(
+                previousState: previousState,
+                invalidatedGeneration: invalidatedGeneration
+            )
+        }
+        runtimeState = .transitioning(
+            generation: invalidatedGeneration,
+            purpose: .stop,
+            task: task
+        )
+        await task.value
+    }
+
+    public func restart() async {
+        switch runtimeState {
+        case .acquiring, .transitioning:
+            await stop()
+        case .stopped, .running, .failed:
+            break
+        }
+        await start(forceRestartIfNeeded: true)
+    }
+
+    public func waitUntilStopped() async {
+        if case .transitioning(_, .stop, let task) = runtimeState {
+            await task.value
+        }
+        await backend.waitUntilStopped()
+    }
+
+    private func performRuntimeAcquisition(
+        generation: ReviewRuntimeGeneration
+    ) async {
+        guard isCurrentAcquisition(generation) else {
+            return
+        }
+        var preparedRuntime: PreparedRuntime?
+        do {
+            let preparedMCPServer = try await backend.mcpServerLifecycle.prepare()
+            guard isCurrentAcquisition(generation) else {
+                return
+            }
+
+            let runtime = try await backend.prepareRuntime(
+                generation: generation,
+                purpose: .start
+            )
+            preparedRuntime = runtime
+            guard isCurrentAcquisition(generation) else {
+                await closeRuntime(runtime, purpose: .start)
+                return
+            }
+
+            try await runtime.handle.activate()
+            guard isCurrentAcquisition(generation) else {
+                await closeRuntime(runtime, purpose: .start)
+                return
+            }
+
+            let mcpSnapshot = try await backend.mcpServerLifecycle.activate(
+                preparedMCPServer.generation
+            )
+            guard isCurrentAcquisition(generation) else {
+                await closeRuntime(runtime, purpose: .start)
+                return
+            }
+
+            try backend.commitRuntimePublication(
+                runtime.snapshot,
+                handle: runtime.handle,
+                auth: auth
+            )
+            runtimeState = .running(
+                generation: generation,
+                runtime: runtime,
+                mcpGeneration: preparedMCPServer.generation
+            )
+            publishRuntime(runtime, serverURL: mcpSnapshot.serverURL)
+            await backend.waitForRuntimePublication(handle: runtime.handle)
+        } catch {
+            if let preparedRuntime {
+                await closeRuntime(preparedRuntime, purpose: .start)
+            }
+            guard isCurrentAcquisition(generation) else {
+                return
+            }
+            await stopMCPServer()
+            guard isCurrentAcquisition(generation) else {
+                return
+            }
+            runtimeState = .stopped(generation)
+            transitionToFailed(error.localizedDescription)
+        }
+    }
+
+    package func failRuntime(
+        handle: any RuntimeLifecycleHandle,
+        message: String
+    ) async {
+        guard case .running(let generation, let runtime, _) = runtimeState,
+              runtime.handle === handle
+        else {
+            return
+        }
+        let stoppedGeneration = generation.successor()
+        await stop()
+        guard case .stopped(stoppedGeneration) = runtimeState else {
+            return
+        }
+        transitionToFailed(message)
+    }
+
+    private func beginRuntimeReplacement(
+        previousGeneration: ReviewRuntimeGeneration,
+        previousRuntime: PreparedRuntime?,
+        retainedMCPGeneration: MCPServerGeneration,
+        retainedMCPServerURL: URL?
+    ) async {
+        let generation = previousGeneration.successor()
+        serverState = .starting
+        writeDiagnosticsIfNeeded()
+        let task = Task<Void, Never> { @MainActor [weak self] in
+            await self?.performRuntimeReplacement(
+                generation: generation,
+                previousRuntime: previousRuntime,
+                retainedMCPGeneration: retainedMCPGeneration,
+                retainedMCPServerURL: retainedMCPServerURL
+            )
+        }
+        runtimeState = .transitioning(
+            generation: generation,
+            purpose: .restartSameAccount,
+            task: task
+        )
+        await task.value
+    }
+
+    private func performRuntimeReplacement(
+        generation: ReviewRuntimeGeneration,
+        previousRuntime: PreparedRuntime?,
+        retainedMCPGeneration: MCPServerGeneration,
+        retainedMCPServerURL: URL?
+    ) async {
+        var preparedRuntime: PreparedRuntime?
+        if let previousRuntime {
+            await previousRuntime.handle.closeAdmission()
+            await stopPublishedRuntimeSemantics()
+            await closeRuntime(
+                previousRuntime,
+                purpose: .restartSameAccount,
+                admissionAlreadyClosed: true
+            )
+        }
+        guard isCurrentTransition(generation, purpose: .restartSameAccount) else {
+            return
+        }
+
+        do {
+            let runtime = try await backend.prepareRuntime(
+                generation: generation,
+                purpose: .restartSameAccount
+            )
+            preparedRuntime = runtime
+            guard isCurrentTransition(generation, purpose: .restartSameAccount) else {
+                await closeRuntime(runtime, purpose: .restartSameAccount)
+                return
+            }
+
+            try await runtime.handle.activate()
+            guard isCurrentTransition(generation, purpose: .restartSameAccount) else {
+                await closeRuntime(runtime, purpose: .restartSameAccount)
+                return
+            }
+
+            try backend.commitRuntimePublication(
+                runtime.snapshot,
+                handle: runtime.handle,
+                auth: auth
+            )
+            runtimeState = .running(
+                generation: generation,
+                runtime: runtime,
+                mcpGeneration: retainedMCPGeneration
+            )
+            publishRuntime(runtime, serverURL: retainedMCPServerURL)
+            await backend.waitForRuntimePublication(handle: runtime.handle)
+        } catch {
+            if let preparedRuntime {
+                await closeRuntime(preparedRuntime, purpose: .restartSameAccount)
+            }
+            guard isCurrentTransition(generation, purpose: .restartSameAccount) else {
+                return
+            }
+            runtimeState = .failed(
+                generation: generation,
+                retainedMCPGeneration: retainedMCPGeneration,
+                retainedMCPServerURL: retainedMCPServerURL
+            )
+            serverURL = retainedMCPServerURL
+            serverState = .failed(error.localizedDescription)
+            writeDiagnosticsIfNeeded()
+        }
+    }
+
+    private func performRuntimeStop(
+        previousState: ReviewStoreRuntimeState,
+        invalidatedGeneration: ReviewRuntimeGeneration
+    ) async {
+        switch previousState {
+        case .acquiring(_, let task):
+            task.cancel()
+            await stopMCPServer()
+            await task.value
+
+        case .running(_, let runtime, _):
+            await runtime.handle.closeAdmission()
+            await stopPublishedRuntimeSemantics()
+            await stopMCPServer()
+            await closeRuntime(runtime, purpose: .stop, admissionAlreadyClosed: true)
+
+        case .transitioning(_, _, let task):
+            task.cancel()
+            await stopMCPServer()
+            await task.value
+
+        case .failed:
+            await stopMCPServer()
+
+        case .stopped:
+            break
+        }
+
+        guard case .transitioning(
+            let currentGeneration,
+            .stop,
+            _
+        ) = runtimeState,
+              currentGeneration == invalidatedGeneration
+        else {
+            return
+        }
+        runtimeState = .stopped(invalidatedGeneration)
+        transitionToStopped()
+    }
+
+    private func stopPublishedRuntimeSemantics() async {
         let locallyCancelledJobIDs: [String]
         if backend.handlesActiveReviewStopCleanup {
             locallyCancelledJobIDs = []
@@ -156,16 +447,66 @@ public final class CodexReviewStore {
         cancelAndDetachReviewWorkersForRuntimeStop(
             jobIDs: Array(Set(locallyCancelledJobIDs + remainingLocallyCancelledJobIDs))
         )
-        transitionToStopped()
     }
 
-    public func restart() async {
-        await stop()
-        await start(forceRestartIfNeeded: true)
+    private func closeRuntime(
+        _ runtime: PreparedRuntime,
+        purpose: ReviewRuntimeTransitionPurpose,
+        admissionAlreadyClosed: Bool = false
+    ) async {
+        if admissionAlreadyClosed == false {
+            await runtime.handle.closeAdmission()
+        }
+        do {
+            try await runtime.handle.close(purpose: purpose)
+        } catch {
+            writeDiagnosticsIfNeeded()
+        }
+        do {
+            try await runtime.handle.waitUntilClosed()
+        } catch {
+            writeDiagnosticsIfNeeded()
+        }
     }
 
-    public func waitUntilStopped() async {
-        await backend.waitUntilStopped()
+    private func stopMCPServer() async {
+        do {
+            try await backend.mcpServerLifecycle.stop()
+        } catch {
+            writeDiagnosticsIfNeeded()
+        }
+    }
+
+    private func isCurrentAcquisition(
+        _ generation: ReviewRuntimeGeneration
+    ) -> Bool {
+        guard case .acquiring(let currentGeneration, _) = runtimeState else {
+            return false
+        }
+        return currentGeneration == generation
+    }
+
+    private func isCurrentTransition(
+        _ generation: ReviewRuntimeGeneration,
+        purpose: ReviewRuntimeTransitionPurpose
+    ) -> Bool {
+        guard case .transitioning(
+            let currentGeneration,
+            let currentPurpose,
+            _
+        ) = runtimeState else {
+            return false
+        }
+        return currentGeneration == generation && currentPurpose == purpose
+    }
+
+    private func publishRuntime(
+        _ runtime: PreparedRuntime,
+        serverURL: URL?
+    ) {
+        settings.apply(snapshot: runtime.snapshot.settings)
+        transitionToRunning(serverURL: serverURL)
+        startAccountRateLimitAutoRefresh()
     }
 
     public func refreshAuthentication() async {

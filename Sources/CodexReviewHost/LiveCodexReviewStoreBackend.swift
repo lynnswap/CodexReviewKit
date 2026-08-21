@@ -187,7 +187,7 @@ public extension CodexReviewStore {
 }
 
 @MainActor
-private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
+private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPServerLifecycleOwner {
     typealias MCPHTTPServerFactory = @MainActor @Sendable (
         CodexReviewStore,
         CodexReviewMCPHTTPServer.Configuration
@@ -197,6 +197,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     private var client: AppServerClient?
     private var appServerBackend: AppServerCodexReviewBackend?
+    private var activeRuntimeHandle: LiveRuntimeLifecycleHandle?
+    private var acceptsRuntimeRequests = false
     private var mcpHTTPServer: (any CodexReviewMCPHTTPServing)?
     private var loginChallenge: CodexReviewBackendModel.Login.Challenge?
     private var loginBackend: AppServerCodexReviewBackend?
@@ -220,6 +222,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     private let appServerRuntimeFactory: AppServerRuntimeFactory
     private let shutdownCleanupTimeout: Duration
     private weak var attachedStore: CodexReviewStore?
+    private var nextMCPGeneration: UInt64 = 0
+    private var preparingMCPGeneration: MCPServerGeneration?
+    private var preparedMCPGeneration: MCPServerGeneration?
+    private var runningMCPGeneration: MCPServerGeneration?
 
     init(
         environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -269,7 +275,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     var isActive: Bool {
-        client != nil
+        acceptsRuntimeRequests
+    }
+
+    var mcpServerLifecycle: any MCPServerLifecycleOwner {
+        self
     }
 
     var handlesActiveReviewStopCleanup: Bool {
@@ -395,62 +405,209 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         attachedStore = store
     }
 
-    func start(store: CodexReviewStore, forceRestartIfNeeded: Bool) async {
-        logger.info("Starting review runtime; forceRestartIfNeeded=\(forceRestartIfNeeded, privacy: .public)")
-        if appServerBackend != nil, forceRestartIfNeeded == false {
-            logger.info("Review runtime already has an app-server backend")
-            store.transitionToRunning(serverURL: await mcpHTTPServer?.url)
-            return
+    func prepare() async throws -> PreparedMCPServer {
+        guard mcpHTTPServer == nil,
+              preparingMCPGeneration == nil,
+              preparedMCPGeneration == nil,
+              runningMCPGeneration == nil
+        else {
+            throw CancellationError()
         }
-        if forceRestartIfNeeded {
-            await stop(store: store)
-        }
-
-        var startedClient: AppServerClient?
-        var startedBackend: AppServerCodexReviewBackend?
-        var startedHTTPServer: (any CodexReviewMCPHTTPServing)?
+        nextMCPGeneration &+= 1
+        let generation = MCPServerGeneration(rawValue: nextMCPGeneration)
+        preparingMCPGeneration = generation
         do {
             if mcpHTTPServerFactory != nil {
                 try await mcpHTTPServerBindChecker(mcpHTTPServerConfiguration)
             }
-            let runtime = try await appServerRuntimeFactory(codexHomeURL)
-            let client = runtime.client
-            let backend = runtime.backend
-            startedClient = client
-            startedBackend = backend
-            self.client = client
-            self.appServerBackend = backend
-            observeAuthNotifications(client: client, backend: backend, store: store)
-            if let mcpHTTPServerFactory {
-                let mcpHTTPServer = mcpHTTPServerFactory(store, mcpHTTPServerConfiguration)
-                startedHTTPServer = mcpHTTPServer
-                try await mcpHTTPServer.start()
-                self.mcpHTTPServer = mcpHTTPServer
+            guard preparingMCPGeneration == generation else {
+                throw CancellationError()
             }
-            store.transitionToRunning(serverURL: await self.mcpHTTPServer?.url)
-            let authSnapshot = try await backend.readAuth()
-            applyAuthSnapshot(authSnapshot, to: store.auth)
-            await refreshSelectedAccountRateLimits(auth: store.auth)
-            logger.info("Review runtime started")
+            if let mcpHTTPServerFactory {
+                guard let attachedStore else {
+                    throw CancellationError()
+                }
+                mcpHTTPServer = mcpHTTPServerFactory(
+                    attachedStore,
+                    mcpHTTPServerConfiguration
+                )
+            }
+            preparingMCPGeneration = nil
+            preparedMCPGeneration = generation
+            return .init(generation: generation)
         } catch {
-            let failureMessage = await runtimeStartupFailureMessage(for: error)
-            logger.error("Review runtime failed to start: \(failureMessage, privacy: .public)")
-            self.client = nil
-            self.appServerBackend = nil
-            self.mcpHTTPServer = nil
-            authNotificationTask?.cancel()
-            authNotificationTask = nil
-            await stopMCPHTTPServer(
-                startedHTTPServer,
-                context: "runtime startup cleanup"
-            )
-            await closeAppServerRuntime(
-                backend: startedBackend,
-                fallbackClient: startedClient,
-                context: "runtime startup cleanup"
-            )
-            store.transitionToFailed(failureMessage)
+            if preparingMCPGeneration == generation {
+                preparingMCPGeneration = nil
+            }
+            throw CodexReviewAPI.Error.io(await runtimeStartupFailureMessage(for: error))
         }
+    }
+
+    func activate(
+        _ generation: MCPServerGeneration
+    ) async throws -> MCPServerPublicationSnapshot {
+        guard preparedMCPGeneration == generation else {
+            throw CancellationError()
+        }
+        guard let server = mcpHTTPServer else {
+            preparedMCPGeneration = nil
+            runningMCPGeneration = generation
+            return .init(serverURL: nil)
+        }
+        do {
+            try await server.start()
+            guard mcpHTTPServer === server,
+                  preparedMCPGeneration == generation
+            else {
+                throw CancellationError()
+            }
+            let serverURL = await server.url
+            guard mcpHTTPServer === server,
+                  preparedMCPGeneration == generation
+            else {
+                throw CancellationError()
+            }
+            preparedMCPGeneration = nil
+            runningMCPGeneration = generation
+            return .init(serverURL: serverURL)
+        } catch {
+            if mcpHTTPServer === server {
+                mcpHTTPServer = nil
+                preparedMCPGeneration = nil
+                try? await server.stop()
+            }
+            throw error
+        }
+    }
+
+    func stop() async throws {
+        preparingMCPGeneration = nil
+        preparedMCPGeneration = nil
+        runningMCPGeneration = nil
+        guard let server = mcpHTTPServer else {
+            return
+        }
+        mcpHTTPServer = nil
+        try await server.stop()
+    }
+
+    func prepareRuntime(
+        generation _: ReviewRuntimeGeneration,
+        purpose _: ReviewRuntimeTransitionPurpose
+    ) async throws -> PreparedRuntime {
+        logger.info("Preparing review runtime")
+        let runtime = try await appServerRuntimeFactory(codexHomeURL)
+        do {
+            let authNotificationStream = await runtime.client.notificationStream()
+            let authentication = try await runtime.backend.readAuth()
+            let settings = try await Self.monitorSettings(from: runtime.backend.readSettings())
+            let handle = LiveRuntimeLifecycleHandle(
+                owner: self,
+                client: runtime.client,
+                backend: runtime.backend,
+                authNotificationStream: authNotificationStream,
+                snapshot: .init(
+                    authentication: authentication,
+                    settings: settings
+                )
+            )
+            logger.info("Review runtime prepared")
+            return .init(snapshot: handle.snapshot, handle: handle)
+        } catch {
+            await closeAppServerRuntime(
+                backend: runtime.backend,
+                fallbackClient: runtime.client,
+                context: "runtime preparation cleanup"
+            )
+            throw error
+        }
+    }
+
+    func commitRuntimePublication(
+        _ snapshot: RuntimePublicationSnapshot,
+        handle: any RuntimeLifecycleHandle,
+        auth: CodexReviewAuthModel
+    ) throws {
+        guard let handle = handle as? LiveRuntimeLifecycleHandle,
+              activeRuntimeHandle === handle,
+              let attachedStore
+        else {
+            throw CancellationError()
+        }
+        applyRuntimeAuthenticationSnapshot(snapshot.authentication, to: auth)
+        if let activeAccountID = snapshot.authentication.activeAccountID?.rawValue,
+           let account = auth.persistedAccounts.first(where: {
+               $0.accountKey == CodexAccount.normalizedEmail(activeAccountID)
+           })
+        {
+            try? CodexReviewAccountRegistry.saveAccounts(
+                auth.persistedAccounts,
+                activeAccountKey: account.accountKey,
+                codexHomeURL: codexHomeURL
+            )
+            try? CodexReviewAccountRegistry.saveSharedAuth(
+                for: account,
+                codexHomeURL: codexHomeURL
+            )
+        }
+        acceptsRuntimeRequests = true
+        observeAuthNotifications(
+            stream: handle.authNotificationStream,
+            backend: handle.backend,
+            store: attachedStore
+        )
+        handle.initialRateLimitTask = Task { @MainActor [weak self, weak auth] in
+            guard let self, let auth else {
+                return
+            }
+            await self.refreshSelectedAccountRateLimits(auth: auth)
+        }
+    }
+
+    func waitForRuntimePublication(
+        handle: any RuntimeLifecycleHandle
+    ) async {
+        guard let handle = handle as? LiveRuntimeLifecycleHandle else {
+            return
+        }
+        await handle.initialRateLimitTask?.value
+    }
+
+    func activateRuntime(_ handle: LiveRuntimeLifecycleHandle) throws {
+        guard activeRuntimeHandle == nil else {
+            throw CancellationError()
+        }
+        guard attachedStore != nil else {
+            throw CancellationError()
+        }
+        activeRuntimeHandle = handle
+        acceptsRuntimeRequests = false
+        client = handle.client
+        appServerBackend = handle.backend
+        settingsSnapshot = handle.snapshot.settings
+    }
+
+    func closeRuntimeAdmission(_ handle: LiveRuntimeLifecycleHandle) {
+        guard activeRuntimeHandle === handle else {
+            return
+        }
+        acceptsRuntimeRequests = false
+    }
+
+    func deactivateRuntime(
+        _ handle: LiveRuntimeLifecycleHandle
+    ) -> Task<Void, Never>? {
+        guard activeRuntimeHandle === handle else {
+            return nil
+        }
+        activeRuntimeHandle = nil
+        acceptsRuntimeRequests = false
+        client = nil
+        appServerBackend = nil
+        let task = authNotificationTask
+        authNotificationTask = nil
+        task?.cancel()
+        return task
     }
 
     private func runtimeStartupFailureMessage(for error: Error) async -> String {
@@ -502,15 +659,12 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     func stop(store: CodexReviewStore) async {
-        let client = client
         let appServerBackend = appServerBackend
-        let mcpHTTPServer = mcpHTTPServer
-        let hasRuntimeState = client != nil || appServerBackend != nil || mcpHTTPServer != nil
         let loginCleanup = takeLoginRuntimeForCleanup()
-        guard hasRuntimeState || loginCleanup.isEmpty == false else {
+        guard appServerBackend != nil || loginCleanup.isEmpty == false else {
             return
         }
-        logger.info("Stopping review runtime")
+        logger.info("Stopping review runtime semantic work")
         if let appServerBackend {
             let reason = ReviewCancellation.system(message: "Review runtime stopped.")
             await cancelActiveReviewsForRuntimeTeardown(
@@ -520,25 +674,14 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 timeoutWarning: "Timed out cleaning active reviews before stopping runtime"
             )
         }
-        self.client = nil
-        self.mcpHTTPServer = nil
-        authNotificationTask?.cancel()
-        authNotificationTask = nil
-        await stopMCPHTTPServer(mcpHTTPServer, context: "runtime stop")
-        self.appServerBackend = nil
         await cleanupLoginRuntime(loginCleanup)
-        await closeAppServerRuntime(
-            backend: appServerBackend,
-            fallbackClient: client,
-            context: "runtime stop"
-        )
-        logger.info("Review runtime stopped")
+        logger.info("Review runtime semantic work stopped")
     }
 
     func waitUntilStopped() async {}
 
     func refreshSettings() async throws -> CodexReviewSettings.Snapshot {
-        guard let appServerBackend else {
+        guard acceptsRuntimeRequests, let appServerBackend else {
             return settingsSnapshot
         }
         settingsSnapshot = try await Self.monitorSettings(from: appServerBackend.readSettings())
@@ -552,7 +695,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         serviceTier: CodexReviewSettings.ServiceTier?,
         persistServiceTier: Bool
     ) async throws {
-        guard let appServerBackend else {
+        guard acceptsRuntimeRequests, let appServerBackend else {
             return
         }
         var change = CodexReviewBackendModel.Settings.Change(
@@ -573,7 +716,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     func updateSettingsReasoningEffort(
         _ reasoningEffort: CodexReviewSettings.ReasoningEffort?
     ) async throws {
-        guard let appServerBackend else {
+        guard acceptsRuntimeRequests, let appServerBackend else {
             return
         }
         settingsSnapshot = try await Self.monitorSettings(
@@ -587,7 +730,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     func updateSettingsServiceTier(
         _ serviceTier: CodexReviewSettings.ServiceTier?
     ) async throws {
-        guard let appServerBackend else {
+        guard acceptsRuntimeRequests, let appServerBackend else {
             return
         }
         settingsSnapshot = try await Self.monitorSettings(
@@ -599,14 +742,29 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     func refreshAuth(auth: CodexReviewAuthModel) async {
+        guard acceptsRuntimeRequests,
+              let expectedRuntimeHandle = activeRuntimeHandle
+        else {
+            return
+        }
         do {
             guard let appServerBackend else {
                 auth.updatePhase(.signedOut)
                 return
             }
             let snapshot = try await appServerBackend.readAuth()
+            guard activeRuntimeHandle === expectedRuntimeHandle,
+                  acceptsRuntimeRequests
+            else {
+                return
+            }
             applyAuthSnapshot(snapshot, to: auth)
         } catch {
+            guard activeRuntimeHandle === expectedRuntimeHandle,
+                  acceptsRuntimeRequests
+            else {
+                return
+            }
             auth.updatePhase(.failed(message: error.localizedDescription))
         }
     }
@@ -678,8 +836,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             return
         }
         await attachedStore.closeActiveReviewSessions(reason: .system(message: "Account switched."))
-        await stop(store: attachedStore)
-        await start(store: attachedStore, forceRestartIfNeeded: true)
+        await attachedStore.stop()
+        await attachedStore.start(forceRestartIfNeeded: true)
     }
 
     func removeAccount(auth: CodexReviewAuthModel, accountKey: String) async throws {
@@ -715,8 +873,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 return
             }
             await attachedStore.closeActiveReviewSessions(reason: .system(message: "Account removed."))
-            await stop(store: attachedStore)
-            await start(store: attachedStore, forceRestartIfNeeded: true)
+            await attachedStore.stop()
+            await attachedStore.start(forceRestartIfNeeded: true)
         }
     }
 
@@ -771,8 +929,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         auth.selectPersistedAccount(nil)
         auth.applyPersistedAccountStates(remaining.map(savedAccountPayload(from:)), activeAccountKey: nil)
         if shouldRecycleRuntime, let attachedStore {
-            await stop(store: attachedStore)
-            await start(store: attachedStore, forceRestartIfNeeded: true)
+            await attachedStore.stop()
+            await attachedStore.start(forceRestartIfNeeded: true)
         }
     }
 
@@ -788,6 +946,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     private func startLogin(auth: CodexReviewAuthModel, activation: LoginActivation) async {
+        let expectedRuntimeHandle = activeRuntimeHandle
         var isolatedLoginClient: AppServerClient?
         var isolatedLoginCodexHomeURL: URL?
         do {
@@ -797,6 +956,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             let loginClient = runtime.usesPrimaryRuntime ? nil : runtime.client
             isolatedLoginClient = loginClient
             isolatedLoginCodexHomeURL = loginCodexHomeURL
+            guard isCurrentRuntime(expectedRuntimeHandle) else {
+                await closeIsolatedLoginRuntime(client: loginClient, codexHomeURL: loginCodexHomeURL)
+                return
+            }
             guard runtime.usesPrimaryRuntime || self.appServerBackend != nil else {
                 logger.error("Cannot start login because review runtime is not running")
                 updateAuthenticationFailure(
@@ -811,6 +974,14 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             let challenge = try await appServerBackend.startLogin(.init(
                 nativeWebAuthenticationCallbackScheme: nativeAuthenticationConfiguration?.callbackScheme
             ))
+            guard let expectedRuntimeHandle,
+                  activeRuntimeHandle === expectedRuntimeHandle,
+                  acceptsRuntimeRequests
+            else {
+                try? await appServerBackend.cancelLogin(challenge)
+                await closeIsolatedLoginRuntime(client: loginClient, codexHomeURL: loginCodexHomeURL)
+                return
+            }
             loginChallenge = challenge
             loginBackend = appServerBackend
             self.loginClient = loginClient
@@ -857,6 +1028,15 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 nativeAuthenticationConfiguration.browserSessionPolicy,
                 nativeAuthenticationConfiguration.presentationAnchorProvider
             )
+            guard activeRuntimeHandle === expectedRuntimeHandle,
+                  acceptsRuntimeRequests,
+                  loginChallenge?.id == challenge.id
+            else {
+                await session.cancel()
+                try? await appServerBackend.cancelLogin(challenge)
+                await closeIsolatedLoginRuntime(client: loginClient, codexHomeURL: loginCodexHomeURL)
+                return
+            }
             activeAuthenticationSession = session
             authenticationTask = Task { @MainActor [weak self, weak auth] in
                 guard let self, let auth else {
@@ -895,6 +1075,15 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 activation: activation
             )
         }
+    }
+
+    private func isCurrentRuntime(
+        _ expectedRuntimeHandle: LiveRuntimeLifecycleHandle?
+    ) -> Bool {
+        guard let expectedRuntimeHandle else {
+            return activeRuntimeHandle == nil
+        }
+        return activeRuntimeHandle === expectedRuntimeHandle && acceptsRuntimeRequests
     }
 
     private func monitorAuthenticationSession(
@@ -993,7 +1182,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     private func loginRuntime(for activation: LoginActivation) async throws -> LoginRuntime {
         switch activation {
         case .activateAuthenticatedAccount:
-            guard let client, let appServerBackend else {
+            guard acceptsRuntimeRequests, let client, let appServerBackend else {
                 throw CodexReviewAPI.Error.io("Review runtime is not running.")
             }
             return .init(
@@ -1050,14 +1239,14 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         _ request: CodexReviewBackendModel.Review.Start,
         admission: ReviewStartAdmission
     ) async throws -> BackendReviewAttempt {
-        guard let appServerBackend else {
+        guard acceptsRuntimeRequests, let appServerBackend else {
             throw CodexReviewAPI.Error.io("Review runtime is not running.")
         }
         return try await appServerBackend.startReview(request, admission: admission)
     }
 
     func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws {
-        guard let appServerBackend else {
+        guard acceptsRuntimeRequests, let appServerBackend else {
             throw CodexReviewAPI.Error.io("Review runtime is not running.")
         }
         try await appServerBackend.interruptReview(run, reason: reason)
@@ -1067,7 +1256,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         _ run: CodexReviewBackendModel.Review.Run,
         reason: CodexReviewBackendModel.CancellationReason
     ) async throws -> CodexReviewBackendModel.Review.RecoveryToken {
-        guard let appServerBackend else {
+        guard acceptsRuntimeRequests, let appServerBackend else {
             throw CodexReviewAPI.Error.io("Review runtime is not running.")
         }
         return try await appServerBackend.beginReviewRecovery(run, reason: reason)
@@ -1077,7 +1266,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         _ token: CodexReviewBackendModel.Review.RecoveryToken,
         request: CodexReviewBackendModel.Review.Start
     ) async throws -> BackendReviewAttempt {
-        guard let appServerBackend else {
+        guard acceptsRuntimeRequests, let appServerBackend else {
             throw CodexReviewAPI.Error.io("Review runtime is not running.")
         }
         return try await appServerBackend.resumeReviewRecovery(token, request: request)
@@ -1154,7 +1343,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     private func observeAuthNotifications(
-        client: AppServerClient,
+        stream: AsyncThrowingStream<JSONRPC.Notification, Error>,
         backend: AppServerCodexReviewBackend,
         store: CodexReviewStore
     ) {
@@ -1163,7 +1352,6 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             guard let self, let store else {
                 return
             }
-            let stream = await client.notificationStream()
             do {
                 for try await notification in stream {
                     await self.handleAuthNotification(
@@ -1184,37 +1372,16 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         _ error: any Error,
         store: CodexReviewStore
     ) async {
-        let loginCleanup = takeLoginRuntimeForCleanup()
-        guard client != nil || appServerBackend != nil || mcpHTTPServer != nil || loginCleanup.isEmpty == false else {
+        guard let activeRuntimeHandle else {
             return
         }
         let message = "Review runtime stopped unexpectedly: \(error.localizedDescription)"
-        if let appServerBackend {
-            let reason = ReviewCancellation.system(message: message)
-            await cancelActiveReviewsForRuntimeTeardown(
-                store: store,
-                appServerBackend: appServerBackend,
-                reason: reason,
-                timeoutWarning: "Timed out cleaning active reviews after runtime failure"
-            )
-        }
-        let failedClient = client
-        let failedBackend = appServerBackend
-        let failedMCPHTTPServer = mcpHTTPServer
-        client = nil
-        appServerBackend = nil
-        mcpHTTPServer = nil
+        // The current notification Task is the caller. Remove it from the
+        // handle's join set before Store teardown so close cannot await itself.
         authNotificationTask = nil
-        store.transitionToFailed(message)
-        await stopMCPHTTPServer(
-            failedMCPHTTPServer,
-            context: "failed runtime cleanup"
-        )
-        await cleanupLoginRuntime(loginCleanup)
-        await closeAppServerRuntime(
-            backend: failedBackend,
-            fallbackClient: failedClient,
-            context: "notification stream failure"
+        await store.failRuntime(
+            handle: activeRuntimeHandle,
+            message: message
         )
     }
 
@@ -1438,7 +1605,23 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             await refreshSavedAccountRateLimits(for: account)
             return
         }
-        let didRefresh = await refreshRateLimits(for: account, using: appServerBackend, source: "active-runtime")
+        guard acceptsRuntimeRequests else {
+            return
+        }
+        guard let expectedRuntimeHandle = activeRuntimeHandle else {
+            return
+        }
+        let didRefresh = await refreshRateLimits(
+            for: account,
+            using: appServerBackend,
+            source: "active-runtime",
+            expectedRuntimeHandle: expectedRuntimeHandle
+        )
+        guard activeRuntimeHandle === expectedRuntimeHandle,
+              acceptsRuntimeRequests
+        else {
+            return
+        }
         if didRefresh {
             persistRefreshedSharedAuth(
                 from: codexHomeURL,
@@ -1494,7 +1677,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     private func refreshRateLimits(
         for account: CodexAccount,
         using backend: AppServerCodexReviewBackend?,
-        source: String
+        source: String,
+        expectedRuntimeHandle: LiveRuntimeLifecycleHandle? = nil
     ) async -> Bool {
         do {
             guard let backend else {
@@ -1507,6 +1691,13 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 )
             }
             let response = try await backend.readRateLimits()
+            if let expectedRuntimeHandle {
+                guard activeRuntimeHandle === expectedRuntimeHandle,
+                      acceptsRuntimeRequests
+                else {
+                    return false
+                }
+            }
             applyRateLimits(
                 windows: response.codexRateLimitWindows,
                 planType: response.codexPlanType,
@@ -1518,6 +1709,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             )
             return true
         } catch {
+            if let expectedRuntimeHandle,
+               (activeRuntimeHandle !== expectedRuntimeHandle || acceptsRuntimeRequests == false)
+            {
+                return false
+            }
             recordRateLimitRefreshFailure(error, account: account)
             try? CodexReviewAccountRegistry.updateCachedRateLimits(
                 from: account,
@@ -1587,22 +1783,6 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         } catch {
             logger.error(
                 "Failed to close app-server during \(context, privacy: .public): \(error.localizedDescription, privacy: .public)"
-            )
-        }
-    }
-
-    private func stopMCPHTTPServer(
-        _ server: (any CodexReviewMCPHTTPServing)?,
-        context: String
-    ) async {
-        guard let server else {
-            return
-        }
-        do {
-            try await server.stop()
-        } catch {
-            logger.error(
-                "Failed to stop MCP HTTP server during \(context, privacy: .public): \(error.localizedDescription, privacy: .public)"
             )
         }
     }
@@ -1732,6 +1912,82 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             throw CodexReviewAPI.Error.io("Authentication did not provide a valid authorization URL.")
         }
         return url
+    }
+}
+
+@MainActor
+private final class LiveRuntimeLifecycleHandle: RuntimeLifecycleHandle {
+    fileprivate let client: AppServerClient
+    fileprivate let backend: AppServerCodexReviewBackend
+    fileprivate let authNotificationStream: AsyncThrowingStream<JSONRPC.Notification, Error>
+    fileprivate let snapshot: RuntimePublicationSnapshot
+    fileprivate var initialRateLimitTask: Task<Void, Never>?
+
+    private weak var owner: LiveCodexReviewStoreBackend?
+    private var isActivated = false
+    private var closeTask: Task<Result<Void, any Error>, Never>?
+
+    init(
+        owner: LiveCodexReviewStoreBackend,
+        client: AppServerClient,
+        backend: AppServerCodexReviewBackend,
+        authNotificationStream: AsyncThrowingStream<JSONRPC.Notification, Error>,
+        snapshot: RuntimePublicationSnapshot
+    ) {
+        self.owner = owner
+        self.client = client
+        self.backend = backend
+        self.authNotificationStream = authNotificationStream
+        self.snapshot = snapshot
+    }
+
+    func activate() async throws {
+        guard isActivated == false, closeTask == nil, let owner else {
+            throw CancellationError()
+        }
+        try owner.activateRuntime(self)
+        isActivated = true
+    }
+
+    func closeAdmission() async {
+        owner?.closeRuntimeAdmission(self)
+    }
+
+    func close(purpose _: ReviewRuntimeTransitionPurpose) async throws {
+        let task: Task<Result<Void, any Error>, Never>
+        if let closeTask {
+            task = closeTask
+        } else {
+            let authObservationTask = owner?.deactivateRuntime(self)
+            let initialRateLimitTask = initialRateLimitTask
+            self.initialRateLimitTask = nil
+            let lifecycle = backend.runtimeOwnerLifecycleHandle
+            let created = Task<Result<Void, any Error>, Never> { @MainActor in
+                authObservationTask?.cancel()
+                initialRateLimitTask?.cancel()
+                let result: Result<Void, any Error>
+                do {
+                    await lifecycle.closeAdmission()
+                    try await lifecycle.closeAndWait()
+                    result = .success(())
+                } catch {
+                    result = .failure(error)
+                }
+                await authObservationTask?.value
+                await initialRateLimitTask?.value
+                return result
+            }
+            closeTask = created
+            task = created
+        }
+        try await task.value.get()
+    }
+
+    func waitUntilClosed() async throws {
+        guard let closeTask else {
+            throw CancellationError()
+        }
+        try await closeTask.value.get()
     }
 }
 

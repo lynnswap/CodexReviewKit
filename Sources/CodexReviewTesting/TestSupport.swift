@@ -806,20 +806,179 @@ package struct StoreJobSnapshot: Sendable {
 }
 
 @MainActor
+package final class TestingRuntimeLifecycleHandle: RuntimeLifecycleHandle {
+    package private(set) var activateCallCount = 0
+    package private(set) var closeAdmissionCallCount = 0
+    package private(set) var closePurposes: [ReviewRuntimeTransitionPurpose] = []
+    package private(set) var waitUntilClosedCallCount = 0
+
+    private let onActivate: @MainActor @Sendable () -> Void
+    private let onClose: @MainActor @Sendable () -> Void
+    private var didClose = false
+
+    package init(
+        onActivate: @escaping @MainActor @Sendable () -> Void = {},
+        onClose: @escaping @MainActor @Sendable () -> Void = {}
+    ) {
+        self.onActivate = onActivate
+        self.onClose = onClose
+    }
+
+    package func activate() async throws {
+        activateCallCount += 1
+        onActivate()
+    }
+
+    package func closeAdmission() async {
+        closeAdmissionCallCount += 1
+    }
+
+    package func close(purpose: ReviewRuntimeTransitionPurpose) async throws {
+        closePurposes.append(purpose)
+        guard didClose == false else {
+            return
+        }
+        didClose = true
+        onClose()
+    }
+
+    package func waitUntilClosed() async throws {
+        waitUntilClosedCallCount += 1
+        guard didClose else {
+            throw CancellationError()
+        }
+    }
+}
+
+@MainActor
+package final class TestingMCPServerLifecycleOwner: MCPServerLifecycleOwner {
+    package private(set) var preparedGenerations: [MCPServerGeneration] = []
+    package private(set) var activatedGenerations: [MCPServerGeneration] = []
+    package private(set) var stopCallCount = 0
+
+    private let serverURL: URL?
+    private var nextGeneration: UInt64 = 0
+    private var preparedGeneration: MCPServerGeneration?
+    private var isRunning = false
+    private var preparationGate: AsyncGate?
+    private var preparationStartedGate = AsyncGate()
+    private var preparationCancellationGate = AsyncGate()
+    private var stopGate: AsyncGate?
+    private var stopStartedGate = AsyncGate()
+    private var secondStopStartedGate = AsyncGate()
+    private var stopCallerCount = 0
+    private var isStopping = false
+
+    package init(serverURL: URL? = nil) {
+        self.serverURL = serverURL
+    }
+
+    package func holdPreparation(with gate: AsyncGate) {
+        preparationGate = gate
+        preparationStartedGate = AsyncGate()
+        preparationCancellationGate = AsyncGate()
+    }
+
+    package func waitForPreparation() async {
+        await preparationStartedGate.wait()
+    }
+
+    package func waitForPreparationCancellation() async {
+        await preparationCancellationGate.wait()
+    }
+
+    package func holdStop(with gate: AsyncGate) {
+        stopGate = gate
+        stopStartedGate = AsyncGate()
+        secondStopStartedGate = AsyncGate()
+        stopCallerCount = 0
+    }
+
+    package func waitForStop() async {
+        await stopStartedGate.wait()
+    }
+
+    package func waitForSecondStop() async {
+        await secondStopStartedGate.wait()
+    }
+
+    package func prepare() async throws -> PreparedMCPServer {
+        nextGeneration &+= 1
+        let generation = MCPServerGeneration(rawValue: nextGeneration)
+        preparedGeneration = generation
+        preparedGenerations.append(generation)
+        await preparationStartedGate.open()
+        if let preparationGate {
+            let cancellationGate = preparationCancellationGate
+            await withTaskCancellationHandler {
+                await preparationGate.waitIgnoringCancellation()
+            } onCancel: {
+                Task { await cancellationGate.open() }
+            }
+            self.preparationGate = nil
+        }
+        try Task.checkCancellation()
+        return .init(generation: generation)
+    }
+
+    package func activate(
+        _ generation: MCPServerGeneration
+    ) async throws -> MCPServerPublicationSnapshot {
+        guard preparedGeneration == generation else {
+            throw CancellationError()
+        }
+        preparedGeneration = nil
+        isRunning = true
+        activatedGenerations.append(generation)
+        return .init(serverURL: serverURL)
+    }
+
+    package func stop() async throws {
+        guard preparedGeneration != nil || isRunning else {
+            return
+        }
+        stopCallerCount += 1
+        if stopCallerCount == 2 {
+            await secondStopStartedGate.open()
+        }
+        if isStopping {
+            await stopGate?.waitIgnoringCancellation()
+            return
+        }
+        isStopping = true
+        await stopStartedGate.open()
+        await stopGate?.waitIgnoringCancellation()
+        stopGate = nil
+        preparedGeneration = nil
+        isRunning = false
+        stopCallCount += 1
+        isStopping = false
+    }
+}
+
+@MainActor
 package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     package let reviewBackend: FakeCodexReviewBackend
     package let seed: CodexReviewStoreSeed
     package var currentSettingsSnapshot: CodexReviewSettings.Snapshot
     package private(set) var isActive = false
     package private(set) var startRequests: [Bool] = []
+    package let mcpServerLifecycle: any MCPServerLifecycleOwner
+    package private(set) var lastPreparedRuntimeHandle: TestingRuntimeLifecycleHandle?
+    private var runtimePreparationGate: AsyncGate?
+    private var runtimePreparationFailureMessage: String?
+    private var runtimePreparationStartedGate = AsyncGate()
+    private var runtimePreparationCancellationGate = AsyncGate()
 
     package init(
         reviewBackend: FakeCodexReviewBackend,
-        seed: CodexReviewStoreSeed = .init()
+        seed: CodexReviewStoreSeed = .init(),
+        mcpServerLifecycle: (any MCPServerLifecycleOwner)? = nil
     ) {
         self.reviewBackend = reviewBackend
         self.seed = seed
         self.currentSettingsSnapshot = seed.initialSettingsSnapshot
+        self.mcpServerLifecycle = mcpServerLifecycle ?? NoMCPServerLifecycleOwner()
     }
 
     package var initialSettingsSnapshot: CodexReviewSettings.Snapshot {
@@ -828,10 +987,55 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     package func attachStore(_: CodexReviewStore) {}
 
-    package func start(store: CodexReviewStore, forceRestartIfNeeded: Bool) async {
-        startRequests.append(forceRestartIfNeeded)
-        isActive = true
-        store.transitionToRunning(serverURL: nil)
+    package func holdRuntimePreparation(with gate: AsyncGate) {
+        runtimePreparationGate = gate
+        runtimePreparationStartedGate = AsyncGate()
+        runtimePreparationCancellationGate = AsyncGate()
+    }
+
+    package func waitForRuntimePreparation() async {
+        await runtimePreparationStartedGate.wait()
+    }
+
+    package func waitForRuntimePreparationCancellation() async {
+        await runtimePreparationCancellationGate.wait()
+    }
+
+    package func failNextRuntimePreparation(message: String) {
+        runtimePreparationFailureMessage = message
+    }
+
+    package func prepareRuntime(
+        generation _: ReviewRuntimeGeneration,
+        purpose: ReviewRuntimeTransitionPurpose
+    ) async throws -> PreparedRuntime {
+        startRequests.append(purpose == .restartSameAccount)
+        let handle = TestingRuntimeLifecycleHandle(
+            onActivate: { [weak self] in self?.isActive = true },
+            onClose: { [weak self] in self?.isActive = false }
+        )
+        lastPreparedRuntimeHandle = handle
+        await runtimePreparationStartedGate.open()
+        if let runtimePreparationGate {
+            let cancellationGate = runtimePreparationCancellationGate
+            await withTaskCancellationHandler {
+                await runtimePreparationGate.waitIgnoringCancellation()
+            } onCancel: {
+                Task { await cancellationGate.open() }
+            }
+            self.runtimePreparationGate = nil
+        }
+        if let runtimePreparationFailureMessage {
+            self.runtimePreparationFailureMessage = nil
+            throw FakeCodexReviewBackendError(message: runtimePreparationFailureMessage)
+        }
+        return PreparedRuntime(
+            snapshot: .init(
+                authentication: try await reviewBackend.readAuth(),
+                settings: try await monitoredSettingsSnapshot()
+            ),
+            handle: handle
+        )
     }
 
     package func stop(store _: CodexReviewStore) async {
@@ -970,15 +1174,19 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     package func refreshSettings() async throws -> CodexReviewSettings.Snapshot {
+        currentSettingsSnapshot = try await monitoredSettingsSnapshot()
+        return currentSettingsSnapshot
+    }
+
+    private func monitoredSettingsSnapshot() async throws -> CodexReviewSettings.Snapshot {
         let snapshot = try await reviewBackend.readSettings()
-        currentSettingsSnapshot = .init(
+        return .init(
             model: snapshot.model,
             fallbackModel: snapshot.fallbackModel,
             reasoningEffort: snapshot.reasoningEffort.flatMap(CodexReviewSettings.ReasoningEffort.init(rawValue:)),
             serviceTier: snapshot.serviceTier.flatMap(CodexReviewSettings.ServiceTier.init(rawValue:)),
             models: snapshot.models
         )
-        return currentSettingsSnapshot
     }
 
     package func updateSettingsModel(
