@@ -134,7 +134,13 @@ package actor AppServerClient {
     }
 
     package func close() async {
-        await transport.close()
+        do {
+            try await transport.close()
+        } catch {
+            logger.error(
+                "Failed to close codex app-server transport: \(error.localizedDescription, privacy: .public)"
+            )
+        }
     }
 
     private func allocateRequestID() -> Int {

@@ -80,6 +80,30 @@ private func eventSequence(
     return BackendReviewEventSequence(mailbox: attempt.events)
 }
 
+private func makeProcessTransport(
+    in directory: URL,
+    script: String,
+    closeAdmissionForTesting: (@Sendable () async -> Void)? = nil,
+    closeCompletionForTesting: (@Sendable () async throws -> Void)? = nil
+) throws -> AppServerProcessTransport {
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let executable = directory.appending(path: "app-server-stub.sh")
+    try Data(script.utf8).write(to: executable)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+    return try AppServerProcessTransport(
+        configuration: .init(
+            executable: executable.path,
+            arguments: [],
+            environment: [
+                "HOME": directory.path,
+                "PATH": "/bin:/usr/bin",
+            ]
+        ),
+        closeAdmissionForTesting: closeAdmissionForTesting,
+        closeCompletionForTesting: closeCompletionForTesting
+    )
+}
+
 @Suite("app-server client")
 struct AppServerClientTests {
     @Test func processTransportConfigurationResolvesCodexFromProvidedPath() throws {
@@ -330,7 +354,7 @@ struct AppServerClientTests {
         }
         #expect(Darwin.kill(childPID, 0) == 0)
 
-        await transport.close()
+        try await transport.close()
 
         let childExited = await waitUntil(timeout: .seconds(2)) {
             Darwin.kill(childPID, 0) != 0 && errno == ESRCH
@@ -342,6 +366,174 @@ struct AppServerClientTests {
         await #expect(throws: (any Error).self) {
             _ = try await iterator.next()
         }
+    }
+
+    @Test func concurrentProcessTransportCloseCallersJoinOneFailure() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "codex-review-concurrent-close-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let closeStarted = AsyncGate()
+        let closeGate = AsyncGate()
+        let secondCloseAdmitted = AsyncGate()
+        let closeAdmissions = CallCounter()
+        let closeCompletions = CallCounter()
+        let failure = TransportCloseTestError.injected
+        let transport = try AppServerProcessTransport(
+            configuration: .init(
+                executable: "/bin/cat",
+                arguments: [],
+                environment: [
+                    "HOME": directory.path,
+                    "PATH": "/bin:/usr/bin",
+                ]
+            ),
+            closeAdmissionForTesting: {
+                if await closeAdmissions.record() == 2 {
+                    await secondCloseAdmitted.open()
+                }
+            },
+            closeCompletionForTesting: {
+                _ = await closeCompletions.record()
+                await closeStarted.open()
+                await closeGate.waitIgnoringCancellation()
+                throw failure
+            }
+        )
+
+        let first = Task { try await transport.close() }
+        await closeStarted.wait()
+        let second = Task { try await transport.close() }
+        await secondCloseAdmitted.wait()
+        await closeGate.open()
+
+        await #expect(throws: failure) {
+            try await first.value
+        }
+        await #expect(throws: failure) {
+            try await second.value
+        }
+        #expect(await closeCompletions.value() == 1)
+    }
+
+    @Test func repeatedProcessTransportCloseRethrowsRecordedFailure() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "codex-review-repeated-close-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let closeCompletions = CallCounter()
+        let failure = TransportCloseTestError.injected
+        let transport = try AppServerProcessTransport(
+            configuration: .init(
+                executable: "/bin/cat",
+                arguments: [],
+                environment: [
+                    "HOME": directory.path,
+                    "PATH": "/bin:/usr/bin",
+                ]
+            ),
+            closeCompletionForTesting: {
+                _ = await closeCompletions.record()
+                throw failure
+            }
+        )
+
+        await #expect(throws: failure) {
+            try await transport.close()
+        }
+        await #expect(throws: failure) {
+            try await transport.close()
+        }
+        #expect(await closeCompletions.value() == 1)
+    }
+
+    @Test func invalidFrameAndExplicitCloseShareOneTerminal() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "codex-review-invalid-close-race-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let closeStarted = AsyncGate()
+        let closeGate = AsyncGate()
+        let secondCloseAdmitted = AsyncGate()
+        let closeAdmissions = CallCounter()
+        let closeCompletions = CallCounter()
+        let transport = try makeProcessTransport(
+            in: directory,
+            script: """
+            #!/bin/sh
+            printf 'not-json\\n'
+            sleep 10
+            """,
+            closeAdmissionForTesting: {
+                if await closeAdmissions.record() == 2 {
+                    await secondCloseAdmitted.open()
+                }
+            },
+            closeCompletionForTesting: {
+                _ = await closeCompletions.record()
+                await closeStarted.open()
+                await closeGate.waitIgnoringCancellation()
+            }
+        )
+        let notifications = await transport.notificationStream()
+        var iterator = notifications.makeAsyncIterator()
+
+        await closeStarted.wait()
+        let explicitClose = Task { try await transport.close() }
+        await secondCloseAdmitted.wait()
+        await closeGate.open()
+
+        try await explicitClose.value
+        await #expect(throws: JSONRPC.Error.invalidMessage("app-server emitted invalid JSON")) {
+            _ = try await iterator.next()
+        }
+        #expect(await closeCompletions.value() == 1)
+    }
+
+    @Test func stdoutEOFAndExplicitCloseShareOneTerminal() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "codex-review-eof-close-race-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let closeStarted = AsyncGate()
+        let closeGate = AsyncGate()
+        let secondCloseAdmitted = AsyncGate()
+        let closeAdmissions = CallCounter()
+        let closeCompletions = CallCounter()
+        let transport = try makeProcessTransport(
+            in: directory,
+            script: """
+            #!/bin/sh
+            exit 0
+            """,
+            closeAdmissionForTesting: {
+                if await closeAdmissions.record() == 2 {
+                    await secondCloseAdmitted.open()
+                }
+            },
+            closeCompletionForTesting: {
+                _ = await closeCompletions.record()
+                await closeStarted.open()
+                await closeGate.waitIgnoringCancellation()
+            }
+        )
+        let notifications = await transport.notificationStream()
+        var iterator = notifications.makeAsyncIterator()
+
+        await closeStarted.wait()
+        let explicitClose = Task { try await transport.close() }
+        await secondCloseAdmitted.wait()
+        await closeGate.open()
+
+        try await explicitClose.value
+        await #expect(throws: JSONRPC.Error.closed) {
+            _ = try await iterator.next()
+        }
+        #expect(await closeCompletions.value() == 1)
     }
 
     @Test func processTransportProcessesChunkedStdoutBeforeEOF() async throws {
@@ -376,7 +568,7 @@ struct AppServerClientTests {
             method: "test/request",
             params: Data("{}".utf8)
         ))
-        await transport.close()
+        try await transport.close()
 
         let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
         #expect(object["value"] as? String == "done")
@@ -450,7 +642,7 @@ struct AppServerClientTests {
         var iterator = notifications.makeAsyncIterator()
 
         let notification = try #require(try await iterator.next())
-        await transport.close()
+        try await transport.close()
 
         #expect(notification.method == "item/completed")
         #expect(try JSONSerialization.jsonObject(
@@ -503,7 +695,7 @@ struct AppServerClientTests {
         let notificationWritten = await waitUntil(timeout: .seconds(2)) {
             FileManager.default.fileExists(atPath: notificationFile.path)
         }
-        await transport.close()
+        try await transport.close()
 
         #expect(notificationWritten)
         let request = try #require(JSONSerialization.jsonObject(
@@ -5742,5 +5934,22 @@ private struct TestErrorNotification: Encodable, Sendable {
         try container.encodeIfPresent(turnID, forKey: .turnID)
         try container.encode(AppServerAPI.Turn.Error(message: message), forKey: .error)
         try container.encode(willRetry, forKey: .willRetry)
+    }
+}
+
+private enum TransportCloseTestError: Error, Equatable, Sendable {
+    case injected
+}
+
+private actor CallCounter {
+    private var count = 0
+
+    func record() -> Int {
+        count += 1
+        return count
+    }
+
+    func value() -> Int {
+        count
     }
 }
