@@ -35,6 +35,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     private var reviewNotificationSequence = 0
     private var notificationRouterMetrics = AppServerNotificationRouterMetrics()
     private var reviewStartRequestsInFlight = 0
+    private var reviewStartRoutingAttemptIDs: Set<String> = []
     private var diagnosedUnknownNotificationMethods: Set<String> = []
 
     package init(
@@ -176,6 +177,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         control.recordThreadStarted(threadID: thread.threadID)
 
         let review: AppServerAPI.Review.Start.Response
+        reviewStartRoutingAttemptIDs.insert(provisionalRun.attemptID)
         reviewStartRequestsInFlight += 1
         do {
             review = try await client.sendStartRequest(AppServerAPI.Review.Start.Request(
@@ -192,7 +194,6 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                 }
             })
         } catch {
-            reviewStartRequestsInFlight -= 1
             let failure = Self.startRequestFailure(for: error)
             if case .rejected = failure {
                 try await admission.recordReviewStartRejected(failure, for: provisionalRun)
@@ -204,8 +205,9 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             let failureDisposition = await admission.failedReviewStartDisposition(
                 for: provisionalRun
             )
+            reviewStartRequestsInFlight -= 1
+            discardUnmatchedReviewNotificationsIfIdle()
             if failureDisposition == .cleanup {
-                discardUnmatchedReviewNotificationsIfIdle()
                 let primaryDescription = error.localizedDescription
                 do {
                     try await cleanupReview(provisionalRun)
@@ -232,7 +234,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             discardUnmatchedReviewNotificationsIfIdle()
             let primaryDescription = error.localizedDescription
             do {
-                try await cleanupReview(provisionalRun)
+                try await cleanupReview(run)
             } catch let cleanupError {
                 appServerBackendLogger.error(
                     "Review start activation failed: \(primaryDescription, privacy: .public). Secondary cleanup failure: \(cleanupError.localizedDescription, privacy: .public)"
@@ -245,6 +247,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         control.recordReviewStarted(turnThreadID: appServerTurnThreadID(for: run), turnID: review.turnID)
         await session.bufferStartupNotifications(takeUnmatchedReviewNotifications(for: run))
         await session.finalizeRun()
+        reviewStartRoutingAttemptIDs.remove(run.attemptID)
         reviewStartRequestsInFlight -= 1
         discardUnmatchedReviewNotificationsIfIdle()
 
@@ -544,7 +547,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     package func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws {
         controlsByThreadID.removeValue(forKey: run.threadID)
         var cleanupThreadIDs = cleanupThreadIDs(for: run)
-        if let session = unregisterReviewEventSession(for: run) {
+        let session = unregisterReviewEventSession(for: run)
+        reviewStartRoutingAttemptIDs.remove(run.attemptID)
+        discardUnmatchedReviewNotificationsIfIdle()
+        if let session {
             await session.finish(cancellationMessage: nil)
             let metrics = await session.metricsSnapshot()
             cleanupThreadIDs = mergedCleanupThreadIDs(cleanupThreadIDs, await session.cleanupThreadIDs())
@@ -649,6 +655,14 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
 
     package func notificationRouterIsRunningForTesting() -> Bool {
         notificationRouterTask != nil
+    }
+
+    package func reviewStartRoutingReservationCountForTesting() -> Int {
+        reviewStartRoutingAttemptIDs.count
+    }
+
+    package func unmatchedReviewNotificationCountForTesting() -> Int {
+        unmatchedReviewNotificationsByThreadID.values.reduce(0) { $0 + $1.count }
     }
 
     package func detachReviewEventStreamForTesting(threadID: String, subscriptionID: Int) async {
@@ -769,7 +783,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     private func bufferUnmatchedReviewNotification(_ notification: AppServerRoutedReviewNotification) -> Bool {
-        guard reviewStartRequestsInFlight > 0,
+        guard reviewStartRequestsInFlight > 0 || reviewStartRoutingAttemptIDs.isEmpty == false,
               let threadID = notification.payload.threadID
         else {
             return false
@@ -789,7 +803,9 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     private func discardUnmatchedReviewNotificationsIfIdle() {
-        guard reviewStartRequestsInFlight == 0 else {
+        guard reviewStartRequestsInFlight == 0,
+              reviewStartRoutingAttemptIDs.isEmpty
+        else {
             return
         }
         unmatchedReviewNotificationsByThreadID.removeAll(keepingCapacity: true)

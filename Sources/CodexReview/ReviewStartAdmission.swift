@@ -344,9 +344,9 @@ package actor ReviewStartAdmission {
         switch phase {
         case .preparingThread(.outcomeUnknown), .startingReview(_, .outcomeUnknown):
             phase = .terminal(.connection(failure))
-        case .terminal(.connection(let currentFailure)) where currentFailure == failure:
+        case .terminal:
             return
-        case .preparingThread(.notSent), .startingReview(_, .notSent), .active, .terminal:
+        case .preparingThread(.notSent), .startingReview(_, .notSent), .active:
             throw contractFailure(.wrongPhase(operation: .recordConnectionTerminal))
         }
     }

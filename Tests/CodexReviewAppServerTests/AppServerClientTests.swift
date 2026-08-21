@@ -1386,6 +1386,43 @@ struct AppServerClientTests {
         #expect(methods.filter { $0 == "review/start" }.count == 1)
     }
 
+    @Test func backendPreservesWinningConnectionTerminalAndOriginalRequestFailure() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(
+            AppServerAPI.Thread.Start.Response(threadID: "thread-1"),
+            for: "thread/start"
+        )
+        await transport.enqueueFailure(.closed, for: "review/start")
+        let admission = ReviewStartAdmission()
+        let winningTerminal = ReviewRuntimeCloseFailure.connection("Process exited")
+        await transport.beforeReturningNextResponse(method: "review/start") {
+            do {
+                try await admission.recordConnectionTerminal(winningTerminal)
+            } catch {
+                Issue.record("Could not install the winning connection terminal: \(error)")
+            }
+        }
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        await #expect(throws: JSONRPC.Error.closed) {
+            try await backend.startReview(
+                .init(
+                    jobID: "job-1",
+                    sessionID: "session-1",
+                    request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+                ),
+                admission: admission
+            )
+        }
+
+        #expect(await admission.currentPhase() == .terminal(.connection(winningTerminal)))
+        let methods = await transport.recordedRequests().map(\.method)
+        #expect(methods.contains("thread/backgroundTerminals/clean"))
+        #expect(methods.contains("thread/unsubscribe"))
+        #expect(methods.contains("thread/delete"))
+    }
+
     @Test func backendRechecksThreadStartAdmissionBeforeAnOverloadRetry() async throws {
         let transport = FakeJSONRPCTransport()
         let retryStarted = AsyncGate()
@@ -1491,6 +1528,10 @@ struct AppServerClientTests {
             for: "thread/start"
         )
         await transport.enqueueCancellation(for: "review/start")
+        try await transport.enqueue(
+            AppServerAPI.Thread.Unsubscribe.Response(status: .unsubscribed),
+            for: "thread/unsubscribe"
+        )
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
         let admission = ReviewStartAdmission()
 
@@ -1505,14 +1546,32 @@ struct AppServerClientTests {
             )
         }
 
-        if case .startingReview(_, .outcomeUnknown) = await admission.currentPhase() {
-        } else {
+        guard case .startingReview(let provisionalRun, .outcomeUnknown) = await admission.currentPhase() else {
             Issue.record("Outcome-unknown review/start did not retain its dispatch state.")
+            return
         }
         let methods = await transport.recordedRequests().map(\.method)
         #expect(methods.contains("thread/backgroundTerminals/clean") == false)
         #expect(methods.contains("thread/unsubscribe") == false)
         #expect(methods.contains("thread/delete") == false)
+        #expect(await backend.reviewStartRoutingReservationCountForTesting() == 1)
+
+        try await transport.emitServerNotification(
+            method: "turn/started",
+            params: TestTurnNotification(
+                threadID: "detached-review-thread",
+                turn: .init(id: "detached-turn")
+            )
+        )
+        let buffered = await waitUntil {
+            await backend.notificationRouterMetricsForTesting().buffered == 1
+        }
+        #expect(buffered)
+        #expect(await backend.unmatchedReviewNotificationCountForTesting() == 1)
+
+        try await backend.cleanupReview(provisionalRun)
+        #expect(await backend.reviewStartRoutingReservationCountForTesting() == 0)
+        #expect(await backend.unmatchedReviewNotificationCountForTesting() == 0)
     }
 
     @Test func compatibilityStartCleansOutcomeUnknownBecauseItCannotPublishTheAdmission() async throws {
@@ -1611,7 +1670,7 @@ struct AppServerClientTests {
         #expect(await transport.recordedRequests().map(\.method).contains("thread/delete"))
     }
 
-    @Test func backendCleansProvisionalSessionWhenConnectionTerminalWinsActivation() async throws {
+    @Test func backendCleansReturnedReviewThreadWhenConnectionTerminalWinsActivation() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(
@@ -1619,7 +1678,10 @@ struct AppServerClientTests {
             for: "thread/start"
         )
         try await transport.enqueue(
-            AppServerAPI.Review.Start.Response(turnID: "turn-1"),
+            AppServerAPI.Review.Start.Response(
+                turnID: "turn-1",
+                reviewThreadID: "detached-review-thread"
+            ),
             for: "review/start"
         )
         let admission = ReviewStartAdmission()
@@ -1649,6 +1711,15 @@ struct AppServerClientTests {
         #expect(methods.contains("thread/backgroundTerminals/clean"))
         #expect(methods.contains("thread/unsubscribe"))
         #expect(methods.contains("thread/delete"))
+        let deletedThreadIDs = try await transport.recordedRequests()
+            .filter { $0.method == "thread/delete" }
+            .map {
+                try JSONDecoder().decode(
+                    AppServerAPI.Thread.Delete.Params.self,
+                    from: $0.params
+                ).threadID
+            }
+        #expect(Set(deletedThreadIDs) == ["thread-1", "detached-review-thread"])
     }
 
     @Test func backendCleansStartedThreadWhenConnectionTerminalWinsPreparation() async throws {

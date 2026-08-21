@@ -116,11 +116,11 @@ struct ReviewStartAdmissionTests {
 
     @Test func connectionFailureTerminatesAnOutcomeUnknownStartup() async throws {
         let admission = ReviewStartAdmission()
-        let failure = ReviewRuntimeCloseFailure.connection("Transport closed")
+        let failure = ReviewRuntimeCloseFailure.connection("Process exited")
         try await admission.admitThreadStartDispatch()
 
         try await admission.recordConnectionTerminal(failure)
-        try await admission.recordConnectionTerminal(failure)
+        try await admission.recordConnectionTerminal(.connection("Transport closed"))
 
         #expect(await admission.currentPhase() == .terminal(.connection(failure)))
     }
