@@ -514,14 +514,25 @@ extension CodexReviewStore {
             return .init(jobID: job.id, cancelled: false, core: job.core)
         }
 
-        job.cancellationRequested = true
-        job.core.lifecycle.cancellation = cancellation
-        job.core.output.summary = cancellation.message
-        job.core.lifecycle.errorMessage = cancellation.message
+        let ownedCancellation: ReviewCancellation
+        if job.cancellationRequested {
+            guard let recorded = job.core.lifecycle.cancellation else {
+                throw ReviewAttemptContractFailure(
+                    message: "A requested review cancellation must retain its exact owner."
+                )
+            }
+            ownedCancellation = recorded
+        } else {
+            job.cancellationRequested = true
+            job.core.lifecycle.cancellation = cancellation
+            job.core.output.summary = cancellation.message
+            job.core.lifecycle.errorMessage = cancellation.message
+            ownedCancellation = cancellation
+        }
         do {
             try await cancelOwnedReviewAttempt(
                 job: job,
-                cancellation: cancellation
+                cancellation: ownedCancellation
             )
         } catch {
             if job.isTerminal == false {

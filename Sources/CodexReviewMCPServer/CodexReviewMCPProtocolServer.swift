@@ -30,11 +30,12 @@ package actor MCPClientSessionState {
 }
 
 @MainActor
-package func makeMCPProtocolServer(
+func makeMCPProtocolServer(
     adapter: CodexReviewMCPServer,
     defaultSessionID: String? = nil,
     clientSession: MCPClientSessionState = .init(),
-    boundedReviewWaitDuration: Duration = .seconds(540)
+    boundedReviewWaitDuration: Duration = .seconds(540),
+    networkResources: MCPHTTPNetworkResourceOwner
 ) async -> Server {
     let server = Server(
         name: "codex_review",
@@ -46,56 +47,66 @@ package func makeMCPProtocolServer(
     )
 
     await server.withMethodHandler(ListTools.self) { _ in
-        let tools = await adapter.tools.map { descriptor in
-            Tool(
-                name: descriptor.name.rawValue,
-                description: descriptor.description,
-                inputSchema: schema(for: descriptor.name)
-            )
+        try await networkResources.performTask(kind: .domainHandler) {
+            let tools = await adapter.tools.map { descriptor in
+                Tool(
+                    name: descriptor.name.rawValue,
+                    description: descriptor.description,
+                    inputSchema: schema(for: descriptor.name)
+                )
+            }
+            return .init(tools: tools)
         }
-        return .init(tools: tools)
     }
 
     await server.withMethodHandler(CallTool.self) { params in
-        guard let tool = CodexReviewMCP.Tool.Name(rawValue: params.name) else {
-            return .init(
-                content: [.text(text: "Unknown tool: \(params.name)", annotations: nil, _meta: nil)],
-                isError: true
-            )
-        }
+        try await networkResources.performTask(kind: .domainHandler) {
+            guard let tool = CodexReviewMCP.Tool.Name(rawValue: params.name) else {
+                return .init(
+                    content: [.text(text: "Unknown tool: \(params.name)", annotations: nil, _meta: nil)],
+                    isError: true
+                )
+            }
 
-        do {
-            let httpContext = Server.currentHandlerContext?.httpContext
-            let useBoundedReviewStart = await clientSession.usesBoundedReviewStart(httpContext: httpContext)
-            let request = try toolRequest(
-                tool: tool,
-                arguments: params.arguments ?? [:],
-                defaultSessionID: defaultSessionID,
-                boundedReviewWaitDuration: boundedReviewWaitDuration,
-                useBoundedReviewStart: useBoundedReviewStart
-            )
-            let response = try await adapter.handle(request)
-            return try toolResult(tool: tool, response: response)
-        } catch {
-            return .init(
-                content: [.text(text: error.localizedDescription, annotations: nil, _meta: nil)],
-                isError: true
-            )
+            do {
+                let httpContext = Server.currentHandlerContext?.httpContext
+                let useBoundedReviewStart = await clientSession.usesBoundedReviewStart(httpContext: httpContext)
+                let request = try toolRequest(
+                    tool: tool,
+                    arguments: params.arguments ?? [:],
+                    defaultSessionID: defaultSessionID,
+                    boundedReviewWaitDuration: boundedReviewWaitDuration,
+                    useBoundedReviewStart: useBoundedReviewStart
+                )
+                let response = try await adapter.handle(request)
+                return try toolResult(tool: tool, response: response)
+            } catch {
+                return .init(
+                    content: [.text(text: error.localizedDescription, annotations: nil, _meta: nil)],
+                    isError: true
+                )
+            }
         }
     }
 
     await server.withMethodHandler(ListResources.self) { _ in
-        .init(resources: helpResources.map(\.resource))
+        try await networkResources.performTask(kind: .domainHandler) {
+            .init(resources: helpResources.map(\.resource))
+        }
     }
 
     await server.withMethodHandler(ReadResource.self) { params in
-        let content = helpResources.first { $0.uri == params.uri }?.content
-            ?? "Resource not found: \(params.uri)"
-        return .init(contents: [.text(content, uri: params.uri, mimeType: "text/markdown")])
+        try await networkResources.performTask(kind: .domainHandler) {
+            let content = helpResources.first { $0.uri == params.uri }?.content
+                ?? "Resource not found: \(params.uri)"
+            return .init(contents: [.text(content, uri: params.uri, mimeType: "text/markdown")])
+        }
     }
 
     await server.withMethodHandler(ListResourceTemplates.self) { _ in
-        .init(templates: helpResourceTemplates)
+        try await networkResources.performTask(kind: .domainHandler) {
+            .init(templates: helpResourceTemplates)
+        }
     }
 
     return server

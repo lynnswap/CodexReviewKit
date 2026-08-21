@@ -849,6 +849,9 @@ struct CodexReviewStoreLifecycleTests {
             )
         }
         await backend.waitForRuntimePreparation()
+        #expect(try store.readReview(jobID: "job-target").core.lifecycle.cancellation == .mcpClient(
+            message: "Stop target"
+        ))
         let stopTask = Task { @MainActor in
             await store.stop()
         }
