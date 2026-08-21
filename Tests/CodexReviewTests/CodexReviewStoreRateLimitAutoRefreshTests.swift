@@ -268,6 +268,40 @@ struct CodexReviewStoreRateLimitAutoRefreshTests {
         }
     }
 
+    @Test func storeCloseCancelsAndAwaitsHeldRateLimitRefresh() async throws {
+        let account = makeAccount(lastFetchAt: now.addingTimeInterval(-15 * 60))
+        let backend = BlockingRateLimitRefreshBackend(account: account)
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        store.loadForTesting(
+            serverState: .running,
+            authPhase: .signedOut,
+            account: account,
+            persistedAccounts: [account],
+            workspaces: []
+        )
+        store.refreshDueAccountRateLimits(now: now)
+        await backend.waitUntilRefreshStarts()
+
+        let closeCompletion = RateLimitCloseCompletion()
+        let closeTask = Task { @MainActor in
+            try await store.close()
+            await closeCompletion.complete()
+        }
+        await backend.waitUntilRefreshIsCancelled()
+
+        #expect(await closeCompletion.isComplete() == false)
+        #expect(backend.refreshCompletionCount == 0)
+
+        await backend.releaseRefresh()
+        try await closeTask.value
+
+        #expect(await closeCompletion.isComplete())
+        #expect(backend.refreshCompletionCount == 1)
+        #expect(store.accountRateLimitAutoRefreshInFlightAccountKeys.isEmpty)
+        store.refreshDueAccountRateLimits(now: now)
+        #expect(backend.refreshedAccountKeys == [account.accountKey])
+    }
+
     private func makeAccount(
         accountKey: String? = nil,
         email: String = "review@example.com",
@@ -347,6 +381,18 @@ private struct TestFailure: Error {
     }
 }
 
+private actor RateLimitCloseCompletion {
+    private var completeValue = false
+
+    func complete() {
+        completeValue = true
+    }
+
+    func isComplete() -> Bool {
+        completeValue
+    }
+}
+
 private final class MutableTestClock: @unchecked Sendable {
     nonisolated(unsafe) var now: Date
 
@@ -378,7 +424,9 @@ private final class NoProgressRateLimitRefreshBackend: PreviewCodexReviewStoreBa
 private final class BlockingRateLimitRefreshBackend: PreviewCodexReviewStoreBackend {
     private let startedGate = AsyncGate()
     private let releaseGate = AsyncGate()
+    private let cancellationGate = AsyncGate()
     private(set) var refreshedAccountKeys: [String] = []
+    private(set) var refreshCompletionCount = 0
 
     init(account: CodexAccount) {
         super.init(seed: .init(
@@ -393,7 +441,13 @@ private final class BlockingRateLimitRefreshBackend: PreviewCodexReviewStoreBack
     ) async {
         refreshedAccountKeys.append(accountKey)
         await startedGate.open()
-        await releaseGate.wait()
+        let cancellationGate = cancellationGate
+        await withTaskCancellationHandler {
+            await releaseGate.waitIgnoringCancellation()
+        } onCancel: {
+            Task { await cancellationGate.open() }
+        }
+        refreshCompletionCount += 1
     }
 
     func waitUntilRefreshStarts() async {
@@ -402,5 +456,9 @@ private final class BlockingRateLimitRefreshBackend: PreviewCodexReviewStoreBack
 
     func releaseRefresh() async {
         await releaseGate.open()
+    }
+
+    func waitUntilRefreshIsCancelled() async {
+        await cancellationGate.wait()
     }
 }

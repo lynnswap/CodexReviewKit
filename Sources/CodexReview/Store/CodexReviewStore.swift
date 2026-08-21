@@ -10,6 +10,11 @@ public final class CodexReviewStore {
         package var timeoutTask: Task<Void, Never>?
     }
 
+    package struct CloseCallerWaiter {
+        package var targetCount: Int
+        package var continuation: CheckedContinuation<Void, Never>
+    }
+
     public package(set) var serverState: CodexReviewServerState = .stopped
     public let auth: CodexReviewAuthModel
     package let settings: SettingsStore
@@ -25,18 +30,35 @@ public final class CodexReviewStore {
     @ObservationIgnored package let backend: any CodexReviewStoreBackend
     @ObservationIgnored package let networkMonitor: any CodexReviewNetworkMonitoring
     @ObservationIgnored package let networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy
+    @ObservationIgnored package let reviewRuntimeClosePolicy: ReviewRuntimeClosePolicy
     @ObservationIgnored package var previewSupportRetainer: AnyObject?
     @ObservationIgnored package let clock: CodexReviewClock
     @ObservationIgnored package let idGenerator: CodexReviewIDGenerator
-    @ObservationIgnored package var activeRuns: [String: CodexReviewBackendModel.Review.Run] = [:]
-    @ObservationIgnored package var reviewRecoveryWaitingJobIDs: Set<String> = []
-    @ObservationIgnored package var startingJobIDs: Set<String> = []
-    @ObservationIgnored package var startupCancellations: [String: ReviewCancellation] = [:]
+    @ObservationIgnored package var reviewAttemptOwnerships: [String: ReviewAttemptOwnership] = [:]
+    @ObservationIgnored package var reviewRegistrationOrder: [String] = []
+    @ObservationIgnored package var reviewCleanupFailures: [String: ReviewRuntimeCloseFailure] = [:]
     @ObservationIgnored package var reviewWorkerTasks: [String: Task<Void, Never>] = [:]
-    @ObservationIgnored package var runtimeStopDetachedReviewWorkerTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored package var nextReviewMutationID: UInt64 = 0
+    @ObservationIgnored package var reviewMutationTasks: [UInt64: Task<String, any Error>] = [:]
+    @ObservationIgnored package var reviewMutationPreparationForTesting: (@MainActor @Sendable () async -> Void)?
+    @ObservationIgnored package var reviewCleanupPreparationForTesting: (@MainActor @Sendable () async -> Void)?
+    @ObservationIgnored package var reviewTerminalPublicationPreparationForTesting: (@MainActor @Sendable () async -> Void)?
+    @ObservationIgnored package var runtimeForceCloseReceiptRecordedForTesting: (@MainActor @Sendable () async -> Void)?
+    @ObservationIgnored package var runtimeReplacementEnrollmentPreparationForTesting: (@MainActor @Sendable () async -> Void)?
+    @ObservationIgnored package var reviewCancellationBarrierPreparationForTesting: (@MainActor @Sendable () async -> Void)?
+    @ObservationIgnored package var storeCommandRegistry = ReviewStoreCommandRegistry()
+    @ObservationIgnored package var closeCallerCount = 0
+    @ObservationIgnored package var closeCallerWaiters: [CloseCallerWaiter] = []
     @ObservationIgnored package var reviewTerminalWaiters: [String: [ReviewTerminalWaiter]] = [:]
     @ObservationIgnored package var closedSessions: Set<String> = []
     @ObservationIgnored package var accountRateLimitAutoRefreshDriver: CodexReviewStoreRateLimitAutoRefreshDriver?
+    @ObservationIgnored package var lifetimeState: ReviewStoreLifetimeState = .open
+    @ObservationIgnored package var applicationCloseFailureLedger: ReviewCloseFailureLedger?
+    @ObservationIgnored package var runtimeState: ReviewStoreRuntimeState = .stopped(
+        .init(rawValue: 0)
+    )
+    @ObservationIgnored package var lastRuntimeTransitionRecord: ReviewRuntimeTransitionRecord?
+    @ObservationIgnored package let runtimeWorkerRegistry = ReviewRuntimeWorkerRegistry()
 
     package init(
         backend: any CodexReviewStoreBackend = PreviewCodexReviewStoreBackend(),
@@ -45,11 +67,13 @@ public final class CodexReviewStore {
         clock: CodexReviewClock = .init(),
         idGenerator: CodexReviewIDGenerator = .init(),
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
-        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default
+        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
+        reviewRuntimeClosePolicy: ReviewRuntimeClosePolicy = .production
     ) {
         self.backend = backend
         self.networkMonitor = networkMonitor
         self.networkRecoveryPolicy = networkRecoveryPolicy
+        self.reviewRuntimeClosePolicy = reviewRuntimeClosePolicy
         self.diagnosticsURL = diagnosticsURL
         self.clock = clock
         self.idGenerator = idGenerator
@@ -78,10 +102,22 @@ public final class CodexReviewStore {
 
     isolated deinit {
         accountRateLimitAutoRefreshDriver?.cancel()
+        if case .closing(let task) = lifetimeState {
+            task.cancel()
+        }
+        switch runtimeState {
+        case .acquiring(_, let task, _), .transitioning(_, _, let task, _, _, _):
+            task.cancel()
+        case .stopped, .running, .failed:
+            break
+        }
         for task in reviewWorkerTasks.values {
             task.cancel()
         }
-        for task in runtimeStopDetachedReviewWorkerTasks.values {
+        for task in reviewMutationTasks.values {
+            task.cancel()
+        }
+        for (_, task) in storeCommandRegistry.ownedTaskSnapshot() {
             task.cancel()
         }
         for waiters in reviewTerminalWaiters.values {
@@ -89,6 +125,9 @@ public final class CodexReviewStore {
                 waiter.timeoutTask?.cancel()
                 waiter.continuation.resume()
             }
+        }
+        for waiter in closeCallerWaiters {
+            waiter.continuation.resume()
         }
     }
 
@@ -113,7 +152,8 @@ public final class CodexReviewStore {
         clock: CodexReviewClock = .init(),
         idGenerator: CodexReviewIDGenerator = .init(),
         networkMonitor: any CodexReviewNetworkMonitoring = StaticCodexReviewNetworkMonitor(),
-        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default
+        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
+        reviewRuntimeClosePolicy: ReviewRuntimeClosePolicy = .production
     ) -> CodexReviewStore {
         CodexReviewStore(
             backend: backend,
@@ -121,67 +161,1013 @@ public final class CodexReviewStore {
             clock: clock,
             idGenerator: idGenerator,
             networkMonitor: networkMonitor,
-            networkRecoveryPolicy: networkRecoveryPolicy
+            networkRecoveryPolicy: networkRecoveryPolicy,
+            reviewRuntimeClosePolicy: reviewRuntimeClosePolicy
         )
     }
 
     public func start(forceRestartIfNeeded: Bool = false) async {
-        switch serverState {
-        case .stopped, .failed:
-            break
-        case .starting:
+        guard case .open = lifetimeState else {
+            return
+        }
+        switch runtimeState {
+        case .acquiring:
+            return
+        case .transitioning(_, _, let task, _, _, _):
+            await task.value
             return
         case .running where forceRestartIfNeeded == false:
             return
-        case .running:
+        case .running(let generation, let runtime, let mcpGeneration):
+            await startRuntimeReplacement(
+                previousGeneration: generation,
+                previousRuntime: runtime,
+                retainedMCPGeneration: mcpGeneration,
+                retainedServerURL: serverURL
+            )
+            return
+        case .failed(let generation, let mcpGeneration, let retainedServerURL, _):
+            await startRuntimeReplacement(
+                previousGeneration: generation,
+                previousRuntime: nil,
+                retainedMCPGeneration: mcpGeneration,
+                retainedServerURL: retainedServerURL
+            )
+            return
+        case .stopped:
             break
         }
+        let purpose: ReviewRuntimeTransitionPurpose = forceRestartIfNeeded
+            ? .restartSameAccount
+            : .stop
+        await startRuntime(purpose: purpose)
+    }
+
+    private func startRuntime(purpose: ReviewRuntimeTransitionPurpose) async {
+        guard case .stopped(let previousGeneration) = runtimeState else {
+            return
+        }
+        let generation = previousGeneration.successor()
+        let record = ReviewRuntimeTransitionRecord()
         serverState = .starting
         serverURL = nil
         writeDiagnosticsIfNeeded()
-        await backend.start(store: self, forceRestartIfNeeded: forceRestartIfNeeded)
-        await settingsService.refreshIfRunning(serverState: serverState)
-        startAccountRateLimitAutoRefresh()
+        let task = Task<Void, Never> { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performRuntimeAcquisition(
+                generation: generation,
+                purpose: purpose,
+                record: record
+            )
+        }
+        runtimeState = .acquiring(
+            generation: generation,
+            task: task,
+            record: record
+        )
+        await task.value
+    }
+
+    private func startRuntimeReplacement(
+        previousGeneration: ReviewRuntimeGeneration,
+        previousRuntime: PreparedRuntime?,
+        retainedMCPGeneration: MCPServerGeneration,
+        retainedServerURL: URL?
+    ) async {
+        serverState = .starting
+        writeDiagnosticsIfNeeded()
+        let (_, task) = installRuntimeReplacement(
+            previousGeneration: previousGeneration,
+            sourceRuntime: previousRuntime,
+            retainedMCPGeneration: retainedMCPGeneration,
+            retainedServerURL: retainedServerURL,
+            trigger: .sameAccountRestart,
+            purpose: .restartSameAccount
+        )
+        await task.value
+    }
+
+    @discardableResult
+    package func installRuntimeReplacement(
+        previousGeneration: ReviewRuntimeGeneration,
+        sourceRuntime: PreparedRuntime?,
+        retainedMCPGeneration: MCPServerGeneration,
+        retainedServerURL: URL?,
+        trigger: ReviewRuntimeRecoveryReplacement.Trigger,
+        purpose: ReviewRuntimeTransitionPurpose
+    ) -> (ReviewRuntimeRecoveryReplacement, Task<Void, Never>) {
+        let generation = previousGeneration.successor()
+        let record = ReviewRuntimeTransitionRecord()
+        let replacement = makeRuntimeRecoveryReplacement(
+            sourceGeneration: previousGeneration,
+            replacementGeneration: generation,
+            sourceRuntime: sourceRuntime,
+            retainedMCPGeneration: retainedMCPGeneration,
+            retainedServerURL: retainedServerURL,
+            trigger: trigger
+        )
+        let task = Task<Void, Never> { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performRuntimeReplacement(
+                replacement,
+                purpose: purpose,
+                record: record
+            )
+        }
+        runtimeState = .transitioning(
+            generation: generation,
+            purpose: purpose,
+            task: task,
+            record: record,
+            sourceRuntime: sourceRuntime,
+            recoveryReplacement: replacement
+        )
+        return (replacement, task)
     }
 
     public func stop() async {
-        let locallyCancelledJobIDs: [String]
-        if backend.handlesActiveReviewStopCleanup {
-            locallyCancelledJobIDs = []
-        } else {
-            locallyCancelledJobIDs = await requestActiveReviewCancellationsForRuntimeStop()
+        switch lifetimeState {
+        case .open:
+            break
+        case .closing(let task):
+            _ = await task.value
+            return
+        case .closed:
+            return
         }
-        await backend.stop(store: self)
-        let remainingLocallyCancelledJobIDs = cancelActiveReviewsLocallyForRuntimeStop(cancelWorkers: false)
-        cancelAndDetachReviewWorkersForRuntimeStop(
-            jobIDs: Array(Set(locallyCancelledJobIDs + remainingLocallyCancelledJobIDs))
+        let previousState = runtimeState
+        switch previousState {
+        case .stopped:
+            transitionToStopped()
+            return
+        case .transitioning(_, .stop, let task, _, _, _):
+            await task.value
+            return
+        case .acquiring, .running, .transitioning, .failed:
+            break
+        }
+        let invalidatedGeneration = previousState.generation.successor()
+        let record = ReviewRuntimeTransitionRecord()
+        let task = Task<Void, Never> { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performRuntimeStop(
+                previousState: previousState,
+                invalidatedGeneration: invalidatedGeneration,
+                record: record
+            )
+        }
+        runtimeState = .transitioning(
+            generation: invalidatedGeneration,
+            purpose: .stop,
+            task: task,
+            record: record,
+            sourceRuntime: previousState.runtimeForClose,
+            recoveryReplacement: nil
         )
-        transitionToStopped()
+        await task.value
+    }
+
+    /// Permanently closes this Store and awaits every resource it owns.
+    ///
+    /// The first call closes mutation admission and records one application-lifetime
+    /// close operation. Concurrent and later calls join or replay that exact result.
+    /// After close begins, `start(forceRestartIfNeeded:)` and `restart()` are no-ops
+    /// and new review mutations are rejected. A thrown error reports the recorded
+    /// lifecycle failures after all close stages have been attempted.
+    public func close() async throws {
+        closeCallerCount += 1
+        let completedCloseCallerWaiters = closeCallerWaiters.filter {
+            closeCallerCount >= $0.targetCount
+        }
+        closeCallerWaiters.removeAll {
+            closeCallerCount >= $0.targetCount
+        }
+        for waiter in completedCloseCallerWaiters {
+            waiter.continuation.resume()
+        }
+        let task: Task<Result<Void, ReviewCloseError>, Never>
+        switch lifetimeState {
+        case .open:
+            storeCommandRegistry.closeAdmission()
+            let previousRuntimeState = runtimeState
+            let invalidatedGeneration = previousRuntimeState.generation.successor()
+            let failureLedger = ReviewCloseFailureLedger()
+            applicationCloseFailureLedger = failureLedger
+            let newTask = Task<Result<Void, ReviewCloseError>, Never> { @MainActor [self] in
+                return await self.performApplicationClose(
+                    previousRuntimeState: previousRuntimeState,
+                    invalidatedGeneration: invalidatedGeneration,
+                    failureLedger: failureLedger
+                )
+            }
+            lifetimeState = .closing(newTask)
+            task = newTask
+        case .closing(let existingTask):
+            task = existingTask
+        case .closed(let result):
+            try result.get()
+            return
+        }
+
+        let result = await task.value
+        lifetimeState = .closed(result)
+        applicationCloseFailureLedger = nil
+        try result.get()
+    }
+
+    package func waitForCloseCallersForTesting(_ count: Int) async {
+        if closeCallerCount >= count {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            if closeCallerCount >= count {
+                continuation.resume()
+            } else {
+                closeCallerWaiters.append(.init(
+                    targetCount: count,
+                    continuation: continuation
+                ))
+            }
+        }
+    }
+
+    package func registerStoreCommand() -> UInt64? {
+        storeCommandRegistry.register()
+    }
+
+    package func installOwnedStoreCommandTask(
+        _ task: Task<Void, Never>,
+        for id: UInt64
+    ) {
+        storeCommandRegistry.installOwnedTask(task, for: id)
+    }
+
+    package func finishStoreCommand(_ id: UInt64) {
+        storeCommandRegistry.finish(id)
+    }
+
+    package func waitForAdmittedStoreCommands() async {
+        if storeCommandRegistry.activeIDs.isEmpty {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            storeCommandRegistry.appendDrainWaiter(continuation)
+        }
+    }
+
+    package func performAdmittedStoreCommand(
+        _ operation: @MainActor () async -> Void
+    ) async {
+        guard let commandID = registerStoreCommand() else {
+            return
+        }
+        defer { finishStoreCommand(commandID) }
+        await operation()
+    }
+
+    package func performThrowingAdmittedStoreCommand<Value>(
+        _ operation: @MainActor () async throws -> Value
+    ) async throws -> Value {
+        guard let commandID = registerStoreCommand() else {
+            throw CodexReviewAPI.Error.io("Review Store is closed.")
+        }
+        defer { finishStoreCommand(commandID) }
+        return try await operation()
+    }
+
+    private func performApplicationClose(
+        previousRuntimeState: ReviewStoreRuntimeState,
+        invalidatedGeneration: ReviewRuntimeGeneration,
+        failureLedger: ReviewCloseFailureLedger
+    ) async -> Result<Void, ReviewCloseError> {
+        let runningRuntime = previousRuntimeState.runtimeForClose
+        if let lastRuntimeTransitionRecord {
+            failureLedger.importReceipts(from: lastRuntimeTransitionRecord)
+        }
+
+        await backend.mcpServerLifecycle.closeAdmission()
+        await cancelAndAwaitAllReviewMutationTasks()
+
+        let cancellation = await requestActiveReviewCancellationsForApplicationClose(
+            failureLedger: failureLedger
+        )
+
+        await runningRuntime?.handle.closeAdmission()
+        var runtimePhysicalCloseCompleted = false
+        let unresolvedCancellationJobIDs = cancellation.jobIDs.filter { jobID in
+            cancellation.failedJobIDs.contains(jobID)
+                && (job(id: jobID)?.isTerminal == false || reviewWorkerTasks[jobID] != nil)
+        }
+        if unresolvedCancellationJobIDs.isEmpty == false {
+            if let runningRuntime {
+                await applicationCloseRuntime(
+                    runningRuntime,
+                    failureLedger: failureLedger
+                )
+                runtimePhysicalCloseCompleted = true
+                await awaitReviewWorkers(jobIDs: unresolvedCancellationJobIDs)
+            } else {
+                await cancelAndAwaitReviewWorkersForRuntimeStop(
+                    jobIDs: unresolvedCancellationJobIDs
+                )
+            }
+        }
+        await finishAllReviewWaitersForStoreClose()
+
+        do {
+            try await backend.mcpServerLifecycle.drainAdmittedHandlers()
+        } catch {
+            failureLedger.record(closePrimaryFailure(
+                from: error,
+                fallback: .mcpHandlerDrain(error.localizedDescription)
+            ))
+        }
+
+        var mcpCloseFailureWasRecorded = false
+        do {
+            try await backend.mcpServerLifecycle.close()
+        } catch {
+            mcpCloseFailureWasRecorded = true
+            failureLedger.record(closePrimaryFailure(
+                from: error,
+                fallback: .mcpServer(error.localizedDescription)
+            ))
+        }
+        do {
+            try await backend.mcpServerLifecycle.waitUntilClosed()
+        } catch {
+            if mcpCloseFailureWasRecorded == false {
+                failureLedger.record(closePrimaryFailure(
+                    from: error,
+                    fallback: .mcpServer(error.localizedDescription)
+                ))
+            }
+        }
+
+        await cancelAccountRateLimitAutoRefreshAndWait()
+        switch previousRuntimeState {
+        case .acquiring(_, let task, let record):
+            task.cancel()
+            await task.value
+            failureLedger.merge(record)
+        case .transitioning(_, _, let task, let record, _, let replacement):
+            replacement?.finish(.superseded(.applicationClose))
+            replacement?.recordNetworkRestoration()
+            task.cancel()
+            await task.value
+            failureLedger.merge(record)
+        case .stopped, .running, .failed:
+            if let lastRuntimeTransitionRecord {
+                failureLedger.merge(lastRuntimeTransitionRecord)
+            }
+            break
+        }
+
+        await cancelAndAwaitAllReviewMutationTasks()
+        await cancelAndAwaitOwnedStoreCommandTasks()
+        await waitForAdmittedStoreCommands()
+        await awaitAllReviewWorkers()
+        await finishAllReviewWaitersForStoreClose()
+        do {
+            try await backend.stop(store: self)
+        } catch {
+            failureLedger.record(closePrimaryFailure(
+                from: error,
+                fallback: .client(error.localizedDescription)
+            ))
+        }
+        await backend.waitUntilStopped()
+
+        for jobID in reviewRegistrationOrder
+            where failureLedger.consumedReviewCleanupJobIDs.contains(jobID) == false {
+            if let failure = reviewCleanupFailures[jobID] {
+                failureLedger.recordReviewCleanupFailure(failure, jobID: jobID)
+            }
+        }
+
+        if let runningRuntime, runtimePhysicalCloseCompleted == false {
+            await applicationCloseRuntime(
+                runningRuntime,
+                failureLedger: failureLedger
+            )
+        }
+
+        runtimeState = .stopped(invalidatedGeneration)
+        let result: Result<Void, ReviewCloseError>
+        if let first = failureLedger.failures.first {
+            let closeError = ReviewCloseError(failures: .init(
+                first: first,
+                additionalInLifecycleOrder: Array(failureLedger.failures.dropFirst())
+            ))
+            transitionToFailed(closeError.localizedDescription)
+            result = .failure(closeError)
+        } else {
+            transitionToStopped()
+            result = .success(())
+        }
+        return result
+    }
+
+    private func applicationCloseRuntime(
+        _ runtime: PreparedRuntime,
+        failureLedger: ReviewCloseFailureLedger
+    ) async {
+        _ = await runtime.closeRecord.closeAndWait(
+            handle: runtime.handle,
+            purpose: .applicationClose
+        )
+        failureLedger.record(contentsOf: runtime.closeRecord.consumeFailures())
+    }
+
+    private func closePrimaryFailure(
+        from error: any Error,
+        fallback: ReviewLifecycleResourceFailure
+    ) -> ReviewClosePrimaryFailure {
+        if let failure = error as? ReviewInterruptRequestFailure {
+            return .interruptRequest(failure)
+        }
+        if let failure = error as? ReviewRuntimeCloseFailure {
+            return .attemptRuntime(failure)
+        }
+        if let aggregate = error as? ReviewLifecycleResourceFailureAggregate {
+            return .lifecycleResources(aggregate)
+        }
+        if let failure = error as? ReviewLifecycleResourceFailure {
+            return .lifecycleResources(.init(first: failure))
+        }
+        return .lifecycleResources(.init(first: fallback))
+    }
+
+    private func performRuntimeStop(
+        previousState: ReviewStoreRuntimeState,
+        invalidatedGeneration: ReviewRuntimeGeneration,
+        record: ReviewRuntimeTransitionRecord
+    ) async {
+        defer { lastRuntimeTransitionRecord = record }
+        switch previousState {
+        case .acquiring(_, let task, let previousRecord):
+            task.cancel()
+            await stopPreparedMCPServer(record: record)
+            await task.value
+            record.merge(previousRecord)
+        case .running(_, let runtime, _):
+            await stopPublishedRuntime(runtime, record: record)
+        case .transitioning(
+            _,
+            _,
+            let task,
+            let previousRecord,
+            let sourceRuntime,
+            let replacement
+        ):
+            await performPublishedRuntimeSemanticStop(record: record)
+            replacement?.finish(.superseded(.stop))
+            replacement?.recordNetworkRestoration()
+            task.cancel()
+            await task.value
+            record.merge(previousRecord)
+            if let sourceRuntime {
+                await closeAppServerRuntime(
+                    sourceRuntime,
+                    purpose: .stop,
+                    record: record
+                )
+            }
+            await stopPreparedMCPServer(record: record)
+        case .failed:
+            await stopPreparedMCPServer(record: record)
+        case .stopped:
+            break
+        }
+        guard case .transitioning(let currentGeneration, .stop, _, _, _, _) = runtimeState,
+              currentGeneration == invalidatedGeneration
+        else {
+            return
+        }
+        runtimeState = .stopped(invalidatedGeneration)
+        if let failureDescription = record.failureDescription {
+            transitionToFailed(failureDescription)
+        } else {
+            transitionToStopped()
+        }
+    }
+
+    private func stopPublishedRuntime(
+        _ runtime: PreparedRuntime,
+        record: ReviewRuntimeTransitionRecord
+    ) async {
+        await performPublishedRuntimeSemanticStop(record: record)
+        await runtime.handle.closeAdmission()
+        await stopPreparedMCPServer(record: record)
+        await closeAppServerRuntime(
+            runtime,
+            purpose: .stop,
+            record: record
+        )
+    }
+
+    private func performPublishedRuntimeSemanticStop(
+        record: ReviewRuntimeTransitionRecord
+    ) async {
+        let cancellation = await requestActiveReviewCancellationsForApplicationClose(
+            reason: .system(message: "Review runtime stopped."),
+            failureLedger: record
+        )
+        do {
+            try await backend.stop(store: self)
+        } catch {
+            record.record(error, fallback: .client(error.localizedDescription))
+        }
+        let remainingLocallyCancelledJobIDs = cancelActiveReviewsLocallyForRuntimeStop(cancelWorkers: false)
+        await cancelAndAwaitReviewWorkersForRuntimeStop(
+            jobIDs: cancellation.jobIDs + remainingLocallyCancelledJobIDs
+        )
+        for jobID in cancellation.jobIDs
+            where record.consumedReviewCleanupJobIDs.contains(jobID) == false {
+            if let failure = reviewCleanupFailures[jobID] {
+                record.recordReviewCleanupFailure(failure, jobID: jobID)
+            }
+        }
+        await cancelAccountRateLimitAutoRefreshAndWait()
+    }
+
+    private func closeAppServerRuntime(
+        _ runtime: PreparedRuntime,
+        purpose: ReviewRuntimeTransitionPurpose,
+        record: ReviewRuntimeTransitionRecord
+    ) async {
+        let result = await runtime.closeRecord.closeAndWait(
+            handle: runtime.handle,
+            purpose: purpose
+        )
+        record.record(contentsOf: runtime.closeRecord.consumeFailures())
+        if result.failures.isEmpty == false {
+            writeDiagnosticsIfNeeded()
+        }
     }
 
     public func restart() async {
-        await stop()
         await start(forceRestartIfNeeded: true)
     }
 
     public func waitUntilStopped() async {
+        if case .transitioning(_, _, let task, _, _, _) = runtimeState {
+            await task.value
+        }
         await backend.waitUntilStopped()
+        try? await backend.mcpServerLifecycle.waitUntilStopped()
+    }
+
+    private func performRuntimeAcquisition(
+        generation: ReviewRuntimeGeneration,
+        purpose: ReviewRuntimeTransitionPurpose,
+        record: ReviewRuntimeTransitionRecord
+    ) async {
+        defer { lastRuntimeTransitionRecord = record }
+        guard isCurrentAcquisition(generation) else {
+            return
+        }
+        var preparedMCPServer: PreparedMCPServer?
+        var preparedRuntime: PreparedRuntime?
+        do {
+            let mcpServer = try await backend.mcpServerLifecycle.prepare()
+            preparedMCPServer = mcpServer
+            guard isCurrentAcquisition(generation) else {
+                if currentTransitionOwnsMCPStop == false {
+                    await stopPreparedMCPServer(record: record)
+                }
+                return
+            }
+
+            let runtime = try await backend.prepareRuntime(
+                generation: generation,
+                purpose: purpose
+            )
+            preparedRuntime = runtime
+            guard isCurrentAcquisition(generation) else {
+                await closeStaleRuntime(
+                    runtime,
+                    mcpServerWasPrepared: true,
+                    purpose: purpose,
+                    record: record
+                )
+                return
+            }
+
+            try await runtime.handle.activate()
+            guard isCurrentAcquisition(generation) else {
+                await closeStaleRuntime(
+                    runtime,
+                    mcpServerWasPrepared: true,
+                    purpose: purpose,
+                    record: record
+                )
+                return
+            }
+            publishRuntimeSnapshot(runtime.snapshot)
+
+            let mcpSnapshot = try await backend.mcpServerLifecycle.activate(
+                mcpServer.generation
+            )
+            guard isCurrentAcquisition(generation) else {
+                await closeStaleRuntime(
+                    runtime,
+                    mcpServerWasPrepared: true,
+                    purpose: purpose,
+                    record: record
+                )
+                return
+            }
+
+            runtimeState = .running(
+                generation: generation,
+                runtime: runtime,
+                mcpGeneration: mcpServer.generation
+            )
+            publishMCPServer(serverURL: mcpSnapshot.serverURL)
+        } catch {
+            let visibleFailureDescription: String
+            if let preparationFailure = error as? ReviewRuntimePreparationFailure {
+                record.record(.lifecycleResources(preparationFailure.cleanupFailures))
+                visibleFailureDescription = preparationFailure.preparationDescription
+            } else {
+                visibleFailureDescription = error.localizedDescription
+            }
+            if let preparedRuntime {
+                await closeStaleRuntime(
+                    preparedRuntime,
+                    mcpServerWasPrepared: preparedMCPServer != nil,
+                    purpose: purpose,
+                    record: record
+                )
+            } else if preparedMCPServer != nil,
+                      currentTransitionOwnsMCPStop == false {
+                await stopPreparedMCPServer(record: record)
+            }
+            guard isCurrentAcquisition(generation) else {
+                return
+            }
+            runtimeState = .stopped(generation)
+            transitionToFailed(visibleFailureDescription)
+        }
+    }
+
+    package func performRuntimeAcquisitionForTesting(
+        generation: ReviewRuntimeGeneration,
+        purpose: ReviewRuntimeTransitionPurpose
+    ) async {
+        await performRuntimeAcquisition(
+            generation: generation,
+            purpose: purpose,
+            record: ReviewRuntimeTransitionRecord()
+        )
+    }
+
+    private func performRuntimeReplacement(
+        _ replacement: ReviewRuntimeRecoveryReplacement,
+        purpose: ReviewRuntimeTransitionPurpose,
+        record: ReviewRuntimeTransitionRecord
+    ) async {
+        defer { lastRuntimeTransitionRecord = record }
+        var preparedRuntime: PreparedRuntime?
+        await runtimeReplacementEnrollmentPreparationForTesting?()
+        await enrollRuntimeReplacementParticipants(replacement)
+        if let sourceRuntime = replacement.sourceRuntime {
+            await sourceRuntime.handle.closeAdmission()
+            let closeResult = await sourceRuntime.closeRecord.closeAndWait(
+                handle: sourceRuntime.handle,
+                purpose: purpose
+            )
+            let consumedFailures = sourceRuntime.closeRecord.consumeFailures()
+            if consumedFailures.isEmpty == false {
+                record.markForceCloseFailureOwnership(
+                    jobIDs: replacement.forceCloseObserverJobIDs
+                )
+                record.record(contentsOf: consumedFailures)
+                applicationCloseFailureLedger?.importReceipts(from: record)
+            }
+            lastRuntimeTransitionRecord = record
+            if let firstFailure = closeResult.failures.first {
+                replacement.finishSourceClose(.failure(
+                    reviewRuntimeCloseFailure(from: firstFailure)
+                ))
+            } else {
+                replacement.finishSourceClose(.success(()))
+            }
+        } else {
+            replacement.finishSourceClose(.success(()))
+        }
+        guard isCurrentRuntimeReplacement(replacement, purpose: purpose) else {
+            replacement.finish(.superseded(currentSupersedingPurpose))
+            return
+        }
+        if replacement.trigger.requiresNetworkRestoration {
+            var iterator = replacement.networkRestorations().makeAsyncIterator()
+            guard await iterator.next() != nil,
+                  isCurrentRuntimeReplacement(replacement, purpose: purpose)
+            else {
+                replacement.finish(.superseded(currentSupersedingPurpose))
+                return
+            }
+        }
+        do {
+            let runtime = try await backend.prepareRuntime(
+                generation: replacement.replacementGeneration,
+                purpose: purpose
+            )
+            preparedRuntime = runtime
+            guard isCurrentRuntimeReplacement(replacement, purpose: purpose) else {
+                await closeStaleRuntime(
+                    runtime,
+                    mcpServerWasPrepared: false,
+                    purpose: purpose,
+                    record: record
+                )
+                replacement.finish(.superseded(currentSupersedingPurpose))
+                return
+            }
+
+            try await runtime.handle.activate()
+            guard isCurrentRuntimeReplacement(replacement, purpose: purpose) else {
+                await closeStaleRuntime(
+                    runtime,
+                    mcpServerWasPrepared: false,
+                    purpose: purpose,
+                    record: record
+                )
+                replacement.finish(.superseded(currentSupersedingPurpose))
+                return
+            }
+
+            publishRuntimeSnapshot(runtime.snapshot)
+            runtimeState = .running(
+                generation: replacement.replacementGeneration,
+                runtime: runtime,
+                mcpGeneration: replacement.retainedMCPGeneration
+            )
+            publishMCPServer(serverURL: replacement.retainedServerURL)
+            replacement.finish(.running(replacement.replacementGeneration))
+        } catch {
+            if let preparedRuntime {
+                await closeStaleRuntime(
+                    preparedRuntime,
+                    mcpServerWasPrepared: false,
+                    purpose: purpose,
+                    record: record
+                )
+            }
+            guard isCurrentRuntimeReplacement(replacement, purpose: purpose) else {
+                replacement.finish(.superseded(currentSupersedingPurpose))
+                return
+            }
+            let failure = runtimeReplacementFailure(from: error)
+            record.record(.lifecycleResources(failure.resources))
+            runtimeState = .failed(
+                generation: replacement.replacementGeneration,
+                retainedMCPGeneration: replacement.retainedMCPGeneration,
+                serverURL: replacement.retainedServerURL,
+                replacementFailure: failure
+            )
+            serverURL = replacement.retainedServerURL
+            serverState = .failed(failure.localizedDescription)
+            writeDiagnosticsIfNeeded()
+            replacement.finish(.failed(failure))
+        }
+    }
+
+    private func isCurrentRuntimeReplacement(
+        _ replacement: ReviewRuntimeRecoveryReplacement,
+        purpose: ReviewRuntimeTransitionPurpose
+    ) -> Bool {
+        guard case .open = lifetimeState,
+              case .transitioning(
+                let generation,
+                let currentPurpose,
+                _,
+                _,
+                _,
+                let currentReplacement
+              ) = runtimeState
+        else {
+            return false
+        }
+        return generation == replacement.replacementGeneration
+            && currentPurpose == purpose
+            && currentReplacement === replacement
+    }
+
+    private var currentSupersedingPurpose: ReviewRuntimeTransitionPurpose {
+        if case .closing = lifetimeState { return .applicationClose }
+        if case .transitioning(_, let purpose, _, _, _, _) = runtimeState {
+            return purpose
+        }
+        return .stop
+    }
+
+    private func reviewRuntimeCloseFailure(
+        from failure: ReviewClosePrimaryFailure
+    ) -> ReviewRuntimeCloseFailure {
+        switch failure {
+        case .attemptRuntime(let failure):
+            return failure
+        case .lifecycleResources(let failure):
+            return .connection(failure.localizedDescription)
+        case .interruptRequest(let failure):
+            return .connection(failure.localizedDescription)
+        case .persistence(let failure):
+            return .connection(failure.localizedDescription)
+        }
+    }
+
+    private func runtimeReplacementFailure(
+        from error: any Error
+    ) -> ReviewRuntimeReplacementFailure {
+        if let failure = error as? ReviewRuntimeReplacementFailure {
+            return failure
+        }
+        if let failure = error as? ReviewRuntimePreparationFailure {
+            return .init(resources: .init(
+                first: .client(failure.preparationDescription),
+                additionalInLifecycleOrder: [failure.cleanupFailures.first]
+                    + failure.cleanupFailures.additionalInLifecycleOrder
+            ))
+        }
+        if let failure = error as? ReviewLifecycleResourceFailureAggregate {
+            return .init(resources: failure)
+        }
+        if let failure = error as? ReviewLifecycleResourceFailure {
+            return .init(failure)
+        }
+        return .init(.client(error.localizedDescription))
+    }
+
+    private func isCurrentAcquisition(
+        _ generation: ReviewRuntimeGeneration
+    ) -> Bool {
+        guard case .open = lifetimeState else {
+            return false
+        }
+        guard case .acquiring(let currentGeneration, _, _) = runtimeState else {
+            return false
+        }
+        return currentGeneration == generation
+    }
+
+    private func isCurrentTransition(
+        _ generation: ReviewRuntimeGeneration,
+        purpose: ReviewRuntimeTransitionPurpose
+    ) -> Bool {
+        guard case .open = lifetimeState else {
+            return false
+        }
+        guard case .transitioning(
+            let currentGeneration,
+            let currentPurpose,
+            _,
+            _,
+            _,
+            _
+        ) = runtimeState else {
+            return false
+        }
+        return currentGeneration == generation && currentPurpose == purpose
+    }
+
+    private var currentTransitionOwnsMCPStop: Bool {
+        switch lifetimeState {
+        case .closing, .closed:
+            return true
+        case .open:
+            break
+        }
+        guard case .transitioning(_, let purpose, _, _, _, _) = runtimeState else {
+            return false
+        }
+        return purpose == .stop || purpose == .applicationClose
+    }
+
+    private func closeStaleRuntime(
+        _ runtime: PreparedRuntime,
+        mcpServerWasPrepared: Bool,
+        purpose: ReviewRuntimeTransitionPurpose,
+        record: ReviewRuntimeTransitionRecord
+    ) async {
+        await runtime.handle.closeAdmission()
+        let result = await runtime.closeRecord.closeAndWait(
+            handle: runtime.handle,
+            purpose: purpose
+        )
+        record.record(contentsOf: runtime.closeRecord.consumeFailures())
+        if result.failures.isEmpty == false {
+            writeDiagnosticsIfNeeded()
+        }
+        if mcpServerWasPrepared, currentTransitionOwnsMCPStop == false {
+            await stopPreparedMCPServer(record: record)
+        }
+    }
+
+    private func stopPreparedMCPServer(
+        record: ReviewRuntimeTransitionRecord
+    ) async {
+        var stopFailureWasRecorded = false
+        do {
+            try await backend.mcpServerLifecycle.stop()
+        } catch {
+            stopFailureWasRecorded = true
+            record.record(
+                error,
+                fallback: .mcpServer(error.localizedDescription)
+            )
+            writeDiagnosticsIfNeeded()
+        }
+        do {
+            try await backend.mcpServerLifecycle.waitUntilStopped()
+        } catch {
+            if stopFailureWasRecorded == false {
+                record.record(
+                    error,
+                    fallback: .mcpServer(error.localizedDescription)
+                )
+            }
+            writeDiagnosticsIfNeeded()
+        }
+    }
+
+    private func publishRuntimeSnapshot(_ snapshot: RuntimePublicationSnapshot) {
+        settings.apply(snapshot: snapshot.settings)
+        applyRuntimeAuthenticationSnapshot(snapshot.authentication)
+    }
+
+    private func publishMCPServer(serverURL: URL?) {
+        transitionToRunning(serverURL: serverURL)
+        startAccountRateLimitAutoRefresh()
+    }
+
+    private func applyRuntimeAuthenticationSnapshot(
+        _ snapshot: CodexReviewBackendModel.Auth.Snapshot
+    ) {
+        let observedAccounts = snapshot.accounts.compactMap { account -> CodexAccount? in
+            let label = account.label.trimmingCharacters(in: .whitespacesAndNewlines)
+            let accountKey = CodexAccount.normalizedEmail(account.id.rawValue)
+            guard label.isEmpty == false, accountKey.isEmpty == false else {
+                return nil
+            }
+            return CodexAccount(
+                accountKey: accountKey,
+                email: label,
+                planType: account.planType,
+                kind: account.kind,
+                capabilities: account.capabilities
+            )
+        }
+        let activeAccountKey = snapshot.activeAccountID.map {
+            CodexAccount.normalizedEmail($0.rawValue)
+        }
+        var accounts = auth.persistedAccounts
+        for observedAccount in observedAccounts {
+            if let index = accounts.firstIndex(where: {
+                $0.accountKey == observedAccount.accountKey
+            }) {
+                accounts[index].updateEmail(observedAccount.email)
+                accounts[index].updateKind(
+                    observedAccount.kind,
+                    capabilities: observedAccount.capabilities
+                )
+                accounts[index].updatePlanType(observedAccount.planType)
+            } else {
+                accounts.insert(observedAccount, at: 0)
+            }
+        }
+        auth.applyPersistedAccountStates(
+            accounts.map(savedAccountPayload(from:)),
+            activeAccountKey: activeAccountKey
+        )
+        auth.selectPersistedAccount(activeAccountKey)
+        auth.updatePhase(.signedOut)
     }
 
     public func refreshAuthentication() async {
-        await backend.refreshAuth(auth: auth)
+        await performAdmittedStoreCommand {
+            await backend.refreshAuth(auth: auth)
+        }
     }
 
     public func signIn() async {
-        await backend.signIn(auth: auth)
+        await performAdmittedStoreCommand {
+            await backend.signIn(auth: auth)
+        }
     }
 
     public func addAccount() async {
-        await backend.addAccount(auth: auth)
+        await performAdmittedStoreCommand {
+            await backend.addAccount(auth: auth)
+        }
     }
 
     public func cancelAuthentication() async {
-        await backend.cancelAuthentication(auth: auth)
+        await performAdmittedStoreCommand {
+            await backend.cancelAuthentication(auth: auth)
+        }
     }
 
     package func performPrimaryAuthenticationAction() async {
@@ -204,39 +1190,53 @@ public final class CodexReviewStore {
     }
 
     public func logout() async {
-        if auth.isAuthenticating, auth.selectedAccount == nil {
-            await cancelAuthentication()
-            return
-        }
-        do {
-            try await signOutActiveAccount()
-        } catch {
-            if auth.errorMessage == nil, auth.isAuthenticated {
-                auth.updatePhase(.failed(message: error.localizedDescription))
+        await performAdmittedStoreCommand {
+            if auth.isAuthenticating, auth.selectedAccount == nil {
+                await backend.cancelAuthentication(auth: auth)
+                return
+            }
+            do {
+                try await performSignOutActiveAccount()
+            } catch {
+                if auth.errorMessage == nil, auth.isAuthenticated {
+                    auth.updatePhase(.failed(message: error.localizedDescription))
+                }
             }
         }
     }
 
     public func signOutActiveAccount() async throws {
+        try await performThrowingAdmittedStoreCommand {
+            try await performSignOutActiveAccount()
+        }
+    }
+
+    private func performSignOutActiveAccount() async throws {
         try await backend.signOutActiveAccount(auth: auth)
     }
 
     package func switchAccount(_ account: CodexAccount) async throws {
-        guard canSwitchAccount(account) else {
-            return
+        try await performThrowingAdmittedStoreCommand {
+            guard canSwitchAccount(account) else {
+                return
+            }
+            let targetAccount = auth.persistedAccounts.first(where: {
+                $0.accountKey == account.accountKey
+            })
+            if auth.persistedAccounts.contains(where: { $0.isSwitching })
+                || auth.selectedAccount?.isSwitching == true {
+                return
+            }
+            targetAccount?.updateIsSwitching(true)
+            defer {
+                targetAccount?.updateIsSwitching(false)
+            }
+            try await backend.switchAccount(auth: auth, accountKey: account.accountKey)
         }
-        let targetAccount = auth.persistedAccounts.first(where: { $0.accountKey == account.accountKey })
-        if auth.persistedAccounts.contains(where: { $0.isSwitching }) || auth.selectedAccount?.isSwitching == true {
-            return
-        }
-        targetAccount?.updateIsSwitching(true)
-        defer {
-            targetAccount?.updateIsSwitching(false)
-        }
-        try await backend.switchAccount(auth: auth, accountKey: account.accountKey)
     }
 
     package func requestSwitchAccount(_ account: CodexAccount, requiresConfirmation: Bool) {
+        guard case .open = lifetimeState else { return }
         auth.requestSwitchAccount(account, requiresConfirmation: requiresConfirmation)
         guard requiresConfirmation == false else {
             return
@@ -253,6 +1253,7 @@ public final class CodexReviewStore {
     }
 
     package func requestSignOutActiveAccount(requiresConfirmation: Bool) {
+        guard case .open = lifetimeState else { return }
         auth.requestSignOutActiveAccount(requiresConfirmation: requiresConfirmation)
         guard requiresConfirmation == false else {
             return
@@ -261,6 +1262,7 @@ public final class CodexReviewStore {
     }
 
     package func requestRemoveAccount(_ account: CodexAccount, requiresConfirmation: Bool) {
+        guard case .open = lifetimeState else { return }
         auth.requestRemoveAccount(account, requiresConfirmation: requiresConfirmation)
         guard requiresConfirmation == false else {
             return
@@ -269,15 +1271,29 @@ public final class CodexReviewStore {
     }
 
     package func confirmPendingAccountAction() {
+        guard case .open = lifetimeState else {
+            return
+        }
         guard let action = auth.consumePendingAccountAction() else {
             return
         }
-        Task { @MainActor [weak self] in
+        guard let commandID = registerStoreCommand() else {
+            return
+        }
+        let task = Task { @MainActor [weak self] in
             guard let self else {
                 return
             }
+            defer {
+                self.finishStoreCommand(commandID)
+            }
             do {
                 try await self.executePendingAccountAction(action)
+                guard Task.isCancelled == false,
+                      case .open = self.lifetimeState
+                else {
+                    return
+                }
                 if let warningMessage = self.auth.warningMessage {
                     self.auth.presentAccountActionAlert(
                         title: "Account Updated With Warning",
@@ -285,35 +1301,54 @@ public final class CodexReviewStore {
                     )
                 }
             } catch {
+                guard Task.isCancelled == false,
+                      case .open = self.lifetimeState
+                else {
+                    return
+                }
                 self.auth.presentAccountActionAlert(
                     title: action.failureTitle,
                     message: error.localizedDescription
                 )
             }
         }
+        installOwnedStoreCommandTask(task, for: commandID)
     }
 
     package func cancelPendingAccountAction() {
+        guard case .open = lifetimeState else { return }
         auth.cancelPendingAccountAction()
     }
 
     package func dismissAccountActionAlert() {
+        guard case .open = lifetimeState else { return }
         auth.dismissAccountActionAlert()
     }
 
     package func removeAccount(accountKey: String) async throws {
-        try await backend.removeAccount(auth: auth, accountKey: accountKey)
+        try await performThrowingAdmittedStoreCommand {
+            try await backend.removeAccount(auth: auth, accountKey: accountKey)
+        }
     }
 
     package func reorderPersistedAccount(accountKey: String, toIndex: Int) async throws {
-        try await backend.reorderPersistedAccount(auth: auth, accountKey: accountKey, toIndex: toIndex)
+        try await performThrowingAdmittedStoreCommand {
+            try await backend.reorderPersistedAccount(
+                auth: auth,
+                accountKey: accountKey,
+                toIndex: toIndex
+            )
+        }
     }
 
     package func refreshAccountRateLimits(accountKey: String) async {
-        await backend.refreshAccountRateLimits(auth: auth, accountKey: accountKey)
+        await performAdmittedStoreCommand {
+            await backend.refreshAccountRateLimits(auth: auth, accountKey: accountKey)
+        }
     }
 
     package func startStartupAuthRefresh() {
+        guard case .open = lifetimeState else { return }
         if auth.selectedAccount == nil {
             auth.updatePhase(.signedOut)
         }
@@ -335,19 +1370,27 @@ public final class CodexReviewStore {
     }
 
     package func refreshSettings() async {
-        await settingsService.refresh()
+        await performAdmittedStoreCommand {
+            await settingsService.refresh()
+        }
     }
 
     package func updateSettingsModel(_ model: String) async {
-        await settingsService.updateModel(model)
+        await performAdmittedStoreCommand {
+            await settingsService.updateModel(model)
+        }
     }
 
     package func clearSettingsModelOverride() async {
-        await settingsService.clearModelOverride()
+        await performAdmittedStoreCommand {
+            await settingsService.clearModelOverride()
+        }
     }
 
     package func updateSettingsReasoningEffort(_ reasoningEffort: CodexReviewSettings.ReasoningEffort?) async {
-        await settingsService.updateReasoningEffort(reasoningEffort)
+        await performAdmittedStoreCommand {
+            await settingsService.updateReasoningEffort(reasoningEffort)
+        }
     }
 
     package func clearSettingsReasoningEffort() async {
@@ -355,7 +1398,9 @@ public final class CodexReviewStore {
     }
 
     package func updateSettingsServiceTier(_ serviceTier: CodexReviewSettings.ServiceTier?) async {
-        await settingsService.updateServiceTier(serviceTier)
+        await performAdmittedStoreCommand {
+            await settingsService.updateServiceTier(serviceTier)
+        }
     }
 
     package func transitionToRunning(serverURL: URL?) {

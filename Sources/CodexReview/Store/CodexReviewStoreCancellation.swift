@@ -1,57 +1,11 @@
 import Foundation
 
-private actor RuntimeStopDetachedReviewWorkerDrainRace {
-    private var result: Bool?
-    private var continuation: CheckedContinuation<Bool, Never>?
-
-    func finish(_ value: Bool) {
-        guard result == nil else {
-            return
-        }
-        result = value
-        continuation?.resume(returning: value)
-        continuation = nil
-    }
-
-    func wait() async -> Bool {
-        if let result {
-            return result
-        }
-        return await withCheckedContinuation { continuation in
-            if let result {
-                continuation.resume(returning: result)
-            } else {
-                self.continuation = continuation
-            }
-        }
-    }
+package struct ReviewCloseCancellationOutcome {
+    package let jobIDs: [String]
+    package let failedJobIDs: Set<String>
 }
 
 extension CodexReviewStore {
-    package func recordCancellationRequest(
-        _ cancellation: ReviewCancellation,
-        for job: CodexReviewJob
-    ) {
-        guard job.isTerminal == false else {
-            return
-        }
-        job.cancellationRequested = true
-        job.core.lifecycle.cancellation = cancellation
-        job.core.output.summary = cancellation.message
-        job.core.lifecycle.errorMessage = cancellation.message
-    }
-
-    @discardableResult
-    package func recordActiveReviewCancellationRequestsForRuntimeStop(
-        reason: ReviewCancellation = .system(message: "Review runtime stopped.")
-    ) -> [String] {
-        let jobs = orderedJobs.filter { $0.isTerminal == false }
-        for job in jobs {
-            recordCancellationRequest(reason, for: job)
-        }
-        return jobs.map(\.id)
-    }
-
     package func completeCancellationLocally(
         jobID: String,
         sessionID: String,
@@ -145,16 +99,55 @@ extension CodexReviewStore {
         }
     }
 
-    package func requestActiveReviewCancellationsForRuntimeStop(
-        reason: ReviewCancellation = .system(message: "Review runtime stopped.")
-    ) async -> [String] {
-        let activeJobIDs = orderedJobs
-            .filter { $0.isTerminal == false }
-            .map(\.id)
+    package func requestActiveReviewCancellationsForApplicationClose(
+        reason: ReviewCancellation = .system(message: "Review Store closed."),
+        failureLedger: ReviewCloseFailureLedger
+    ) async -> ReviewCloseCancellationOutcome {
+        await reviewCancellationBarrierPreparationForTesting?()
+        let activeJobIDs = activeReviewJobIDsInRegistrationOrder
+        var failedJobIDs: Set<String> = []
         for jobID in activeJobIDs {
-            _ = try? await cancelReview(jobID: jobID, cancellation: reason)
+            do {
+                _ = try await cancelReview(jobID: jobID, cancellation: reason)
+            } catch {
+                failedJobIDs.insert(jobID)
+                guard failureLedger.ownsForceCloseFailure(for: jobID) == false else {
+                    continue
+                }
+                let failure = closePrimaryFailure(from: error)
+                if case .attemptRuntime(let runtimeFailure) = failure,
+                   reviewCleanupFailures[jobID] == runtimeFailure {
+                    failureLedger.recordReviewCleanupFailure(
+                        runtimeFailure,
+                        jobID: jobID
+                    )
+                } else {
+                    failureLedger.record(failure)
+                }
+            }
         }
-        return activeJobIDs
+        return .init(
+            jobIDs: activeJobIDs,
+            failedJobIDs: failedJobIDs
+        )
+    }
+
+    private func closePrimaryFailure(
+        from error: any Error
+    ) -> ReviewClosePrimaryFailure {
+        if let failure = error as? ReviewInterruptRequestFailure {
+            return .interruptRequest(failure)
+        }
+        if let failure = error as? ReviewRuntimeCloseFailure {
+            return .attemptRuntime(failure)
+        }
+        if let aggregate = error as? ReviewLifecycleResourceFailureAggregate {
+            return .lifecycleResources(aggregate)
+        }
+        if let failure = error as? ReviewLifecycleResourceFailure {
+            return .lifecycleResources(.init(first: failure))
+        }
+        return .attemptRuntime(.worker(error.localizedDescription))
     }
 
     @discardableResult
@@ -162,9 +155,7 @@ extension CodexReviewStore {
         reason: ReviewCancellation = .system(message: "Review runtime stopped."),
         cancelWorkers: Bool = true
     ) -> [String] {
-        let activeJobIDs = orderedJobs
-            .filter { $0.isTerminal == false }
-            .map(\.id)
+        let activeJobIDs = activeReviewJobIDsInRegistrationOrder
         guard activeJobIDs.isEmpty == false else {
             return []
         }
@@ -184,60 +175,75 @@ extension CodexReviewStore {
         return activeJobIDs
     }
 
-    package func cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: [String]) {
-        for jobID in jobIDs {
-            if let task = reviewWorkerTasks.removeValue(forKey: jobID) {
-                task.cancel()
-                runtimeStopDetachedReviewWorkerTasks[jobID] = task
+    package func cancelAndAwaitReviewWorkersForRuntimeStop(
+        jobIDs: [String]
+    ) async {
+        var seenJobIDs: Set<String> = []
+        let orderedTasks = jobIDs.compactMap { jobID -> Task<Void, Never>? in
+            guard seenJobIDs.insert(jobID).inserted else {
+                return nil
             }
-            activeRuns.removeValue(forKey: jobID)
-            reviewRecoveryWaitingJobIDs.remove(jobID)
-            startingJobIDs.remove(jobID)
-            startupCancellations.removeValue(forKey: jobID)
+            return reviewWorkerTasks[jobID]
+        }
+        for task in orderedTasks {
+            task.cancel()
+        }
+        for task in orderedTasks {
+            await task.value
         }
     }
 
-    package func drainRuntimeStopDetachedReviewWorkers(timeout: Duration) async -> Bool {
-        let tasks = Array(runtimeStopDetachedReviewWorkerTasks.values)
-        return await drainReviewWorkerTasksForRuntimeStop(tasks, timeout: timeout)
+    package func awaitReviewWorkers(jobIDs: [String]) async {
+        var seenJobIDs: Set<String> = []
+        let orderedTasks = jobIDs.compactMap { jobID -> Task<Void, Never>? in
+            guard seenJobIDs.insert(jobID).inserted else {
+                return nil
+            }
+            return reviewWorkerTasks[jobID]
+        }
+        for task in orderedTasks {
+            await task.value
+        }
     }
 
-    package func drainReviewWorkersForRuntimeStop(timeout: Duration) async -> Bool {
-        let tasks = Array(reviewWorkerTasks.values) + Array(runtimeStopDetachedReviewWorkerTasks.values)
-        return await drainReviewWorkerTasksForRuntimeStop(tasks, timeout: timeout)
+    package func awaitAllReviewWorkers() async {
+        let orderedJobIDs = reviewRegistrationOrder
+        let remainingJobIDs = reviewWorkerTasks.keys
+            .filter { orderedJobIDs.contains($0) == false }
+            .sorted()
+        await awaitReviewWorkers(jobIDs: orderedJobIDs + remainingJobIDs)
     }
 
-    private func drainReviewWorkerTasksForRuntimeStop(
-        _ tasks: [Task<Void, Never>],
-        timeout: Duration
-    ) async -> Bool {
-        guard tasks.isEmpty == false else {
-            return true
-        }
+    package func cancelAndAwaitAllReviewWorkers() async {
+        let orderedJobIDs = reviewRegistrationOrder
+        let remainingJobIDs = reviewWorkerTasks.keys
+            .filter { orderedJobIDs.contains($0) == false }
+            .sorted()
+        await cancelAndAwaitReviewWorkersForRuntimeStop(
+            jobIDs: orderedJobIDs + remainingJobIDs
+        )
+    }
 
-        let race = RuntimeStopDetachedReviewWorkerDrainRace()
-        let drainTask = Task {
-            for task in tasks {
-                await task.value
-            }
-            await race.finish(true)
+    package func cancelAndAwaitAllReviewMutationTasks() async {
+        let entries = reviewMutationTasks.sorted { $0.key < $1.key }
+        for (_, task) in entries {
+            task.cancel()
         }
-        let timeoutTask = Task {
-            do {
-                try await Task.sleep(for: timeout)
-            } catch {
-                return
-            }
-            await race.finish(false)
+        for (id, task) in entries {
+            _ = await task.result
+            reviewMutationTasks.removeValue(forKey: id)
         }
+    }
 
-        let didDrain = await race.wait()
-        if didDrain {
-            timeoutTask.cancel()
-        } else {
-            drainTask.cancel()
+    package func cancelAndAwaitOwnedStoreCommandTasks() async {
+        let entries = storeCommandRegistry.ownedTaskSnapshot()
+        for (_, task) in entries {
+            task.cancel()
         }
-        return didDrain
+        for (id, task) in entries {
+            await task.value
+            finishStoreCommand(id)
+        }
     }
 
     package func terminateAllRunningJobsLocally(
@@ -267,5 +273,17 @@ extension CodexReviewStore {
         for jobID in terminatedJobIDs {
             resumeReviewWaiters(for: jobID)
         }
+    }
+
+    private var activeReviewJobIDsInRegistrationOrder: [String] {
+        let registered = reviewRegistrationOrder.filter {
+            job(id: $0)?.isTerminal == false
+        }
+        let registeredSet = Set(registered)
+        let missing = orderedJobs
+            .filter { $0.isTerminal == false && registeredSet.contains($0.id) == false }
+            .map(\.id)
+            .sorted()
+        return registered + missing
     }
 }

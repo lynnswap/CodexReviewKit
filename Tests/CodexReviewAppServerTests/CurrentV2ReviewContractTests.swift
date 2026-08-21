@@ -1214,9 +1214,11 @@ struct CurrentV2ReviewRoutingIntegrationTests {
             )
         )
 
-        #expect(try await failedAttempt.events.next() == .failed(
-            "Malformed app-server notification item/completed: id must be a nonempty string"
-        ))
+        await #expect(throws: ReviewAttemptStreamFailure.protocolViolation(.init(
+            message: "Malformed app-server notification item/completed: id must be a nonempty string"
+        ))) {
+            _ = try await failedAttempt.events.next()
+        }
         #expect(try await collectEvents(from: healthyAttempt.events).last == .completed(
             summary: "Succeeded.",
             result: "Healthy review"
@@ -1265,9 +1267,11 @@ struct CurrentV2ReviewRoutingIntegrationTests {
             )
         )
 
-        #expect(try await failedAttempt.events.next() == .failed(
-            "Unsupported app-server item type futureItem in item/completed."
-        ))
+        await #expect(throws: ReviewAttemptStreamFailure.protocolViolation(.init(
+            message: "Unsupported app-server item type futureItem in item/completed."
+        ))) {
+            _ = try await failedAttempt.events.next()
+        }
         #expect(try await collectEvents(from: healthyAttempt.events).last == .completed(
             summary: "Succeeded.",
             result: "Healthy review"
@@ -1599,9 +1603,7 @@ struct CurrentV2ReviewRoutingIntegrationTests {
 
         try await transport.emitServerNotification(method: "item/completed", params: 1)
 
-        await #expect(throws: BackendReviewEventMailboxError.self) {
-            _ = try await attempt.events.next()
-        }
+        await expectProtocolViolation(from: attempt.events)
         #expect(await backend.notificationRouterMetricsForTesting().connectionFailures == 1)
         #expect(await transport.isClosedForTesting())
     }
@@ -1621,9 +1623,7 @@ struct CurrentV2ReviewRoutingIntegrationTests {
             params: V2WarningNotification(message: "Guardian warning")
         )
 
-        await #expect(throws: BackendReviewEventMailboxError.self) {
-            _ = try await attempt.events.next()
-        }
+        await expectProtocolViolation(from: attempt.events)
         #expect(await backend.notificationRouterMetricsForTesting().connectionFailures == 1)
         #expect(await transport.isClosedForTesting())
     }
@@ -1643,9 +1643,7 @@ struct CurrentV2ReviewRoutingIntegrationTests {
             params: V2ContextCompactedNotification(threadID: "thread-review")
         )
 
-        await #expect(throws: BackendReviewEventMailboxError.self) {
-            _ = try await attempt.events.next()
-        }
+        await expectProtocolViolation(from: attempt.events)
         #expect(await backend.notificationRouterMetricsForTesting().connectionFailures == 1)
         #expect(await transport.isClosedForTesting())
     }
@@ -1772,12 +1770,8 @@ struct CurrentV2ReviewRoutingIntegrationTests {
             )
         )
 
-        await #expect(throws: BackendReviewEventMailboxError.self) {
-            _ = try await first.events.next()
-        }
-        await #expect(throws: BackendReviewEventMailboxError.self) {
-            _ = try await second.events.next()
-        }
+        await expectProtocolViolation(from: first.events)
+        await expectProtocolViolation(from: second.events)
         #expect(await backend.notificationRouterMetricsForTesting().connectionFailures == 1)
         #expect(await transport.isClosedForTesting())
     }
@@ -1881,6 +1875,22 @@ struct CurrentV2ReviewRoutingIntegrationTests {
             events.append(event)
         }
         return events
+    }
+
+    private func expectProtocolViolation(
+        from mailbox: BackendReviewEventMailbox
+    ) async {
+        do {
+            _ = try await mailbox.next()
+            Issue.record("Expected a typed protocol violation.")
+        } catch let failure as ReviewAttemptStreamFailure {
+            guard case .protocolViolation = failure else {
+                Issue.record("Expected protocolViolation, received \(failure).")
+                return
+            }
+        } catch {
+            Issue.record("Expected ReviewAttemptStreamFailure, received \(error).")
+        }
     }
 
     private func outputTexts(

@@ -24,14 +24,17 @@ package struct CodexReviewStoreSeed {
 }
 
 @MainActor
-package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend {
+package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend, Sendable {
     var seed: CodexReviewStoreSeed { get }
     var isActive: Bool { get }
-    var handlesActiveReviewStopCleanup: Bool { get }
+    var mcpServerLifecycle: any MCPServerLifecycleOwner { get }
 
     func attachStore(_ store: CodexReviewStore)
-    func start(store: CodexReviewStore, forceRestartIfNeeded: Bool) async
-    func stop(store: CodexReviewStore) async
+    func prepareRuntime(
+        generation: ReviewRuntimeGeneration,
+        purpose: ReviewRuntimeTransitionPurpose
+    ) async throws -> PreparedRuntime
+    func stop(store: CodexReviewStore) async throws
     func waitUntilStopped() async
     func refreshAuth(auth: CodexReviewAuthModel) async
     func signIn(auth: CodexReviewAuthModel) async
@@ -44,21 +47,31 @@ package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend {
     func refreshAccountRateLimits(auth: CodexReviewAuthModel, accountKey: String) async
     func requiresCurrentSessionRecovery(auth: CodexReviewAuthModel, accountKey: String) -> Bool
 
-    func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt
-    func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws
-    func beginReviewRecovery(
-        _ run: CodexReviewBackendModel.Review.Run,
-        reason: CodexReviewBackendModel.CancellationReason
-    ) async throws -> CodexReviewBackendModel.Review.RecoveryToken
-    func resumeReviewRecovery(
-        _ token: CodexReviewBackendModel.Review.RecoveryToken,
-        request: CodexReviewBackendModel.Review.Start
+    func startReview(
+        _ request: CodexReviewBackendModel.Review.Start,
+        admission: ReviewStartAdmission
     ) async throws -> BackendReviewAttempt
-    func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async
-}
-
-extension CodexReviewStoreBackend {
-    package var handlesActiveReviewStopCleanup: Bool {
-        false
-    }
+    func interruptReview(
+        _ run: CodexReviewBackendModel.Review.Run,
+        admission: ReviewStartAdmission,
+        reason: CodexReviewBackendModel.CancellationReason
+    ) async throws
+    func forceCloseReviewConnection() async throws
+    func prepareReviewRecovery(
+        _ candidate: ReviewRecoveryCandidate
+    ) async throws -> ReviewRecoveryHandoff
+    func resumeReviewRecovery(
+        _ handoff: ReviewRecoveryHandoff,
+        request: CodexReviewBackendModel.Review.Start,
+        admission: ReviewStartAdmission
+    ) async throws -> BackendReviewAttempt
+    func commitResumedReviewRecovery(
+        _ handoff: ReviewRecoveryHandoff,
+        recoveredRun: CodexReviewBackendModel.Review.Run
+    ) throws
+    func discardResumedReviewRecovery(
+        _ handoff: ReviewRecoveryHandoff,
+        recoveredRun: CodexReviewBackendModel.Review.Run
+    ) async throws
+    func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws
 }

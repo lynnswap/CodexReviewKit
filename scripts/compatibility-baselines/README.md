@@ -36,5 +36,13 @@ file; the checker never rewrites it.
 - Replacement baseline SHA-256: `465956e4233ae545980a42dd03bd34a4de2bedea93c4ce735f15b68a37ded17d`
 - Accepted baseline update: [`f377ba37dee59eace8237f28661a27c121707d16`](https://github.com/lynnswap/CodexReviewKit/commit/f377ba37dee59eace8237f28661a27c121707d16)
 
+### v0.6.2 Store close addition
+
+- Reviewed contract change: additive `CodexReviewStore.close() async throws`
+- Capture revision: `6a05d14a67932ffddb2f98791855df4a7a6a93a3`
+- Recovery design acceptance: [`d0ec991ec9c553b30f49ac5689e8b3b159f6f1ae`](https://github.com/lynnswap/CodexReviewKit/commit/d0ec991ec9c553b30f49ac5689e8b3b159f6f1ae)
+- Replacement baseline SHA-256: `04517f712053061a8f662752ecbb33d367738354aa2eef10609ebea57e0e501b`
+- Accepted baseline update: [`846fed0178f25bb2613e1df1ad9b7e4477490359`](https://github.com/lynnswap/CodexReviewKit/commit/846fed0178f25bb2613e1df1ad9b7e4477490359)
+
 Future entries must identify the reviewed contract change, the replacement
 baseline checksum, and the commit that accepted both.

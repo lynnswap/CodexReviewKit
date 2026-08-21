@@ -180,7 +180,7 @@ struct ReviewTerminalContractTests {
         #expect(result.core.reviewText != "arbitrary last message")
     }
 
-    @Test func streamEOFFailsWithoutAnAuthoritativeTerminal() async throws {
+    @Test func streamEOFUsesTypedWorkerContractFailureWithoutCanonicalTerminal() async throws {
         let (store, backend) = makeStore()
         async let started = store.startReview(
             sessionID: "session-1",
@@ -192,6 +192,11 @@ struct ReviewTerminalContractTests {
         let result = try await started
         #expect(result.core.lifecycle.status == .failed)
         #expect(result.core.lifecycle.terminal?.kind == .failed)
+        guard case .failed(let message) = result.core.lifecycle.terminal else {
+            Issue.record("Expected a nonrecoverable worker-contract failure.")
+            return
+        }
+        #expect(message?.contains("authoritative terminal") == true)
         #expect(result.core.lifecycle.errorMessage?.contains("authoritative terminal") == true)
     }
 

@@ -5,6 +5,7 @@ package class PreviewCodexReviewStoreBackend: CodexReviewStoreBackend {
     package let seed: CodexReviewStoreSeed
     package var isActive = false
     package var currentSettingsSnapshot: CodexReviewSettings.Snapshot
+    package let mcpServerLifecycle: any MCPServerLifecycleOwner = NoMCPServerLifecycleOwner()
 
     package init(seed: CodexReviewStoreSeed = .init()) {
         self.seed = seed
@@ -17,9 +18,11 @@ package class PreviewCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     package func attachStore(_: CodexReviewStore) {}
 
-    package func start(store: CodexReviewStore, forceRestartIfNeeded _: Bool) async {
-        isActive = true
-        store.transitionToFailed(Self.previewUnavailableMessage)
+    package func prepareRuntime(
+        generation _: ReviewRuntimeGeneration,
+        purpose _: ReviewRuntimeTransitionPurpose
+    ) async throws -> PreparedRuntime {
+        throw CodexReviewAPI.Error.io(Self.previewUnavailableMessage)
     }
 
     package func stop(store _: CodexReviewStore) async {
@@ -133,27 +136,48 @@ package class PreviewCodexReviewStoreBackend: CodexReviewStoreBackend {
         false
     }
 
-    package func startReview(_: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt {
-        throw CodexReviewAPI.Error.io(Self.previewUnavailableMessage)
-    }
-
-    package func interruptReview(_: CodexReviewBackendModel.Review.Run, reason _: CodexReviewBackendModel.CancellationReason) async throws {}
-
-    package func beginReviewRecovery(
-        _: CodexReviewBackendModel.Review.Run,
-        reason _: CodexReviewBackendModel.CancellationReason
-    ) async throws -> CodexReviewBackendModel.Review.RecoveryToken {
-        throw CodexReviewAPI.Error.io(Self.previewUnavailableMessage)
-    }
-
-    package func resumeReviewRecovery(
-        _: CodexReviewBackendModel.Review.RecoveryToken,
-        request _: CodexReviewBackendModel.Review.Start
+    package func startReview(
+        _: CodexReviewBackendModel.Review.Start,
+        admission _: ReviewStartAdmission
     ) async throws -> BackendReviewAttempt {
         throw CodexReviewAPI.Error.io(Self.previewUnavailableMessage)
     }
 
-    package func cleanupReview(_: CodexReviewBackendModel.Review.Run) async {}
+    package func interruptReview(
+        _: CodexReviewBackendModel.Review.Run,
+        admission _: ReviewStartAdmission,
+        reason _: CodexReviewBackendModel.CancellationReason
+    ) async throws {}
+
+    package func forceCloseReviewConnection() async throws {}
+
+    package func prepareReviewRecovery(
+        _: ReviewRecoveryCandidate
+    ) async throws -> ReviewRecoveryHandoff {
+        throw CodexReviewAPI.Error.io(Self.previewUnavailableMessage)
+    }
+
+    package func resumeReviewRecovery(
+        _: ReviewRecoveryHandoff,
+        request _: CodexReviewBackendModel.Review.Start,
+        admission _: ReviewStartAdmission
+    ) async throws -> BackendReviewAttempt {
+        throw CodexReviewAPI.Error.io(Self.previewUnavailableMessage)
+    }
+
+    package func commitResumedReviewRecovery(
+        _: ReviewRecoveryHandoff,
+        recoveredRun _: CodexReviewBackendModel.Review.Run
+    ) throws {
+        throw CodexReviewAPI.Error.io(Self.previewUnavailableMessage)
+    }
+
+    package func discardResumedReviewRecovery(
+        _: ReviewRecoveryHandoff,
+        recoveredRun _: CodexReviewBackendModel.Review.Run
+    ) async throws {}
+
+    package func cleanupReview(_: CodexReviewBackendModel.Review.Run) async throws {}
 
     fileprivate static let previewUnavailableMessage = "Embedded server is unavailable in preview mode."
     fileprivate static let previewAuthenticationFailureMessage = "Authentication is unavailable in preview mode."

@@ -61,6 +61,7 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
     private let stderr: Pipe
     private let stdoutEvents: AppServerPipeReadEventSource
     private let stderrEvents: AppServerPipeReadEventSource
+    private let closeCompletionForTesting: (@Sendable () async throws -> Void)?
     private var framer = JSONRPC.Framer()
     private var pending: [Int: PendingResponse] = [:]
     private var notificationContinuations: [UUID: AsyncThrowingStream<JSONRPC.Notification, Error>.Continuation] = [:]
@@ -68,8 +69,13 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
     private var stdoutReaderTask: Task<Void, Never>? = nil
     private var stderrReaderTask: Task<Void, Never>? = nil
     private var closed = false
+    private var closeTask: Task<Void, any Error>?
+    private var terminalError: JSONRPC.Error?
 
-    package init(configuration: Configuration = .init()) throws {
+    package init(
+        configuration: Configuration = .init(),
+        closeCompletionForTesting: (@Sendable () async throws -> Void)? = nil
+    ) throws {
         guard FileManager.default.isExecutableFile(atPath: configuration.executable) else {
             throw AppServerProcessTransportError.executableNotFound(
                 command: configuration.executable,
@@ -100,6 +106,7 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
         )
         self.stdoutEvents = stdoutEvents
         self.stderrEvents = stderrEvents
+        self.closeCompletionForTesting = closeCompletionForTesting
         logger.info("Launching codex app-server: \(configuration.executable, privacy: .public) \(configuration.arguments.joined(separator: " "), privacy: .public)")
         logger.info("Using codex app-server home: \(configuration.codexHomeURL.path, privacy: .public)")
         logger.info("codex app-server launched with pid \(process.processIdentifier, privacy: .public)")
@@ -135,11 +142,14 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
         try stdin.fileHandleForWriting.write(contentsOf: payload)
     }
 
-    package func notificationStream() -> AsyncThrowingStream<JSONRPC.Notification, Error> {
+    package func notificationStream() async -> AsyncThrowingStream<JSONRPC.Notification, Error> {
         ensureReaderTasksStarted()
+        if let closeTask {
+            _ = await closeTask.result
+        }
         return AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
             if closed {
-                continuation.finish(throwing: JSONRPC.Error.closed)
+                continuation.finish(throwing: terminalError ?? JSONRPC.Error.closed)
                 return
             }
             let id = UUID()
@@ -150,42 +160,77 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
         }
     }
 
-    package func close() async {
-        await closeTransport(terminateProcess: true, readerTask: nil)
+    package func close() async throws {
+        try await closeTransport(terminateProcess: true, readerTask: nil)
     }
 
     private func closeTransport(
         terminateProcess: Bool,
         readerTask: ReaderTask?
-    ) async {
-        await closeTransport(
+    ) async throws {
+        try await closeTransport(
             terminateProcess: terminateProcess,
-            error: JSONRPC.Error.closed,
+            error: JSONRPC.Error.transportTerminated(.ownerClose),
             readerTask: readerTask
         )
     }
 
     private func closeTransport(
         terminateProcess: Bool,
-        error: any Error,
+        error: JSONRPC.Error,
         readerTask: ReaderTask?
-    ) async {
-        if closed {
-            if readerTask == nil {
-                await waitForReaderTasks(excluding: nil)
+    ) async throws {
+        let task: Task<Void, any Error>
+        if let closeTask {
+            task = closeTask
+        } else {
+            closed = true
+            terminalError = error
+            stdoutEvents.cancel()
+            stderrEvents.cancel()
+            try? stdin.fileHandleForWriting.close()
+            let newTask = Task<Void, any Error> {
+                try await self.performCloseTransport(
+                    terminateProcess: terminateProcess,
+                    error: error
+                )
             }
-            return
+            closeTask = newTask
+            task = newTask
         }
-        closed = true
-        stdoutEvents.cancel()
-        stderrEvents.cancel()
-        try? stdin.fileHandleForWriting.close()
+
+        let result = await task.result
+        await waitForReaderTasks(excluding: readerTask)
+        try result.get()
+    }
+
+    private func performCloseTransport(
+        terminateProcess: Bool,
+        error: JSONRPC.Error
+    ) async throws {
+        var processCloseError: (any Error)?
         if terminateProcess {
             logger.info("Terminating codex app-server pid \(self.process.processIdentifier, privacy: .public)")
-            await process.terminateAndWait()
+            do {
+                try await process.terminateAndWait()
+                try await closeCompletionForTesting?()
+            } catch {
+                processCloseError = error
+            }
         }
-        finishAll(throwing: error)
-        await waitForReaderTasks(excluding: readerTask)
+        if let processCloseError {
+            let typedError = JSONRPC.Error.transportTerminated(.processFailure(
+                processCloseError.localizedDescription
+            ))
+            terminalError = typedError
+            finishAll(throwing: typedError)
+        } else {
+            terminalError = error
+            finishAll(throwing: error)
+        }
+        if let processCloseError {
+            throw processCloseError
+        }
     }
 
     private func receiveStdout(_ event: AppServerPipeReadEvent) async {
@@ -204,11 +249,16 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
                 try processMessage(message)
             } catch {
                 logger.error("Closing codex app-server after invalid JSON-RPC framing: \(error.localizedDescription, privacy: .public)")
-                await closeTransport(
-                    terminateProcess: true,
-                    error: error,
-                    readerTask: .stdout
-                )
+                do {
+                    try await closeTransport(
+                        terminateProcess: true,
+                        error: error as? JSONRPC.Error
+                            ?? .invalidMessage(error.localizedDescription),
+                        readerTask: .stdout
+                    )
+                } catch {
+                    logger.error("Failed to close codex app-server process: \(error.localizedDescription, privacy: .public)")
+                }
                 return
             }
         }
@@ -242,15 +292,30 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
                 try processMessage(message)
             } catch {
                 logger.error("Closing codex app-server after invalid trailing JSON-RPC framing: \(error.localizedDescription, privacy: .public)")
-                await closeTransport(
-                    terminateProcess: true,
-                    error: error,
-                    readerTask: .stdout
-                )
+                do {
+                    try await closeTransport(
+                        terminateProcess: true,
+                        error: error as? JSONRPC.Error
+                            ?? .invalidMessage(error.localizedDescription),
+                        readerTask: .stdout
+                    )
+                } catch {
+                    logger.error("Failed to close codex app-server process: \(error.localizedDescription, privacy: .public)")
+                }
                 return
             }
         }
-        await closeTransport(terminateProcess: true, readerTask: .stdout)
+        do {
+            try await closeTransport(
+                terminateProcess: true,
+                error: .transportTerminated(.processExit(
+                    "Codex app-server process exited after stdout reached EOF."
+                )),
+                readerTask: .stdout
+            )
+        } catch {
+            logger.error("Failed to close codex app-server process after stdout EOF: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     private func processMessage(_ data: Data) throws {
@@ -409,7 +474,7 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
 
     private func throwIfClosed() throws {
         if closed {
-            throw JSONRPC.Error.closed
+            throw terminalError ?? JSONRPC.Error.closed
         }
     }
 }
@@ -729,7 +794,7 @@ private final class AppServerSpawnedProcess: @unchecked Sendable {
     func terminateAndWait(
         graceDuration: Duration = .seconds(2),
         killDuration: Duration = .seconds(1)
-    ) async {
+    ) async throws {
         let trackedProcessIDs = descendantProcessIDs()
         guard isFullyTerminated(trackedProcessIDs: trackedProcessIDs) == false else {
             return
@@ -739,7 +804,9 @@ private final class AppServerSpawnedProcess: @unchecked Sendable {
             return
         }
         signalProcessTree(SIGKILL, trackedProcessIDs: trackedProcessIDs)
-        _ = await waitUntilExit(timeout: killDuration, trackedProcessIDs: trackedProcessIDs)
+        guard await waitUntilExit(timeout: killDuration, trackedProcessIDs: trackedProcessIDs) else {
+            throw AppServerProcessTransportError.processDidNotTerminate(processIdentifier)
+        }
     }
 
     private func signalProcessTree(_ signal: Int32, trackedProcessIDs: Set<pid_t>) {
@@ -886,10 +953,11 @@ private final class AppServerSpawnedProcess: @unchecked Sendable {
     }
 }
 
-private enum AppServerProcessTransportError: LocalizedError {
+package enum AppServerProcessTransportError: LocalizedError, Equatable, Sendable {
     case executableNotFound(command: String, path: String?)
+    case processDidNotTerminate(pid_t)
 
-    var errorDescription: String? {
+    package var errorDescription: String? {
         switch self {
         case .executableNotFound(let command, let path):
             let resolvedPath = path?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -897,6 +965,8 @@ private enum AppServerProcessTransportError: LocalizedError {
                 return "Unable to locate \(command) executable in PATH: \(resolvedPath)"
             }
             return "Unable to locate \(command) executable. Set PATH so codex can be found."
+        case .processDidNotTerminate(let processIdentifier):
+            return "Codex app-server process \(processIdentifier) did not terminate after SIGKILL."
         }
     }
 }

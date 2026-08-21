@@ -27,13 +27,14 @@ package enum JSONRPC {
         func send(_ request: Request) async throws -> Data
         func notify(_ notification: Notification) async throws
         func notificationStream() async -> AsyncThrowingStream<Notification, Swift.Error>
-        func close() async
+        func close() async throws
     }
 
     package enum Error: Swift.Error, Equatable, Sendable, LocalizedError {
         case closed
         case invalidMessage(String)
         case responseError(code: Int, message: String)
+        case transportTerminated(TransportTermination)
 
         package var errorDescription: String? {
             switch self {
@@ -42,6 +43,23 @@ package enum JSONRPC {
             case .invalidMessage(let message):
                 "Invalid JSON-RPC message: \(message)"
             case .responseError(_, let message):
+                message
+            case .transportTerminated(let termination):
+                termination.localizedDescription
+            }
+        }
+    }
+
+    package enum TransportTermination: Equatable, Sendable, LocalizedError {
+        case ownerClose
+        case processExit(String)
+        case processFailure(String)
+
+        package var errorDescription: String? {
+            switch self {
+            case .ownerClose:
+                "JSON-RPC transport was closed by its owner."
+            case .processExit(let message), .processFailure(let message):
                 message
             }
         }

@@ -13,6 +13,64 @@ extension CodexReviewStore {
         set { requestCancellationDelay = newValue }
     }
 
+    package func setReviewMutationPreparationForTesting(
+        _ operation: (@MainActor @Sendable () async -> Void)?
+    ) {
+        reviewMutationPreparationForTesting = operation
+    }
+
+    package func setReviewCleanupPreparationForTesting(
+        _ operation: (@MainActor @Sendable () async -> Void)?
+    ) {
+        reviewCleanupPreparationForTesting = operation
+    }
+
+    package func setReviewTerminalPublicationPreparationForTesting(
+        _ operation: (@MainActor @Sendable () async -> Void)?
+    ) {
+        reviewTerminalPublicationPreparationForTesting = operation
+    }
+
+    package func setRuntimeForceCloseReceiptRecordedForTesting(
+        _ operation: (@MainActor @Sendable () async -> Void)?
+    ) {
+        runtimeForceCloseReceiptRecordedForTesting = operation
+    }
+
+    package func setRuntimeReplacementEnrollmentPreparationForTesting(
+        _ operation: (@MainActor @Sendable () async -> Void)?
+    ) {
+        runtimeReplacementEnrollmentPreparationForTesting = operation
+    }
+
+    package func setReviewCancellationBarrierPreparationForTesting(
+        _ operation: (@MainActor @Sendable () async -> Void)?
+    ) {
+        reviewCancellationBarrierPreparationForTesting = operation
+    }
+
+    package func waitForRuntimeReplacementRegistrationForTesting(
+        jobID: String,
+        attemptID: String
+    ) async {
+        await runtimeWorkerRegistry.waitForRegistrationForTesting(
+            jobID: jobID,
+            attemptID: attemptID
+        )
+    }
+
+    package func waitForRuntimeReplacementRegistrationForTesting(
+        jobID: String
+    ) async -> String {
+        await runtimeWorkerRegistry.waitForRegistrationForTesting(
+            jobID: jobID
+        )
+    }
+
+    package var activeRuntimeReplacementReceiptCountForTesting: Int {
+        runtimeWorkerRegistry.activeReplacementReceiptCountForTesting
+    }
+
     package func loadForTesting(
         serverState: CodexReviewServerState,
         authPhase: CodexReviewAuthModel.Phase = .signedOut,
@@ -77,6 +135,7 @@ extension CodexReviewStore {
             job.sortOrder = Double(workspaceJobs.count - index - 1)
         }
         self.jobs = Set(resolvedJobs)
+        reviewRegistrationOrder = resolvedJobs.map(\.id)
         if let settingsSnapshot {
             settings.loadForTesting(snapshot: settingsSnapshot)
         }
@@ -84,7 +143,19 @@ extension CodexReviewStore {
     }
 
     package func cancelAndDrainReviewWorkersForTesting() async {
-        let tasks = Array(reviewWorkerTasks.values) + Array(runtimeStopDetachedReviewWorkerTasks.values)
+        for job in orderedJobs where job.isTerminal == false {
+            do {
+                _ = try await cancelReview(
+                    jobID: job.id,
+                    cancellation: .system(message: "Test cleanup requested.")
+                )
+            } catch {
+                reviewCleanupFailures[job.id] = .worker(
+                    "Test cleanup cancellation failed: \(error.localizedDescription)"
+                )
+            }
+        }
+        let tasks = Array(reviewWorkerTasks.values)
         for task in tasks {
             task.cancel()
         }
@@ -93,11 +164,8 @@ extension CodexReviewStore {
         }
 
         reviewWorkerTasks.removeAll(keepingCapacity: false)
-        runtimeStopDetachedReviewWorkerTasks.removeAll(keepingCapacity: false)
-        startingJobIDs.removeAll(keepingCapacity: false)
-        startupCancellations.removeAll(keepingCapacity: false)
-        activeRuns.removeAll(keepingCapacity: false)
-        reviewRecoveryWaitingJobIDs.removeAll(keepingCapacity: false)
+        reviewCleanupFailures.removeAll(keepingCapacity: false)
+        reviewAttemptOwnerships.removeAll(keepingCapacity: false)
 
         let waiters = reviewTerminalWaiters.values.flatMap { $0 }
         reviewTerminalWaiters.removeAll(keepingCapacity: false)

@@ -1765,6 +1765,13 @@ struct ReviewUITests {
             serverState: .running,
             content: makeSidebarContent(from: [job])
         )
+        let admission = ReviewStartAdmission()
+        let registered = try await admission.registerStart { _ in
+            throw ReviewAttemptContractFailure(
+                message: "Sidebar cancellation fixture must remain backend-inert."
+            )
+        }
+        store.reviewAttemptOwnerships[job.id] = .initialStart(registered)
         let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
@@ -1779,7 +1786,7 @@ struct ReviewUITests {
         #expect(job.core.lifecycle.endedAt != nil)
     }
 
-    @Test func cancellationFailureUpdatesJobErrorState() async {
+    @Test func cancellationFailureUpdatesJobErrorState() async throws {
         let job = makeJob(
             id: "job-running",
             cwd: "/tmp/workspace-alpha",
@@ -1792,6 +1799,17 @@ struct ReviewUITests {
             serverState: .running,
             content: makeSidebarContent(from: [job])
         )
+        let run = CodexReviewBackendModel.Review.Run(
+            threadID: try #require(job.core.run.threadID),
+            turnID: job.core.run.turnID,
+            reviewThreadID: job.core.run.reviewThreadID
+        )
+        let admission = ReviewStartAdmission()
+        await admission.recordActiveRun(run)
+        store.reviewAttemptOwnerships[job.id] = .active(.init(
+            run: run,
+            admission: admission
+        ))
         let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
@@ -6695,12 +6713,15 @@ func makeStore(backend: AuthActionBackend) -> CodexReviewStore {
 final class CountingStartBackend: PreviewCodexReviewStoreBackend {
     private var startCalls = 0
 
-    override func start(
-        store _: CodexReviewStore,
-        forceRestartIfNeeded _: Bool
-    ) async {
-        isActive = true
+    override func prepareRuntime(
+        generation: ReviewRuntimeGeneration,
+        purpose: ReviewRuntimeTransitionPurpose
+    ) async throws -> PreparedRuntime {
         startCalls += 1
+        return try await super.prepareRuntime(
+            generation: generation,
+            purpose: purpose
+        )
     }
 
     override func stop(store _: CodexReviewStore) async {
@@ -6730,13 +6751,6 @@ final class AuthActionBackend: PreviewCodexReviewStoreBackend {
                 initialAccounts: initialAccount.map { [$0] } ?? []
             )
         )
-    }
-
-    override func start(
-        store _: CodexReviewStore,
-        forceRestartIfNeeded _: Bool
-    ) async {
-        isActive = true
     }
 
     override func stop(store _: CodexReviewStore) async {
@@ -6775,19 +6789,19 @@ final class FailingCancellationBackend: PreviewCodexReviewStoreBackend {
         )
     }
 
-    override func start(
-        store _: CodexReviewStore,
-        forceRestartIfNeeded _: Bool
-    ) async {
-    }
-
     override func stop(store _: CodexReviewStore) async {
     }
 
     override func waitUntilStopped() async {}
 
-    override func interruptReview(_: CodexReviewBackendModel.Review.Run, reason _: CodexReviewBackendModel.CancellationReason) async throws {
-        throw CodexReviewAPI.Error.io("Cancellation failed.")
+    override func interruptReview(
+        _: CodexReviewBackendModel.Review.Run,
+        admission _: ReviewStartAdmission,
+        reason _: CodexReviewBackendModel.CancellationReason
+    ) async throws {
+        throw ReviewInterruptRequestFailure(
+            outcome: .rejected(code: nil, message: "Cancellation failed.")
+        )
     }
 
 }
@@ -6822,12 +6836,6 @@ final class BlockingSettingsBackend: PreviewCodexReviewStoreBackend {
                 initialSettingsSnapshot: snapshot
             )
         )
-    }
-
-    override func start(
-        store _: CodexReviewStore,
-        forceRestartIfNeeded _: Bool
-    ) async {
     }
 
     override func stop(store _: CodexReviewStore) async {
