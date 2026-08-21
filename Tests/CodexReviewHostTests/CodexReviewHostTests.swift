@@ -485,6 +485,11 @@ struct CodexReviewHostTests {
         )
         try await firstTransport.enqueue(EmptyResponse(), for: "turn/interrupt")
         try await firstTransport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let targetInterruptResponseGate = AsyncGate()
+        await firstTransport.holdNext(
+            method: "turn/interrupt",
+            gate: targetInterruptResponseGate
+        )
 
         let secondTransport = FakeJSONRPCTransport()
         try await secondTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
@@ -510,6 +515,7 @@ struct CodexReviewHostTests {
         var mcpFactoryCallCount = 0
         let routingProbe = HostRecoveryRoutingProbe()
         let jobIDs = HostSequentialIDs(["job-target", "job-sibling"])
+        let graceGate = AsyncGate()
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
@@ -520,7 +526,7 @@ struct CodexReviewHostTests {
             mcpHTTPServerBindChecker: { _ in },
             reviewRuntimeClosePolicy: .init(
                 terminalGrace: .seconds(10),
-                sleep: { _ in }
+                sleep: { _ in await graceGate.wait() }
             ),
             idGenerator: .init(next: { jobIDs.next() }),
             reviewRecoveryRoutingObserver: { event in
@@ -555,6 +561,10 @@ struct CodexReviewHostTests {
                 cancellation: .mcpClient(message: "Stop target")
             )
         }
+        await firstTransport.waitForRequest(method: "turn/interrupt")
+        await targetInterruptResponseGate.open()
+        await firstTransport.waitForResponseDelivery(method: "turn/interrupt")
+        await graceGate.open()
         await secondTransport.waitForRequest(method: "review/start")
         try await secondTransport.emitServerNotification(
             method: "item/completed",
