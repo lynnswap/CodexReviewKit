@@ -804,6 +804,9 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                 completedReviewEventSessionMetricsByThreadID[threadID] = metrics
             }
         }
+        guard case .open = lifecycleState else {
+            return
+        }
         var failureMessages: [String] = []
         do {
             let _: EmptyResponse = try await client.send(AppServerAPI.Thread.BackgroundTerminals.Clean.Request(

@@ -37,6 +37,40 @@ extension CodexReviewStore {
         runtimeForceCloseReceiptRecordedForTesting = operation
     }
 
+    package func setRuntimeReplacementEnrollmentPreparationForTesting(
+        _ operation: (@MainActor @Sendable () async -> Void)?
+    ) {
+        runtimeReplacementEnrollmentPreparationForTesting = operation
+    }
+
+    package func setReviewCancellationBarrierPreparationForTesting(
+        _ operation: (@MainActor @Sendable () async -> Void)?
+    ) {
+        reviewCancellationBarrierPreparationForTesting = operation
+    }
+
+    package func waitForRuntimeReplacementRegistrationForTesting(
+        jobID: String,
+        attemptID: String
+    ) async {
+        await runtimeWorkerRegistry.waitForRegistrationForTesting(
+            jobID: jobID,
+            attemptID: attemptID
+        )
+    }
+
+    package func waitForRuntimeReplacementRegistrationForTesting(
+        jobID: String
+    ) async -> String {
+        await runtimeWorkerRegistry.waitForRegistrationForTesting(
+            jobID: jobID
+        )
+    }
+
+    package var activeRuntimeReplacementReceiptCountForTesting: Int {
+        runtimeWorkerRegistry.activeReplacementReceiptCountForTesting
+    }
+
     package func loadForTesting(
         serverState: CodexReviewServerState,
         authPhase: CodexReviewAuthModel.Phase = .signedOut,

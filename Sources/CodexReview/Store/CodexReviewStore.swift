@@ -44,6 +44,8 @@ public final class CodexReviewStore {
     @ObservationIgnored package var reviewCleanupPreparationForTesting: (@MainActor @Sendable () async -> Void)?
     @ObservationIgnored package var reviewTerminalPublicationPreparationForTesting: (@MainActor @Sendable () async -> Void)?
     @ObservationIgnored package var runtimeForceCloseReceiptRecordedForTesting: (@MainActor @Sendable () async -> Void)?
+    @ObservationIgnored package var runtimeReplacementEnrollmentPreparationForTesting: (@MainActor @Sendable () async -> Void)?
+    @ObservationIgnored package var reviewCancellationBarrierPreparationForTesting: (@MainActor @Sendable () async -> Void)?
     @ObservationIgnored package var storeCommandRegistry = ReviewStoreCommandRegistry()
     @ObservationIgnored package var closeCallerCount = 0
     @ObservationIgnored package var closeCallerWaiters: [CloseCallerWaiter] = []
@@ -56,7 +58,7 @@ public final class CodexReviewStore {
         .init(rawValue: 0)
     )
     @ObservationIgnored package var lastRuntimeTransitionRecord: ReviewRuntimeTransitionRecord?
-    @ObservationIgnored package let runtimeReplacementCoordinator = ReviewRuntimeReplacementCoordinator()
+    @ObservationIgnored package let runtimeWorkerRegistry = ReviewRuntimeWorkerRegistry()
 
     package init(
         backend: any CodexReviewStoreBackend = PreviewCodexReviewStoreBackend(),
@@ -304,10 +306,6 @@ public final class CodexReviewStore {
         case .acquiring, .running, .transitioning, .failed:
             break
         }
-        if case .transitioning(_, _, _, _, _, let replacement) = previousState {
-            replacement?.finish(.superseded(.stop))
-            replacement?.recordNetworkRestoration()
-        }
         let invalidatedGeneration = previousState.generation.successor()
         let record = ReviewRuntimeTransitionRecord()
         let task = Task<Void, Never> { @MainActor [weak self] in
@@ -443,10 +441,6 @@ public final class CodexReviewStore {
         failureLedger: ReviewCloseFailureLedger
     ) async -> Result<Void, ReviewCloseError> {
         let runningRuntime = previousRuntimeState.runtimeForClose
-        if case .transitioning(_, _, _, _, _, let replacement) = previousRuntimeState {
-            replacement?.finish(.superseded(.applicationClose))
-            replacement?.recordNetworkRestoration()
-        }
         if let lastRuntimeTransitionRecord {
             failureLedger.importReceipts(from: lastRuntimeTransitionRecord)
         }
@@ -618,12 +612,27 @@ public final class CodexReviewStore {
             record.merge(previousRecord)
         case .running(_, let runtime, _):
             await stopPublishedRuntime(runtime, record: record)
-        case .transitioning(_, _, let task, let previousRecord, _, let replacement):
+        case .transitioning(
+            _,
+            _,
+            let task,
+            let previousRecord,
+            let sourceRuntime,
+            let replacement
+        ):
+            await performPublishedRuntimeSemanticStop(record: record)
             replacement?.finish(.superseded(.stop))
             replacement?.recordNetworkRestoration()
             task.cancel()
             await task.value
             record.merge(previousRecord)
+            if let sourceRuntime {
+                await closeAppServerRuntime(
+                    sourceRuntime,
+                    purpose: .stop,
+                    record: record
+                )
+            }
             await stopPreparedMCPServer(record: record)
         case .failed:
             await stopPreparedMCPServer(record: record)
@@ -821,6 +830,7 @@ public final class CodexReviewStore {
     ) async {
         defer { lastRuntimeTransitionRecord = record }
         var preparedRuntime: PreparedRuntime?
+        await runtimeReplacementEnrollmentPreparationForTesting?()
         await enrollRuntimeReplacementParticipants(replacement)
         if let sourceRuntime = replacement.sourceRuntime {
             await sourceRuntime.handle.closeAdmission()
@@ -829,14 +839,14 @@ public final class CodexReviewStore {
                 purpose: purpose
             )
             let consumedFailures = sourceRuntime.closeRecord.consumeFailures()
-            if let targetJobID = replacement.trigger.targetJobID {
-                record.recordForceCloseFailures(
-                    consumedFailures,
-                    jobID: targetJobID
+            if consumedFailures.isEmpty == false {
+                record.markForceCloseFailureOwnership(
+                    jobIDs: replacement.forceCloseObserverJobIDs
                 )
-            } else {
                 record.record(contentsOf: consumedFailures)
+                applicationCloseFailureLedger?.importReceipts(from: record)
             }
+            lastRuntimeTransitionRecord = record
             if let firstFailure = closeResult.failures.first {
                 replacement.finishSourceClose(.failure(
                     reviewRuntimeCloseFailure(from: firstFailure)

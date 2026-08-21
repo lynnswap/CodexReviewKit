@@ -55,6 +55,16 @@ package typealias CodexReviewMCPLifecycleCallObserver = @MainActor @Sendable (
     Int
 ) -> Void
 
+package enum CodexReviewLiveRecoveryRoutingEvent: Equatable, Sendable {
+    case staged(sourceAttemptID: String, recoveredAttemptID: String)
+    case committed(sourceAttemptID: String, recoveredAttemptID: String)
+    case discarded(sourceAttemptID: String, recoveredAttemptID: String)
+}
+
+package typealias CodexReviewLiveRecoveryRoutingObserver = @MainActor @Sendable (
+    CodexReviewLiveRecoveryRoutingEvent
+) -> Void
+
 package protocol CodexReviewMCPHTTPServing: AnyObject, Sendable {
     var url: URL { get async }
 
@@ -97,6 +107,8 @@ public extension CodexReviewStore {
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
         networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
         reviewRuntimeClosePolicy: ReviewRuntimeClosePolicy = .production,
+        idGenerator: CodexReviewIDGenerator = .init(),
+        reviewRecoveryRoutingObserver: CodexReviewLiveRecoveryRoutingObserver? = nil,
         transport: any JSONRPC.Transport
     ) -> CodexReviewStore {
         makeLiveStoreForTesting(
@@ -111,6 +123,8 @@ public extension CodexReviewStore {
             networkMonitor: networkMonitor,
             networkRecoveryPolicy: networkRecoveryPolicy,
             reviewRuntimeClosePolicy: reviewRuntimeClosePolicy,
+            idGenerator: idGenerator,
+            reviewRecoveryRoutingObserver: reviewRecoveryRoutingObserver,
             transportFactory: { _ in transport }
         )
     }
@@ -131,6 +145,8 @@ public extension CodexReviewStore {
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
         networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
         reviewRuntimeClosePolicy: ReviewRuntimeClosePolicy = .production,
+        idGenerator: CodexReviewIDGenerator = .init(),
+        reviewRecoveryRoutingObserver: CodexReviewLiveRecoveryRoutingObserver? = nil,
         transportFactory: @escaping @MainActor @Sendable (URL) async throws -> any JSONRPC.Transport
     ) -> CodexReviewStore {
         CodexReviewStore(
@@ -144,6 +160,7 @@ public extension CodexReviewStore {
                 mcpPortOwnerResolver: mcpPortOwnerResolver,
                 mcpHTTPServerBindChecker: mcpHTTPServerBindChecker,
                 mcpLifecycleCallObserver: mcpLifecycleCallObserver,
+                reviewRecoveryRoutingObserver: reviewRecoveryRoutingObserver,
                 appServerRuntimeFactory: { codexHomeURL in
                     let client = AppServerClient(transport: try await transportFactory(codexHomeURL))
                     return .init(
@@ -152,6 +169,7 @@ public extension CodexReviewStore {
                     )
                 }
             ),
+            idGenerator: idGenerator,
             networkMonitor: networkMonitor,
             networkRecoveryPolicy: networkRecoveryPolicy,
             reviewRuntimeClosePolicy: reviewRuntimeClosePolicy
@@ -169,6 +187,23 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     private struct RecoveryRoute {
         let handoff: ReviewRecoveryHandoff
         let source: AttemptRoute
+        var destination: RecoveryDestination?
+    }
+
+    private enum RecoveryDestination {
+        case resuming(
+            runtime: LiveRuntimeLifecycleHandle,
+            admissionID: ObjectIdentifier
+        )
+        case staged(
+            runtime: LiveRuntimeLifecycleHandle,
+            admissionID: ObjectIdentifier,
+            run: CodexReviewBackendModel.Review.Run
+        )
+        case discarding(
+            runtime: LiveRuntimeLifecycleHandle,
+            run: CodexReviewBackendModel.Review.Run
+        )
     }
 
     typealias MCPHTTPServerFactory = @MainActor @Sendable (
@@ -182,6 +217,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     private var activeRuntimeHandle: LiveRuntimeLifecycleHandle?
     private var attemptRoutesByAttemptID: [String: AttemptRoute] = [:]
     private var recoveryRoutesByAttemptID: [String: RecoveryRoute] = [:]
+    private var pendingRuntimeByAdmissionID: [ObjectIdentifier: LiveRuntimeLifecycleHandle] = [:]
     private var acceptsRuntimeRequests = false
     private var loginChallenge: CodexReviewBackendModel.Login.Challenge?
     private var loginBackend: AppServerCodexReviewBackend?
@@ -206,6 +242,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     private let externalURLOpener: ExternalURLOpener
     private let mcpLifecycleOwner: LiveMCPServerLifecycleOwner
     private let appServerRuntimeFactory: AppServerRuntimeFactory
+    private let reviewRecoveryRoutingObserver: CodexReviewLiveRecoveryRoutingObserver?
     private weak var attachedStore: CodexReviewStore?
 
     private var appServerBackend: AppServerCodexReviewBackend? {
@@ -227,6 +264,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
         mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
         mcpLifecycleCallObserver: CodexReviewMCPLifecycleCallObserver? = nil,
+        reviewRecoveryRoutingObserver: CodexReviewLiveRecoveryRoutingObserver? = nil,
         appServerRuntimeFactory: AppServerRuntimeFactory? = nil
     ) {
         let runtimePreferences = runtimePreferences.normalized
@@ -242,6 +280,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         self.nativeAuthenticationConfiguration = nativeAuthenticationConfiguration
         self.webAuthenticationSessionFactory = webAuthenticationSessionFactory
         self.externalURLOpener = externalURLOpener
+        self.reviewRecoveryRoutingObserver = reviewRecoveryRoutingObserver
         let resolvedPortOwnerResolver = mcpPortOwnerResolver ?? Self.defaultMCPPortOwnerResolver
         let resolvedBindChecker = mcpHTTPServerBindChecker ?? Self.defaultMCPHTTPServerBindChecker
         self.mcpLifecycleOwner = LiveMCPServerLifecycleOwner(
@@ -1032,6 +1071,13 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         guard acceptsRuntimeRequests, let runtime = activeRuntimeHandle else {
             throw CodexReviewAPI.Error.io("Review runtime is not running.")
         }
+        let admissionID = ObjectIdentifier(admission)
+        pendingRuntimeByAdmissionID[admissionID] = runtime
+        defer {
+            if pendingRuntimeByAdmissionID[admissionID] === runtime {
+                pendingRuntimeByAdmissionID.removeValue(forKey: admissionID)
+            }
+        }
         let attempt = try await runtime.backend.startReview(request, admission: admission)
         attemptRoutesByAttemptID[attempt.run.attemptID] = .init(
             generation: runtime.generation,
@@ -1040,11 +1086,32 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         return attempt
     }
 
-    func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws {
-        guard let route = attemptRoutesByAttemptID[run.attemptID] else {
-            throw CodexReviewAPI.Error.io("Review attempt route is unavailable.")
+    func interruptReview(
+        _ run: CodexReviewBackendModel.Review.Run,
+        admission: ReviewStartAdmission,
+        reason: CodexReviewBackendModel.CancellationReason
+    ) async throws {
+        if let route = attemptRoutesByAttemptID[run.attemptID] {
+            try await route.runtime.backend.interruptReview(run, reason: reason)
+            return
         }
-        try await route.runtime.backend.interruptReview(run, reason: reason)
+        let admissionID = ObjectIdentifier(admission)
+        if let pendingRuntime = pendingRuntimeByAdmissionID[admissionID] {
+            try await pendingRuntime.backend.interruptReview(run, reason: reason)
+            return
+        }
+        for recovery in recoveryRoutesByAttemptID.values {
+            guard case .staged(let runtime, let stagedAdmissionID, let stagedRun) =
+                recovery.destination,
+                stagedAdmissionID == admissionID,
+                stagedRun.attemptID == run.attemptID
+            else {
+                continue
+            }
+            try await runtime.backend.interruptReview(run, reason: reason)
+            return
+        }
+        throw CodexReviewAPI.Error.io("Review attempt route is unavailable.")
     }
 
     func forceCloseReviewConnection() async throws {
@@ -1064,7 +1131,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         let handoff = try await source.runtime.backend.prepareReviewRecovery(candidate)
         recoveryRoutesByAttemptID[attemptID] = .init(
             handoff: handoff,
-            source: source
+            source: source,
+            destination: nil
         )
         return handoff
     }
@@ -1089,18 +1157,110 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 "Same-account recovery requires a replacement runtime generation."
             )
         }
-        let attempt = try await destination.backend.resumeReviewRecovery(
-            handoff,
-            request: request,
-            admission: admission
+        let admissionID = ObjectIdentifier(admission)
+        recoveryRoutesByAttemptID[sourceAttemptID]?.destination = .resuming(
+            runtime: destination,
+            admissionID: admissionID
         )
+        pendingRuntimeByAdmissionID[admissionID] = destination
+        do {
+            let attempt = try await destination.backend.resumeReviewRecovery(
+                handoff,
+                request: request,
+                admission: admission
+            )
+            guard let current = recoveryRoutesByAttemptID[sourceAttemptID],
+                  current.handoff == handoff
+            else {
+                try await destination.backend.cleanupReview(attempt.run)
+                throw CodexReviewAPI.Error.io("Review recovery route changed before staging.")
+            }
+            recoveryRoutesByAttemptID[sourceAttemptID]?.destination = .staged(
+                runtime: destination,
+                admissionID: admissionID,
+                run: attempt.run
+            )
+            reviewRecoveryRoutingObserver?(.staged(
+                sourceAttemptID: sourceAttemptID,
+                recoveredAttemptID: attempt.run.attemptID
+            ))
+            pendingRuntimeByAdmissionID.removeValue(forKey: admissionID)
+            return attempt
+        } catch {
+            if pendingRuntimeByAdmissionID[admissionID] === destination {
+                pendingRuntimeByAdmissionID.removeValue(forKey: admissionID)
+            }
+            if let current = recoveryRoutesByAttemptID[sourceAttemptID],
+               current.handoff == handoff,
+               case .resuming(let runtime, let currentAdmissionID) = current.destination,
+               runtime === destination,
+               currentAdmissionID == admissionID {
+                recoveryRoutesByAttemptID[sourceAttemptID]?.destination = nil
+            }
+            throw error
+        }
+    }
+
+    func commitResumedReviewRecovery(
+        _ handoff: ReviewRecoveryHandoff,
+        recoveredRun: CodexReviewBackendModel.Review.Run
+    ) throws {
+        let sourceAttemptID = handoff.candidate.resolved.run.attemptID
+        guard let recovery = recoveryRoutesByAttemptID[sourceAttemptID],
+              recovery.handoff == handoff,
+              case .staged(let destination, _, let stagedRun) = recovery.destination,
+              stagedRun.attemptID == recoveredRun.attemptID,
+              activeRuntimeHandle === destination
+        else {
+            throw ReviewAttemptContractFailure(
+                message: "Review recovery destination route is not staged for commit."
+            )
+        }
         attemptRoutesByAttemptID.removeValue(forKey: sourceAttemptID)
         recoveryRoutesByAttemptID.removeValue(forKey: sourceAttemptID)
-        attemptRoutesByAttemptID[attempt.run.attemptID] = .init(
+        attemptRoutesByAttemptID[recoveredRun.attemptID] = .init(
             generation: destination.generation,
             runtime: destination
         )
-        return attempt
+        reviewRecoveryRoutingObserver?(.committed(
+            sourceAttemptID: sourceAttemptID,
+            recoveredAttemptID: recoveredRun.attemptID
+        ))
+    }
+
+    func discardResumedReviewRecovery(
+        _ handoff: ReviewRecoveryHandoff,
+        recoveredRun: CodexReviewBackendModel.Review.Run
+    ) async throws {
+        let sourceAttemptID = handoff.candidate.resolved.run.attemptID
+        guard let recovery = recoveryRoutesByAttemptID[sourceAttemptID],
+              recovery.handoff == handoff,
+              case .staged(let destination, let admissionID, let stagedRun) = recovery.destination,
+              stagedRun.attemptID == recoveredRun.attemptID
+        else {
+            throw ReviewRuntimeCloseFailure.cleanup(
+                "Review recovery destination route is not staged for discard."
+            )
+        }
+        recoveryRoutesByAttemptID[sourceAttemptID]?.destination = .discarding(
+            runtime: destination,
+            run: stagedRun
+        )
+        reviewRecoveryRoutingObserver?(.discarded(
+            sourceAttemptID: sourceAttemptID,
+            recoveredAttemptID: recoveredRun.attemptID
+        ))
+        pendingRuntimeByAdmissionID.removeValue(forKey: admissionID)
+        defer {
+            if let current = recoveryRoutesByAttemptID[sourceAttemptID],
+               current.handoff == handoff,
+               case .discarding(let runtime, let currentRun) = current.destination,
+               runtime === destination,
+               currentRun.attemptID == recoveredRun.attemptID {
+                recoveryRoutesByAttemptID[sourceAttemptID]?.destination = nil
+            }
+        }
+        try await destination.backend.cleanupReview(recoveredRun)
     }
 
     func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws {

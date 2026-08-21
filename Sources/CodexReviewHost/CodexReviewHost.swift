@@ -315,6 +315,7 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     func interruptReview(
         _ run: CodexReviewBackendModel.Review.Run,
+        admission _: ReviewStartAdmission,
         reason: CodexReviewBackendModel.CancellationReason
     ) async throws {
         try await backend.interruptReview(run, reason: reason)
@@ -336,6 +337,18 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
         admission: ReviewStartAdmission
     ) async throws -> BackendReviewAttempt {
         try await backend.resumeReviewRecovery(handoff, request: request, admission: admission)
+    }
+
+    func commitResumedReviewRecovery(
+        _: ReviewRecoveryHandoff,
+        recoveredRun _: CodexReviewBackendModel.Review.Run
+    ) throws {}
+
+    func discardResumedReviewRecovery(
+        _: ReviewRecoveryHandoff,
+        recoveredRun: CodexReviewBackendModel.Review.Run
+    ) async throws {
+        try await backend.cleanupReview(recoveredRun)
     }
 
     func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws {

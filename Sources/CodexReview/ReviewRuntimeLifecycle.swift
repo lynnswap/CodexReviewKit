@@ -209,8 +209,12 @@ package final class ReviewCloseFailureLedger {
         guard failures.isEmpty == false else {
             return
         }
-        forceCloseFailureJobIDs.insert(jobID)
+        markForceCloseFailureOwnership(jobIDs: [jobID])
         self.failures.append(contentsOf: failures)
+    }
+
+    package func markForceCloseFailureOwnership(jobIDs: [String]) {
+        forceCloseFailureJobIDs.formUnion(jobIDs)
     }
 
     package func ownsForceCloseFailure(for jobID: String) -> Bool {
@@ -257,12 +261,23 @@ package struct ReviewRuntimePreparationFailure: LocalizedError, Sendable {
 }
 
 package struct ReviewRuntimeReplacementParticipant: Equatable, Sendable {
+    package enum Phase: Equatable, Sendable {
+        case eligible
+        case recovering
+        case suppressed
+        case finished
+    }
+
     package let jobID: String
     package let attemptID: String
+    package let registrationID: UUID
+    package var phase: Phase
 
-    package init(jobID: String, attemptID: String) {
+    package init(jobID: String, attemptID: String, registrationID: UUID) {
         self.jobID = jobID
         self.attemptID = attemptID
+        self.registrationID = registrationID
+        self.phase = .eligible
     }
 }
 
@@ -321,7 +336,6 @@ package final class ReviewRuntimeRecoveryReplacement {
     private var outcomeContinuations: [AsyncStream<Outcome>.Continuation] = []
     private var networkRestorationWasRecorded = false
     private var networkRestorationContinuations: [AsyncStream<Void>.Continuation] = []
-    private var remainingParticipantJobIDs: Set<String>
 
     package init(
         sourceGeneration: ReviewRuntimeGeneration,
@@ -339,20 +353,54 @@ package final class ReviewRuntimeRecoveryReplacement {
         self.retainedServerURL = retainedServerURL
         self.trigger = trigger
         self.participants = participants
-        self.remainingParticipantJobIDs = Set(participants.map(\.jobID))
     }
 
-    package func suppressParticipant(jobID: String) {
-        participants.removeAll { $0.jobID == jobID }
-        remainingParticipantJobIDs.remove(jobID)
+    @discardableResult
+    package func beginParticipantRecovery(
+        jobID: String,
+        registrationID: UUID
+    ) -> Bool {
+        guard let index = participants.firstIndex(where: {
+            $0.jobID == jobID && $0.registrationID == registrationID
+        }), participants[index].phase == .eligible else {
+            return false
+        }
+        participants[index].phase = .recovering
+        return true
     }
 
-    package func finishParticipant(jobID: String) {
-        remainingParticipantJobIDs.remove(jobID)
+    package func suppressParticipant(jobID: String, registrationID: UUID) {
+        guard let index = participants.firstIndex(where: {
+            $0.jobID == jobID && $0.registrationID == registrationID
+        }) else {
+            return
+        }
+        participants[index].phase = .suppressed
     }
 
-    package var hasRemainingParticipants: Bool {
-        remainingParticipantJobIDs.isEmpty == false
+    package func finishParticipant(jobID: String, registrationID: UUID) {
+        guard let index = participants.firstIndex(where: {
+            $0.jobID == jobID && $0.registrationID == registrationID
+        }) else {
+            return
+        }
+        participants[index].phase = .finished
+    }
+
+    package var forceCloseObserverJobIDs: [String] {
+        var jobIDs: [String] = []
+        switch trigger {
+        case .explicitCancellation(let targetJobID):
+            jobIDs.append(targetJobID)
+        case .recoverableNetwork(let initiatingJobID):
+            jobIDs.append(initiatingJobID)
+        case .sameAccountRestart:
+            break
+        }
+        for participant in participants where jobIDs.contains(participant.jobID) == false {
+            jobIDs.append(participant.jobID)
+        }
+        return jobIDs
     }
 
     package func finishSourceClose(

@@ -209,6 +209,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     private var startReviewGate: AsyncGate?
     private var startReviewWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var resumeReviewRecoveryGate: AsyncGate?
+    private var resumeReviewRecoveryIgnoresCancellation = false
     private var resumeReviewRecoveryWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var eventMailboxes: [EventMailboxKey: BackendReviewEventMailbox] = [:]
 
@@ -277,6 +278,12 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
 
     package func holdResumeReviewRecovery(with gate: AsyncGate) {
         resumeReviewRecoveryGate = gate
+        resumeReviewRecoveryIgnoresCancellation = false
+    }
+
+    package func holdResumeReviewRecoveryIgnoringCancellation(with gate: AsyncGate) {
+        resumeReviewRecoveryGate = gate
+        resumeReviewRecoveryIgnoresCancellation = true
     }
 
     package func holdPrepareReviewRecovery(with gate: AsyncGate) {
@@ -660,8 +667,12 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
             waiter.resume()
         }
         if let resumeReviewRecoveryGate {
-            await resumeReviewRecoveryGate.wait()
-            try Task.checkCancellation()
+            if resumeReviewRecoveryIgnoresCancellation {
+                await resumeReviewRecoveryGate.waitIgnoringCancellation()
+            } else {
+                await resumeReviewRecoveryGate.wait()
+                try Task.checkCancellation()
+            }
         }
         if let recoveryFailureMessage {
             throw FakeCodexReviewBackendError(message: recoveryFailureMessage)
@@ -1392,6 +1403,7 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     package func interruptReview(
         _ run: CodexReviewBackendModel.Review.Run,
+        admission _: ReviewStartAdmission,
         reason: CodexReviewBackendModel.CancellationReason
     ) async throws {
         try await reviewBackend.interruptReview(run, reason: reason)
@@ -1420,6 +1432,18 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
             request: request,
             admission: admission
         )
+    }
+
+    package func commitResumedReviewRecovery(
+        _: ReviewRecoveryHandoff,
+        recoveredRun _: CodexReviewBackendModel.Review.Run
+    ) throws {}
+
+    package func discardResumedReviewRecovery(
+        _: ReviewRecoveryHandoff,
+        recoveredRun: CodexReviewBackendModel.Review.Run
+    ) async throws {
+        try await reviewBackend.cleanupReview(recoveredRun)
     }
 
     package func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws {

@@ -275,6 +275,867 @@ struct CodexReviewStoreLifecycleTests {
         await store.stop()
     }
 
+    @Test func manualRestartRecoversActiveReviewThroughTheSharedCoordinator() async throws {
+        let initialRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-active",
+            threadID: "thread-active",
+            turnID: "turn-active",
+            reviewThreadID: "review-active"
+        )
+        let recoveredRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-active-recovered",
+            threadID: "thread-active",
+            turnID: "turn-active-recovered",
+            reviewThreadID: "review-active"
+        )
+        let reviewBackend = FakeCodexReviewBackend(nextRun: initialRun)
+        await reviewBackend.enqueueRecoveredRun(recoveredRun)
+        let endpoint = try #require(URL(string: "http://127.0.0.1:19435/mcp"))
+        let mcpOwner = TestingMCPServerLifecycleOwner(serverURL: endpoint)
+        let backend = TestingCodexReviewStoreBackend(
+            reviewBackend: reviewBackend,
+            mcpServerLifecycle: mcpOwner
+        )
+        let store = CodexReviewStore.makeTestingStore(
+            backend: backend,
+            idGenerator: .init(next: { "job-active" })
+        )
+        await store.start()
+        let sourceRuntime = try #require(backend.lastPreparedRuntimeHandle)
+        let reviewTask = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-active",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        await store.waitForRuntimeReplacementRegistrationForTesting(
+            jobID: "job-active",
+            attemptID: initialRun.attemptID
+        )
+
+        let restartTask = Task { @MainActor in
+            await store.restart()
+        }
+        await reviewBackend.waitForResumeReviewRecovery()
+        await reviewBackend.yield(
+            .completed(summary: "Done", result: "manual restart recovered"),
+            for: recoveredRun
+        )
+        await restartTask.value
+        let review = try await reviewTask.value
+
+        #expect(review.core.lifecycle.status == .succeeded)
+        #expect(review.core.run.turnID == recoveredRun.turnID)
+        #expect(sourceRuntime.closeCallCount == 1)
+        #expect(sourceRuntime.closePurposes == [.restartSameAccount])
+        #expect(backend.startRequests == [false, true])
+        #expect(store.serverURL == endpoint)
+        #expect(mcpOwner.prepareCallCount == 1)
+        #expect(mcpOwner.activateCallCount == 1)
+        #expect(mcpOwner.stopCallCount == 0)
+        let commands = await reviewBackend.recordedCommands()
+        #expect(commands.filter { if case .prepareReviewRecovery = $0 { true } else { false } }.count == 1)
+        #expect(commands.filter { if case .resumeReviewRecovery = $0 { true } else { false } }.count == 1)
+
+        await store.stop()
+    }
+
+    @Test func graceForceCloseWithNoSiblingStillPublishesOneReplacementRuntime() async throws {
+        let targetRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-target",
+            threadID: "thread-target",
+            turnID: "turn-target",
+            reviewThreadID: "review-target"
+        )
+        let nextRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-next",
+            threadID: "thread-next",
+            turnID: "turn-next",
+            reviewThreadID: "review-next"
+        )
+        let reviewBackend = FakeCodexReviewBackend(nextRun: targetRun)
+        await reviewBackend.enqueueRun(nextRun)
+        let endpoint = try #require(URL(string: "http://127.0.0.1:19432/mcp"))
+        let mcpOwner = TestingMCPServerLifecycleOwner(serverURL: endpoint)
+        let backend = TestingCodexReviewStoreBackend(
+            reviewBackend: reviewBackend,
+            mcpServerLifecycle: mcpOwner
+        )
+        let jobIDs = SequentialJobIDs(["job-target", "job-next"])
+        let store = CodexReviewStore.makeTestingStore(
+            backend: backend,
+            idGenerator: .init(next: { jobIDs.next() }),
+            reviewRuntimeClosePolicy: .init(
+                terminalGrace: .seconds(10),
+                sleep: { _ in }
+            )
+        )
+        await store.start()
+        let sourceRuntime = try #require(backend.lastPreparedRuntimeHandle)
+        let targetTask = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-target",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        await store.waitForRuntimeReplacementRegistrationForTesting(
+            jobID: "job-target",
+            attemptID: targetRun.attemptID
+        )
+
+        let replacementGate = AsyncGate()
+        backend.holdRuntimePreparation(with: replacementGate)
+        let cancellation = Task { @MainActor in
+            try await store.cancelReview(
+                jobID: "job-target",
+                cancellation: .mcpClient(message: "Stop target")
+            )
+        }
+        await backend.waitForRuntimePreparation()
+        let replacementRuntime = try #require(backend.lastPreparedRuntimeHandle)
+
+        #expect(sourceRuntime.closeCallCount == 1)
+        #expect(sourceRuntime.closePurposes == [.recoveryReplacement])
+        #expect(replacementRuntime !== sourceRuntime)
+        #expect(replacementRuntime.activateCallCount == 0)
+        #expect(backend.startRequests == [false, false])
+        #expect(store.serverURL == endpoint)
+        #expect(mcpOwner.prepareCallCount == 1)
+        #expect(mcpOwner.activateCallCount == 1)
+        #expect(mcpOwner.stopCallCount == 0)
+
+        await replacementGate.open()
+        await store.start()
+        let cancelled = try await cancellation.value
+        _ = try await targetTask.value
+
+        #expect(cancelled.cancelled)
+        #expect(replacementRuntime.activateCallCount == 1)
+        #expect(store.serverState == .running)
+        #expect(store.serverURL == endpoint)
+        #expect(store.activeRuntimeReplacementReceiptCountForTesting == 0)
+
+        let nextTask = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-next",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        await store.waitForRuntimeReplacementRegistrationForTesting(
+            jobID: "job-next",
+            attemptID: nextRun.attemptID
+        )
+        await reviewBackend.yield(
+            .completed(summary: "Done", result: "replacement runtime usable"),
+            for: nextRun
+        )
+        let next = try await nextTask.value
+        #expect(next.core.lifecycle.status == .succeeded)
+        #expect(next.core.run.turnID == nextRun.turnID)
+
+        await store.stop()
+    }
+
+    @Test func siblingCanonicalCompletionBeforeEnrollmentSuppressesItsRecoverySuccessor() async throws {
+        let targetRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-target",
+            threadID: "thread-target",
+            turnID: "turn-target",
+            reviewThreadID: "review-target"
+        )
+        let siblingRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-sibling",
+            threadID: "thread-sibling",
+            turnID: "turn-sibling",
+            reviewThreadID: "review-sibling"
+        )
+        let reviewBackend = FakeCodexReviewBackend(nextRun: targetRun)
+        await reviewBackend.enqueueRun(siblingRun)
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: reviewBackend)
+        let jobIDs = SequentialJobIDs(["job-target", "job-sibling"])
+        let store = CodexReviewStore.makeTestingStore(
+            backend: backend,
+            idGenerator: .init(next: { jobIDs.next() }),
+            reviewRuntimeClosePolicy: .init(
+                terminalGrace: .seconds(10),
+                sleep: { _ in }
+            )
+        )
+        await store.start()
+        let enrollmentEntered = AsyncGate()
+        let enrollmentRelease = AsyncGate()
+        store.setRuntimeReplacementEnrollmentPreparationForTesting {
+            await enrollmentEntered.open()
+            await enrollmentRelease.waitIgnoringCancellation()
+        }
+        let targetTask = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-target",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        await store.waitForRuntimeReplacementRegistrationForTesting(
+            jobID: "job-target",
+            attemptID: targetRun.attemptID
+        )
+        let siblingTask = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-sibling",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        await store.waitForRuntimeReplacementRegistrationForTesting(
+            jobID: "job-sibling",
+            attemptID: siblingRun.attemptID
+        )
+
+        let cancellation = Task { @MainActor in
+            try await store.cancelReview(
+                jobID: "job-target",
+                cancellation: .mcpClient(message: "Stop target")
+            )
+        }
+        await enrollmentEntered.wait()
+        await reviewBackend.yield(
+            .completed(summary: "Done", result: "natural sibling result"),
+            for: siblingRun
+        )
+        let sibling = try await siblingTask.value
+
+        await enrollmentRelease.open()
+        store.setRuntimeReplacementEnrollmentPreparationForTesting(nil)
+        let cancelled = try await cancellation.value
+        _ = try await targetTask.value
+        await store.start()
+
+        #expect(cancelled.cancelled)
+        #expect(sibling.core.lifecycle.status == .succeeded)
+        #expect(sibling.core.run.turnID == siblingRun.turnID)
+        #expect(backend.startRequests == [false, false])
+        #expect(store.activeRuntimeReplacementReceiptCountForTesting == 0)
+        let commands = await reviewBackend.recordedCommands()
+        #expect(commands.filter { if case .prepareReviewRecovery = $0 { true } else { false } }.isEmpty)
+        #expect(commands.filter { if case .resumeReviewRecovery = $0 { true } else { false } }.isEmpty)
+
+        await store.stop()
+    }
+
+    @Test func replacementPreparationFailureFailsAllEligibleSiblingsAndRetainsMCP() async throws {
+        let targetRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-target",
+            threadID: "thread-target",
+            turnID: "turn-target",
+            reviewThreadID: "review-target"
+        )
+        let firstSiblingRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-sibling-1",
+            threadID: "thread-sibling-1",
+            turnID: "turn-sibling-1",
+            reviewThreadID: "review-sibling-1"
+        )
+        let secondSiblingRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-sibling-2",
+            threadID: "thread-sibling-2",
+            turnID: "turn-sibling-2",
+            reviewThreadID: "review-sibling-2"
+        )
+        let reviewBackend = FakeCodexReviewBackend(nextRun: targetRun)
+        await reviewBackend.enqueueRun(firstSiblingRun)
+        await reviewBackend.enqueueRun(secondSiblingRun)
+        let endpoint = try #require(URL(string: "http://127.0.0.1:19433/mcp"))
+        let mcpOwner = TestingMCPServerLifecycleOwner(serverURL: endpoint)
+        let backend = TestingCodexReviewStoreBackend(
+            reviewBackend: reviewBackend,
+            mcpServerLifecycle: mcpOwner
+        )
+        let jobIDs = SequentialJobIDs(["job-target", "job-sibling-1", "job-sibling-2"])
+        let store = CodexReviewStore.makeTestingStore(
+            backend: backend,
+            idGenerator: .init(next: { jobIDs.next() }),
+            reviewRuntimeClosePolicy: .init(
+                terminalGrace: .seconds(10),
+                sleep: { _ in }
+            )
+        )
+        await store.start()
+        let targetTask = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-target",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        await store.waitForRuntimeReplacementRegistrationForTesting(
+            jobID: "job-target",
+            attemptID: targetRun.attemptID
+        )
+        let firstSiblingTask = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-sibling-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        await store.waitForRuntimeReplacementRegistrationForTesting(
+            jobID: "job-sibling-1",
+            attemptID: firstSiblingRun.attemptID
+        )
+        let secondSiblingTask = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-sibling-2",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        await store.waitForRuntimeReplacementRegistrationForTesting(
+            jobID: "job-sibling-2",
+            attemptID: secondSiblingRun.attemptID
+        )
+        await reviewBackend.failAuthRead(message: "Replacement authentication unavailable.")
+
+        let cancellation = Task { @MainActor in
+            try await store.cancelReview(
+                jobID: "job-target",
+                cancellation: .mcpClient(message: "Stop target")
+            )
+        }
+        let cancelled = try await cancellation.value
+        let target = try await targetTask.value
+        let firstSibling = try await firstSiblingTask.value
+        let secondSibling = try await secondSiblingTask.value
+
+        #expect(cancelled.cancelled)
+        #expect(target.core.lifecycle.terminal == .interrupted(
+            .requested(.mcpClient(message: "Stop target"))
+        ))
+        guard case .failed(let firstMessage) = firstSibling.core.lifecycle.terminal,
+              case .failed(let secondMessage) = secondSibling.core.lifecycle.terminal
+        else {
+            Issue.record("Replacement failure must terminalize every eligible sibling.")
+            await store.stop()
+            return
+        }
+        #expect(firstMessage == secondMessage)
+        #expect(firstMessage?.contains("Replacement authentication unavailable.") == true)
+        guard case .failed = store.serverState else {
+            Issue.record("Replacement preparation failure must fail the Store runtime.")
+            await store.stop()
+            return
+        }
+        #expect(store.serverURL == endpoint)
+        #expect(backend.startRequests == [false, false])
+        #expect(mcpOwner.prepareCallCount == 1)
+        #expect(mcpOwner.activateCallCount == 1)
+        #expect(mcpOwner.stopCallCount == 0)
+        await #expect(throws: CodexReviewAPI.Error.self) {
+            _ = try await store.startReview(
+                sessionID: "session-after-failure",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+
+        await store.stop()
+    }
+
+    @Test func siblingCancellationDuringHeldHandoffSuppressesResume() async throws {
+        let targetRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-target",
+            threadID: "thread-target",
+            turnID: "turn-target",
+            reviewThreadID: "review-target"
+        )
+        let siblingRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-sibling",
+            threadID: "thread-sibling",
+            turnID: "turn-sibling",
+            reviewThreadID: "review-sibling"
+        )
+        let reviewBackend = FakeCodexReviewBackend(nextRun: targetRun)
+        await reviewBackend.enqueueRun(siblingRun)
+        let handoffGate = AsyncGate()
+        await reviewBackend.holdPrepareReviewRecovery(with: handoffGate)
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: reviewBackend)
+        let jobIDs = SequentialJobIDs(["job-target", "job-sibling"])
+        let store = CodexReviewStore.makeTestingStore(
+            backend: backend,
+            idGenerator: .init(next: { jobIDs.next() }),
+            reviewRuntimeClosePolicy: .init(
+                terminalGrace: .seconds(10),
+                sleep: { _ in }
+            )
+        )
+        await store.start()
+        let targetTask = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-target",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        await store.waitForRuntimeReplacementRegistrationForTesting(
+            jobID: "job-target",
+            attemptID: targetRun.attemptID
+        )
+        let siblingTask = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-sibling",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        await store.waitForRuntimeReplacementRegistrationForTesting(
+            jobID: "job-sibling",
+            attemptID: siblingRun.attemptID
+        )
+
+        let targetCancellation = Task { @MainActor in
+            try await store.cancelReview(
+                jobID: "job-target",
+                cancellation: .mcpClient(message: "Stop target")
+            )
+        }
+        await reviewBackend.waitForPrepareReviewRecovery()
+        let siblingCancellation = Task { @MainActor in
+            try await store.cancelReview(
+                jobID: "job-sibling",
+                cancellation: .system(message: "Stop sibling during handoff")
+            )
+        }
+        let siblingCancelled = try await siblingCancellation.value
+        await handoffGate.open()
+        let targetCancelled = try await targetCancellation.value
+        let target = try await targetTask.value
+        let sibling = try await siblingTask.value
+        await store.start()
+
+        #expect(targetCancelled.cancelled)
+        #expect(siblingCancelled.cancelled)
+        #expect(target.core.lifecycle.terminal == .interrupted(
+            .requested(.mcpClient(message: "Stop target"))
+        ))
+        #expect(sibling.core.lifecycle.terminal == .interrupted(
+            .requested(.system(message: "Stop sibling during handoff"))
+        ))
+        let commands = await reviewBackend.recordedCommands()
+        #expect(commands.filter { if case .prepareReviewRecovery = $0 { true } else { false } }.count == 1)
+        #expect(commands.filter { if case .resumeReviewRecovery = $0 { true } else { false } }.isEmpty)
+        #expect(backend.startRequests == [false, false])
+
+        await store.stop()
+    }
+
+    @Test func applicationCloseSupersedesHeldRecoveryReplacementWithoutLatePublication() async throws {
+        let targetRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-target",
+            threadID: "thread-target",
+            turnID: "turn-target",
+            reviewThreadID: "review-target"
+        )
+        let reviewBackend = FakeCodexReviewBackend(nextRun: targetRun)
+        let mcpOwner = TestingMCPServerLifecycleOwner()
+        let backend = TestingCodexReviewStoreBackend(
+            reviewBackend: reviewBackend,
+            mcpServerLifecycle: mcpOwner
+        )
+        let store = CodexReviewStore.makeTestingStore(
+            backend: backend,
+            idGenerator: .init(next: { "job-target" }),
+            reviewRuntimeClosePolicy: .init(
+                terminalGrace: .seconds(10),
+                sleep: { _ in }
+            )
+        )
+        await store.start()
+        let sourceRuntime = try #require(backend.lastPreparedRuntimeHandle)
+        let targetTask = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-target",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        await store.waitForRuntimeReplacementRegistrationForTesting(
+            jobID: "job-target",
+            attemptID: targetRun.attemptID
+        )
+
+        let replacementGate = AsyncGate()
+        backend.holdRuntimePreparation(with: replacementGate)
+        let cancellation = Task { @MainActor in
+            try await store.cancelReview(
+                jobID: "job-target",
+                cancellation: .mcpClient(message: "Stop target")
+            )
+        }
+        await backend.waitForRuntimePreparation()
+        let staleReplacement = try #require(backend.lastPreparedRuntimeHandle)
+        let closeTask = Task { @MainActor in
+            try await store.close()
+        }
+        await backend.waitForRuntimePreparationCancellation()
+
+        #expect(sourceRuntime.closeCallCount == 1)
+        #expect(sourceRuntime.closePurposes == [.recoveryReplacement])
+        #expect(staleReplacement.activateCallCount == 0)
+        #expect(mcpOwner.closeAdmissionCallCount == 1)
+
+        await replacementGate.open()
+        try await closeTask.value
+        _ = try await cancellation.value
+        _ = try await targetTask.value
+
+        #expect(staleReplacement.activateCallCount == 0)
+        #expect(staleReplacement.closeCallCount == 1)
+        #expect(staleReplacement.waitUntilClosedCallCount == 1)
+        #expect(sourceRuntime.closeCallCount == 1)
+        #expect(sourceRuntime.waitUntilClosedCallCount == 1)
+        #expect(mcpOwner.closeCallCount == 1)
+        #expect(mcpOwner.waitUntilClosedCallCount == 1)
+        #expect(store.serverState == .stopped)
+        #expect(store.serverURL == nil)
+    }
+
+    @Test func stopSupersedingHeldReplacementCancelsAndJoinsEligibleSibling() async throws {
+        let targetRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-target",
+            threadID: "thread-target",
+            turnID: "turn-target",
+            reviewThreadID: "review-target"
+        )
+        let siblingRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-sibling",
+            threadID: "thread-sibling",
+            turnID: "turn-sibling",
+            reviewThreadID: "review-sibling"
+        )
+        let reviewBackend = FakeCodexReviewBackend(nextRun: targetRun)
+        await reviewBackend.enqueueRun(siblingRun)
+        let mcpOwner = TestingMCPServerLifecycleOwner()
+        let backend = TestingCodexReviewStoreBackend(
+            reviewBackend: reviewBackend,
+            mcpServerLifecycle: mcpOwner
+        )
+        let jobIDs = SequentialJobIDs(["job-target", "job-sibling"])
+        let store = CodexReviewStore.makeTestingStore(
+            backend: backend,
+            idGenerator: .init(next: { jobIDs.next() }),
+            reviewRuntimeClosePolicy: .init(
+                terminalGrace: .seconds(10),
+                sleep: { _ in }
+            )
+        )
+        await store.start()
+        let targetTask = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-target",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        await store.waitForRuntimeReplacementRegistrationForTesting(
+            jobID: "job-target",
+            attemptID: targetRun.attemptID
+        )
+        let siblingTask = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-sibling",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        await store.waitForRuntimeReplacementRegistrationForTesting(
+            jobID: "job-sibling",
+            attemptID: siblingRun.attemptID
+        )
+
+        let replacementGate = AsyncGate()
+        backend.holdRuntimePreparation(with: replacementGate)
+        let targetCancellation = Task { @MainActor in
+            try await store.cancelReview(
+                jobID: "job-target",
+                cancellation: .mcpClient(message: "Stop target")
+            )
+        }
+        await backend.waitForRuntimePreparation()
+        let stopTask = Task { @MainActor in
+            await store.stop()
+        }
+        await backend.waitForRuntimePreparationCancellation()
+        await replacementGate.open()
+        await stopTask.value
+        let target = try await targetTask.value
+        let sibling = try await siblingTask.value
+        _ = try await targetCancellation.value
+
+        #expect(target.core.lifecycle.terminal == .interrupted(
+            .requested(.mcpClient(message: "Stop target"))
+        ))
+        #expect(sibling.core.lifecycle.terminal == .interrupted(
+            .requested(.system(message: "Review runtime stopped."))
+        ))
+        #expect(store.reviewWorkerTasks.isEmpty)
+        #expect(store.activeRuntimeReplacementReceiptCountForTesting == 0)
+        #expect(store.serverState == .stopped)
+        #expect(mcpOwner.stopCallCount == 1)
+        #expect(mcpOwner.waitUntilStoppedCallCount == 1)
+    }
+
+    @Test func recoverableNetworkForceCloseWaitsForRestorationAndResumesOnReplacement() async throws {
+        let initialRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-network",
+            threadID: "thread-network",
+            turnID: "turn-network",
+            reviewThreadID: "review-network"
+        )
+        let recoveredRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-network-recovered",
+            threadID: "thread-network",
+            turnID: "turn-network-recovered",
+            reviewThreadID: "review-network"
+        )
+        let reviewBackend = FakeCodexReviewBackend(nextRun: initialRun)
+        await reviewBackend.enqueueRecoveredRun(recoveredRun)
+        let endpoint = try #require(URL(string: "http://127.0.0.1:19434/mcp"))
+        let mcpOwner = TestingMCPServerLifecycleOwner(serverURL: endpoint)
+        let backend = TestingCodexReviewStoreBackend(
+            reviewBackend: reviewBackend,
+            mcpServerLifecycle: mcpOwner
+        )
+        let networkMonitor = ManualCodexReviewNetworkMonitor()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: backend,
+            idGenerator: .init(next: { "job-network" }),
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: .init(sleep: { _ in }),
+            reviewRuntimeClosePolicy: .init(
+                terminalGrace: .seconds(10),
+                sleep: { _ in }
+            )
+        )
+        await store.start()
+        let sourceRuntime = try #require(backend.lastPreparedRuntimeHandle)
+        let reviewTask = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-network",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        await store.waitForRuntimeReplacementRegistrationForTesting(
+            jobID: "job-network",
+            attemptID: initialRun.attemptID
+        )
+
+        let replacementGate = AsyncGate()
+        backend.holdRuntimePreparation(with: replacementGate)
+        networkMonitor.yield(.init(status: .unsatisfied))
+        await reviewBackend.waitForInterruptReview(
+            run: initialRun,
+            reason: .init(message: "Network unavailable; waiting to reconnect.")
+        )
+        await sourceRuntime.waitForClose()
+        await reviewBackend.waitForPrepareReviewRecovery()
+
+        #expect(sourceRuntime.closeCallCount == 1)
+        #expect(sourceRuntime.closePurposes == [.recoveryReplacement])
+        #expect(backend.startRequests == [false])
+        #expect(store.serverURL == endpoint)
+        #expect(mcpOwner.prepareCallCount == 1)
+        #expect(mcpOwner.activateCallCount == 1)
+        #expect(mcpOwner.stopCallCount == 0)
+
+        networkMonitor.yield(.satisfied())
+        await backend.waitForRuntimePreparation()
+        let replacementRuntime = try #require(backend.lastPreparedRuntimeHandle)
+        #expect(replacementRuntime !== sourceRuntime)
+        #expect(replacementRuntime.activateCallCount == 0)
+        #expect(backend.startRequests == [false, false])
+
+        await replacementGate.open()
+        await reviewBackend.waitForResumeReviewRecovery()
+        await reviewBackend.yield(
+            .completed(summary: "Done", result: "network recovered"),
+            for: recoveredRun
+        )
+        let review = try await reviewTask.value
+
+        #expect(review.core.lifecycle.status == .succeeded)
+        #expect(review.core.run.turnID == recoveredRun.turnID)
+        #expect(replacementRuntime.activateCallCount == 1)
+        #expect(store.serverState == .running)
+        #expect(store.serverURL == endpoint)
+        #expect(mcpOwner.prepareCallCount == 1)
+        #expect(mcpOwner.activateCallCount == 1)
+        #expect(mcpOwner.stopCallCount == 0)
+
+        await store.stop()
+    }
+
+    @Test func networkForceCloseFailureHasOneApplicationCloseReceipt() async throws {
+        let initialRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-network",
+            threadID: "thread-network",
+            turnID: "turn-network",
+            reviewThreadID: "review-network"
+        )
+        let reviewBackend = FakeCodexReviewBackend(nextRun: initialRun)
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: reviewBackend)
+        let networkMonitor = ManualCodexReviewNetworkMonitor()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: backend,
+            idGenerator: .init(next: { "job-network" }),
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: .init(sleep: { _ in }),
+            reviewRuntimeClosePolicy: .init(
+                terminalGrace: .seconds(10),
+                sleep: { _ in }
+            )
+        )
+        let forceReceiptRecorded = AsyncGate()
+        store.setRuntimeForceCloseReceiptRecordedForTesting {
+            await forceReceiptRecorded.open()
+        }
+        await store.start()
+        let sourceRuntime = try #require(backend.lastPreparedRuntimeHandle)
+        sourceRuntime.failClose(with: .init(first: .client("network source close failed")))
+        let reviewTask = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-network",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        await store.waitForRuntimeReplacementRegistrationForTesting(
+            jobID: "job-network",
+            attemptID: initialRun.attemptID
+        )
+
+        networkMonitor.yield(.init(status: .unsatisfied))
+        await forceReceiptRecorded.wait()
+        let review = try await reviewTask.value
+        let closeError = try #require(await capturedCloseError(from: store))
+
+        #expect(review.core.lifecycle.status == .failed)
+        #expect(sourceRuntime.closeCallCount == 1)
+        #expect(sourceRuntime.waitUntilClosedCallCount == 1)
+        #expect(closeError.failures.additionalInLifecycleOrder.isEmpty)
+        guard case .lifecycleResources(let lifecycle) = closeError.failures.first else {
+            Issue.record("Network force close failure must retain lifecycle ownership.")
+            return
+        }
+        #expect(lifecycle.first == .client("network source close failed"))
+    }
+
+    @Test func sameGenerationNetworkResumeIsDiscardedWhenStopWins() async throws {
+        try await exerciseSameGenerationNetworkResumeDiscard(applicationClose: false)
+    }
+
+    @Test func sameGenerationNetworkResumeIsDiscardedWhenCloseWins() async throws {
+        try await exerciseSameGenerationNetworkResumeDiscard(applicationClose: true)
+    }
+
+    @Test func staleNetworkResumeTerminalizesBeforeCloseCancellationAdmission() async throws {
+        try await exerciseSameGenerationNetworkResumeDiscard(
+            applicationClose: true,
+            terminalBeforeCancellationAdmission: true
+        )
+    }
+
+    private func exerciseSameGenerationNetworkResumeDiscard(
+        applicationClose: Bool,
+        terminalBeforeCancellationAdmission: Bool = false
+    ) async throws {
+        let initialRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-network",
+            threadID: "thread-network",
+            turnID: "turn-network",
+            reviewThreadID: "review-network"
+        )
+        let recoveredRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-network-recovered",
+            threadID: "thread-network",
+            turnID: "turn-network-recovered",
+            reviewThreadID: "review-network"
+        )
+        let reviewBackend = FakeCodexReviewBackend(nextRun: initialRun)
+        await reviewBackend.enqueueRecoveredRun(recoveredRun)
+        let resumeGate = AsyncGate()
+        await reviewBackend.holdResumeReviewRecoveryIgnoringCancellation(
+            with: resumeGate
+        )
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: reviewBackend)
+        let networkMonitor = ManualCodexReviewNetworkMonitor()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: backend,
+            idGenerator: .init(next: { "job-network" }),
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: .init(sleep: { _ in })
+        )
+        await store.start()
+        let runtime = try #require(backend.lastPreparedRuntimeHandle)
+        let reviewTask = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-network",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        await store.waitForRuntimeReplacementRegistrationForTesting(
+            jobID: "job-network",
+            attemptID: initialRun.attemptID
+        )
+
+        let reason = CodexReviewBackendModel.CancellationReason(
+            message: "Network unavailable; waiting to reconnect."
+        )
+        networkMonitor.yield(.init(status: .unsatisfied))
+        await reviewBackend.waitForInterruptReview(run: initialRun, reason: reason)
+        await reviewBackend.yield(.cancelled(reason.message), for: initialRun)
+        await reviewBackend.waitForPrepareReviewRecovery()
+        networkMonitor.yield(.satisfied())
+        await reviewBackend.waitForResumeReviewRecovery()
+
+        let cancellationBarrierEntered = AsyncGate()
+        let cancellationBarrierRelease = AsyncGate()
+        store.setReviewCancellationBarrierPreparationForTesting {
+            await cancellationBarrierEntered.open()
+            if terminalBeforeCancellationAdmission {
+                await cancellationBarrierRelease.waitIgnoringCancellation()
+            }
+        }
+        let shutdownTask = Task { @MainActor in
+            do {
+                if applicationClose {
+                    try await store.close()
+                } else {
+                    await store.stop()
+                }
+                return Result<Void, any Error>.success(())
+            } catch {
+                return Result<Void, any Error>.failure(error)
+            }
+        }
+        await cancellationBarrierEntered.wait()
+        await resumeGate.open()
+        if terminalBeforeCancellationAdmission {
+            await reviewBackend.waitForCleanupReview()
+            await cancellationBarrierRelease.open()
+        }
+        try await shutdownTask.value.get()
+        let review = try await reviewTask.value
+
+        if terminalBeforeCancellationAdmission {
+            #expect(review.core.lifecycle.status == .failed)
+            #expect(review.core.lifecycle.terminal?.kind == .interrupted)
+            #expect(review.core.lifecycle.cancellation == nil)
+        } else {
+            let expectedCancellation: ReviewCancellation = applicationClose
+                ? .system(message: "Review Store closed.")
+                : .system(message: "Review runtime stopped.")
+            #expect(review.core.lifecycle.terminal == .interrupted(
+                .requested(expectedCancellation)
+            ))
+        }
+        #expect(review.core.run.turnID == initialRun.turnID)
+        #expect(store.reviewWorkerTasks.isEmpty)
+        #expect(store.activeRuntimeReplacementReceiptCountForTesting == 0)
+        #expect(runtime.closeCallCount == 1)
+        let commands = await reviewBackend.recordedCommands()
+        #expect(commands.contains(.cleanupReview(recoveredRun)))
+        #expect(commands.contains(.cleanupReview(initialRun)))
+        #expect(store.serverState == .stopped)
+        #expect(store.serverURL == nil)
+    }
+
     @Test func stopInvalidatesHeldRestartBeforeReplacementCanPublish() async throws {
         let endpoint = try #require(URL(string: "http://127.0.0.1:19422/mcp"))
         let mcpOwner = TestingMCPServerLifecycleOwner(serverURL: endpoint)
@@ -765,6 +1626,8 @@ struct CodexReviewStoreLifecycleTests {
         await store.start()
         let runtime = try #require(backend.lastPreparedRuntimeHandle)
         runtime.failClose(with: .init(first: .client("prior forced close failed")))
+        let sourceCloseGate = AsyncGate()
+        runtime.holdClose(with: sourceCloseGate)
         _ = try await store.startReview(
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
@@ -777,14 +1640,16 @@ struct CodexReviewStoreLifecycleTests {
                 cancellation: .mcpClient(message: "Stop")
             )
         }
-        await forceCloseReceiptRecorded.wait()
-        await terminalPublicationEntered.wait()
+        await runtime.waitForClose()
         #expect(try store.readReview(jobID: "job-1").core.lifecycle.status == .running)
 
         let closeTask = Task { @MainActor in
             await capturedCloseError(from: store)
         }
         await store.waitForCloseCallersForTesting(1)
+        await sourceCloseGate.open()
+        await forceCloseReceiptRecorded.wait()
+        await terminalPublicationEntered.wait()
         await terminalPublicationRelease.open()
         _ = await cancellationTask.result
         let closeError = try #require(await closeTask.value)

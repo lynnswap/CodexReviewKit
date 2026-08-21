@@ -6794,7 +6794,11 @@ final class FailingCancellationBackend: PreviewCodexReviewStoreBackend {
 
     override func waitUntilStopped() async {}
 
-    override func interruptReview(_: CodexReviewBackendModel.Review.Run, reason _: CodexReviewBackendModel.CancellationReason) async throws {
+    override func interruptReview(
+        _: CodexReviewBackendModel.Review.Run,
+        admission _: ReviewStartAdmission,
+        reason _: CodexReviewBackendModel.CancellationReason
+    ) async throws {
         throw ReviewInterruptRequestFailure(
             outcome: .rejected(code: nil, message: "Cancellation failed.")
         )

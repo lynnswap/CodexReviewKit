@@ -451,6 +451,333 @@ struct CodexReviewHostTests {
         await store.stop()
     }
 
+    @Test func liveGraceForceCloseResumesSiblingOnlyOnReplacementBackend() async throws {
+        let homeURL = try temporaryHome()
+        let firstTransport = FakeJSONRPCTransport()
+        try await firstTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await firstTransport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
+        try await firstTransport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await firstTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await firstTransport.enqueue(
+            AppServerAPI.Thread.Start.Response(threadID: "thread-target", model: "gpt-5"),
+            for: "thread/start"
+        )
+        try await firstTransport.enqueue(
+            AppServerAPI.Review.Start.Response(
+                turnID: "turn-target",
+                reviewThreadID: "review-target"
+            ),
+            for: "review/start"
+        )
+        try await firstTransport.enqueue(
+            AppServerAPI.Thread.Start.Response(threadID: "thread-sibling", model: "gpt-5"),
+            for: "thread/start"
+        )
+        try await firstTransport.enqueue(
+            AppServerAPI.Review.Start.Response(
+                turnID: "turn-sibling",
+                reviewThreadID: "review-sibling"
+            ),
+            for: "review/start"
+        )
+        try await firstTransport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        try await firstTransport.enqueue(EmptyResponse(), for: "turn/interrupt")
+
+        let secondTransport = FakeJSONRPCTransport()
+        try await secondTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await secondTransport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
+        try await secondTransport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await secondTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await secondTransport.enqueue(EmptyResponse(), for: "thread/rollback")
+        try await secondTransport.enqueue(
+            AppServerAPI.Review.Start.Response(
+                turnID: "turn-sibling-recovered",
+                reviewThreadID: "review-sibling"
+            ),
+            for: "review/start"
+        )
+
+        let mcpServer = ControlledMCPHTTPServer(
+            endpoint: try #require(URL(string: "http://127.0.0.1:19432/mcp"))
+        )
+        var transports = [firstTransport, secondTransport]
+        var mcpFactoryCallCount = 0
+        let routingProbe = HostRecoveryRoutingProbe()
+        let jobIDs = HostSequentialIDs(["job-target", "job-sibling"])
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            mcpHTTPServerFactory: { _, _ in
+                mcpFactoryCallCount += 1
+                return mcpServer
+            },
+            mcpHTTPServerBindChecker: { _ in },
+            reviewRuntimeClosePolicy: .init(
+                terminalGrace: .seconds(10),
+                sleep: { _ in }
+            ),
+            idGenerator: .init(next: { jobIDs.next() }),
+            reviewRecoveryRoutingObserver: { event in
+                routingProbe.record(event)
+            },
+            transportFactory: { _ in transports.removeFirst() }
+        )
+        await store.start()
+        let initialURL = store.serverURL
+        let targetTask = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-target",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        _ = await store.waitForRuntimeReplacementRegistrationForTesting(
+            jobID: "job-target"
+        )
+        let siblingTask = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-sibling",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        _ = await store.waitForRuntimeReplacementRegistrationForTesting(
+            jobID: "job-sibling"
+        )
+
+        let cancellation = Task { @MainActor in
+            try await store.cancelReview(
+                jobID: "job-target",
+                cancellation: .mcpClient(message: "Stop target")
+            )
+        }
+        await secondTransport.waitForRequest(method: "review/start")
+        try await secondTransport.emitServerNotification(
+            method: "item/completed",
+            params: HostCompletedReviewItemNotification(
+                threadID: "review-sibling",
+                turnID: "turn-sibling-recovered",
+                result: "replacement result"
+            )
+        )
+        try await secondTransport.emitServerNotification(
+            method: "turn/completed",
+            params: HostCompletedReviewTurnNotification(
+                threadID: "review-sibling",
+                turnID: "turn-sibling-recovered",
+                result: "replacement result"
+            )
+        )
+
+        let target = try await targetTask.value
+        let sibling = try await siblingTask.value
+        #expect(try await cancellation.value.cancelled)
+        #expect(target.core.lifecycle.terminal == .interrupted(
+            .requested(.mcpClient(message: "Stop target"))
+        ))
+        #expect(sibling.core.lifecycle.status == .succeeded)
+        #expect(sibling.core.run.turnID == "turn-sibling-recovered")
+        #expect(store.serverURL == initialURL)
+        #expect(mcpFactoryCallCount == 1)
+        #expect(mcpServer.startCallCount == 1)
+        #expect(transports.isEmpty)
+        let oldMethods = await firstTransport.recordedRequests().map(\.method)
+        let newMethods = await secondTransport.recordedRequests().map(\.method)
+        #expect(oldMethods.filter { $0 == "review/start" }.count == 2)
+        #expect(oldMethods.contains("thread/rollback") == false)
+        #expect(newMethods.filter { $0 == "review/start" }.count == 1)
+        #expect(newMethods.contains("thread/rollback"))
+        #expect(routingProbe.events == [
+            .staged(
+                sourceAttemptID: routingProbe.sourceAttemptID,
+                recoveredAttemptID: routingProbe.recoveredAttemptID
+            ),
+            .committed(
+                sourceAttemptID: routingProbe.sourceAttemptID,
+                recoveredAttemptID: routingProbe.recoveredAttemptID
+            ),
+        ])
+
+        await store.stop()
+    }
+
+    @Test func liveHeldRecoveryResumeIsDiscardedWhenStopWins() async throws {
+        try await exerciseHeldRecoveryResumeDiscard(applicationClose: false)
+    }
+
+    @Test func liveHeldRecoveryResumeIsDiscardedWhenCloseWins() async throws {
+        try await exerciseHeldRecoveryResumeDiscard(applicationClose: true)
+    }
+
+    private func exerciseHeldRecoveryResumeDiscard(
+        applicationClose: Bool
+    ) async throws {
+        let homeURL = try temporaryHome()
+        let firstTransport = FakeJSONRPCTransport()
+        try await firstTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await firstTransport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
+        try await firstTransport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await firstTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await firstTransport.enqueue(
+            AppServerAPI.Thread.Start.Response(threadID: "thread-target", model: "gpt-5"),
+            for: "thread/start"
+        )
+        try await firstTransport.enqueue(
+            AppServerAPI.Review.Start.Response(
+                turnID: "turn-target",
+                reviewThreadID: "review-target"
+            ),
+            for: "review/start"
+        )
+        try await firstTransport.enqueue(
+            AppServerAPI.Thread.Start.Response(threadID: "thread-sibling", model: "gpt-5"),
+            for: "thread/start"
+        )
+        try await firstTransport.enqueue(
+            AppServerAPI.Review.Start.Response(
+                turnID: "turn-sibling",
+                reviewThreadID: "review-sibling"
+            ),
+            for: "review/start"
+        )
+        try await firstTransport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        try await firstTransport.enqueue(EmptyResponse(), for: "turn/interrupt")
+
+        let secondTransport = FakeJSONRPCTransport()
+        let recoveredStartGate = AsyncGate()
+        await secondTransport.holdNextIgnoringCancellation(
+            method: "review/start",
+            gate: recoveredStartGate
+        )
+        try await secondTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await secondTransport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
+        try await secondTransport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await secondTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await secondTransport.enqueue(EmptyResponse(), for: "thread/rollback")
+        try await secondTransport.enqueue(
+            AppServerAPI.Review.Start.Response(
+                turnID: "turn-sibling-recovered",
+                reviewThreadID: "review-sibling"
+            ),
+            for: "review/start"
+        )
+        try await secondTransport.enqueue(EmptyResponse(), for: "turn/interrupt")
+
+        let mcpServer = ControlledMCPHTTPServer(
+            endpoint: try #require(URL(string: "http://127.0.0.1:19436/mcp"))
+        )
+        let routingProbe = HostRecoveryRoutingProbe()
+        var transports = [firstTransport, secondTransport]
+        let jobIDs = HostSequentialIDs(["job-target", "job-sibling"])
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            mcpHTTPServerFactory: { _, _ in mcpServer },
+            mcpHTTPServerBindChecker: { _ in },
+            reviewRuntimeClosePolicy: .init(
+                terminalGrace: .seconds(10),
+                sleep: { _ in }
+            ),
+            idGenerator: .init(next: { jobIDs.next() }),
+            reviewRecoveryRoutingObserver: { event in
+                routingProbe.record(event)
+            },
+            transportFactory: { _ in transports.removeFirst() }
+        )
+        await store.start()
+        let targetTask = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-target",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        _ = await store.waitForRuntimeReplacementRegistrationForTesting(
+            jobID: "job-target"
+        )
+        let siblingTask = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-sibling",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        _ = await store.waitForRuntimeReplacementRegistrationForTesting(
+            jobID: "job-sibling"
+        )
+        let targetCancellation = Task { @MainActor in
+            try await store.cancelReview(
+                jobID: "job-target",
+                cancellation: .mcpClient(message: "Stop target")
+            )
+        }
+        await secondTransport.waitForRequest(method: "review/start")
+
+        let cancellationBarrierEntered = AsyncGate()
+        store.setReviewCancellationBarrierPreparationForTesting {
+            await cancellationBarrierEntered.open()
+        }
+        let shutdownTask = Task { @MainActor in
+            do {
+                if applicationClose {
+                    try await store.close()
+                } else {
+                    await store.stop()
+                }
+                return Result<Void, any Error>.success(())
+            } catch {
+                return Result<Void, any Error>.failure(error)
+            }
+        }
+        await cancellationBarrierEntered.wait()
+        await recoveredStartGate.open()
+        await secondTransport.waitForRequest(method: "turn/interrupt")
+        try await shutdownTask.value.get()
+        let target = try await targetTask.value
+        let sibling = try await siblingTask.value
+        _ = try await targetCancellation.value
+
+        let expectedSiblingCancellation: ReviewCancellation = applicationClose
+            ? .system(message: "Review Store closed.")
+            : .system(message: "Review runtime stopped.")
+        #expect(target.core.lifecycle.terminal == .interrupted(
+            .requested(.mcpClient(message: "Stop target"))
+        ))
+        #expect(sibling.core.lifecycle.terminal == .interrupted(
+            .requested(expectedSiblingCancellation)
+        ))
+        #expect(sibling.core.run.turnID == "turn-sibling")
+        #expect(store.reviewWorkerTasks.isEmpty)
+        #expect(store.activeRuntimeReplacementReceiptCountForTesting == 0)
+        let oldMethods = await firstTransport.recordedRequests().map(\.method)
+        let newMethods = await secondTransport.recordedRequests().map(\.method)
+        #expect(oldMethods.contains("thread/rollback") == false)
+        #expect(newMethods.contains("thread/rollback"))
+        #expect(newMethods.filter { $0 == "review/start" }.count == 1)
+        #expect(newMethods.contains("turn/interrupt"))
+        #expect(routingProbe.events == [
+            .staged(
+                sourceAttemptID: routingProbe.sourceAttemptID,
+                recoveredAttemptID: routingProbe.recoveredAttemptID
+            ),
+            .discarded(
+                sourceAttemptID: routingProbe.sourceAttemptID,
+                recoveredAttemptID: routingProbe.recoveredAttemptID
+            ),
+        ])
+        #expect(await secondTransport.closeCallCountForTesting() == 1)
+        #expect(store.serverState == .stopped)
+        #expect(store.serverURL == nil)
+    }
+
     @Test func liveMCPOwnerStopDuringPreparationJoinsAndAllowsLaterStart() async throws {
         let homeURL = try temporaryHome()
         let preparationStarted = AsyncGate()
@@ -2898,6 +3225,88 @@ private actor CompletionFlag {
 
     func isCompleted() -> Bool {
         completed
+    }
+}
+
+private final class HostSequentialIDs: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String]
+
+    init(_ values: [String]) {
+        self.values = values
+    }
+
+    func next() -> String {
+        lock.withLock { values.removeFirst() }
+    }
+}
+
+@MainActor
+private final class HostRecoveryRoutingProbe {
+    private(set) var events: [CodexReviewLiveRecoveryRoutingEvent] = []
+
+    var sourceAttemptID: String {
+        guard case .staged(let sourceAttemptID, _) = events.first else {
+            return "missing-source"
+        }
+        return sourceAttemptID
+    }
+
+    var recoveredAttemptID: String {
+        guard case .staged(_, let recoveredAttemptID) = events.first else {
+            return "missing-recovered"
+        }
+        return recoveredAttemptID
+    }
+
+    func record(_ event: CodexReviewLiveRecoveryRoutingEvent) {
+        events.append(event)
+    }
+}
+
+private struct HostCompletedReviewTurnNotification: Encodable, Sendable {
+    private struct Turn: Encodable, Sendable {
+        struct Item: Encodable, Sendable {
+            var type = "exitedReviewMode"
+            var id = "final-review"
+            var review: String
+        }
+
+        var id: String
+        var items: [Item]
+        var itemsView = "full"
+        var status = "completed"
+        var error: String? = nil
+    }
+
+    private var threadId: String
+    private var turn: Turn
+
+    init(threadID: String, turnID: String, result: String) {
+        self.threadId = threadID
+        self.turn = Turn(
+            id: turnID,
+            items: [.init(review: result)]
+        )
+    }
+}
+
+private struct HostCompletedReviewItemNotification: Encodable, Sendable {
+    private struct Item: Encodable, Sendable {
+        var type = "exitedReviewMode"
+        var id = "final-review"
+        var review: String
+    }
+
+    private var threadId: String
+    private var turnId: String
+    private var item: Item
+    private var completedAtMs: Int64 = 0
+
+    init(threadID: String, turnID: String, result: String) {
+        self.threadId = threadID
+        self.turnId = turnID
+        self.item = Item(review: result)
     }
 }
 

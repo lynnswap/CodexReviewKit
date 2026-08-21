@@ -103,6 +103,7 @@ extension CodexReviewStore {
         reason: ReviewCancellation = .system(message: "Review Store closed."),
         failureLedger: ReviewCloseFailureLedger
     ) async -> ReviewCloseCancellationOutcome {
+        await reviewCancellationBarrierPreparationForTesting?()
         let activeJobIDs = activeReviewJobIDsInRegistrationOrder
         var failedJobIDs: Set<String> = []
         for jobID in activeJobIDs {

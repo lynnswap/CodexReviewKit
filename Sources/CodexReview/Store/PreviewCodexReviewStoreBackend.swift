@@ -143,7 +143,11 @@ package class PreviewCodexReviewStoreBackend: CodexReviewStoreBackend {
         throw CodexReviewAPI.Error.io(Self.previewUnavailableMessage)
     }
 
-    package func interruptReview(_: CodexReviewBackendModel.Review.Run, reason _: CodexReviewBackendModel.CancellationReason) async throws {}
+    package func interruptReview(
+        _: CodexReviewBackendModel.Review.Run,
+        admission _: ReviewStartAdmission,
+        reason _: CodexReviewBackendModel.CancellationReason
+    ) async throws {}
 
     package func forceCloseReviewConnection() async throws {}
 
@@ -160,6 +164,18 @@ package class PreviewCodexReviewStoreBackend: CodexReviewStoreBackend {
     ) async throws -> BackendReviewAttempt {
         throw CodexReviewAPI.Error.io(Self.previewUnavailableMessage)
     }
+
+    package func commitResumedReviewRecovery(
+        _: ReviewRecoveryHandoff,
+        recoveredRun _: CodexReviewBackendModel.Review.Run
+    ) throws {
+        throw CodexReviewAPI.Error.io(Self.previewUnavailableMessage)
+    }
+
+    package func discardResumedReviewRecovery(
+        _: ReviewRecoveryHandoff,
+        recoveredRun _: CodexReviewBackendModel.Review.Run
+    ) async throws {}
 
     package func cleanupReview(_: CodexReviewBackendModel.Review.Run) async throws {}
 
