@@ -6,6 +6,26 @@ import CodexReviewTesting
 @Suite("Codex review store", .serialized)
 @MainActor
 struct CodexReviewStoreCommandTests {
+    @Test func storeBackendForwardsExplicitAdmissionAndKeepsLegacyStartAvailable() async throws {
+        let reviewBackend = FakeCodexReviewBackend()
+        let storeBackend = TestingCodexReviewStoreBackend(reviewBackend: reviewBackend)
+        let request = CodexReviewBackendModel.Review.Start(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        )
+        let admission = ReviewStartAdmission()
+
+        let explicitAttempt = try await storeBackend.startReview(request, admission: admission)
+        #expect(await reviewBackend.receivedStartAdmission(admission))
+        #expect(await admission.currentPhase() == .active(explicitAttempt.run))
+
+        let legacyAttempt = try await storeBackend.startReview(request)
+        #expect(legacyAttempt.run == explicitAttempt.run)
+        let commands = await reviewBackend.recordedCommands()
+        #expect(commands.filter { if case .startReview = $0 { true } else { false } }.count == 2)
+    }
+
     @Test func reviewStartPublishesCompletedJobAndRetainsResult() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(

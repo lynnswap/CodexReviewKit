@@ -133,7 +133,10 @@ package class PreviewCodexReviewStoreBackend: CodexReviewStoreBackend {
         false
     }
 
-    package func startReview(_: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt {
+    package func startReview(
+        _: CodexReviewBackendModel.Review.Start,
+        admission _: ReviewStartAdmission
+    ) async throws -> BackendReviewAttempt {
         throw CodexReviewAPI.Error.io(Self.previewUnavailableMessage)
     }
 

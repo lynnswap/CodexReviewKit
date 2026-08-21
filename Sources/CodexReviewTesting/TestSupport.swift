@@ -184,6 +184,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     private var settings: CodexReviewBackendModel.Settings.Snapshot
     private var auth: CodexReviewBackendModel.Auth.Snapshot
     private var commands: [Command] = []
+    private var startAdmissionIdentities: [ObjectIdentifier] = []
     private var nextRun: CodexReviewBackendModel.Review.Run
     private var nextRecoveredRun: CodexReviewBackendModel.Review.Run?
     private var interruptFailureMessage: String?
@@ -468,6 +469,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         _ request: CodexReviewBackendModel.Review.Start,
         admission: ReviewStartAdmission
     ) async throws -> BackendReviewAttempt {
+        startAdmissionIdentities.append(ObjectIdentifier(admission))
         try await admission.admitThreadStartDispatch()
         commands.append(.startReview(request))
         let waiters = Array(startReviewWaiters.values)
@@ -497,6 +499,10 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         }
         try await admission.recordActiveRun(nextRun)
         return .init(run: nextRun, events: eventMailbox(for: nextRun))
+    }
+
+    package func receivedStartAdmission(_ admission: ReviewStartAdmission) -> Bool {
+        startAdmissionIdentities.contains(ObjectIdentifier(admission))
     }
 
     package func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws {
@@ -859,8 +865,11 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         false
     }
 
-    package func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt {
-        try await reviewBackend.startReview(request)
+    package func startReview(
+        _ request: CodexReviewBackendModel.Review.Start,
+        admission: ReviewStartAdmission
+    ) async throws -> BackendReviewAttempt {
+        try await reviewBackend.startReview(request, admission: admission)
     }
 
     package func interruptReview(
