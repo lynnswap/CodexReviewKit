@@ -233,8 +233,11 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
         false
     }
 
-    func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt {
-        try await backend.startReview(request)
+    func startReview(
+        _ request: CodexReviewBackendModel.Review.Start,
+        admission: ReviewStartAdmission
+    ) async throws -> BackendReviewAttempt {
+        try await backend.startReview(request, admission: admission)
     }
 
     func interruptReview(

@@ -1033,11 +1033,14 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         await closeIsolatedLoginRuntime(client: loginClient, codexHomeURL: loginCodexHomeURL)
     }
 
-    func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt {
+    func startReview(
+        _ request: CodexReviewBackendModel.Review.Start,
+        admission: ReviewStartAdmission
+    ) async throws -> BackendReviewAttempt {
         guard let appServerBackend else {
             throw CodexReviewAPI.Error.io("Review runtime is not running.")
         }
-        return try await appServerBackend.startReview(request)
+        return try await appServerBackend.startReview(request, admission: admission)
     }
 
     func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws {
