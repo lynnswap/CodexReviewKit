@@ -10,7 +10,10 @@ package protocol CodexReviewBackend: Sendable {
     func completeLogin(_ response: CodexReviewBackendModel.Login.Response) async throws -> CodexReviewBackendModel.Auth.Snapshot
     func logout(_ account: CodexReviewBackendModel.Account.ID) async throws -> CodexReviewBackendModel.Auth.Snapshot
 
-    func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt
+    func startReview(
+        _ request: CodexReviewBackendModel.Review.Start,
+        admission: ReviewStartAdmission
+    ) async throws -> BackendReviewAttempt
     func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws
     func beginReviewRecovery(
         _ run: CodexReviewBackendModel.Review.Run,
@@ -24,13 +27,26 @@ package protocol CodexReviewBackend: Sendable {
 }
 
 package enum ReviewRuntimeCloseFailure: LocalizedError, Equatable, Sendable {
+    case connection(String)
     case cleanup(String)
 
     package var errorDescription: String? {
         switch self {
+        case .connection(let message):
+            "App-server connection close failed: \(message)"
         case .cleanup(let message):
             "Review cleanup failed: \(message)"
         }
+    }
+}
+
+package extension CodexReviewBackend {
+    func startReview(
+        _ request: CodexReviewBackendModel.Review.Start
+    ) async throws -> BackendReviewAttempt {
+        // Legacy callers cannot retain an unresolved admission after this call returns.
+        // Remove this compatibility ownership once Store publishes one shared admission.
+        try await startReview(request, admission: ReviewStartAdmission.compatibility())
     }
 }
 

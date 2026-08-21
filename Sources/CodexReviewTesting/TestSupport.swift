@@ -464,12 +464,29 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         return auth
     }
 
-    package func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt {
+    package func startReview(
+        _ request: CodexReviewBackendModel.Review.Start,
+        admission: ReviewStartAdmission
+    ) async throws -> BackendReviewAttempt {
+        try await admission.admitThreadStartDispatch()
         commands.append(.startReview(request))
         let waiters = Array(startReviewWaiters.values)
         startReviewWaiters.removeAll(keepingCapacity: false)
         for waiter in waiters {
             waiter.resume()
+        }
+        let provisionalRun = CodexReviewBackendModel.Review.Run(
+            attemptID: nextRun.attemptID,
+            threadID: nextRun.threadID,
+            reviewThreadID: nextRun.threadID,
+            model: nextRun.model
+        )
+        try await admission.recordPreparedThread(provisionalRun)
+        do {
+            try await admission.admitReviewStartDispatch(for: provisionalRun)
+        } catch {
+            commands.append(.cleanupReview(provisionalRun))
+            throw error
         }
         if let startReviewGate {
             if startReviewGateIgnoresCancellation {
@@ -478,6 +495,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
                 await startReviewGate.wait()
             }
         }
+        try await admission.recordActiveRun(nextRun)
         return .init(run: nextRun, events: eventMailbox(for: nextRun))
     }
 
@@ -929,6 +947,8 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
     private enum QueuedResponse: Sendable {
         case success(Data)
         case failure(JSONRPC.Error)
+        case cancellation
+        case transportFailure(String)
     }
 
     private var responses: [String: [QueuedResponse]]
@@ -939,6 +959,7 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
     private var maxActiveByMethod: [String: Int] = [:]
     private var gatesByMethod: [String: RequestGate] = [:]
     private var oneShotGatesByMethod: [String: [RequestGate]] = [:]
+    private var beforeReturningResponseByMethod: [String: [@Sendable () async -> Void]] = [:]
     private var requestCountWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
     private var notificationStreamCountWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
     private var closed = false
@@ -963,6 +984,18 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
         responses[method, default: []].append(.failure(error))
     }
 
+    package func enqueueCancellation(for method: String) {
+        responses[method, default: []].append(.cancellation)
+    }
+
+    package func enqueueRawResponse(_ response: Data, for method: String) {
+        responses[method, default: []].append(.success(response))
+    }
+
+    package func enqueueTransportFailure(message: String, for method: String) {
+        responses[method, default: []].append(.transportFailure(message))
+    }
+
     package func hold(method: String, gate: AsyncGate) {
         gatesByMethod[method] = .init(gate: gate, ignoresCancellation: false)
     }
@@ -973,6 +1006,13 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
 
     package func holdNextIgnoringCancellation(method: String, gate: AsyncGate) {
         oneShotGatesByMethod[method, default: []].append(.init(gate: gate, ignoresCancellation: true))
+    }
+
+    package func beforeReturningNextResponse(
+        method: String,
+        _ operation: @escaping @Sendable () async -> Void
+    ) {
+        beforeReturningResponseByMethod[method, default: []].append(operation)
     }
 
     package func send(_ request: JSONRPC.Request) async throws -> Data {
@@ -990,6 +1030,9 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
         if let gate = dequeueOneShotGate(for: request.method) ?? gatesByMethod[request.method] {
             await gate.wait()
         }
+        if let operation = dequeueBeforeReturningResponse(for: request.method) {
+            await operation()
+        }
         activeByMethod[request.method, default: 1] -= 1
         if let queuedResponse {
             switch queuedResponse {
@@ -997,6 +1040,10 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
                 return data
             case .failure(let error):
                 throw error
+            case .cancellation:
+                throw CancellationError()
+            case .transportFailure(let message):
+                throw FakeCodexReviewBackendError(message: message)
             }
         }
         return try JSONEncoder().encode(EmptyResponse())
@@ -1018,6 +1065,19 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
         let gate = gates.removeFirst()
         oneShotGatesByMethod[method] = gates
         return gate
+    }
+
+    private func dequeueBeforeReturningResponse(
+        for method: String
+    ) -> (@Sendable () async -> Void)? {
+        guard var operations = beforeReturningResponseByMethod[method],
+              operations.isEmpty == false
+        else {
+            return nil
+        }
+        let operation = operations.removeFirst()
+        beforeReturningResponseByMethod[method] = operations
+        return operation
     }
 
     package func notify(_ notification: JSONRPC.Notification) async throws {
