@@ -9,16 +9,6 @@ import CodexReview
 
 private let logger = Logger(subsystem: "CodexReviewKit", category: "mcp-http")
 
-private enum TrackedHTTPStreamLifetime {
-    case open(ActiveRequestCompletion)
-    case finite(MCPHTTPNetworkResourceOwner.FiniteResponseOperation)
-}
-
-private struct TrackedHTTPResponse {
-    var response: HTTPResponse
-    var streamLifetime: TrackedHTTPStreamLifetime? = nil
-}
-
 package extension CodexReviewMCPHTTPServer {
     enum Error: Swift.Error, LocalizedError, Equatable, Sendable {
         case addressInUse(host: String, port: Int)
@@ -100,118 +90,6 @@ package extension CodexReviewMCPHTTPServer {
             components.port = boundPort ?? port
             components.path = endpoint
             return components.url!
-        }
-    }
-}
-
-private final class MCPHTTPAdmissionRegistry: @unchecked Sendable {
-    struct Admission: Sendable {
-        fileprivate let id: UUID
-    }
-
-    private struct AdmissionCountWaiter {
-        let targetCount: Int
-        let continuation: CheckedContinuation<Void, Never>
-    }
-
-    private let lock = NSLock()
-    private var acceptsRequests = false
-    private var admittedRequestIDs: Set<UUID> = []
-    private var drainWaiters: [CheckedContinuation<Void, Never>] = []
-    private var totalAdmissionCount = 0
-    private var admissionCountWaiters: [UUID: AdmissionCountWaiter] = [:]
-
-    func open() {
-        lock.lock()
-        precondition(
-            admittedRequestIDs.isEmpty,
-            "MCPHTTPAdmissionRegistry must drain one listener generation before reopening."
-        )
-        acceptsRequests = true
-        lock.unlock()
-    }
-
-    func close() {
-        lock.lock()
-        acceptsRequests = false
-        lock.unlock()
-    }
-
-    func admit() -> Admission? {
-        let waiters: [CheckedContinuation<Void, Never>]
-        lock.lock()
-        guard acceptsRequests else {
-            lock.unlock()
-            return nil
-        }
-        let admission = Admission(id: UUID())
-        admittedRequestIDs.insert(admission.id)
-        totalAdmissionCount += 1
-        let completedWaiterIDs = admissionCountWaiters.compactMap { id, waiter in
-            totalAdmissionCount >= waiter.targetCount ? id : nil
-        }
-        waiters = completedWaiterIDs.compactMap {
-            admissionCountWaiters.removeValue(forKey: $0)?.continuation
-        }
-        lock.unlock()
-        for waiter in waiters {
-            waiter.resume()
-        }
-        return admission
-    }
-
-    func finish(_ admission: Admission) {
-        let waiters: [CheckedContinuation<Void, Never>]
-        lock.lock()
-        precondition(
-            admittedRequestIDs.remove(admission.id) != nil,
-            "MCPHTTPAdmissionRegistry owns exactly one completion per admitted request."
-        )
-        if admittedRequestIDs.isEmpty {
-            waiters = drainWaiters
-            drainWaiters.removeAll(keepingCapacity: false)
-        } else {
-            waiters = []
-        }
-        lock.unlock()
-        for waiter in waiters {
-            waiter.resume()
-        }
-    }
-
-    func waitUntilDrained() async {
-        await withCheckedContinuation { continuation in
-            lock.lock()
-            if admittedRequestIDs.isEmpty {
-                lock.unlock()
-                continuation.resume()
-            } else {
-                drainWaiters.append(continuation)
-                lock.unlock()
-            }
-        }
-    }
-
-    func admissionCount() -> Int {
-        lock.lock()
-        let count = totalAdmissionCount
-        lock.unlock()
-        return count
-    }
-
-    func waitForAdmissionCount(_ targetCount: Int) async {
-        await withCheckedContinuation { continuation in
-            lock.lock()
-            if totalAdmissionCount >= targetCount {
-                lock.unlock()
-                continuation.resume()
-            } else {
-                admissionCountWaiters[UUID()] = .init(
-                    targetCount: targetCount,
-                    continuation: continuation
-                )
-                lock.unlock()
-            }
         }
     }
 }
@@ -389,14 +267,17 @@ package actor CodexReviewMCPHTTPServer {
 
     private final class StartingGeneration {
         let id: UInt64
+        let networkResources: MCPHTTPNetworkResourceOwner
         let task: Task<StartingGenerationResult, Never>
         var admissionClosed = false
 
         init(
             id: UInt64,
+            networkResources: MCPHTTPNetworkResourceOwner,
             task: Task<StartingGenerationResult, Never>
         ) {
             self.id = id
+            self.networkResources = networkResources
             self.task = task
         }
     }
@@ -407,6 +288,7 @@ package actor CodexReviewMCPHTTPServer {
         let eventLoopGroup: MultiThreadedEventLoopGroup
         let cleanupTask: Task<Void, Never>
         let boundURL: URL
+        let networkResources: MCPHTTPNetworkResourceOwner
         var listenerCloseTask: Task<Result<Void, ReviewLifecycleResourceFailure>, Never>?
 
         init(
@@ -414,13 +296,15 @@ package actor CodexReviewMCPHTTPServer {
             listener: any Channel,
             eventLoopGroup: MultiThreadedEventLoopGroup,
             cleanupTask: Task<Void, Never>,
-            boundURL: URL
+            boundURL: URL,
+            networkResources: MCPHTTPNetworkResourceOwner
         ) {
             self.id = id
             self.listener = listener
             self.eventLoopGroup = eventLoopGroup
             self.cleanupTask = cleanupTask
             self.boundURL = boundURL
+            self.networkResources = networkResources
         }
     }
 
@@ -435,12 +319,31 @@ package actor CodexReviewMCPHTTPServer {
         )
     }
 
-    private struct SessionContext {
-        let server: Server
+    private final class SessionContext: @unchecked Sendable {
+        let ordinal: UInt64
+        var server: Server?
         let transport: StatefulHTTPServerTransport
+        let foreignLifetimeWaiter: MCPProtocolServerForeignLifetimeWaiter
         let createdAt: Date
         var lastAccessedAt: Date
-        var activeRequestCount: Int
+        var semanticCloseTask: Task<Void, Never>?
+
+        init(
+            ordinal: UInt64,
+            server: Server,
+            transport: StatefulHTTPServerTransport,
+            foreignLifetimeWaiter: MCPProtocolServerForeignLifetimeWaiter,
+            createdAt: Date,
+            lastAccessedAt: Date
+        ) {
+            self.ordinal = ordinal
+            self.server = server
+            self.transport = transport
+            self.foreignLifetimeWaiter = foreignLifetimeWaiter
+            self.createdAt = createdAt
+            self.lastAccessedAt = lastAccessedAt
+            self.semanticCloseTask = nil
+        }
     }
 
     private struct FixedSessionIDGenerator: SessionIDGenerator {
@@ -456,15 +359,12 @@ package actor CodexReviewMCPHTTPServer {
     private var lifecycleState = LifecycleState.stopped([])
     private var nextGenerationID: UInt64 = 0
     private var sessions: [String: SessionContext] = [:]
+    private var nextSessionOrdinal: UInt64 = 0
     private var pendingCloseFailures: [ReviewLifecycleResourceFailure] = []
-    private let admissionRegistry = MCPHTTPAdmissionRegistry()
     private let handlerEntryGate = MCPHTTPHandlerEntryGate()
     private let startCompletionGate = MCPHTTPStartCompletionGate()
-    private let networkResources = MCPHTTPNetworkResourceOwner()
     private var admittedHandlerDrainDidBegin = false
     private var admittedHandlerDrainStartWaiters: [CheckedContinuation<Void, Never>] = []
-    private var finiteResponseDrainDidBegin = false
-    private var finiteResponseDrainStartWaiters: [CheckedContinuation<Void, Never>] = []
     private var eventLoopGroupShutdownCount = 0
     private var eventLoopGroupShutdownWaiters: [
         (count: Int, continuation: CheckedContinuation<Void, Never>)
@@ -532,11 +432,18 @@ package actor CodexReviewMCPHTTPServer {
                 try throwLifecycleFailures(failures)
                 nextGenerationID &+= 1
                 let id = nextGenerationID
-                networkResources.open()
+                let networkResources = MCPHTTPNetworkResourceOwner()
                 let task = Task<StartingGenerationResult, Never> { [self] in
-                    await performStartGeneration(id: id)
+                    await performStartGeneration(
+                        id: id,
+                        networkResources: networkResources
+                    )
                 }
-                let operation = StartingGeneration(id: id, task: task)
+                let operation = StartingGeneration(
+                    id: id,
+                    networkResources: networkResources,
+                    task: task
+                )
                 lifecycleState = .starting(operation)
                 let result = await task.value
                 try await publishStartResult(result, operation: operation)
@@ -558,25 +465,27 @@ package actor CodexReviewMCPHTTPServer {
         }
     }
 
-    private func performStartGeneration(id: UInt64) async -> StartingGenerationResult {
-        let admissionRegistry = admissionRegistry
+    private func performStartGeneration(
+        id: UInt64,
+        networkResources: MCPHTTPNetworkResourceOwner
+    ) async -> StartingGenerationResult {
         let handlerEntryGate = handlerEntryGate
-        let networkResources = networkResources
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 128)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
-                guard let childRegistration = networkResources.registerChild(channel) else {
+                guard let connection = networkResources.admitConnection(channel) else {
                     return channel.close(mode: .all)
                 }
-                return channel.pipeline.configureHTTPServerPipeline().flatMap {
+                return channel.pipeline.configureHTTPServerPipeline(
+                    withPipeliningAssistance: false
+                ).flatMap {
                     channel.pipeline.addHandler(CodexReviewMCPHTTPHandler(
                         server: self,
-                        admissionRegistry: admissionRegistry,
                         entryGate: handlerEntryGate,
                         networkResources: networkResources,
-                        childRegistration: childRegistration
+                        connection: connection
                     ))
                 }
             }
@@ -604,10 +513,11 @@ package actor CodexReviewMCPHTTPServer {
                 listener: channel,
                 eventLoopGroup: group,
                 cleanupTask: cleanupTask,
-                boundURL: configuration.url(boundPort: actualPort)
+                boundURL: configuration.url(boundPort: actualPort),
+                networkResources: networkResources
             ))
         } catch {
-            networkResources.closeChildAdmission()
+            networkResources.closeAdmission()
             var cleanupFailures: [ReviewLifecycleResourceFailure] = []
             if let listener {
                 do {
@@ -620,8 +530,8 @@ package actor CodexReviewMCPHTTPServer {
                     cleanupFailures.append(injected)
                 }
             }
-            await networkResources.closeAndDrainChildren()
-            await networkResources.closeTaskAdmissionCancelAndDrain()
+            let closingGeneration = networkResources.beginClosing(.serverStop)
+            await closingGeneration.waitUntilClosed()
             do {
                 try await group.shutdownGracefully()
             } catch {
@@ -669,9 +579,7 @@ package actor CodexReviewMCPHTTPServer {
                 throw CancellationError()
             }
             pendingCloseFailures.removeAll(keepingCapacity: false)
-            admissionRegistry.open()
             admittedHandlerDrainDidBegin = false
-            finiteResponseDrainDidBegin = false
             lifecycleState = .running(resources)
             logger.info(
                 "MCP Streamable HTTP server listening at \(resources.boundURL.absoluteString, privacy: .public)"
@@ -686,9 +594,6 @@ package actor CodexReviewMCPHTTPServer {
     }
 
     package func stop() async throws {
-        admissionRegistry.close()
-        networkResources.closeChildAdmission()
-        networkResources.closeTaskAdmission(kind: .domainHandler)
         let id: UInt64
         let task: Task<[ReviewLifecycleResourceFailure], Never>
         switch lifecycleState {
@@ -700,6 +605,7 @@ package actor CodexReviewMCPHTTPServer {
             task = currentTask
         case .running(let resources):
             id = resources.id
+            resources.networkResources.closeAdmission()
             let newTask = Task<[ReviewLifecycleResourceFailure], Never> { [self] in
                 await performStopGeneration(resources)
             }
@@ -732,6 +638,7 @@ package actor CodexReviewMCPHTTPServer {
     private func closeStartingAdmission(_ operation: StartingGeneration) {
         if operation.admissionClosed == false {
             operation.admissionClosed = true
+            operation.networkResources.closeAdmission()
             startCompletionGate.recordAdmissionClosed()
         }
         operation.task.cancel()
@@ -740,29 +647,46 @@ package actor CodexReviewMCPHTTPServer {
     private func performStopGeneration(
         _ resources: RunningGeneration
     ) async -> [ReviewLifecycleResourceFailure] {
-        admissionRegistry.close()
-        networkResources.closeChildAdmission()
-        networkResources.closeTaskAdmission(kind: .domainHandler)
+        resources.networkResources.closeAdmission()
         var failures = pendingCloseFailures
         pendingCloseFailures.removeAll(keepingCapacity: false)
-        if let listenerFailure = await closeListener(resources) {
-            if failures.contains(listenerFailure) == false {
-                failures.append(listenerFailure)
+        let listenerCloseTask = listenerCloseTask(resources)
+        resources.cleanupTask.cancel()
+
+        let closingSessions = sessions
+            .map { (id: $0.key, context: $0.value) }
+            .sorted { $0.context.ordinal < $1.context.ordinal }
+        sessions.removeAll(keepingCapacity: false)
+        let disconnectTasks = closingSessions.map { session in
+            Task<Void, Never> {
+                await session.context.transport.disconnect()
             }
         }
-        resources.cleanupTask.cancel()
-        await waitForAdmittedHandlers()
+        for task in disconnectTasks {
+            await task.value
+        }
+        let closingGeneration = resources.networkResources.beginClosing(.serverStop)
+
+        switch await listenerCloseTask.value {
+        case .success:
+            break
+        case .failure(let failure):
+            if failures.contains(failure) == false {
+                failures.append(failure)
+            }
+        }
         await resources.cleanupTask.value
-        await networkResources.waitForTasksDrained(kind: .domainHandler)
-        beginFiniteResponseDrain()
-        await networkResources.waitForTasksDrained(kind: .finiteResponse)
-        await closeAllSessions()
-        await networkResources.closeAndDrainChildren()
-        await networkResources.closeTaskAdmissionCancelAndDrain()
-        let resourceCounts = networkResources.resourceCountsForTesting()
+        await closingGeneration.waitUntilClosed()
+        for session in closingSessions {
+            await session.context.semanticCloseTask?.value
+        }
+        await stopProtocolServersAndReleaseForeignLifetimes(closingSessions)
+        for session in closingSessions {
+            await adapter.closeSession(session.id)
+        }
         precondition(
-            resourceCounts.children == 0 && resourceCounts.tasks == 0,
-            "MCPHTTPNetworkResourceOwner must drain children and Tasks before EventLoopGroup shutdown."
+            resources.networkResources.snapshot().isQuiescent,
+            "The MCP network generation owner must be quiescent before EventLoopGroup shutdown."
         )
         eventLoopGroupShutdownCount += 1
         let shutdownWaiters = eventLoopGroupShutdownWaiters.filter {
@@ -781,6 +705,23 @@ package actor CodexReviewMCPHTTPServer {
         }
         logger.info("MCP Streamable HTTP server stopped")
         return failures
+    }
+
+    private func stopProtocolServersAndReleaseForeignLifetimes(
+        _ sessions: [(id: String, context: SessionContext)]
+    ) async {
+        for session in sessions {
+            var server = session.context.server
+            if let current = server {
+                await current.waitUntilCompleted()
+                await current.stop()
+            }
+            session.context.server = nil
+            server = nil
+        }
+        for session in sessions {
+            await session.context.foreignLifetimeWaiter.wait()
+        }
     }
 
     private func finishStopIfCurrent(
@@ -807,15 +748,14 @@ package actor CodexReviewMCPHTTPServer {
     }
 
     package func closeAdmission() async {
-        admissionRegistry.close()
-        networkResources.closeChildAdmission()
-        networkResources.closeTaskAdmission(kind: .domainHandler)
         var resources: RunningGeneration?
         var startingOperation: StartingGeneration?
         switch lifecycleState {
         case .running(let running):
+            running.networkResources.closeAdmission()
             resources = running
         case .stopping(_, let stopping, _):
+            stopping?.networkResources.closeAdmission()
             resources = stopping
         case .starting(let operation):
             closeStartingAdmission(operation)
@@ -854,28 +794,32 @@ package actor CodexReviewMCPHTTPServer {
     private func closeListener(
         _ resources: RunningGeneration
     ) async -> ReviewLifecycleResourceFailure? {
-        let task: Task<Result<Void, ReviewLifecycleResourceFailure>, Never>
-        if let existing = resources.listenerCloseTask {
-            task = existing
-        } else {
-            let listener = resources.listener
-            let newTask = Task<Result<Void, ReviewLifecycleResourceFailure>, Never> {
-                do {
-                    try await listener.close()
-                    return .success(())
-                } catch {
-                    return .failure(.mcpServer(error.localizedDescription))
-                }
-            }
-            resources.listenerCloseTask = newTask
-            task = newTask
-        }
+        let task = listenerCloseTask(resources)
         switch await task.value {
         case .success:
             return nil
         case .failure(let failure):
             return failure
         }
+    }
+
+    private func listenerCloseTask(
+        _ resources: RunningGeneration
+    ) -> Task<Result<Void, ReviewLifecycleResourceFailure>, Never> {
+        if let existing = resources.listenerCloseTask {
+            return existing
+        }
+        let listener = resources.listener
+        let newTask = Task<Result<Void, ReviewLifecycleResourceFailure>, Never> {
+            do {
+                try await listener.close()
+                return .success(())
+            } catch {
+                return .failure(.mcpServer(error.localizedDescription))
+            }
+        }
+        resources.listenerCloseTask = newTask
+        return newTask
     }
 
     private func recordPendingListenerCloseFailureIfRunning(
@@ -898,77 +842,83 @@ package actor CodexReviewMCPHTTPServer {
         for waiter in startWaiters {
             waiter.resume()
         }
-        await admissionRegistry.waitUntilDrained()
-    }
-
-    private func beginFiniteResponseDrain() {
-        finiteResponseDrainDidBegin = true
-        let waiters = finiteResponseDrainStartWaiters
-        finiteResponseDrainStartWaiters.removeAll(keepingCapacity: false)
-        for waiter in waiters {
-            waiter.resume()
+        let networkResources: MCPHTTPNetworkResourceOwner?
+        switch lifecycleState {
+        case .starting(let operation):
+            networkResources = operation.networkResources
+        case .running(let resources), .stopping(_, let resources?, _):
+            networkResources = resources.networkResources
+        case .stopped, .stopping:
+            networkResources = nil
         }
-    }
-
-    package func handleHTTPRequest(_ request: HTTPRequest) async -> HTTPResponse {
-        guard let admission = admissionRegistry.admit() else {
-            return .error(
-                statusCode: 503,
-                .internalError("MCP server is not accepting requests.")
-            )
-        }
-        let trackedResponse = await performTrackedHTTPRequest(request)
-        if case .finite(let operation) = trackedResponse.streamLifetime {
-            operation.waiveWriter()
-        }
-        admissionRegistry.finish(admission)
-        return trackedResponse.response
+        await networkResources?.waitForAdmittedHandlingWorkToDrain()
     }
 
     fileprivate func handleAdmittedHTTPRequest(
-        _ request: HTTPRequest
-    ) async -> TrackedHTTPResponse {
-        await performTrackedHTTPRequest(request)
+        _ request: HTTPRequest,
+        operation: MCPHTTPNetworkResourceOwner.RequestOperation,
+        networkResources: MCPHTTPNetworkResourceOwner
+    ) async -> HTTPResponse {
+        await performHTTPRequest(
+            request,
+            operation: operation,
+            networkResources: networkResources
+        )
     }
 
-    private func performTrackedHTTPRequest(_ request: HTTPRequest) async -> TrackedHTTPResponse {
+    private func performHTTPRequest(
+        _ request: HTTPRequest,
+        operation: MCPHTTPNetworkResourceOwner.RequestOperation,
+        networkResources: MCPHTTPNetworkResourceOwner
+    ) async -> HTTPResponse {
         let sessionID = request.header(HTTPHeaderName.sessionID)
 
-        if let sessionID, var session = sessions[sessionID] {
-            session.lastAccessedAt = Date()
-            session.activeRequestCount += 1
-            sessions[sessionID] = session
-            let response = await session.transport.handleRequest(request)
-            let (trackedResponse, didFinishRequest) = trackActiveRequest(
-                response,
-                sessionID: sessionID,
-                method: request.method
-            )
-            if didFinishRequest, request.method.uppercased() == "DELETE", trackedResponse.response.statusCode == 200 {
-                await closeSession(sessionID)
+        if let sessionID, let session = sessions[sessionID] {
+            guard isCurrentGeneration(networkResources) else {
+                operation.beginClosing(.serverStop)
+                return .error(
+                    statusCode: 503,
+                    .internalError("MCP server is stopping.")
+                )
             }
-            return trackedResponse
+            operation.bindSession(sessionID)
+            session.lastAccessedAt = Date()
+            let response = await session.transport.handleRequest(request)
+            if request.method.uppercased() == "DELETE", response.statusCode == 200 {
+                scheduleSessionClose(
+                    sessionID,
+                    after: operation,
+                    expected: session
+                )
+            }
+            return response
         }
 
         if request.method.uppercased() == "POST",
            let body = request.body,
            Self.isInitializeRequest(body)
         {
-            return await createSessionAndHandle(request)
+            return await createSessionAndHandle(
+                request,
+                operation: operation,
+                networkResources: networkResources
+            )
         }
 
         if sessionID != nil {
-            return .init(response: .error(statusCode: 404, .invalidRequest("Not Found: Session not found or expired")))
+            return .error(statusCode: 404, .invalidRequest("Not Found: Session not found or expired"))
         }
-        return .init(
-            response: .error(
-                statusCode: 400,
-                .invalidRequest("Bad Request: Missing \(HTTPHeaderName.sessionID) header")
-            )
+        return .error(
+            statusCode: 400,
+            .invalidRequest("Bad Request: Missing \(HTTPHeaderName.sessionID) header")
         )
     }
 
-    private func createSessionAndHandle(_ request: HTTPRequest) async -> TrackedHTTPResponse {
+    private func createSessionAndHandle(
+        _ request: HTTPRequest,
+        operation: MCPHTTPNetworkResourceOwner.RequestOperation,
+        networkResources: MCPHTTPNetworkResourceOwner
+    ) async -> HTTPResponse {
         let sessionID = UUID().uuidString
         let clientSession = MCPClientSessionState()
         let transport = StatefulHTTPServerTransport(
@@ -976,6 +926,14 @@ package actor CodexReviewMCPHTTPServer {
             validationPipeline: makeValidationPipeline(),
             retryInterval: configuration.retryInterval
         )
+        let foreignLifetimeWaiter: MCPProtocolServerForeignLifetimeWaiter
+        var foreignLifetimeLease: MCPProtocolServerForeignLifetimeWaiter.Lease?
+        do {
+            let pair = MCPProtocolServerForeignLifetimeWaiter.makePair()
+            foreignLifetimeWaiter = pair.waiter
+            foreignLifetimeLease = pair.lease
+        }
+        var protocolServer: Server?
 
         do {
             let server = await makeMCPProtocolServer(
@@ -983,37 +941,62 @@ package actor CodexReviewMCPHTTPServer {
                 defaultSessionID: sessionID,
                 clientSession: clientSession,
                 boundedReviewWaitDuration: configuration.boundedReviewWaitDuration,
-                networkResources: networkResources
+                networkResources: networkResources,
+                foreignLifetimeLease: foreignLifetimeLease!
             )
+            foreignLifetimeLease = nil
+            protocolServer = server
+            guard isCurrentGeneration(networkResources) else {
+                throw CancellationError()
+            }
             try await server.start(transport: transport) { clientInfo, _ in
                 await clientSession.update(clientInfo: clientInfo)
             }
+            guard isCurrentGeneration(networkResources) else {
+                throw CancellationError()
+            }
+            operation.bindSession(sessionID)
+            nextSessionOrdinal &+= 1
             sessions[sessionID] = SessionContext(
+                ordinal: nextSessionOrdinal,
                 server: server,
                 transport: transport,
+                foreignLifetimeWaiter: foreignLifetimeWaiter,
                 createdAt: Date(),
-                lastAccessedAt: Date(),
-                activeRequestCount: 1
+                lastAccessedAt: Date()
             )
 
             let response = await transport.handleRequest(request)
-            let (trackedResponse, didFinishRequest) = trackActiveRequest(
-                response,
-                sessionID: sessionID,
-                method: request.method
-            )
-            if didFinishRequest, case .error = trackedResponse.response {
-                sessions.removeValue(forKey: sessionID)
-                await transport.disconnect()
+            guard isCurrentGeneration(networkResources) else {
+                if let session = sessions.removeValue(forKey: sessionID) {
+                    await physicallyCloseSession(session)
+                }
+                operation.beginClosing(.serverStop)
+                return .error(statusCode: 503, .internalError("MCP server is stopping."))
             }
-            return trackedResponse
-        } catch {
-            await transport.disconnect()
-            return .init(
-                response: .error(
-                    statusCode: 500,
-                    .internalError("Failed to create MCP session: \(error.localizedDescription)")
+            if case .error = response {
+                sessions.removeValue(forKey: sessionID)
+                await physicallyCloseSessionContext(
+                    server: &protocolServer,
+                    transport: transport,
+                    foreignLifetimeWaiter: foreignLifetimeWaiter
                 )
+            }
+            return response
+        } catch {
+            foreignLifetimeLease = nil
+            await physicallyCloseSessionContext(
+                server: &protocolServer,
+                transport: transport,
+                foreignLifetimeWaiter: foreignLifetimeWaiter
+            )
+            if error is CancellationError {
+                operation.beginClosing(.serverStop)
+                return .error(statusCode: 503, .internalError("MCP server is stopping."))
+            }
+            return .error(
+                statusCode: 500,
+                .internalError("Failed to create MCP session: \(error.localizedDescription)")
             )
         }
     }
@@ -1022,166 +1005,92 @@ package actor CodexReviewMCPHTTPServer {
         guard let session = sessions.removeValue(forKey: sessionID) else {
             return
         }
+        let matchingOperations = currentNetworkResources()?.snapshot().connections
+            .flatMap(\.operations)
+            .filter { $0.boundSessionID == sessionID } ?? []
         await session.transport.disconnect()
-        await session.server.waitUntilCompleted()
-        await session.server.stop()
+        for snapshot in matchingOperations {
+            currentNetworkResources()?.resolve(snapshot.token)?.beginClosing(.sessionClosed)
+        }
+        for snapshot in matchingOperations {
+            _ = await currentNetworkResources()?.resolve(snapshot.token)?.waitUntilClosed()
+        }
+        await physicallyCloseSession(session)
         await adapter.closeSession(sessionID)
         logger.info("Closed MCP HTTP session \(sessionID, privacy: .public)")
     }
 
-    private func trackActiveRequest(
-        _ response: HTTPResponse,
-        sessionID: String,
-        method: String
-    ) -> (response: TrackedHTTPResponse, didFinishRequest: Bool) {
-        switch response {
-        case .stream(let stream, let headers):
-            let networkResources = networkResources
-            let isFiniteResponseStream = method.uppercased() == "POST"
-            let completion = ActiveRequestCompletion {
-                guard let receipt = networkResources.registerTask(
-                    kind: .streamCompletion
-                ) else {
-                    return
-                }
-                let task = Task {
-                    await self.finishActiveRequest(sessionID: sessionID)
-                    receipt.finish()
-                }
-                receipt.install(task)
-            }
-            let finiteResponseOperation: MCPHTTPNetworkResourceOwner.FiniteResponseOperation?
-            if isFiniteResponseStream {
-                guard let operation = networkResources.registerFiniteResponseOperation() else {
-                    completion.finish()
-                    return (
-                        .init(response: .error(
-                            statusCode: 503,
-                            .internalError("MCP server is not accepting responses.")
-                        )),
-                        true
-                    )
-                }
-                finiteResponseOperation = operation
-            } else {
-                finiteResponseOperation = nil
-            }
-            let trackedStream = AsyncThrowingStream<Data, Swift.Error>(bufferingPolicy: .unbounded) { continuation in
-                let heartbeatTask = makeStreamHeartbeatTask(continuation: continuation)
-                if isFiniteResponseStream {
-                    guard let finiteResponseOperation else {
-                        heartbeatTask?.cancel()
-                        completion.finish()
-                        continuation.finish()
-                        return
-                    }
-                    let task = Task {
-                        defer {
-                            heartbeatTask?.cancel()
-                            completion.finish()
-                            finiteResponseOperation.finishSource()
-                        }
-                        do {
-                            for try await chunk in stream {
-                                continuation.yield(chunk)
-                            }
-                            continuation.finish()
-                        } catch {
-                            continuation.finish(throwing: error)
-                        }
-                    }
-                    finiteResponseOperation.installSource(task)
-                    continuation.onTermination = { _ in
-                        heartbeatTask?.cancel()
-                    }
-                } else {
-                    guard let receipt = networkResources.registerTask(
-                        kind: .streamBridge
-                    ) else {
-                        heartbeatTask?.cancel()
-                        completion.finish()
-                        continuation.finish()
-                        return
-                    }
-                    let task = Task {
-                        defer {
-                            heartbeatTask?.cancel()
-                            completion.finish()
-                            receipt.finish()
-                        }
-                        do {
-                            for try await chunk in stream {
-                                continuation.yield(chunk)
-                            }
-                            continuation.finish()
-                        } catch {
-                            continuation.finish(throwing: error)
-                        }
-                    }
-                    receipt.install(task)
-                    continuation.onTermination = { _ in
-                        heartbeatTask?.cancel()
-                        task.cancel()
-                        completion.finish()
-                    }
-                }
-            }
-            return (
-                .init(
-                    response: .stream(trackedStream, headers: headers),
-                    streamLifetime: finiteResponseOperation.map {
-                        .finite($0)
-                    } ?? .open(completion)
-                ),
-                false
+    private func scheduleSessionClose(
+        _ sessionID: String,
+        after operation: MCPHTTPNetworkResourceOwner.RequestOperation,
+        expected session: SessionContext
+    ) {
+        guard session.semanticCloseTask == nil else { return }
+        let sessionOrdinal = session.ordinal
+        let task = Task { [weak self] in
+            _ = await operation.waitUntilClosed()
+            await self?.completeScheduledSessionClose(
+                sessionID,
+                expectedOrdinal: sessionOrdinal
             )
-
-        default:
-            finishActiveRequest(sessionID: sessionID)
-            return (.init(response: response), true)
         }
+        session.semanticCloseTask = task
     }
 
-    private func finishActiveRequest(sessionID: String) {
-        if var session = sessions[sessionID] {
+    private func completeScheduledSessionClose(
+        _ sessionID: String,
+        expectedOrdinal: UInt64
+    ) async {
+        guard sessions[sessionID]?.ordinal == expectedOrdinal else { return }
+        await closeSession(sessionID)
+    }
+
+    fileprivate func requestOperationDidFinish(sessionID: String?) {
+        if let sessionID, let session = sessions[sessionID] {
             session.lastAccessedAt = Date()
-            session.activeRequestCount = max(0, session.activeRequestCount - 1)
-            sessions[sessionID] = session
         }
     }
 
-    private func makeStreamHeartbeatTask(
-        continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
-    ) -> Task<Void, Never>? {
-        guard let interval = configuration.streamHeartbeatInterval else {
-            return nil
-        }
-        guard let receipt = networkResources.registerTask(
-            kind: .streamHeartbeat
-        ) else {
-            return nil
-        }
-        let task = Task {
-            defer { receipt.finish() }
-            while Task.isCancelled == false {
-                do {
-                    try await Task.sleep(for: interval)
-                } catch {
-                    return
-                }
-                guard Task.isCancelled == false else {
-                    return
-                }
-                continuation.yield(Data(": keep-alive\n\n".utf8))
-            }
-        }
-        receipt.install(task)
-        return task
+    fileprivate var responseHeartbeatInterval: Duration? {
+        configuration.streamHeartbeatInterval
     }
 
-    private func closeAllSessions() async {
-        for sessionID in sessions.keys {
-            await closeSession(sessionID)
+    private func physicallyCloseSession(_ session: SessionContext) async {
+        var server = session.server
+        session.server = nil
+        await physicallyCloseSessionContext(
+            server: &server,
+            transport: session.transport,
+            foreignLifetimeWaiter: session.foreignLifetimeWaiter
+        )
+    }
+
+    private func physicallyCloseSessionContext(
+        server: inout Server?,
+        transport: StatefulHTTPServerTransport,
+        foreignLifetimeWaiter: MCPProtocolServerForeignLifetimeWaiter
+    ) async {
+        await transport.disconnect()
+        if let current = server {
+            await current.waitUntilCompleted()
+            await current.stop()
+        }
+        server = nil
+        await foreignLifetimeWaiter.wait()
+    }
+
+    private func isCurrentGeneration(
+        _ networkResources: MCPHTTPNetworkResourceOwner
+    ) -> Bool {
+        guard case .running(let resources) = lifecycleState else { return false }
+        return resources.networkResources === networkResources
+    }
+
+    private func currentNetworkResources() -> MCPHTTPNetworkResourceOwner? {
+        switch lifecycleState {
+        case .starting(let operation): operation.networkResources
+        case .running(let resources), .stopping(_, let resources?, _): resources.networkResources
+        case .stopped, .stopping: nil
         }
     }
 
@@ -1200,7 +1109,8 @@ package actor CodexReviewMCPHTTPServer {
     }
 
     package func sessionActiveRequestCountForTesting(sessionID: String) -> Int? {
-        sessions[sessionID]?.activeRequestCount
+        guard sessions[sessionID] != nil else { return nil }
+        return currentNetworkResources()?.liveOperationCount(boundTo: sessionID) ?? 0
     }
 
     package func listenerIsOpenForTesting() -> Bool {
@@ -1211,16 +1121,6 @@ package actor CodexReviewMCPHTTPServer {
         case .stopped, .starting, .stopping:
             false
         }
-    }
-
-    package func admittedNetworkRequestCountForTesting() -> Int {
-        admissionRegistry.admissionCount()
-    }
-
-    package func waitForAdmittedNetworkRequestCountForTesting(
-        _ count: Int
-    ) async {
-        await admissionRegistry.waitForAdmissionCount(count)
     }
 
     package func holdNextNetworkHandlerEntryForTesting() async {
@@ -1268,91 +1168,18 @@ package actor CodexReviewMCPHTTPServer {
         }
     }
 
-    package func waitForFiniteResponseDrainToBeginForTesting() async {
-        if finiteResponseDrainDidBegin {
-            return
+    func networkSnapshotForTesting() -> MCPHTTPNetworkResourceOwner.Snapshot {
+        currentNetworkResources()?.snapshot()
+            ?? .init(revision: 0, phase: .closed, connections: [])
+    }
+
+    func nextNetworkSnapshotForTesting(
+        after revision: UInt64
+    ) async -> MCPHTTPNetworkResourceOwner.Snapshot {
+        guard let resources = currentNetworkResources() else {
+            return .init(revision: revision &+ 1, phase: .closed, connections: [])
         }
-        await withCheckedContinuation { continuation in
-            if finiteResponseDrainDidBegin {
-                continuation.resume()
-            } else {
-                finiteResponseDrainStartWaiters.append(continuation)
-            }
-        }
-    }
-
-    package func waitForFiniteResponsesToDrainForTesting() async {
-        await networkResources.waitForTasksDrained(kind: .finiteResponse)
-    }
-
-    package func networkResourceCountsForTesting() -> (children: Int, tasks: Int) {
-        networkResources.resourceCountsForTesting()
-    }
-
-    package func networkTaskRegistrationCountForTesting(
-        streamWriter: Bool
-    ) -> Int {
-        networkResources.taskCountForTesting(
-            kind: streamWriter ? .streamWriter : .response
-        )
-    }
-
-    package func waitForNetworkTaskRegistrationCountForTesting(
-        streamWriter: Bool,
-        count: Int
-    ) async {
-        await networkResources.waitForTaskCountForTesting(
-            kind: streamWriter ? .streamWriter : .response,
-            count: count
-        )
-    }
-
-    package func holdNextNetworkTaskCompletionForTesting(
-        streamWriter: Bool
-    ) {
-        networkResources.holdNextTaskCompletionForTesting(
-            kind: streamWriter ? .streamWriter : .response
-        )
-    }
-
-    package func holdNextFiniteResponseCompletionForTesting() {
-        networkResources.holdNextTaskCompletionForTesting(
-            kind: .finiteResponse
-        )
-    }
-
-    package func finiteResponseCompletionIsHeldForTesting() -> Bool {
-        networkResources.hasHeldTaskCompletionForTesting()
-    }
-
-    package func waitForHeldNetworkTaskCompletionForTesting() async {
-        await networkResources.waitForHeldTaskCompletionForTesting()
-    }
-
-    package func releaseHeldNetworkTaskCompletionForTesting() {
-        networkResources.releaseHeldTaskCompletionForTesting()
-    }
-
-    package func childChannelRegistrationCountForTesting() -> Int {
-        networkResources.childCountForTesting()
-    }
-
-    package func waitForChildChannelRegistrationCountForTesting(
-        _ count: Int
-    ) async {
-        await networkResources.waitForChildCountForTesting(count)
-    }
-
-    package func holdNextChildCloseAcknowledgementForTesting() {
-        networkResources.holdNextChildCloseAcknowledgementForTesting()
-    }
-
-    package func waitForHeldChildCloseAcknowledgementForTesting() async {
-        await networkResources.waitForHeldChildCloseAcknowledgementForTesting()
-    }
-
-    package func releaseHeldChildCloseAcknowledgementForTesting() {
-        networkResources.releaseHeldChildCloseAcknowledgementForTesting()
+        return await resources.nextSnapshot(after: revision)
     }
 
     package func eventLoopGroupShutdownCountForTesting() -> Int {
@@ -1380,18 +1207,17 @@ package actor CodexReviewMCPHTTPServer {
             guard now.timeIntervalSince(context.lastAccessedAt) > configuration.sessionTimeout else {
                 continue
             }
-            if context.activeRequestCount > 0 {
+            if currentNetworkResources()?.liveOperationCount(boundTo: sessionID) ?? 0 > 0 {
                 continue
             }
             if await adapter.hasActiveReviews(in: sessionID) {
-                if var session = sessions[sessionID] {
+                if let session = sessions[sessionID] {
                     session.lastAccessedAt = Date()
-                    sessions[sessionID] = session
                 }
                 continue
             }
             if let current = sessions[sessionID],
-               current.activeRequestCount == 0,
+               currentNetworkResources()?.liveOperationCount(boundTo: sessionID) ?? 0 == 0,
                now.timeIntervalSince(current.lastAccessedAt) > configuration.sessionTimeout
             {
                 expiredSessionIDs.append(sessionID)
@@ -1478,127 +1304,6 @@ package actor CodexReviewMCPHTTPServer {
     }
 }
 
-private final class ActiveRequestCompletion: @unchecked Sendable {
-    private let lock = NSLock()
-    private let onFinish: @Sendable () -> Void
-    private var didFinish = false
-
-    init(onFinish: @escaping @Sendable () -> Void) {
-        self.onFinish = onFinish
-    }
-
-    func finish() {
-        lock.lock()
-        if didFinish {
-            lock.unlock()
-            return
-        }
-        didFinish = true
-        lock.unlock()
-        onFinish()
-    }
-}
-
-private final class MCPHTTPStreamOwnership: @unchecked Sendable {
-    private enum TerminationOwner {
-        case active
-        case channel
-        case task
-    }
-
-    let id = UUID()
-    let receipt: MCPHTTPNetworkResourceOwner.TaskReceipt
-    let completion: ActiveRequestCompletion?
-    private let lock = NSLock()
-    private var terminationOwner = TerminationOwner.active
-
-    init(
-        receipt: MCPHTTPNetworkResourceOwner.TaskReceipt,
-        completion: ActiveRequestCompletion?
-    ) {
-        self.receipt = receipt
-        self.completion = completion
-    }
-
-    func install(_ task: Task<Void, Never>) {
-        receipt.install(task)
-    }
-
-    func terminateFromChannel() {
-        lock.lock()
-        guard terminationOwner == .active else {
-            lock.unlock()
-            return
-        }
-        terminationOwner = .channel
-        lock.unlock()
-        completion?.finish()
-        receipt.cancel()
-    }
-
-    func claimTaskTermination() -> Bool {
-        lock.lock()
-        guard terminationOwner == .active else {
-            lock.unlock()
-            return false
-        }
-        terminationOwner = .task
-        lock.unlock()
-        return true
-    }
-
-    func finishTask() {
-        receipt.finish()
-    }
-}
-
-private enum MCPHTTPActiveStreamOwnership: Sendable {
-    case open(MCPHTTPStreamOwnership)
-    case finite(MCPHTTPNetworkResourceOwner.FiniteResponseOperation)
-
-    var id: UUID {
-        switch self {
-        case .open(let ownership): ownership.id
-        case .finite(let operation): operation.id
-        }
-    }
-
-    var completion: ActiveRequestCompletion? {
-        switch self {
-        case .open(let ownership): ownership.completion
-        case .finite: nil
-        }
-    }
-
-    func install(_ task: Task<Void, Never>) {
-        switch self {
-        case .open(let ownership): ownership.install(task)
-        case .finite(let operation): operation.installWriter(task)
-        }
-    }
-
-    func terminateFromChannel() {
-        switch self {
-        case .open(let ownership): ownership.terminateFromChannel()
-        case .finite(let operation): operation.terminateWriterFromChannel()
-        }
-    }
-
-    func claimTaskTermination() -> Bool {
-        switch self {
-        case .open(let ownership): ownership.claimTaskTermination()
-        case .finite(let operation): operation.claimWriterTaskTermination()
-        }
-    }
-
-    func finishTask() {
-        switch self {
-        case .open(let ownership): ownership.finishTask()
-        case .finite(let operation): operation.finishWriter()
-        }
-    }
-}
-
 private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
@@ -1629,26 +1334,29 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
         var bodyBuffer: ByteBuffer
     }
 
+    private enum WriterEvent: Sendable {
+        case body(Data)
+        case heartbeat
+        case sourceFinished
+        case sourceFailed(String)
+    }
+
     private let server: CodexReviewMCPHTTPServer
-    private let admissionRegistry: MCPHTTPAdmissionRegistry
     private let entryGate: MCPHTTPHandlerEntryGate
     private let networkResources: MCPHTTPNetworkResourceOwner
-    private let childRegistration: MCPHTTPNetworkResourceOwner.ChildRegistration
+    private let connection: MCPHTTPNetworkResourceOwner.Connection
     private var requestState: RequestState?
-    private var activeStreamOwnership: MCPHTTPActiveStreamOwnership?
 
     init(
         server: CodexReviewMCPHTTPServer,
-        admissionRegistry: MCPHTTPAdmissionRegistry,
         entryGate: MCPHTTPHandlerEntryGate,
         networkResources: MCPHTTPNetworkResourceOwner,
-        childRegistration: MCPHTTPNetworkResourceOwner.ChildRegistration
+        connection: MCPHTTPNetworkResourceOwner.Connection
     ) {
         self.server = server
-        self.admissionRegistry = admissionRegistry
         self.entryGate = entryGate
         self.networkResources = networkResources
-        self.childRegistration = childRegistration
+        self.connection = connection
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -1666,18 +1374,10 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
                 return
             }
             requestState = nil
-            guard let admission = admissionRegistry.admit() else {
-                writeAdmissionClosedResponse(
-                    version: state.head.version,
-                    context: context
-                )
-                return
-            }
-            guard let taskReceipt = networkResources.registerTask(
-                kind: .response,
-                child: childRegistration
-            ) else {
-                admissionRegistry.finish(admission)
+            let metadata = makeRequestMetadata(from: state)
+            guard let operation = connection.admitRequest(metadata: metadata),
+                  let httpReservation = operation.beginHTTPHandling()
+            else {
                 writeAdmissionClosedResponse(
                     version: state.head.version,
                     context: context
@@ -1686,20 +1386,18 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
             }
             nonisolated(unsafe) let context = context
             let task = Task {
-                defer {
-                    admissionRegistry.finish(admission)
-                    taskReceipt.finish()
-                }
+                defer { httpReservation.acknowledge() }
                 await entryGate.waitIfNeeded()
                 guard Task.isCancelled == false else {
                     return
                 }
                 await handleRequest(
                     state: state,
+                    operation: operation,
                     context: context
                 )
             }
-            taskReceipt.install(task)
+            httpReservation.install(task)
         }
     }
 
@@ -1709,15 +1407,13 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
     }
 
     func channelInactive(context: ChannelHandlerContext) {
-        finishActiveStream()
-        networkResources.cancelTasks(for: childRegistration)
+        connection.beginClosing(.peerClosed)
         context.fireChannelInactive()
     }
 
     func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
         if case ChannelEvent.inputClosed = event {
-            finishActiveStream()
-            networkResources.cancelTasks(for: childRegistration)
+            connection.beginClosing(.peerClosed)
             context.close(promise: nil)
             return
         }
@@ -1725,35 +1421,42 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
     }
 
     func errorCaught(context: ChannelHandlerContext, error: any Error) {
-        finishActiveStream()
-        networkResources.cancelTasks(for: childRegistration)
+        connection.beginClosing(.transportFailure(error.localizedDescription))
         context.close(promise: nil)
-    }
-
-    private func finishActiveStream() {
-        activeStreamOwnership?.terminateFromChannel()
-        activeStreamOwnership = nil
     }
 
     private func handleRequest(
         state: RequestState,
+        operation: MCPHTTPNetworkResourceOwner.RequestOperation,
         context: ChannelHandlerContext
     ) async {
         let head = state.head
         let path = head.uri.split(separator: "?").first.map(String.init) ?? head.uri
         let endpoint = await server.endpoint
+        let response: HTTPResponse
         guard path == endpoint else {
-            await writeResponse(
-                .init(response: .error(statusCode: 404, .invalidRequest("Not Found"))),
+            response = .error(statusCode: 404, .invalidRequest("Not Found"))
+            await prepareAndQueueResponse(
+                response,
+                operation: operation,
                 version: head.version,
                 context: context
             )
             return
         }
 
-        let request = makeHTTPRequest(from: state)
-        let response = await server.handleAdmittedHTTPRequest(request)
-        await writeResponse(response, version: head.version, context: context)
+        let request = makeHTTPRequest(from: state, token: operation.token)
+        response = await server.handleAdmittedHTTPRequest(
+            request,
+            operation: operation,
+            networkResources: networkResources
+        )
+        await prepareAndQueueResponse(
+            response,
+            operation: operation,
+            version: head.version,
+            context: context
+        )
     }
 
     private func writeAdmissionClosedResponse(
@@ -1787,9 +1490,17 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
         context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
     }
 
-    private func makeHTTPRequest(from state: RequestState) -> HTTPRequest {
+    private func makeHTTPRequest(
+        from state: RequestState,
+        token: MCPHTTPNetworkResourceOwner.OperationToken
+    ) -> HTTPRequest {
         var headers: [String: String] = [:]
         for (name, value) in state.head.headers {
+            guard name.caseInsensitiveCompare(
+                MCPHTTPNetworkResourceOwner.operationTokenHeaderName
+            ) != .orderedSame else {
+                continue
+            }
             if let existing = headers[name] {
                 headers[name] = "\(existing), \(value)"
             } else {
@@ -1805,6 +1516,7 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
         } else {
             body = nil
         }
+        headers[MCPHTTPNetworkResourceOwner.operationTokenHeaderName] = token.headerValue
 
         let path = String(state.head.uri.split(separator: "?").first ?? Substring(state.head.uri))
         return HTTPRequest(
@@ -1815,152 +1527,206 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
         )
     }
 
-    private func writeResponse(
-        _ trackedResponse: TrackedHTTPResponse,
+    private func makeRequestMetadata(
+        from state: RequestState
+    ) -> MCPHTTPNetworkResourceOwner.RequestMetadata {
+        let path = String(state.head.uri.split(separator: "?").first ?? Substring(state.head.uri))
+        let jsonRPCID: String?
+        if state.bodyBuffer.readableBytes > 0,
+           let bytes = state.bodyBuffer.getBytes(at: 0, length: state.bodyBuffer.readableBytes),
+           let object = try? JSONSerialization.jsonObject(with: Data(bytes)) as? [String: Any],
+           let id = object["id"]
+        {
+            if let string = id as? String {
+                jsonRPCID = string
+            } else if let number = id as? NSNumber {
+                jsonRPCID = number.stringValue
+            } else {
+                jsonRPCID = nil
+            }
+        } else {
+            jsonRPCID = nil
+        }
+        return .init(
+            method: state.head.method.rawValue,
+            path: path,
+            jsonRPCID: jsonRPCID
+        )
+    }
+
+    private func prepareAndQueueResponse(
+        _ response: HTTPResponse,
+        operation: MCPHTTPNetworkResourceOwner.RequestOperation,
         version: HTTPVersion,
         context: ChannelHandlerContext
     ) async {
+        guard operation.beginResponding() else { return }
+        let preparedResponse: HTTPResponse
+        switch response {
+        case .stream(let source, let headers):
+            guard let sourceReservation = operation.bindResponseSource() else {
+                operation.beginClosing(.transportFailure("Response source admission was closed."))
+                return
+            }
+            let tracked = AsyncThrowingStream<Data, Swift.Error>(bufferingPolicy: .unbounded) { continuation in
+                let sourceTask = Task {
+                    do {
+                        for try await chunk in source {
+                            try Task.checkCancellation()
+                            continuation.yield(chunk)
+                        }
+                        continuation.finish()
+                        sourceReservation.acknowledge()
+                    } catch is CancellationError {
+                        continuation.finish()
+                        sourceReservation.acknowledge()
+                    } catch {
+                        continuation.finish(throwing: error)
+                        sourceReservation.acknowledge(.failed(error.localizedDescription))
+                    }
+                }
+                sourceReservation.install(sourceTask)
+                continuation.onTermination = { _ in sourceTask.cancel() }
+            }
+            preparedResponse = .stream(tracked, headers: headers)
+        default:
+            operation.markResponseSourceNotRequired()
+            preparedResponse = response
+        }
+
+        guard await connection.supplyResponse(for: operation),
+              let writerReservation = operation.bindWriter()
+        else { return }
         nonisolated(unsafe) let context = context
+        let heartbeatInterval = await server.responseHeartbeatInterval
+        let writerTask = Task {
+            let completion = await self.writeResponse(
+                preparedResponse,
+                operation: operation,
+                version: version,
+                context: context,
+                heartbeatInterval: heartbeatInterval
+            )
+            switch completion {
+            case .responded:
+                operation.acknowledgeResponseEnd()
+                writerReservation.acknowledge()
+            case .cancelled:
+                writerReservation.acknowledge()
+            case .failed(let message):
+                writerReservation.acknowledge(.failed(message))
+            }
+            await self.server.requestOperationDidFinish(
+                sessionID: operation.snapshot().boundSessionID
+            )
+        }
+        writerReservation.install(writerTask)
+    }
+
+    private enum WriterCompletion {
+        case responded
+        case cancelled
+        case failed(String)
+    }
+
+    private func writeResponse(
+        _ response: HTTPResponse,
+        operation: MCPHTTPNetworkResourceOwner.RequestOperation,
+        version: HTTPVersion,
+        context: ChannelHandlerContext,
+        heartbeatInterval: Duration?
+    ) async -> WriterCompletion {
         let eventLoop = context.eventLoop
-        let response = trackedResponse.response
         let status = HTTPResponseStatus(statusCode: response.statusCode)
         let headers = response.headers
+        var head = HTTPResponseHead(version: version, status: status)
+        for (name, value) in headers { head.headers.add(name: name, value: value) }
 
         switch response {
         case .stream(let stream, _):
-            let ownership: MCPHTTPActiveStreamOwnership
-            switch trackedResponse.streamLifetime {
-            case .finite(let operation):
-                guard operation.claimWriter() else {
-                    return
-                }
-                ownership = .finite(operation)
-            case .open(let completion):
-                guard let streamReceipt = networkResources.registerTask(
-                    kind: .streamWriter,
-                    child: childRegistration
-                ) else {
-                    completion.finish()
-                    return
-                }
-                ownership = .open(MCPHTTPStreamOwnership(
-                    receipt: streamReceipt,
-                    completion: completion
-                ))
-            case nil:
-                return
-            }
-            let registration = eventLoop.makePromise(of: Void.self)
-            eventLoop.execute {
-                guard context.channel.isActive else {
-                    ownership.completion?.finish()
-                    ownership.finishTask()
-                    registration.succeed(())
-                    return
-                }
-                let streamTask = Task {
-                    var head = HTTPResponseHead(version: version, status: status)
-                    for (name, value) in headers {
-                        head.headers.add(name: name, value: value)
-                    }
-
-                    var iterator = stream.makeAsyncIterator()
-                    do {
-                        try Task.checkCancellation()
-                        try await self.writeResponsePart(
-                            .head(head),
-                            context: context,
-                            eventLoop: eventLoop
-                        )
-                        while let chunk = try await iterator.next() {
-                            try Task.checkCancellation()
-                            try await self.writeResponseBody(
-                                chunk,
-                                context: context,
-                                eventLoop: eventLoop
-                            )
+            do {
+                try await writeResponsePart(.head(head), context: context, eventLoop: eventLoop)
+                let events = AsyncStream<WriterEvent>.makeStream(bufferingPolicy: .unbounded)
+                await withTaskGroup(of: Void.self) { group in
+                    group.addTask {
+                        do {
+                            for try await chunk in stream {
+                                try Task.checkCancellation()
+                                events.continuation.yield(.body(chunk))
+                            }
+                            events.continuation.yield(.sourceFinished)
+                        } catch is CancellationError {
+                            events.continuation.yield(.sourceFinished)
+                        } catch {
+                            events.continuation.yield(.sourceFailed(error.localizedDescription))
                         }
-                    } catch is CancellationError {
-                    } catch {
-                        logger.error("MCP SSE stream failed: \(error.localizedDescription, privacy: .public)")
+                    }
+                    if let heartbeatInterval {
+                        group.addTask {
+                            while Task.isCancelled == false {
+                                do { try await Task.sleep(for: heartbeatInterval) }
+                                catch { return }
+                                guard Task.isCancelled == false else { return }
+                                events.continuation.yield(.heartbeat)
+                            }
+                        }
                     }
 
-                    if Task.isCancelled == false {
-                        try? await self.writeResponsePart(
-                            .end(nil),
-                            context: context,
-                            eventLoop: eventLoop
-                        )
+                    eventLoopLoop: for await event in events.stream {
+                        switch event {
+                        case .body(let data):
+                            do { try await writeResponseBody(data, context: context, eventLoop: eventLoop) }
+                            catch {
+                                operation.beginClosing(.transportFailure(error.localizedDescription))
+                                break eventLoopLoop
+                            }
+                        case .heartbeat:
+                            do {
+                                try await writeResponseBody(
+                                    Data(": keep-alive\n\n".utf8),
+                                    context: context,
+                                    eventLoop: eventLoop
+                                )
+                            } catch {
+                                operation.beginClosing(.transportFailure(error.localizedDescription))
+                                break eventLoopLoop
+                            }
+                        case .sourceFinished:
+                            break eventLoopLoop
+                        case .sourceFailed(let message):
+                            logger.error("MCP SSE stream failed: \(message, privacy: .public)")
+                            operation.beginClosing(.transportFailure(message))
+                            break eventLoopLoop
+                        }
                     }
-                    await self.finishStreamTask(
-                        ownership,
-                        context: context,
-                        eventLoop: eventLoop
-                    )
+                    group.cancelAll()
+                    events.continuation.finish()
                 }
-                context.channel.closeFuture.whenComplete { _ in
-                    ownership.terminateFromChannel()
+                try await writeResponsePart(.end(nil), context: context, eventLoop: eventLoop)
+                return .responded
+            } catch is CancellationError {
+                do {
+                    try await writeResponsePart(.end(nil), context: context, eventLoop: eventLoop)
+                    return .responded
+                } catch {
+                    return .cancelled
                 }
-                self.activeStreamOwnership?.terminateFromChannel()
-                self.activeStreamOwnership = ownership
-                ownership.install(streamTask)
-                context.read()
-                registration.succeed(())
+            } catch {
+                return .failed(error.localizedDescription)
             }
-            try? await registration.futureResult.get()
 
         default:
             let body = response.bodyData
-            var head = HTTPResponseHead(version: version, status: status)
-            for (name, value) in headers {
-                head.headers.add(name: name, value: value)
-            }
-            if let body {
-                head.headers.add(name: "Content-Length", value: "\(body.count)")
-            }
+            if let body { head.headers.add(name: "Content-Length", value: "\(body.count)") }
             do {
-                try await writeResponsePart(
-                    .head(head),
-                    context: context,
-                    eventLoop: eventLoop
-                )
-                if let body {
-                    try await writeResponseBody(
-                        body,
-                        context: context,
-                        eventLoop: eventLoop
-                    )
-                }
-                try await writeResponsePart(
-                    .end(nil),
-                    context: context,
-                    eventLoop: eventLoop
-                )
+                try await writeResponsePart(.head(head), context: context, eventLoop: eventLoop)
+                if let body { try await writeResponseBody(body, context: context, eventLoop: eventLoop) }
+                try await writeResponsePart(.end(nil), context: context, eventLoop: eventLoop)
+                return .responded
             } catch {
-                logger.debug(
-                    "MCP HTTP response ended during connection shutdown: \(error.localizedDescription, privacy: .public)"
-                )
+                return .failed(error.localizedDescription)
             }
         }
-    }
-
-    private func finishStreamTask(
-        _ ownership: MCPHTTPActiveStreamOwnership,
-        context: ChannelHandlerContext,
-        eventLoop: any EventLoop
-    ) async {
-        if ownership.claimTaskTermination() {
-            let completion = eventLoop.makePromise(of: Void.self)
-            eventLoop.execute {
-                if self.activeStreamOwnership?.id == ownership.id {
-                    self.activeStreamOwnership = nil
-                }
-                ownership.completion?.finish()
-                completion.succeed(())
-            }
-            try? await completion.futureResult.get()
-        }
-        ownership.finishTask()
     }
 
     private func writeResponsePart(

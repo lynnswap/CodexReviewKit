@@ -1,6 +1,79 @@
 import Foundation
 import MCP
+import OSLog
 import CodexReview
+
+private let protocolServerLogger = Logger(
+    subsystem: "CodexReviewKit",
+    category: "mcp-protocol"
+)
+
+final class MCPProtocolServerForeignLifetimeWaiter: @unchecked Sendable {
+    final class Lease: @unchecked Sendable {
+        private let state: State
+
+        fileprivate init(state: State) {
+            self.state = state
+        }
+
+        deinit {
+            state.finish()
+        }
+    }
+
+    fileprivate final class State: @unchecked Sendable {
+        private let lock = NSLock()
+        private var didFinish = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+
+        func finish() {
+            let waiters: [CheckedContinuation<Void, Never>]
+            lock.lock()
+            guard didFinish == false else {
+                lock.unlock()
+                return
+            }
+            didFinish = true
+            waiters = self.waiters
+            self.waiters.removeAll(keepingCapacity: false)
+            lock.unlock()
+            for waiter in waiters {
+                waiter.resume()
+            }
+        }
+
+        func wait() async {
+            await withCheckedContinuation { continuation in
+                lock.lock()
+                if didFinish {
+                    lock.unlock()
+                    continuation.resume()
+                } else {
+                    waiters.append(continuation)
+                    lock.unlock()
+                }
+            }
+        }
+    }
+
+    private let state: State
+
+    private init(state: State) {
+        self.state = state
+    }
+
+    static func makePair() -> (lease: Lease, waiter: MCPProtocolServerForeignLifetimeWaiter) {
+        let state = State()
+        return (
+            Lease(state: state),
+            MCPProtocolServerForeignLifetimeWaiter(state: state)
+        )
+    }
+
+    func wait() async {
+        await state.wait()
+    }
+}
 
 package actor MCPClientSessionState {
     private var clientInfo: Client.Info?
@@ -35,7 +108,8 @@ func makeMCPProtocolServer(
     defaultSessionID: String? = nil,
     clientSession: MCPClientSessionState = .init(),
     boundedReviewWaitDuration: Duration = .seconds(540),
-    networkResources: MCPHTTPNetworkResourceOwner
+    networkResources: MCPHTTPNetworkResourceOwner,
+    foreignLifetimeLease: MCPProtocolServerForeignLifetimeWaiter.Lease
 ) async -> Server {
     let server = Server(
         name: "codex_review",
@@ -46,8 +120,11 @@ func makeMCPProtocolServer(
         )
     )
 
-    await server.withMethodHandler(ListTools.self) { _ in
-        try await networkResources.performTask(kind: .domainHandler) {
+    await server.withMethodHandler(ListTools.self) { [foreignLifetimeLease] _ in
+        try await performMCPDomainWork(
+            networkResources: networkResources,
+            foreignLifetimeLease: foreignLifetimeLease
+        ) {
             let tools = await adapter.tools.map { descriptor in
                 Tool(
                     name: descriptor.name.rawValue,
@@ -59,8 +136,11 @@ func makeMCPProtocolServer(
         }
     }
 
-    await server.withMethodHandler(CallTool.self) { params in
-        try await networkResources.performTask(kind: .domainHandler) {
+    await server.withMethodHandler(CallTool.self) { [foreignLifetimeLease] params in
+        try await performMCPDomainWork(
+            networkResources: networkResources,
+            foreignLifetimeLease: foreignLifetimeLease
+        ) {
             guard let tool = CodexReviewMCP.Tool.Name(rawValue: params.name) else {
                 return .init(
                     content: [.text(text: "Unknown tool: \(params.name)", annotations: nil, _meta: nil)],
@@ -80,6 +160,8 @@ func makeMCPProtocolServer(
                 )
                 let response = try await adapter.handle(request)
                 return try toolResult(tool: tool, response: response)
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
                 return .init(
                     content: [.text(text: error.localizedDescription, annotations: nil, _meta: nil)],
@@ -89,27 +171,122 @@ func makeMCPProtocolServer(
         }
     }
 
-    await server.withMethodHandler(ListResources.self) { _ in
-        try await networkResources.performTask(kind: .domainHandler) {
+    await server.withMethodHandler(ListResources.self) { [foreignLifetimeLease] _ in
+        try await performMCPDomainWork(
+            networkResources: networkResources,
+            foreignLifetimeLease: foreignLifetimeLease
+        ) {
             .init(resources: helpResources.map(\.resource))
         }
     }
 
-    await server.withMethodHandler(ReadResource.self) { params in
-        try await networkResources.performTask(kind: .domainHandler) {
+    await server.withMethodHandler(ReadResource.self) { [foreignLifetimeLease] params in
+        try await performMCPDomainWork(
+            networkResources: networkResources,
+            foreignLifetimeLease: foreignLifetimeLease
+        ) {
             let content = helpResources.first { $0.uri == params.uri }?.content
                 ?? "Resource not found: \(params.uri)"
             return .init(contents: [.text(content, uri: params.uri, mimeType: "text/markdown")])
         }
     }
 
-    await server.withMethodHandler(ListResourceTemplates.self) { _ in
-        try await networkResources.performTask(kind: .domainHandler) {
+    await server.withMethodHandler(ListResourceTemplates.self) { [foreignLifetimeLease] _ in
+        try await performMCPDomainWork(
+            networkResources: networkResources,
+            foreignLifetimeLease: foreignLifetimeLease
+        ) {
             .init(templates: helpResourceTemplates)
         }
     }
 
     return server
+}
+
+private func performMCPDomainWork<Success: Sendable>(
+    networkResources: MCPHTTPNetworkResourceOwner,
+    foreignLifetimeLease: MCPProtocolServerForeignLifetimeWaiter.Lease,
+    operation: @escaping @Sendable () async throws -> Success
+) async throws -> Success {
+    _ = foreignLifetimeLease
+    let requestOperation = try resolveMCPRequestOperation(
+        networkResources: networkResources
+    )
+    guard let reservation = requestOperation.admitDomainWork() else {
+        return try unavailableMCPDomainWork(
+            networkResources: networkResources,
+            reason: "The HTTP request operation did not admit domain work."
+        )
+    }
+
+    let task = Task {
+        let value = try await operation()
+        try Task.checkCancellation()
+        return value
+    }
+    reservation.install(task)
+
+    do {
+        let value = try await withTaskCancellationHandler {
+            let value = try await task.value
+            try Task.checkCancellation()
+            return value
+        } onCancel: {
+            requestOperation.beginClosing(.sdkCancellation)
+            task.cancel()
+        }
+        reservation.acknowledge()
+        return value
+    } catch is CancellationError {
+        requestOperation.beginClosing(.sdkCancellation)
+        reservation.acknowledge()
+        throw CancellationError()
+    } catch {
+        reservation.acknowledge(.failed(error.localizedDescription))
+        throw error
+    }
+}
+
+private func resolveMCPRequestOperation(
+    networkResources: MCPHTTPNetworkResourceOwner
+) throws -> MCPHTTPNetworkResourceOwner.RequestOperation {
+    guard let encodedToken = Server.currentHandlerContext?
+        .httpContext?
+        .header(MCPHTTPNetworkResourceOwner.operationTokenHeaderName)
+    else {
+        return try unavailableMCPDomainWork(
+            networkResources: networkResources,
+            reason: "The HTTP request did not contain an operation token."
+        )
+    }
+    guard let token = MCPHTTPNetworkResourceOwner.OperationToken(
+        headerValue: encodedToken
+    ) else {
+        return try unavailableMCPDomainWork(
+            networkResources: networkResources,
+            reason: "The HTTP request contained a malformed operation token."
+        )
+    }
+    guard let requestOperation = networkResources.resolve(token) else {
+        return try unavailableMCPDomainWork(
+            networkResources: networkResources,
+            reason: "The HTTP request operation token did not resolve in its generation."
+        )
+    }
+    return requestOperation
+}
+
+private func unavailableMCPDomainWork<Success>(
+    networkResources: MCPHTTPNetworkResourceOwner,
+    reason: String
+) throws -> Success {
+    switch networkResources.snapshot().phase {
+    case .accepting:
+        protocolServerLogger.error("\(reason, privacy: .public)")
+        throw MCPError.internalError("MCP request ownership could not be resolved.")
+    case .admissionClosed, .closing, .closed:
+        throw CancellationError()
+    }
 }
 
 private func schema(for tool: CodexReviewMCP.Tool.Name) -> Value {

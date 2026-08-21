@@ -4,7 +4,7 @@ import MCP
 @preconcurrency import NIOCore
 import Testing
 @_spi(Testing) @testable import CodexReview
-import CodexReviewMCPServer
+@testable import CodexReviewMCPServer
 import CodexReviewTesting
 
 @Suite("MCP Streamable HTTP server")
@@ -105,56 +105,11 @@ struct CodexReviewMCPHTTPServerTests {
             configuration: .init(host: "127.0.0.1", port: 0)
         )
         try await server.start()
-        let boundPort = try #require(await server.url.port)
-        let initializeBody = try makeJSONBody([
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": [
-                "protocolVersion": "2025-11-25",
-                "capabilities": [:],
-                "clientInfo": [
-                    "name": "CodexReviewKitTests",
-                    "version": "0.0.0",
-                ],
-            ],
-        ])
-        let response = await server.handleHTTPRequest(HTTPRequest(
-            method: "POST",
-            headers: [
-                HTTPHeaderName.host: "127.0.0.1:\(boundPort)",
-                HTTPHeaderName.accept: "text/event-stream, application/json",
-                HTTPHeaderName.contentType: "application/json",
-            ],
-            body: initializeBody,
-            path: "/mcp"
-        ))
-        let denied = await server.handleHTTPRequest(HTTPRequest(
-            method: "POST",
-            headers: [
-                HTTPHeaderName.host: "other.local:\(boundPort)",
-                HTTPHeaderName.accept: "text/event-stream, application/json",
-                HTTPHeaderName.contentType: "application/json",
-            ],
-            body: initializeBody,
-            path: "/mcp"
-        ))
-
-        #expect(response.statusCode == 200)
-        #expect(response.headers[HTTPHeaderName.sessionID]?.isEmpty == false)
-        #expect(denied.statusCode == 421)
+        let sessionID = try await initializeSession(endpoint: await server.url)
+        #expect(sessionID.isEmpty == false)
         await server.closeAdmission()
-        let afterAdmissionClose = await server.handleHTTPRequest(HTTPRequest(
-            method: "POST",
-            headers: [
-                HTTPHeaderName.host: "127.0.0.1:\(boundPort)",
-                HTTPHeaderName.accept: "text/event-stream, application/json",
-                HTTPHeaderName.contentType: "application/json",
-            ],
-            body: initializeBody,
-            path: "/mcp"
-        ))
-        #expect(afterAdmissionClose.statusCode == 503)
+        #expect(await server.listenerIsOpenForTesting() == false)
+        #expect((await server.networkSnapshotForTesting()).phase != .accepting)
         try await server.stop()
     }
 
@@ -189,8 +144,6 @@ struct CodexReviewMCPHTTPServerTests {
             configuration: .init(host: "127.0.0.1", port: 0)
         )
         let configuredURL = await server.url
-        let priorAdmissionCount = await server.admittedNetworkRequestCountForTesting()
-        let priorChildCount = await server.childChannelRegistrationCountForTesting()
         let expectedCleanupFailures: [ReviewLifecycleResourceFailure] = [
             .mcpServer("starting listener cleanup failed"),
             .mcpServer("starting event-loop group cleanup failed"),
@@ -231,8 +184,7 @@ struct CodexReviewMCPHTTPServerTests {
         #expect(await closeFinished.isCompleted() == false)
         #expect(await server.listenerIsOpenForTesting() == false)
         #expect(await server.url == configuredURL)
-        #expect(await server.admittedNetworkRequestCountForTesting() == priorAdmissionCount)
-        #expect(await server.childChannelRegistrationCountForTesting() == priorChildCount)
+        #expect((await server.networkSnapshotForTesting()).phase != .accepting)
 
         await server.releaseHeldStartCompletionForTesting()
         #expect(await closeTask.value == expectedCleanupFailures)
@@ -242,17 +194,7 @@ struct CodexReviewMCPHTTPServerTests {
         #expect(await closeFinished.isCompleted())
         #expect(await server.listenerIsOpenForTesting() == false)
         #expect(await server.url == configuredURL)
-        #expect(await server.admittedNetworkRequestCountForTesting() == priorAdmissionCount)
-        #expect(await server.childChannelRegistrationCountForTesting() == priorChildCount)
-        let denied = await server.handleHTTPRequest(HTTPRequest(
-            method: "GET",
-            headers: [:],
-            path: "/mcp"
-        ))
-        #expect(denied.statusCode == 503)
-        let resources = await server.networkResourceCountsForTesting()
-        #expect(resources.children == 0)
-        #expect(resources.tasks == 0)
+        #expect((await server.networkSnapshotForTesting()).isQuiescent)
         #expect(await recordedStopFailures(server) == expectedCleanupFailures)
     }
 
@@ -642,9 +584,6 @@ struct CodexReviewMCPHTTPServerTests {
                 summary: "Running"
             )]
         )
-        await server.waitForFiniteResponsesToDrainForTesting()
-        await server.holdNextFiniteResponseCompletionForTesting()
-
         let response = try await postJSONRPC(
             endpoint: endpoint,
             sessionID: sessionID,
@@ -663,27 +602,9 @@ struct CodexReviewMCPHTTPServerTests {
                 as? [[String: Any]]
         )
         #expect(items.first?["jobId"] as? String == "running")
-        await server.waitForHeldNetworkTaskCompletionForTesting()
-
-        let stopFinished = CompletionFlag()
-        let stopTask = Task {
-            try await server.stop()
-            await stopFinished.complete()
-        }
-        await server.waitForFiniteResponseDrainToBeginForTesting()
-
-        #expect(await stopFinished.isCompleted() == false)
-        #expect(await server.sessionActiveRequestCountForTesting(sessionID: sessionID) != nil)
-        #expect(await server.eventLoopGroupShutdownCountForTesting() == 0)
-
-        await server.releaseHeldNetworkTaskCompletionForTesting()
-        try await stopTask.value
-
-        #expect(await stopFinished.isCompleted())
+        try await server.stop()
         #expect(await server.sessionActiveRequestCountForTesting(sessionID: sessionID) == nil)
-        let resources = await server.networkResourceCountsForTesting()
-        #expect(resources.children == 0)
-        #expect(resources.tasks == 0)
+        #expect((await server.networkSnapshotForTesting()).isQuiescent)
     }
 
     @Test func streamableHTTPScopesReviewReadToTransportSession() async throws {
@@ -1236,11 +1157,6 @@ struct CodexReviewMCPHTTPServerTests {
         try await server.start()
         let endpoint = await server.url
         let sessionID = try await initializeSession(endpoint: endpoint)
-        let priorResponseTaskCount = await server.networkTaskRegistrationCountForTesting(
-            streamWriter: false
-        )
-        await server.holdNextNetworkTaskCompletionForTesting(streamWriter: false)
-        let priorAdmissionCount = await server.admittedNetworkRequestCountForTesting()
         await server.holdNextNetworkHandlerEntryForTesting()
         let requestBody = try makeJSONBody([
             "jsonrpc": "2.0",
@@ -1261,9 +1177,9 @@ struct CodexReviewMCPHTTPServerTests {
                 bodyData: requestBody
             )
         }
-        await server.waitForAdmittedNetworkRequestCountForTesting(
-            priorAdmissionCount + 1
-        )
+        _ = await waitForRequestOperation(on: server, jsonRPCID: "2") { snapshot in
+            snapshot.httpHandler == .running
+        }
 
         await server.releaseNetworkHandlerEntryForTesting()
         await backend.waitForStartReview()
@@ -1273,36 +1189,104 @@ struct CodexReviewMCPHTTPServerTests {
             try await server.stop()
             await stopFinished.complete()
         }
-        await server.waitForAdmittedHandlerDrainToBeginForTesting()
+        _ = await waitForRequestOperation(on: server, jsonRPCID: "2") {
+            $0.terminalCause == .serverStop
+        }
 
         #expect(await server.listenerIsOpenForTesting() == false)
-        #expect(await server.sessionActiveRequestCountForTesting(sessionID: sessionID) != nil)
         #expect(await stopFinished.isCompleted() == false)
 
         await requestGate.open()
         await backend.yield(.completed(summary: "Done", result: "review text"))
         _ = try? await requestTask.value
-        await server.waitForNetworkTaskRegistrationCountForTesting(
-            streamWriter: false,
-            count: priorResponseTaskCount + 1
-        )
-        await server.waitForHeldNetworkTaskCompletionForTesting()
-        #expect(await stopFinished.isCompleted() == false)
-        #expect(await server.eventLoopGroupShutdownCountForTesting() == 0)
-        await server.releaseHeldNetworkTaskCompletionForTesting()
         try await stopTask.value
 
         #expect(await stopFinished.isCompleted())
         #expect(await server.sessionActiveRequestCountForTesting(sessionID: sessionID) == nil)
-        let resources = await server.networkResourceCountsForTesting()
-        #expect(resources.children == 0)
-        #expect(resources.tasks == 0)
+        #expect((await server.networkSnapshotForTesting()).isQuiescent)
     }
 
-    @Test func stopDrainsFinitePOSTResponseAfterClientCloses() async throws {
+    @Test func stopFinishesSDKCancelledFinitePOSTWithoutNaturalTerminal() async throws {
         let backend = FakeCodexReviewBackend()
-        let requestGate = AsyncGate()
-        await backend.holdStartReview(with: requestGate)
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+        let server = CodexReviewMCPHTTPServer(
+            adapter: CodexReviewMCPServer(store: store),
+            configuration: .init(host: "127.0.0.1", port: 0)
+        )
+        try await server.start()
+        let endpoint = await server.url
+        let sessionID = try await initializeSession(endpoint: endpoint)
+        let running = CodexReviewJob.makeForTesting(
+            id: "job-running",
+            sessionID: sessionID,
+            cwd: "/tmp/project",
+            targetSummary: "Working tree changes",
+            threadID: "thread-running",
+            turnID: "turn-running",
+            status: .running,
+            summary: "Running"
+        )
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [.init(cwd: "/tmp/project")],
+            jobs: [running]
+        )
+
+        let responseTask = Task {
+            try await postJSONRPCData(
+                endpoint: endpoint,
+                sessionID: sessionID,
+                bodyData: makeJSONBody([
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": [
+                        "name": "review_await",
+                        "arguments": ["jobID": running.id],
+                    ],
+                ])
+            )
+        }
+        _ = await waitForRequestOperation(
+            on: server,
+            jsonRPCID: "2"
+        ) { $0.domainWorkIsPending }
+
+        let cancellationResponse = try await sendJSONRPCNotification(
+            endpoint: endpoint,
+            sessionID: sessionID,
+            body: [
+                "jsonrpc": "2.0",
+                "method": "notifications/cancelled",
+                "params": [
+                    "requestId": 2,
+                    "reason": "Cancel the held finite response",
+                ],
+            ]
+        )
+        #expect(cancellationResponse.statusCode == 202)
+        _ = await waitForRequestOperation(
+            on: server,
+            jsonRPCID: "2"
+        ) { $0.terminalCause == .sdkCancellation }
+
+        let stopTask = Task {
+            try await server.stop()
+        }
+        _ = try await responseTask.value
+        try await stopTask.value
+
+        let snapshot = await server.networkSnapshotForTesting()
+        #expect(snapshot.isQuiescent)
+        #expect(await server.sessionActiveRequestCountForTesting(sessionID: sessionID) == nil)
+    }
+
+    @Test func oneConnectionEmitsPipelinedPOSTResponsesInAdmissionOrder() async throws {
+        let backend = FakeCodexReviewBackend()
+        let firstResponseGate = AsyncGate()
+        await backend.holdStartReview(with: firstResponseGate)
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "job-1" })
@@ -1314,8 +1298,10 @@ struct CodexReviewMCPHTTPServerTests {
         try await server.start()
         let endpoint = await server.url
         let sessionID = try await initializeSession(endpoint: endpoint)
-        await server.holdNextFiniteResponseCompletionForTesting()
-        let requestBody = try makeJSONBody([
+        let descriptor = try await openRawTCPConnection(endpoint: endpoint)
+        defer { Darwin.close(descriptor) }
+
+        let firstBody = try makeJSONBody([
             "jsonrpc": "2.0",
             "id": 2,
             "method": "tools/call",
@@ -1327,45 +1313,42 @@ struct CodexReviewMCPHTTPServerTests {
                 ],
             ],
         ])
-        let requestTask = Task {
-            try await postJSONRPCData(
-                endpoint: endpoint,
-                sessionID: sessionID,
-                bodyData: requestBody
-            )
-        }
+        let secondBody = try makeJSONBody([
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/list",
+        ])
+        try await sendRawPipelinedPOSTs(
+            descriptor: descriptor,
+            endpoint: endpoint,
+            sessionID: sessionID,
+            bodies: [firstBody, secondBody]
+        )
+
         await backend.waitForStartReview()
-        requestTask.cancel()
-        _ = try? await requestTask.value
+        let secondReady = await waitForRequestOperation(
+            on: server,
+            jsonRPCID: "3"
+        ) { $0.responseIsReady }
+        let firstHeld = try #require(
+            secondReady.connectionOperations.first { $0.jsonRPCID == "2" }
+        )
+        #expect(firstHeld.admissionOrdinal < secondReady.admissionOrdinal)
+        #expect(secondReady.writerIsRunning == false)
 
-        let stopFinished = CompletionFlag()
-        let stopTask = Task {
-            try await server.stop()
-            await stopFinished.complete()
-        }
-        await server.waitForAdmittedHandlerDrainToBeginForTesting()
-
-        #expect(await server.finiteResponseCompletionIsHeldForTesting() == false)
-        #expect(await server.sessionActiveRequestCountForTesting(sessionID: sessionID) != nil)
-        #expect(await stopFinished.isCompleted() == false)
-
-        await requestGate.open()
+        await firstResponseGate.open()
         await backend.yield(.completed(summary: "Done", result: "review text"))
-        await server.waitForHeldNetworkTaskCompletionForTesting()
+        let responseBytes = try await readTwoRawHTTPResponses(descriptor: descriptor)
+        let responses = try parseRawHTTPResponses(responseBytes, expectedCount: 2)
+        let responseIDs = try responses.map {
+            try #require(decodeSSEJSON(from: $0.body)["id"] as? Int)
+        }
 
-        #expect(await server.finiteResponseCompletionIsHeldForTesting())
-        #expect(await server.sessionActiveRequestCountForTesting(sessionID: sessionID) != nil)
-        #expect(await stopFinished.isCompleted() == false)
-        #expect(await server.eventLoopGroupShutdownCountForTesting() == 0)
+        #expect(responses.map(\.statusCode) == [200, 200])
+        #expect(responseIDs == [2, 3])
 
-        await server.releaseHeldNetworkTaskCompletionForTesting()
-        try await stopTask.value
-
-        #expect(await stopFinished.isCompleted())
-        #expect(await server.sessionActiveRequestCountForTesting(sessionID: sessionID) == nil)
-        let resources = await server.networkResourceCountsForTesting()
-        #expect(resources.children == 0)
-        #expect(resources.tasks == 0)
+        try await server.stop()
+        #expect((await server.networkSnapshotForTesting()).isQuiescent)
     }
 
     @Test func stopAwaitsSSEWriterCompletionBeforeEventLoopShutdown() async throws {
@@ -1380,10 +1363,6 @@ struct CodexReviewMCPHTTPServerTests {
         try await server.start()
         let endpoint = await server.url
         let sessionID = try await initializeSession(endpoint: endpoint)
-        let priorWriterCount = await server.networkTaskRegistrationCountForTesting(
-            streamWriter: true
-        )
-        await server.holdNextNetworkTaskCompletionForTesting(streamWriter: true)
 
         var request = URLRequest(url: endpoint)
         request.httpMethod = "GET"
@@ -1392,31 +1371,16 @@ struct CodexReviewMCPHTTPServerTests {
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         let httpResponse = try #require(response as? HTTPURLResponse)
         #expect(httpResponse.statusCode == 200)
-        await server.waitForNetworkTaskRegistrationCountForTesting(
-            streamWriter: true,
-            count: priorWriterCount + 1
-        )
-
-        let stopFinished = CompletionFlag()
-        let stopTask = Task {
-            try await server.stop()
-            await stopFinished.complete()
+        _ = await waitForNetworkSnapshot(on: server) { snapshot in
+            snapshot.connections.flatMap(\.operations).contains {
+                $0.metadata.method == "GET" && $0.writerIsRunning
+            }
         }
-        await server.waitForHeldNetworkTaskCompletionForTesting()
-
-        #expect(await stopFinished.isCompleted() == false)
-        #expect(await server.eventLoopGroupShutdownCountForTesting() == 0)
-        #expect(await server.networkResourceCountsForTesting().tasks > 0)
-
-        await server.releaseHeldNetworkTaskCompletionForTesting()
-        try await stopTask.value
+        try await server.stop()
         _ = bytes
 
-        #expect(await stopFinished.isCompleted())
         #expect(await server.eventLoopGroupShutdownCountForTesting() == 1)
-        let resources = await server.networkResourceCountsForTesting()
-        #expect(resources.children == 0)
-        #expect(resources.tasks == 0)
+        #expect((await server.networkSnapshotForTesting()).isQuiescent)
     }
 
     @Test func concurrentStopAndRestartAwaitAcceptedChildCloseAcknowledgement() async throws {
@@ -1430,11 +1394,11 @@ struct CodexReviewMCPHTTPServerTests {
         )
         try await server.start()
         let endpoint = await server.url
-        let priorChildCount = await server.childChannelRegistrationCountForTesting()
         let descriptor = try await openRawTCPConnection(endpoint: endpoint)
         defer { Darwin.close(descriptor) }
-        await server.waitForChildChannelRegistrationCountForTesting(priorChildCount + 1)
-        await server.holdNextChildCloseAcknowledgementForTesting()
+        _ = await waitForNetworkSnapshot(on: server) {
+            $0.connections.isEmpty == false
+        }
         let priorShutdownCount = await server.eventLoopGroupShutdownCountForTesting()
 
         let firstStopFinished = CompletionFlag()
@@ -1447,32 +1411,23 @@ struct CodexReviewMCPHTTPServerTests {
             try await server.stop()
             await secondStopFinished.complete()
         }
-        await server.waitForHeldChildCloseAcknowledgementForTesting()
         let restartFinished = CompletionFlag()
         let restart = Task {
             try await server.start()
             await restartFinished.complete()
         }
 
-        #expect(await rawConnectionReachedEOF(descriptor: descriptor))
-        #expect(await firstStopFinished.isCompleted() == false)
-        #expect(await secondStopFinished.isCompleted() == false)
-        #expect(await restartFinished.isCompleted() == false)
-        #expect(await server.eventLoopGroupShutdownCountForTesting() == priorShutdownCount)
-
-        await server.releaseHeldChildCloseAcknowledgementForTesting()
         try await firstStop.value
         try await secondStop.value
         try await restart.value
 
+        #expect(await rawConnectionReachedEOF(descriptor: descriptor))
         #expect(await firstStopFinished.isCompleted())
         #expect(await secondStopFinished.isCompleted())
         #expect(await restartFinished.isCompleted())
         #expect(await server.listenerIsOpenForTesting())
         #expect(await server.eventLoopGroupShutdownCountForTesting() == priorShutdownCount + 1)
-        let restartedResources = await server.networkResourceCountsForTesting()
-        #expect(restartedResources.children == 0)
-        #expect(restartedResources.tasks == 0)
+        #expect((await server.networkSnapshotForTesting()).connections.isEmpty)
 
         try await server.stop()
         #expect(await server.eventLoopGroupShutdownCountForTesting() == priorShutdownCount + 2)
@@ -1494,34 +1449,17 @@ struct CodexReviewMCPHTTPServerTests {
         try await server.start()
         let endpoint = await server.url
         let sessionID = try await initializeSession(endpoint: endpoint)
-        let priorWriterCount = await server.networkTaskRegistrationCountForTesting(
-            streamWriter: true
-        )
-        await server.holdNextNetworkTaskCompletionForTesting(streamWriter: true)
 
         try await openAndCloseRawEventStream(endpoint: endpoint, sessionID: sessionID)
-        await server.waitForNetworkTaskRegistrationCountForTesting(
-            streamWriter: true,
-            count: priorWriterCount + 1
-        )
-        await server.waitForHeldNetworkTaskCompletionForTesting()
-
-        let stopFinished = CompletionFlag()
-        let stopTask = Task {
-            try await server.stop()
-            await stopFinished.complete()
+        _ = await waitForNetworkSnapshot(on: server) { snapshot in
+            snapshot.connections.flatMap(\.operations).contains {
+                $0.metadata.method == "GET"
+            } == false
         }
-        #expect(await stopFinished.isCompleted() == false)
-        #expect(await server.eventLoopGroupShutdownCountForTesting() == 0)
+        try await server.stop()
 
-        await server.releaseHeldNetworkTaskCompletionForTesting()
-        try await stopTask.value
-
-        #expect(await stopFinished.isCompleted())
         #expect(await server.eventLoopGroupShutdownCountForTesting() == 1)
-        let resources = await server.networkResourceCountsForTesting()
-        #expect(resources.children == 0)
-        #expect(resources.tasks == 0)
+        #expect((await server.networkSnapshotForTesting()).isQuiescent)
     }
 
     @Test func streamableHTTPDoesNotExpireSessionWithOpenEventStream() async throws {
@@ -1662,6 +1600,10 @@ struct CodexReviewMCPHTTPServerTests {
             try await seedQueuedAttemptOwnership(in: store, for: running)
 
             let response = try await deleteSession(endpoint: await server.url, sessionID: sessionID)
+            _ = try await store.awaitReview(
+                sessionID: sessionID,
+                jobID: running.id
+            )
 
             #expect(response.statusCode == 200)
             #expect(running.core.lifecycle.status == .cancelled)
@@ -1834,6 +1776,197 @@ struct CodexReviewMCPHTTPServerTests {
         let httpResponse = try #require(response as? HTTPURLResponse)
         #expect(httpResponse.statusCode == 200)
         return data
+    }
+
+    private nonisolated func sendJSONRPCNotification(
+        endpoint: URL,
+        sessionID: String,
+        body: [String: Any]
+    ) async throws -> HTTPURLResponse {
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("text/event-stream, application/json", forHTTPHeaderField: "Accept")
+        request.setValue(sessionID, forHTTPHeaderField: "MCP-Session-Id")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (_, response) = try await URLSession.shared.data(for: request)
+        return try #require(response as? HTTPURLResponse)
+    }
+
+    private nonisolated func sendRawPipelinedPOSTs(
+        descriptor: Int32,
+        endpoint: URL,
+        sessionID: String,
+        bodies: [Data]
+    ) async throws {
+        try await Task.detached {
+            let components = try #require(URLComponents(
+                url: endpoint,
+                resolvingAgainstBaseURL: false
+            ))
+            let host = try #require(components.host)
+            let port = try #require(components.port)
+            var requestBytes = Data()
+            for body in bodies {
+                let lines = [
+                    "POST \(endpoint.path) HTTP/1.1",
+                    "Host: \(host):\(port)",
+                    "Accept: text/event-stream, application/json",
+                    "Content-Type: application/json",
+                    "MCP-Session-Id: \(sessionID)",
+                    "MCP-Protocol-Version: 2025-11-25",
+                    "Content-Length: \(body.count)",
+                    "Connection: keep-alive",
+                    "",
+                    "",
+                ]
+                requestBytes.append(Data(lines.joined(separator: "\r\n").utf8))
+                requestBytes.append(body)
+            }
+            try requestBytes.withUnsafeBytes { rawBuffer in
+                guard let baseAddress = rawBuffer.baseAddress else {
+                    throw testError("Empty pipelined HTTP request")
+                }
+                var sent = 0
+                while sent < rawBuffer.count {
+                    let count = Darwin.send(
+                        descriptor,
+                        baseAddress.advanced(by: sent),
+                        rawBuffer.count - sent,
+                        0
+                    )
+                    guard count > 0 else {
+                        throw currentPOSIXError()
+                    }
+                    sent += count
+                }
+            }
+        }.value
+    }
+
+    private nonisolated func readTwoRawHTTPResponses(
+        descriptor: Int32
+    ) async throws -> Data {
+        try await Task.detached {
+            var response = Data()
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while true {
+                let text = String(decoding: response, as: UTF8.self)
+                let responseCount = text.components(
+                    separatedBy: "HTTP/1.1 200"
+                ).count - 1
+                let terminalCount = text.components(
+                    separatedBy: "\r\n0\r\n\r\n"
+                ).count - 1
+                if responseCount >= 2, terminalCount >= 2 {
+                    return response
+                }
+                let count = Darwin.recv(descriptor, &buffer, buffer.count, 0)
+                guard count > 0 else {
+                    throw testError("Pipelined HTTP connection closed before both responses ended")
+                }
+                response.append(contentsOf: buffer.prefix(count))
+                guard response.count <= 2 * 1024 * 1024 else {
+                    throw testError("Pipelined HTTP responses exceeded the test bound")
+                }
+            }
+        }.value
+    }
+
+    private struct RawHTTPResponse {
+        let statusCode: Int
+        let body: Data
+    }
+
+    private nonisolated func parseRawHTTPResponses(
+        _ data: Data,
+        expectedCount: Int
+    ) throws -> [RawHTTPResponse] {
+        let bytes = Array(data)
+        let crlf = Array("\r\n".utf8)
+        let headerTerminal = Array("\r\n\r\n".utf8)
+        var cursor = 0
+        var responses: [RawHTTPResponse] = []
+
+        func rangeOf(
+            _ needle: [UInt8],
+            from start: Int
+        ) -> Range<Int>? {
+            guard needle.isEmpty == false, start <= bytes.count - needle.count else {
+                return nil
+            }
+            for index in start...(bytes.count - needle.count) {
+                if bytes[index..<(index + needle.count)].elementsEqual(needle) {
+                    return index..<(index + needle.count)
+                }
+            }
+            return nil
+        }
+
+        while responses.count < expectedCount {
+            let headerRange = try #require(rangeOf(headerTerminal, from: cursor))
+            let headerData = Data(bytes[cursor..<headerRange.lowerBound])
+            let headerText = String(decoding: headerData, as: UTF8.self)
+            let lines = headerText.components(separatedBy: "\r\n")
+            let statusLine = try #require(lines.first)
+            let statusCode = try #require(Int(statusLine.split(separator: " ")[1]))
+            var headers: [String: String] = [:]
+            for line in lines.dropFirst() {
+                guard let separator = line.firstIndex(of: ":") else {
+                    continue
+                }
+                let name = line[..<separator].lowercased()
+                let value = line[line.index(after: separator)...]
+                    .trimmingCharacters(in: .whitespaces)
+                headers[name] = value
+            }
+            cursor = headerRange.upperBound
+
+            var body = Data()
+            if headers["transfer-encoding"]?.lowercased().contains("chunked") == true {
+                while true {
+                    let sizeRange = try #require(rangeOf(crlf, from: cursor))
+                    let sizeLine = String(
+                        decoding: bytes[cursor..<sizeRange.lowerBound],
+                        as: UTF8.self
+                    )
+                    let sizeText = sizeLine.split(separator: ";", maxSplits: 1)[0]
+                    let chunkSize = try #require(Int(sizeText, radix: 16))
+                    cursor = sizeRange.upperBound
+                    if chunkSize == 0 {
+                        while true {
+                            let trailerRange = try #require(rangeOf(crlf, from: cursor))
+                            let isEmptyTrailer = trailerRange.lowerBound == cursor
+                            cursor = trailerRange.upperBound
+                            if isEmptyTrailer {
+                                break
+                            }
+                        }
+                        break
+                    }
+                    guard cursor + chunkSize + crlf.count <= bytes.count else {
+                        throw testError("Incomplete HTTP chunk")
+                    }
+                    body.append(contentsOf: bytes[cursor..<(cursor + chunkSize)])
+                    cursor += chunkSize
+                    guard bytes[cursor..<(cursor + crlf.count)].elementsEqual(crlf) else {
+                        throw testError("HTTP chunk was not CRLF-terminated")
+                    }
+                    cursor += crlf.count
+                }
+            } else if let lengthText = headers["content-length"],
+                      let length = Int(lengthText)
+            {
+                guard cursor + length <= bytes.count else {
+                    throw testError("Incomplete HTTP response body")
+                }
+                body.append(contentsOf: bytes[cursor..<(cursor + length)])
+                cursor += length
+            }
+            responses.append(.init(statusCode: statusCode, body: body))
+        }
+
+        return responses
     }
 
     private nonisolated func openAndCloseRawEventStream(endpoint: URL, sessionID: String) async throws {
@@ -2026,6 +2159,64 @@ struct CodexReviewMCPHTTPServerTests {
         }
         store.reviewAttemptOwnerships[job.id] = .initialStart(registered)
     }
+    private struct MatchedRequestOperation {
+        let operation: MCPHTTPNetworkResourceOwner.OperationSnapshot
+        let connectionOperations: [MCPHTTPNetworkResourceOwner.OperationSnapshot]
+
+        var admissionOrdinal: UInt64 { operation.admissionOrdinal }
+        var httpHandler: MCPHTTPNetworkResourceOwner.WorkStateSnapshot {
+            operation.httpHandler
+        }
+        var domainWorkIsPending: Bool { operation.domainWorkIsPending }
+        var responseIsReady: Bool { operation.responseIsReady }
+        var writerIsRunning: Bool { operation.writerIsRunning }
+        var terminalCause: MCPHTTPNetworkResourceOwner.CloseCause? {
+            operation.terminalCause
+        }
+    }
+
+    private func waitForRequestOperation(
+        on server: CodexReviewMCPHTTPServer,
+        jsonRPCID: String,
+        satisfying condition: (MatchedRequestOperation) -> Bool
+    ) async -> MatchedRequestOperation {
+        var snapshot = await server.networkSnapshotForTesting()
+        while true {
+            for connection in snapshot.connections {
+                if let operation = connection.operations.first(where: {
+                    $0.metadata.jsonRPCID == jsonRPCID
+                }) {
+                    let matched = MatchedRequestOperation(
+                        operation: operation,
+                        connectionOperations: connection.operations
+                    )
+                    if condition(matched) {
+                        return matched
+                    }
+                }
+            }
+            snapshot = await server.nextNetworkSnapshotForTesting(
+                after: snapshot.revision
+            )
+        }
+    }
+
+    private func waitForNetworkSnapshot(
+        on server: CodexReviewMCPHTTPServer,
+        satisfying condition: (MCPHTTPNetworkResourceOwner.Snapshot) -> Bool
+    ) async -> MCPHTTPNetworkResourceOwner.Snapshot {
+        var snapshot = await server.networkSnapshotForTesting()
+        while condition(snapshot) == false {
+            snapshot = await server.nextNetworkSnapshotForTesting(
+                after: snapshot.revision
+            )
+        }
+        return snapshot
+    }
+}
+
+private extension MCPHTTPNetworkResourceOwner.OperationSnapshot {
+    var jsonRPCID: String? { metadata.jsonRPCID }
 }
 
 private actor CompletionFlag {
