@@ -36,6 +36,127 @@ package struct ReviewStartProtocolFailure: LocalizedError, Equatable, Sendable {
     }
 }
 
+package actor ReviewStartingRuntimeStopReceipt {
+    package nonisolated let run: CodexReviewBackendModel.Review.Run
+    package nonisolated let cancellation: ReviewCancellation
+
+    private var isFinished = false
+    private var operationClaimed = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var cleanupRun: CodexReviewBackendModel.Review.Run?
+    private var cleanupRunWaiters: [UUID: CheckedContinuation<CodexReviewBackendModel.Review.Run, Never>] = [:]
+
+    package init(
+        run: CodexReviewBackendModel.Review.Run,
+        cancellation: ReviewCancellation
+    ) {
+        self.run = run
+        self.cancellation = cancellation
+    }
+
+    package func finish() {
+        guard isFinished == false else {
+            return
+        }
+        isFinished = true
+        let waiters = self.waiters
+        self.waiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+
+    package func claimOperation() -> Bool {
+        guard operationClaimed == false else {
+            return false
+        }
+        operationClaimed = true
+        return true
+    }
+
+    package func resolveCleanupRun(_ run: CodexReviewBackendModel.Review.Run) {
+        guard cleanupRun == nil else {
+            return
+        }
+        cleanupRun = run
+        let waiters = Array(cleanupRunWaiters.values)
+        cleanupRunWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume(returning: run)
+        }
+    }
+
+    package func waitForCleanupRun() async -> CodexReviewBackendModel.Review.Run {
+        if let cleanupRun {
+            return cleanupRun
+        }
+        let waiterID = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if let cleanupRun {
+                    continuation.resume(returning: cleanupRun)
+                } else if Task.isCancelled {
+                    continuation.resume(returning: run)
+                } else {
+                    cleanupRunWaiters[waiterID] = continuation
+                }
+            }
+        } onCancel: {
+            Task {
+                await self.cancelCleanupRunWaiter(id: waiterID)
+            }
+        }
+    }
+
+    package func wait() async {
+        guard isFinished == false else {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            if isFinished {
+                continuation.resume()
+            } else {
+                waiters.append(continuation)
+            }
+        }
+    }
+
+    private func cancelCleanupRunWaiter(id: UUID) {
+        cleanupRunWaiters.removeValue(forKey: id)?.resume(returning: run)
+    }
+}
+
+package struct ReviewStartSupersededByRuntimeStop: LocalizedError, Sendable {
+    package var receipt: ReviewStartingRuntimeStopReceipt
+
+    package init(receipt: ReviewStartingRuntimeStopReceipt) {
+        self.receipt = receipt
+    }
+
+    package var errorDescription: String? {
+        "Review start was superseded by runtime stop cleanup."
+    }
+}
+
+package enum ReviewStartRuntimeStopDisposition: Sendable {
+    case admissionOwned
+    case workerOwned
+    case interruptAndCleanup(ReviewStartingRuntimeStopReceipt)
+}
+
+package enum ReviewStartFailure: Sendable {
+    case rejected(ReviewStartRequestFailure)
+    case protocolFailure(ReviewStartProtocolFailure)
+    case connection(ReviewRuntimeCloseFailure)
+    case outcomeUnknown
+}
+
+package enum ReviewStartFailureSettlement: Sendable {
+    case cleanup
+    case preserveOutcomeUnknown
+    case runtimeStop(ReviewStartingRuntimeStopReceipt)
+}
+
 package enum ReviewStartAdmissionOperation: String, Equatable, Sendable {
     case admitThreadStartDispatch
     case recordThreadStartRejected
@@ -119,6 +240,7 @@ package actor ReviewStartAdmission {
     private let outcomeUnknownIsCallerOwned: Bool
     private var phase: Phase = .preparingThread(.notSent)
     private var requestedCancellation: ReviewCancellation?
+    private var runtimeStopReceipt: ReviewStartingRuntimeStopReceipt?
 
     package init() {
         outcomeUnknownIsCallerOwned = true
@@ -143,6 +265,68 @@ package actor ReviewStartAdmission {
         case .preparingThread(.outcomeUnknown), .startingReview(_, .outcomeUnknown),
              .active, .terminal:
             break
+        }
+    }
+
+    package func claimRuntimeStopCancellation(
+        _ cancellation: ReviewCancellation
+    ) -> ReviewStartRuntimeStopDisposition {
+        if requestedCancellation == nil {
+            requestedCancellation = cancellation
+        }
+        let effectiveCancellation = requestedCancellation ?? cancellation
+        switch phase {
+        case .preparingThread(.notSent):
+            phase = .terminal(.cancelledBeforeDispatch(effectiveCancellation))
+            return .admissionOwned
+        case .preparingThread(.outcomeUnknown):
+            return .admissionOwned
+        case .startingReview(_, .notSent):
+            phase = .terminal(.cancelledBeforeDispatch(effectiveCancellation))
+            return .admissionOwned
+        case .startingReview(let preparedRun, .outcomeUnknown):
+            if let runtimeStopReceipt {
+                return .interruptAndCleanup(runtimeStopReceipt)
+            }
+            let receipt = ReviewStartingRuntimeStopReceipt(
+                run: preparedRun,
+                cancellation: effectiveCancellation
+            )
+            runtimeStopReceipt = receipt
+            return .interruptAndCleanup(receipt)
+        case .active:
+            return .workerOwned
+        case .terminal:
+            return .admissionOwned
+        }
+    }
+
+    package func settleReviewStartFailure(
+        _ failure: ReviewStartFailure,
+        for preparedRun: CodexReviewBackendModel.Review.Run
+    ) async throws -> ReviewStartFailureSettlement {
+        if let runtimeStopReceipt,
+           runtimeStopReceipt.run == preparedRun {
+            await runtimeStopReceipt.resolveCleanupRun(preparedRun)
+            return .runtimeStop(runtimeStopReceipt)
+        }
+
+        switch failure {
+        case .rejected(let rejection):
+            try recordReviewStartRejected(rejection, for: preparedRun)
+        case .protocolFailure(let protocolFailure):
+            try recordProtocolTerminal(protocolFailure)
+        case .connection(let connectionFailure):
+            try recordConnectionTerminal(connectionFailure)
+        case .outcomeUnknown:
+            break
+        }
+
+        return switch failedReviewStartDisposition(for: preparedRun) {
+        case .cleanup:
+            .cleanup
+        case .preserveOutcomeUnknown:
+            .preserveOutcomeUnknown
         }
     }
 
@@ -311,7 +495,7 @@ package actor ReviewStartAdmission {
 
     package func recordActiveRun(
         _ run: CodexReviewBackendModel.Review.Run
-    ) throws {
+    ) async throws {
         switch phase {
         case .startingReview(let preparedRun, .outcomeUnknown):
             guard Self.belongsToPreparedRun(run, preparedRun) else {
@@ -320,6 +504,10 @@ package actor ReviewStartAdmission {
                     expected: preparedRun,
                     received: run
                 )
+            }
+            if let runtimeStopReceipt {
+                await runtimeStopReceipt.resolveCleanupRun(run)
+                throw ReviewStartSupersededByRuntimeStop(receipt: runtimeStopReceipt)
             }
             phase = .active(run)
         case .active(let currentRun) where currentRun == run:
@@ -377,6 +565,9 @@ package actor ReviewStartAdmission {
     package func failedReviewStartDisposition(
         for preparedRun: CodexReviewBackendModel.Review.Run
     ) -> FailedReviewStartDisposition {
+        if runtimeStopReceipt?.run == preparedRun {
+            return .preserveOutcomeUnknown
+        }
         guard outcomeUnknownIsCallerOwned,
               case .startingReview(let currentRun, .outcomeUnknown) = phase,
               currentRun == preparedRun

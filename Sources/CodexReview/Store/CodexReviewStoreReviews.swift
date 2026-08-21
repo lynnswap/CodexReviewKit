@@ -178,6 +178,16 @@ extension CodexReviewStore {
                 await cleanupReviewAndRetainFailure(currentRun, for: job)
                 reviewRecoveryWaitingJobIDs.remove(jobID)
             }
+        } catch let runtimeStop as ReviewStartSupersededByRuntimeStop {
+            await runtimeStop.receipt.wait()
+            if job.isTerminal == false {
+                try? completeCancellationLocally(
+                    jobID: job.id,
+                    sessionID: job.sessionID,
+                    cancellation: runtimeStop.receipt.cancellation
+                )
+            }
+            reviewRecoveryWaitingJobIDs.remove(jobID)
         } catch let cancellation as ReviewStartCancelledBeforeDispatch {
             if job.isTerminal == false {
                 try? completeCancellationLocally(
@@ -364,7 +374,7 @@ extension CodexReviewStore {
         }
     }
 
-    private func retainCleanupFailure(
+    package func retainCleanupFailure(
         _ failure: ReviewRuntimeCloseFailure,
         for job: CodexReviewJob
     ) {

@@ -114,6 +114,117 @@ struct ReviewStartAdmissionTests {
         #expect(await admission.currentPhase() == .active(activeRun))
     }
 
+    @Test func runtimeStopClaimsOutcomeUnknownPreparedRunAndLateActivationJoins() async throws {
+        let admission = ReviewStartAdmission()
+        let cancellation = ReviewCancellation.system(message: "Runtime stopped")
+        try await admission.admitThreadStartDispatch()
+        try await admission.recordPreparedThread(provisionalRun)
+        try await admission.admitReviewStartDispatch(for: provisionalRun)
+
+        guard case .interruptAndCleanup(let receipt) = await admission.claimRuntimeStopCancellation(
+            cancellation
+        ) else {
+            Issue.record("Expected runtime stop to own the outcome-unknown prepared run.")
+            return
+        }
+        guard case .interruptAndCleanup(let repeatedReceipt) = await admission.claimRuntimeStopCancellation(
+            .system(message: "Later stop")
+        ) else {
+            Issue.record("Expected repeated runtime stop to join the existing receipt.")
+            return
+        }
+
+        #expect(receipt === repeatedReceipt)
+        #expect(receipt.run == provisionalRun)
+        #expect(receipt.cancellation == cancellation)
+        do {
+            try await admission.recordActiveRun(activeRun)
+            Issue.record("Late activation bypassed runtime stop ownership.")
+        } catch let stopped as ReviewStartSupersededByRuntimeStop {
+            #expect(stopped.receipt === receipt)
+        }
+        #expect(await receipt.waitForCleanupRun() == activeRun)
+
+        await receipt.finish()
+        await repeatedReceipt.wait()
+    }
+
+    @Test func runtimeStopDuringThreadStartStillPreventsReviewDispatch() async throws {
+        let admission = ReviewStartAdmission()
+        let cancellation = ReviewCancellation.system(message: "Runtime stopped")
+        try await admission.admitThreadStartDispatch()
+
+        guard case .admissionOwned = await admission.claimRuntimeStopCancellation(cancellation) else {
+            Issue.record("Expected thread-start admission to retain cancellation ownership.")
+            return
+        }
+        try await admission.recordPreparedThread(provisionalRun)
+
+        await #expect(throws: ReviewStartCancelledBeforeDispatch(cancellation: cancellation)) {
+            try await admission.admitReviewStartDispatch(for: provisionalRun)
+        }
+    }
+
+    @Test func reviewStartFailureAndRuntimeStopSettleToOneCleanupOwner() async throws {
+        let cancellation = ReviewCancellation.system(message: "Runtime stopped")
+        let rejection = ReviewStartRequestFailure.rejected(
+            code: -32602,
+            message: "Late rejection"
+        )
+
+        let runtimeFirst = ReviewStartAdmission()
+        try await runtimeFirst.admitThreadStartDispatch()
+        try await runtimeFirst.recordPreparedThread(provisionalRun)
+        try await runtimeFirst.admitReviewStartDispatch(for: provisionalRun)
+        guard case .interruptAndCleanup(let receipt) = await runtimeFirst.claimRuntimeStopCancellation(
+            cancellation
+        ) else {
+            Issue.record("Expected runtime stop to claim the prepared run.")
+            return
+        }
+        guard case .runtimeStop(let settledReceipt) = try await runtimeFirst.settleReviewStartFailure(
+            .rejected(rejection),
+            for: provisionalRun
+        ) else {
+            Issue.record("Expected late failure to join runtime-stop cleanup.")
+            return
+        }
+        #expect(settledReceipt === receipt)
+        #expect(await receipt.waitForCleanupRun() == provisionalRun)
+
+        let failureFirst = ReviewStartAdmission()
+        try await failureFirst.admitThreadStartDispatch()
+        try await failureFirst.recordPreparedThread(provisionalRun)
+        try await failureFirst.admitReviewStartDispatch(for: provisionalRun)
+        guard case .cleanup = try await failureFirst.settleReviewStartFailure(
+            .rejected(rejection),
+            for: provisionalRun
+        ) else {
+            Issue.record("Expected the first explicit failure to own cleanup.")
+            return
+        }
+        guard case .admissionOwned = await failureFirst.claimRuntimeStopCancellation(cancellation) else {
+            Issue.record("Expected runtime stop to preserve the settled failure owner.")
+            return
+        }
+    }
+
+    @Test func runtimeStopAfterActivationRemainsWorkerOwned() async throws {
+        let admission = ReviewStartAdmission()
+        try await admission.admitThreadStartDispatch()
+        try await admission.recordPreparedThread(provisionalRun)
+        try await admission.admitReviewStartDispatch(for: provisionalRun)
+        try await admission.recordActiveRun(activeRun)
+
+        guard case .workerOwned = await admission.claimRuntimeStopCancellation(
+            .system(message: "Runtime stopped")
+        ) else {
+            Issue.record("Expected the active worker to retain interrupt ownership.")
+            return
+        }
+        #expect(await admission.currentPhase() == .active(activeRun))
+    }
+
     @Test func connectionFailureTerminatesAnOutcomeUnknownStartup() async throws {
         let admission = ReviewStartAdmission()
         let failure = ReviewRuntimeCloseFailure.connection("Process exited")

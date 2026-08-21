@@ -194,20 +194,36 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                 }
             })
         } catch {
-            let failure = Self.startRequestFailure(for: error)
-            if case .rejected = failure {
-                try await admission.recordReviewStartRejected(failure, for: provisionalRun)
+            let requestFailure = Self.startRequestFailure(for: error)
+            let failure: ReviewStartFailure
+            if case .rejected = requestFailure {
+                failure = .rejected(requestFailure)
             } else if let protocolFailure = Self.protocolFailure(for: error) {
-                try await admission.recordProtocolTerminal(protocolFailure)
+                failure = .protocolFailure(protocolFailure)
             } else if let connectionFailure = Self.connectionFailure(for: error) {
-                try await admission.recordConnectionTerminal(connectionFailure)
+                failure = .connection(connectionFailure)
+            } else {
+                failure = .outcomeUnknown
             }
-            let failureDisposition = await admission.failedReviewStartDisposition(
-                for: provisionalRun
-            )
+            let settlement: ReviewStartFailureSettlement
+            do {
+                settlement = try await admission.settleReviewStartFailure(
+                    failure,
+                    for: provisionalRun
+                )
+            } catch {
+                reviewStartRequestsInFlight -= 1
+                discardUnmatchedReviewNotificationsIfIdle()
+                throw error
+            }
             reviewStartRequestsInFlight -= 1
             discardUnmatchedReviewNotificationsIfIdle()
-            if failureDisposition == .cleanup {
+            switch settlement {
+            case .runtimeStop(let receipt):
+                throw ReviewStartSupersededByRuntimeStop(receipt: receipt)
+            case .preserveOutcomeUnknown:
+                break
+            case .cleanup:
                 let primaryDescription = error.localizedDescription
                 do {
                     try await cleanupReview(provisionalRun)
@@ -229,6 +245,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         )
         do {
             try await admission.recordActiveRun(run)
+        } catch let runtimeStop as ReviewStartSupersededByRuntimeStop {
+            reviewStartRequestsInFlight -= 1
+            discardUnmatchedReviewNotificationsIfIdle()
+            throw runtimeStop
         } catch {
             reviewStartRequestsInFlight -= 1
             discardUnmatchedReviewNotificationsIfIdle()

@@ -149,7 +149,8 @@ extension CodexReviewStore {
         reason: ReviewCancellation = .system(message: "Review runtime stopped.")
     ) async -> [String] {
         let activeJobIDs = recordActiveReviewCancellationRequestsForRuntimeStop(reason: reason)
-        var initialCancellations: [(ReviewStartAdmission, ReviewCancellation)] = []
+        var initialCancellations: [(String, ReviewStartAdmission, ReviewCancellation)] = []
+        var startingRuntimeStops: [(String, ReviewStartingRuntimeStopReceipt)] = []
         var activeRuns: [CodexReviewBackendModel.Review.Run] = []
         for jobID in activeJobIDs {
             if reviewRecoveryWaitingJobIDs.contains(jobID) {
@@ -158,7 +159,7 @@ extension CodexReviewStore {
             switch reviewAttemptOwnerships[jobID] {
             case .queued, .starting:
                 if let receipt = recordInitialAttemptCancellation(reason, jobID: jobID) {
-                    initialCancellations.append((receipt.admission, receipt.cancellation))
+                    initialCancellations.append((jobID, receipt.admission, receipt.cancellation))
                 }
             case .active(let activeAttempt):
                 activeRuns.append(activeAttempt.run)
@@ -166,8 +167,24 @@ extension CodexReviewStore {
                 continue
             }
         }
-        for (admission, cancellation) in initialCancellations {
-            await admission.recordCancellation(cancellation)
+        for (jobID, admission, cancellation) in initialCancellations {
+            switch await admission.claimRuntimeStopCancellation(cancellation) {
+            case .admissionOwned, .workerOwned:
+                break
+            case .interruptAndCleanup(let receipt):
+                startingRuntimeStops.append((jobID, receipt))
+            }
+        }
+        for (jobID, receipt) in startingRuntimeStops {
+            if await receipt.claimOperation() {
+                let cleanupFailure = await interruptAndCleanupStartingReview(receipt)
+                if let cleanupFailure, let job = job(id: jobID) {
+                    retainCleanupFailure(cleanupFailure, for: job)
+                }
+                await receipt.finish()
+            } else {
+                await receipt.wait()
+            }
         }
         for run in activeRuns {
             if Task.isCancelled {
@@ -179,6 +196,24 @@ extension CodexReviewStore {
             )
         }
         return activeJobIDs
+    }
+
+    private func interruptAndCleanupStartingReview(
+        _ receipt: ReviewStartingRuntimeStopReceipt
+    ) async -> ReviewRuntimeCloseFailure? {
+        try? await backend.interruptReview(
+            receipt.run,
+            reason: .init(message: receipt.cancellation.message)
+        )
+        let cleanupRun = await receipt.waitForCleanupRun()
+        do {
+            try await backend.cleanupReview(cleanupRun)
+            return nil
+        } catch let failure as ReviewRuntimeCloseFailure {
+            return failure
+        } catch {
+            return .cleanup(error.localizedDescription)
+        }
     }
 
     @discardableResult

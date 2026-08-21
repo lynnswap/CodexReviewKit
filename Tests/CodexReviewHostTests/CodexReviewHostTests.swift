@@ -1241,6 +1241,158 @@ struct CodexReviewHostTests {
         #expect(interruptIndex < deleteIndex)
     }
 
+    @Test func liveStoreStopJoinsBackendOwnedInFlightStartBeforeLateResponse() async throws {
+        let homeURL = try temporaryHome()
+        let startResponseGate = AsyncGate()
+        let interruptGate = AsyncGate()
+        let transport = FakeJSONRPCTransport()
+        await transport.holdNextIgnoringCancellation(method: "review/start", gate: startResponseGate)
+        await transport.holdNext(method: "turn/interrupt", gate: interruptGate)
+        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
+        try await transport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await transport.enqueue(
+            AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"),
+            for: "thread/start"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Review.Start.Response(
+                turnID: "turn-1",
+                reviewThreadID: "review-thread-1"
+            ),
+            for: "review/start"
+        )
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            shutdownCleanupTimeout: .seconds(2),
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        let reviewTask = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        let reviewStartDispatched = await waitUntil(timeout: .seconds(2)) {
+            await transport.recordedRequests().map(\.method).contains("review/start")
+        }
+        try #require(reviewStartDispatched)
+
+        let stopTask = Task { @MainActor in
+            await store.stop()
+        }
+        let interruptStarted = await waitUntil(timeout: .seconds(2)) {
+            await transport.recordedRequests().map(\.method).contains("turn/interrupt")
+        }
+        try #require(interruptStarted)
+        let pending = try #require(store.jobs.first)
+        let beforeInterrupt = await transport.recordedRequests().map(\.method)
+
+        #expect(pending.cancellationRequested)
+        #expect(pending.core.run.turnID == nil)
+        #expect(beforeInterrupt.filter { $0 == "turn/interrupt" }.count == 1)
+        #expect(beforeInterrupt.contains("thread/backgroundTerminals/clean") == false)
+        #expect(beforeInterrupt.contains("thread/delete") == false)
+
+        await interruptGate.open()
+        let beforeLateResponse = await transport.recordedRequests().map(\.method)
+        #expect(beforeLateResponse.filter { $0 == "turn/interrupt" }.count == 1)
+        #expect(beforeLateResponse.contains("thread/backgroundTerminals/clean") == false)
+        #expect(beforeLateResponse.contains("thread/delete") == false)
+
+        await startResponseGate.open()
+        let cleanupFinished = await waitUntil(timeout: .seconds(2)) {
+            let methods = await transport.recordedRequests().map(\.method)
+            return methods.contains("thread/backgroundTerminals/clean")
+                && methods.contains("thread/delete")
+        }
+        try #require(cleanupFinished)
+        await stopTask.value
+        let cancelled = try await reviewTask.value
+        #expect(await store.drainRuntimeStopDetachedReviewWorkers(timeout: .seconds(2)))
+        let afterLateResponse = await transport.recordedRequests().map(\.method)
+        let deletedThreadIDs = try await transport.recordedRequests()
+            .filter { $0.method == "thread/delete" }
+            .map { request in
+                try JSONDecoder().decode(
+                    AppServerAPI.Thread.Delete.Params.self,
+                    from: request.params
+                ).threadID
+            }
+        #expect(cancelled.core.lifecycle.status == .cancelled)
+        #expect(cancelled.core.run.turnID == nil)
+        #expect(try store.readReview(jobID: cancelled.jobID).core.run.turnID == nil)
+        #expect(afterLateResponse.filter { $0 == "turn/interrupt" }.count == 1)
+        #expect(afterLateResponse.filter { $0 == "thread/backgroundTerminals/clean" }.count == 1)
+        #expect(deletedThreadIDs.sorted() == ["review-thread-1", "thread-1"])
+    }
+
+    @Test func liveStoreStopOwnsCleanupWhenInFlightStartFailsLate() async throws {
+        let homeURL = try temporaryHome()
+        let startResponseGate = AsyncGate()
+        let transport = FakeJSONRPCTransport()
+        await transport.holdNextIgnoringCancellation(method: "review/start", gate: startResponseGate)
+        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
+        try await transport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await transport.enqueue(
+            AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"),
+            for: "thread/start"
+        )
+        await transport.enqueueFailure(
+            .responseError(code: -32602, message: "Late review rejection"),
+            for: "review/start"
+        )
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            shutdownCleanupTimeout: .seconds(2),
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        let reviewTask = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            await transport.recordedRequests().map(\.method).contains("review/start")
+        })
+        let stopTask = Task { @MainActor in
+            await store.stop()
+        }
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            await transport.recordedRequests().map(\.method).contains("turn/interrupt")
+        })
+
+        await startResponseGate.open()
+        await stopTask.value
+        let cancelled = try await reviewTask.value
+        #expect(await store.drainRuntimeStopDetachedReviewWorkers(timeout: .seconds(2)))
+        let methods = await transport.recordedRequests().map(\.method)
+
+        #expect(cancelled.core.lifecycle.status == .cancelled)
+        #expect(cancelled.core.run.turnID == nil)
+        #expect(methods.filter { $0 == "turn/interrupt" }.count == 1)
+        #expect(methods.filter { $0 == "thread/backgroundTerminals/clean" }.count == 1)
+        #expect(methods.filter { $0 == "thread/delete" }.count == 1)
+    }
+
     @Test func liveStoreStopBoundsStuckReviewCancellationCleanup() async throws {
         let homeURL = try temporaryHome()
         let interruptGate = AsyncGate()
