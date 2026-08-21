@@ -104,6 +104,13 @@ package enum ReviewAttemptBarrierTerminal: Equatable, Sendable {
             cancellation.message
         }
     }
+
+    package var canonicalRun: CodexReviewBackendModel.Review.Run? {
+        guard case .canonical(let run, _) = self else {
+            return nil
+        }
+        return run
+    }
 }
 
 package struct ReviewAttemptCancellationResolution: Equatable, Sendable {
@@ -385,6 +392,13 @@ package actor ReviewStartAdmission {
         return await cleanupTask.result
     }
 
+    package func recordedConnectionTerminal() -> ReviewRuntimeCloseFailure? {
+        guard case .connection(let failure) = terminal else {
+            return nil
+        }
+        return failure
+    }
+
     private func finishStart(
         with result: Result<BackendReviewAttempt, any Error>
     ) {
@@ -396,12 +410,14 @@ package actor ReviewStartAdmission {
             }
         case .failure(let error):
             startFailed = true
-            if let cancellation = (error as? ReviewStartCancelledBeforeDispatch)?.cancellation {
-                receiveTerminal(.localCancellation(cancellation))
-            } else if error is CancellationError,
-                      let requestedCancellation,
-                      case .preparingThread(.notSent) = phase {
-                receiveTerminal(.localCancellation(requestedCancellation))
+            if terminal == nil {
+                if let cancellation = (error as? ReviewStartCancelledBeforeDispatch)?.cancellation {
+                    receiveTerminal(.localCancellation(cancellation))
+                } else if error is CancellationError,
+                          let requestedCancellation,
+                          case .preparingThread(.notSent) = phase {
+                    receiveTerminal(.localCancellation(requestedCancellation))
+                }
             }
             resumeActiveRunWaiters(returning: nil)
             resumeCancellationAdmissionWaiters(returning: nil)
@@ -420,7 +436,7 @@ package actor ReviewStartAdmission {
             startTask?.cancel()
         } else if case .queued = phase {
             receiveTerminal(.localCancellation(cancellation))
-        } else if Self.isOutcomeUnknownStartPhase(phase) {
+        } else if Self.requiresGraceDeadline(phase) {
             installGraceTask(forceClose: forceClose)
         }
 
@@ -782,6 +798,16 @@ package actor ReviewStartAdmission {
             run
         case .queued, .preparingThread, .startingReview, .finishing, .terminal:
             nil
+        }
+    }
+
+    private static func requiresGraceDeadline(_ phase: Phase) -> Bool {
+        switch phase {
+        case .preparingThread(.outcomeUnknown), .startingReview:
+            true
+        case .queued, .preparingThread(.notSent), .active, .interrupting,
+             .finishing, .terminal:
+            false
         }
     }
 

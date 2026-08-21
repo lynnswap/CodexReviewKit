@@ -190,6 +190,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     private var interruptFailureMessage: String?
     private var recoveryFailureMessage: String?
     private var cleanupFailure: ReviewRuntimeCloseFailure?
+    private var startReviewConnectionFailure: ReviewRuntimeCloseFailure?
     private var interruptReviewGate: AsyncGate?
     private var interruptReviewWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var beginReviewRecoveryWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
@@ -243,6 +244,10 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
 
     package func failCleanup(message: String) {
         cleanupFailure = .cleanup(message)
+    }
+
+    package func failStartReviewWithConnection(message: String) {
+        startReviewConnectionFailure = .connection(message)
     }
 
     package func holdInterruptReview(with gate: AsyncGate) {
@@ -483,6 +488,10 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         }
         if let startReviewGate {
             await startReviewGate.wait()
+        }
+        if let startReviewConnectionFailure {
+            await admission.recordConnectionTerminal(startReviewConnectionFailure)
+            throw CancellationError()
         }
         await admission.recordActiveRun(nextRun)
         return .init(run: nextRun, events: eventMailbox(for: nextRun))

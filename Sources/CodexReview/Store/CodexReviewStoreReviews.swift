@@ -176,7 +176,11 @@ extension CodexReviewStore {
                     markReviewInterrupted(job, cause: .transport(message: failure.localizedDescription))
                 }
             } else if job.isTerminal == false {
-                markReviewFailed(job, message: error.localizedDescription)
+                await markReviewWorkerFailure(
+                    job,
+                    fallbackMessage: error.localizedDescription,
+                    admission: admission
+                )
             }
             activeRuns.removeValue(forKey: jobID)
             reviewRecoveryWaitingJobIDs.remove(jobID)
@@ -199,7 +203,11 @@ extension CodexReviewStore {
                     cause: .transport(message: transportFailure.message)
                 )
             } else if job.isTerminal == false {
-                markReviewFailed(job, message: error.localizedDescription)
+                await markReviewWorkerFailure(
+                    job,
+                    fallbackMessage: error.localizedDescription,
+                    admission: admission
+                )
             }
         }
         reviewWorkerTasks.removeValue(forKey: jobID)
@@ -444,7 +452,7 @@ extension CodexReviewStore {
                     cancellation: cancellation
                 )
             }
-            if let run = job.backendRun,
+            if let run = resolution.terminal.canonicalRun,
                let cleanupResult = await admission.recordedCleanupResult(for: run) {
                 try cleanupResult.get()
             }
@@ -589,6 +597,21 @@ extension CodexReviewStore {
             message: message,
             terminal: .interrupted(cause)
         )
+    }
+
+    private func markReviewWorkerFailure(
+        _ job: CodexReviewJob,
+        fallbackMessage: String,
+        admission: ReviewStartAdmission
+    ) async {
+        if let connectionFailure = await admission.recordedConnectionTerminal() {
+            markReviewInterrupted(
+                job,
+                cause: .transport(message: connectionFailure.localizedDescription)
+            )
+        } else {
+            markReviewFailed(job, message: fallbackMessage)
+        }
     }
 
     private func consumeReviewEvents(
@@ -1176,18 +1199,6 @@ private extension CodexReviewBackendModel.Review.Event {
 }
 
 private extension CodexReviewJob {
-    var backendRun: CodexReviewBackendModel.Review.Run? {
-        guard let threadID = core.run.threadID else {
-            return nil
-        }
-        return .init(
-            threadID: threadID,
-            turnID: core.run.turnID,
-            reviewThreadID: core.run.reviewThreadID,
-            model: core.run.model
-        )
-    }
-
     func appendAgentMessageDelta(itemID: String, delta: String) -> String? {
         guard completedAgentMessageItemIDs.contains(itemID) == false else {
             return nil

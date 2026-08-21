@@ -594,6 +594,62 @@ struct ReviewAttemptProcessorTests {
         }
     }
 
+    @Test func cancellationAfterPreparedThreadCleanupUsesGraceDeadline() async throws {
+        let graceGate = AsyncGate()
+        let admission = ReviewStartAdmission(closePolicy: controlledClosePolicy(gate: graceGate))
+        let prepared = InvocationProbe()
+        let reviewDispatchGate = AsyncGate()
+        let cleanupStarted = InvocationProbe()
+        let cleanupGate = AsyncGate()
+        let forceClose = InvocationProbe()
+        let connection = ReviewRuntimeCloseFailure.connection("Forced close")
+        let startTask = await admission.start { admission in
+            #expect(await admission.admitThreadStartDispatch())
+            await admission.recordPreparedThread(provisionalRun)
+            await prepared.record()
+            await reviewDispatchGate.waitIgnoringCancellation()
+            guard await admission.admitReviewStartDispatch(for: provisionalRun) else {
+                await cleanupStarted.record()
+                await cleanupGate.waitIgnoringCancellation()
+                throw ReviewStartCancelledBeforeDispatch(
+                    cancellation: await admission.cancellationRequest() ?? .system()
+                )
+            }
+            Issue.record("Review request was dispatched after cancellation.")
+            return .init(run: canonicalRun)
+        }
+        await prepared.waitForInvocation()
+
+        let cancellation = Task {
+            try await admission.cancel(
+                .mcpClient(message: "Stop"),
+                interrupt: { _, _ in Issue.record("Not-sent review was interrupted.") },
+                forceClose: {
+                    await forceClose.record()
+                    await admission.recordConnectionTerminal(connection)
+                    await cleanupGate.open()
+                }
+            )
+        }
+        #expect(await admission.waitForCancellationAdmission() == .mcpClient(message: "Stop"))
+        await reviewDispatchGate.open()
+        await cleanupStarted.waitForInvocation()
+        await graceGate.open()
+
+        let forced = await waitUntil {
+            await forceClose.invocationCount() == 1
+        }
+        if forced == false {
+            await admission.recordConnectionTerminal(connection)
+            await cleanupGate.open()
+        }
+        #expect(forced)
+        #expect(try await cancellation.value.terminal == .connection(connection))
+        await #expect(throws: ReviewStartCancelledBeforeDispatch.self) {
+            try await startTask.value
+        }
+    }
+
     @Test func cancellationAfterReviewDispatchJoinsResponseThenInterruptsCanonicalRun() async throws {
         let graceGate = AsyncGate()
         let admission = ReviewStartAdmission(closePolicy: controlledClosePolicy(gate: graceGate))
@@ -764,4 +820,19 @@ private actor InvocationProbe {
     }
 
     func invocationCount() -> Int { count }
+}
+
+private func waitUntil(
+    timeout: Duration = .seconds(2),
+    condition: () async -> Bool
+) async -> Bool {
+    let clock = ContinuousClock()
+    let deadline = clock.now + timeout
+    while await condition() == false {
+        if clock.now >= deadline {
+            return false
+        }
+        try? await Task.sleep(for: .milliseconds(10))
+    }
+    return true
 }

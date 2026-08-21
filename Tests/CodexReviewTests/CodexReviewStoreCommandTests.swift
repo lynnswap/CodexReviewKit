@@ -803,7 +803,12 @@ struct CodexReviewStoreCommandTests {
     }
 
     @Test func cancellationPreservesTypedCleanupFailureAfterTerminal() async throws {
-        let backend = FakeCodexReviewBackend()
+        let backend = FakeCodexReviewBackend(nextRun: .init(
+            attemptID: "attempt-live-7B768E74",
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1"
+        ))
         await backend.failCleanup(message: "unsubscribe failed")
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -831,6 +836,26 @@ struct CodexReviewStoreCommandTests {
 
             #expect(read.core.lifecycle.status == .cancelled)
             #expect(store.reviewCleanupFailures["job-1"] == .cleanup("unsubscribe failed"))
+        }
+    }
+
+    @Test func startupConnectionTerminalRemainsTypedInJobLifecycle() async throws {
+        let backend = FakeCodexReviewBackend()
+        await backend.failStartReviewWithConnection(message: "Invalid app-server framing")
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            let read = try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+
+            #expect(read.core.lifecycle.status == .failed)
+            #expect(read.core.lifecycle.terminal == .interrupted(.transport(
+                message: "App-server connection close failed: Invalid app-server framing"
+            )))
         }
     }
 
