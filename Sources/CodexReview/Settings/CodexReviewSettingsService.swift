@@ -51,6 +51,14 @@ package final class CodexReviewSettingsService {
         lastPersistedSelection = settings.currentSelection()
     }
 
+    package func applyRuntimeSnapshot(_ snapshot: CodexReviewSettings.Snapshot) {
+        guard let settingsStore else {
+            return
+        }
+        settingsStore.apply(snapshot: snapshot)
+        lastPersistedSelection = settingsStore.currentSelection()
+    }
+
     package func refreshIfRunning(serverState: CodexReviewServerState) async {
         guard case .running = serverState else {
             return

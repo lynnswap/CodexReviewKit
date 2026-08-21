@@ -61,7 +61,10 @@ struct CodexReviewHostTests {
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
         }
-        await backend.waitForStartReview()
+        let activeSnapshot = await StoreSnapshotProbe(store: host.store).waitUntil {
+            $0.job()?.activeRun != nil
+        }
+        try #require(activeSnapshot?.job()?.activeRun != nil)
         let stopTask = Task { @MainActor in try await host.stop() }
         try await backend.waitForInterruptReview(timeout: .seconds(2))
 

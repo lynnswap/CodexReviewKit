@@ -504,7 +504,7 @@ public final class CodexReviewStore {
         _ runtime: PreparedRuntime,
         serverURL: URL?
     ) {
-        settings.apply(snapshot: runtime.snapshot.settings)
+        settingsService.applyRuntimeSnapshot(runtime.snapshot.settings)
         transitionToRunning(serverURL: serverURL)
         startAccountRateLimitAutoRefresh()
     }

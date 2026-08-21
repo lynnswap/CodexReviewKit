@@ -209,4 +209,51 @@ struct CodexReviewStoreLifecycleTests {
         #expect(staleReplacement.waitUntilClosedCallCount == 1)
         #expect(mcpOwner.stopCallCount == 1)
     }
+
+    @Test func failedSettingsEditRollsBackToPublishedRuntimeSnapshot() async {
+        let reviewBackend = FakeCodexReviewBackend(settings: .init(
+            model: "runtime-model",
+            reasoningEffort: "high",
+            serviceTier: "fast"
+        ))
+        let store = CodexReviewStore.makeTestingStore(backend: TestingCodexReviewStoreBackend(
+            reviewBackend: reviewBackend,
+            seed: .init(initialSettingsSnapshot: .init(model: "seed-model"))
+        ))
+        await store.start()
+        await reviewBackend.failNextSettingsUpdate(message: "Injected settings failure.")
+
+        await store.updateSettingsModel("edited-model")
+
+        #expect(store.settings.selectedModel == "runtime-model")
+        #expect(store.settings.selectedReasoningEffort == .high)
+        #expect(store.settings.selectedServiceTier == .fast)
+        #expect(store.settings.lastErrorMessage == "Injected settings failure.")
+    }
+
+    @Test func modelEditDoesNotRepersistPublishedRuntimeReasoningAndTier() async throws {
+        let reviewBackend = FakeCodexReviewBackend(settings: .init(
+            model: "runtime-model",
+            reasoningEffort: "high",
+            serviceTier: "fast"
+        ))
+        let store = CodexReviewStore.makeTestingStore(backend: TestingCodexReviewStoreBackend(
+            reviewBackend: reviewBackend,
+            seed: .init(initialSettingsSnapshot: .init(
+                model: "seed-model",
+                reasoningEffort: .low
+            ))
+        ))
+        await store.start()
+
+        await store.updateSettingsModel("edited-model")
+
+        let command = try #require(await reviewBackend.recordedCommands().last)
+        guard case .applySettings(let change) = command else {
+            Issue.record("Expected a settings update.")
+            return
+        }
+        #expect(change.updatesReasoningEffort == false)
+        #expect(change.updatesServiceTier == false)
+    }
 }

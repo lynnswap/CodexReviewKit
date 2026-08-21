@@ -184,6 +184,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     }
 
     private var settings: CodexReviewBackendModel.Settings.Snapshot
+    private var settingsUpdateFailureMessage: String?
     private var auth: CodexReviewBackendModel.Auth.Snapshot
     private var commands: [Command] = []
     private var startAdmissionIdentities: [ObjectIdentifier] = []
@@ -253,6 +254,10 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
 
     package func failCleanup(message: String) {
         cleanupFailure = .cleanup(message)
+    }
+
+    package func failNextSettingsUpdate(message: String) {
+        settingsUpdateFailureMessage = message
     }
 
     package func holdInterruptReview(with gate: AsyncGate) {
@@ -438,6 +443,10 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
 
     package func applySettings(_ change: CodexReviewBackendModel.Settings.Change) async throws -> CodexReviewBackendModel.Settings.Snapshot {
         commands.append(.applySettings(change))
+        if let settingsUpdateFailureMessage {
+            self.settingsUpdateFailureMessage = nil
+            throw FakeCodexReviewBackendError(message: settingsUpdateFailureMessage)
+        }
         settings = .init(
             model: change.updatesModel ? change.model : settings.model,
             fallbackModel: settings.fallbackModel,
