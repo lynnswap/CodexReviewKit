@@ -407,6 +407,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         }
 
         var startedClient: AppServerClient?
+        var startedBackend: AppServerCodexReviewBackend?
         var startedHTTPServer: (any CodexReviewMCPHTTPServing)?
         do {
             if mcpHTTPServerFactory != nil {
@@ -416,6 +417,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             let client = runtime.client
             let backend = runtime.backend
             startedClient = client
+            startedBackend = backend
             self.client = client
             self.appServerBackend = backend
             observeAuthNotifications(client: client, backend: backend, store: store)
@@ -433,13 +435,17 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         } catch {
             let failureMessage = await runtimeStartupFailureMessage(for: error)
             logger.error("Review runtime failed to start: \(failureMessage, privacy: .public)")
-            await startedHTTPServer?.stop()
-            await startedClient?.close()
             self.client = nil
             self.appServerBackend = nil
             self.mcpHTTPServer = nil
             authNotificationTask?.cancel()
             authNotificationTask = nil
+            await startedHTTPServer?.stop()
+            await closeAppServerRuntime(
+                backend: startedBackend,
+                fallbackClient: startedClient,
+                context: "runtime startup cleanup"
+            )
             store.transitionToFailed(failureMessage)
         }
     }
@@ -518,7 +524,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         await mcpHTTPServer?.stop()
         self.appServerBackend = nil
         await cleanupLoginRuntime(loginCleanup)
-        await client?.close()
+        await closeAppServerRuntime(
+            backend: appServerBackend,
+            fallbackClient: client,
+            context: "runtime stop"
+        )
         logger.info("Review runtime stopped")
     }
 
@@ -1186,6 +1196,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             )
         }
         let failedClient = client
+        let failedBackend = appServerBackend
         let failedMCPHTTPServer = mcpHTTPServer
         client = nil
         appServerBackend = nil
@@ -1194,7 +1205,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         store.transitionToFailed(message)
         await failedMCPHTTPServer?.stop()
         await cleanupLoginRuntime(loginCleanup)
-        await failedClient?.close()
+        await closeAppServerRuntime(
+            backend: failedBackend,
+            fallbackClient: failedClient,
+            context: "notification stream failure"
+        )
     }
 
     private func handleAuthNotification(
@@ -1540,14 +1555,50 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     private func closeIsolatedLoginRuntime(client: AppServerClient?, codexHomeURL: URL?) async {
         guard let codexHomeURL else {
-            await client?.close()
+            await closeClientRecordingFailure(client, context: "login runtime cleanup")
             return
         }
         guard codexHomeURL != self.codexHomeURL else {
             return
         }
-        await client?.close()
+        await closeClientRecordingFailure(client, context: "isolated login runtime cleanup")
         try? FileManager.default.removeItem(at: codexHomeURL)
+    }
+
+    private func closeAppServerRuntime(
+        backend: AppServerCodexReviewBackend?,
+        fallbackClient: AppServerClient?,
+        context: String
+    ) async {
+        guard let backend else {
+            await closeClientRecordingFailure(fallbackClient, context: context)
+            return
+        }
+        let lifecycle = backend.runtimeOwnerLifecycleHandle
+        await lifecycle.closeAdmission()
+        do {
+            try await lifecycle.closeAndWait()
+        } catch {
+            logger.error(
+                "Failed to close app-server during \(context, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+        }
+    }
+
+    private func closeClientRecordingFailure(
+        _ client: AppServerClient?,
+        context: String
+    ) async {
+        guard let client else {
+            return
+        }
+        do {
+            try await client.close()
+        } catch {
+            logger.error(
+                "Failed to close app-server client during \(context, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+        }
     }
 
     private func takeLoginRuntimeForCleanup() -> PendingLoginRuntimeCleanup {
