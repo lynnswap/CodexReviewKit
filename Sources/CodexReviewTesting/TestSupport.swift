@@ -177,7 +177,9 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         case startReview(CodexReviewBackendModel.Review.Start)
         case interruptReview(CodexReviewBackendModel.Review.Run, CodexReviewBackendModel.CancellationReason)
         case beginReviewRecovery(CodexReviewBackendModel.Review.Run, CodexReviewBackendModel.CancellationReason)
+        case prepareReviewRecovery(ReviewRecoveryCandidate)
         case resumeReviewRecovery(CodexReviewBackendModel.Review.RecoveryToken, CodexReviewBackendModel.Review.Start)
+        case resumeReviewRecoveryHandoff(ReviewRecoveryHandoff, CodexReviewBackendModel.Review.Start)
         case cleanupReview(CodexReviewBackendModel.Review.Run)
     }
 
@@ -349,6 +351,8 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         if commands.contains(where: {
             if case .beginReviewRecovery = $0 {
                 true
+            } else if case .prepareReviewRecovery = $0 {
+                true
             } else {
                 false
             }
@@ -360,6 +364,8 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
             await withCheckedContinuation { continuation in
                 if commands.contains(where: {
                     if case .beginReviewRecovery = $0 {
+                        true
+                    } else if case .prepareReviewRecovery = $0 {
                         true
                     } else {
                         false
@@ -387,6 +393,8 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         if commands.contains(where: {
             if case .resumeReviewRecovery = $0 {
                 true
+            } else if case .resumeReviewRecoveryHandoff = $0 {
+                true
             } else {
                 false
             }
@@ -398,6 +406,8 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
             await withCheckedContinuation { continuation in
                 if commands.contains(where: {
                     if case .resumeReviewRecovery = $0 {
+                        true
+                    } else if case .resumeReviewRecoveryHandoff = $0 {
                         true
                     } else {
                         false
@@ -539,6 +549,28 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         return .init(interruptedRun: run, rollbackThreadID: run.reviewThreadID ?? run.threadID)
     }
 
+    package func prepareReviewRecovery(
+        _ candidate: ReviewRecoveryCandidate
+    ) async throws -> ReviewRecoveryHandoff {
+        commands.append(.prepareReviewRecovery(candidate))
+        let waiters = Array(beginReviewRecoveryWaiters.values)
+        beginReviewRecoveryWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
+        if let recoveryFailureMessage {
+            throw FakeCodexReviewBackendError(message: recoveryFailureMessage)
+        }
+        let run = candidate.resolved.run
+        return try .init(
+            candidate: candidate,
+            token: .init(
+                interruptedRun: run,
+                rollbackThreadID: run.reviewThreadID ?? run.threadID
+            )
+        )
+    }
+
     package func resumeReviewRecovery(
         _ token: CodexReviewBackendModel.Review.RecoveryToken,
         request: CodexReviewBackendModel.Review.Start
@@ -564,6 +596,49 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
             model: run.model ?? request.model
         )
         return .init(run: recoveredRun, events: eventMailbox(for: recoveredRun))
+    }
+
+    package func resumeReviewRecovery(
+        _ handoff: ReviewRecoveryHandoff,
+        request: CodexReviewBackendModel.Review.Start,
+        admission: ReviewStartAdmission
+    ) async throws -> BackendReviewAttempt {
+        commands.append(.resumeReviewRecoveryHandoff(handoff, request))
+        let waiters = Array(resumeReviewRecoveryWaiters.values)
+        resumeReviewRecoveryWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
+        let consumedHandoff = try await handoff.consume()
+        let interruptedRun = consumedHandoff.token.interruptedRun
+        try await admission.admitRecoveryRollbackDispatch(for: interruptedRun)
+        let recoveredRun = nextRecoveredRun ?? .init(
+            attemptID: "attempt-recovered",
+            threadID: interruptedRun.threadID,
+            turnID: "turn-recovered",
+            reviewThreadID: interruptedRun.reviewThreadID,
+            model: interruptedRun.model ?? request.model
+        )
+        let provisionalRun = CodexReviewBackendModel.Review.Run(
+            attemptID: recoveredRun.attemptID,
+            threadID: recoveredRun.threadID,
+            reviewThreadID: recoveredRun.threadID,
+            model: recoveredRun.model
+        )
+        if let resumeReviewRecoveryGate {
+            await resumeReviewRecoveryGate.wait()
+        }
+        if let recoveryFailureMessage {
+            throw FakeCodexReviewBackendError(message: recoveryFailureMessage)
+        }
+        try await admission.recordRecoveryRollbackAcknowledged(for: interruptedRun)
+        try await admission.recordPreparedRecoveryRun(provisionalRun)
+        try await admission.admitReviewStartDispatch(for: provisionalRun)
+        try await admission.recordActiveRun(recoveredRun)
+        return .init(
+            run: recoveredRun,
+            events: eventMailbox(for: recoveredRun)
+        )
     }
 
     package func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws {

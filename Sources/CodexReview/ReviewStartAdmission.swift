@@ -40,6 +40,7 @@ package struct ReviewInterruptRequestFailure: LocalizedError, Equatable, Sendabl
 package enum ReviewInterruptTerminal: Equatable, Sendable {
     case canonical(ReviewTerminalRecord)
     case connection(ReviewRuntimeCloseFailure)
+    case stream(ReviewAttemptStreamFailure)
 }
 
 package struct ReviewInterruptResolution: Equatable, Sendable {
@@ -110,10 +111,16 @@ package enum ReviewStartAdmissionOperation: String, Equatable, Sendable {
     case recordReviewStartRejected
     case retryReviewStartDispatch
     case recordActiveRun
+    case recordPreparedRecoveryRun
+    case admitRecoveryRollbackDispatch
+    case recordRecoveryRollbackAcknowledged
+    case recordRecoveryRollbackRejected
     case interruptActiveRun
+    case recoverActiveRun
     case recordInterruptRequestAcknowledged
     case recordCanonicalTerminal
     case recordActiveConnectionTerminal
+    case recordActiveStreamTerminal
     case recordConnectionTerminal
     case recordProtocolTerminal
 }
@@ -186,6 +193,7 @@ package actor ReviewStartAdmission {
         case protocolFailure(ReviewStartProtocolFailure)
         case rejected(ReviewStartRequestFailure)
         case active(ReviewInterruptResolution)
+        case recovery(ReviewRecoveryDisposition)
     }
 
     package enum Phase: Equatable, Sendable {
@@ -193,6 +201,11 @@ package actor ReviewStartAdmission {
         case startingReview(
             preparedRun: CodexReviewBackendModel.Review.Run,
             dispatch: RequestDispatch
+        )
+        /// `thread/rollback` may have been applied. This phase is entered
+        /// immediately before the non-idempotent request is sent.
+        case rollingBackRecovery(
+            predecessorRun: CodexReviewBackendModel.Review.Run
         )
         case active(CodexReviewBackendModel.Review.Run)
         case interrupting(
@@ -203,6 +216,17 @@ package actor ReviewStartAdmission {
         case finishing(
             run: CodexReviewBackendModel.Review.Run,
             cancellation: ReviewCancellation,
+            terminal: ReviewInterruptTerminal,
+            request: InterruptRequestDispatch
+        )
+        case recovering(
+            run: CodexReviewBackendModel.Review.Run,
+            trigger: ReviewAttemptRecoveryTrigger,
+            request: InterruptRequestDispatch
+        )
+        case finishingRecovery(
+            run: CodexReviewBackendModel.Review.Run,
+            trigger: ReviewAttemptRecoveryTrigger,
             terminal: ReviewInterruptTerminal,
             request: InterruptRequestDispatch
         )
@@ -218,6 +242,7 @@ package actor ReviewStartAdmission {
     private var phase: Phase = .preparingThread(.notSent)
     private var requestedCancellation: ReviewCancellation?
     private var interruptionTask: Task<ReviewInterruptResolution, any Error>?
+    private var recoveryTask: Task<ReviewRecoveryDisposition, any Error>?
     private var activeTerminalWaiters: [CheckedContinuation<ReviewInterruptTerminal, Never>] = []
 
     package init() {
@@ -236,13 +261,16 @@ package actor ReviewStartAdmission {
         guard requestedCancellation == nil else {
             return
         }
-        requestedCancellation = cancellation
         switch phase {
+        case .terminal:
+            return
         case .preparingThread(.notSent), .startingReview(_, .notSent):
+            requestedCancellation = cancellation
             phase = .terminal(.cancelledBeforeDispatch(cancellation))
         case .preparingThread(.outcomeUnknown), .startingReview(_, .outcomeUnknown),
-             .active, .interrupting, .finishing, .terminal:
-            break
+             .rollingBackRecovery, .active, .interrupting, .finishing, .recovering,
+             .finishingRecovery:
+            requestedCancellation = cancellation
         }
     }
 
@@ -252,8 +280,10 @@ package actor ReviewStartAdmission {
             break
         case .terminal(.cancelledBeforeDispatch(let cancellation)):
             throw ReviewStartCancelledBeforeDispatch(cancellation: cancellation)
-        case .preparingThread(.outcomeUnknown), .startingReview, .active,
-             .interrupting, .finishing, .terminal:
+        case .preparingThread(.outcomeUnknown), .startingReview,
+             .rollingBackRecovery, .active,
+             .interrupting, .finishing, .recovering, .finishingRecovery,
+             .terminal:
             throw contractFailure(.wrongPhase(operation: .admitThreadStartDispatch))
         }
         if let requestedCancellation {
@@ -292,8 +322,9 @@ package actor ReviewStartAdmission {
             return
         case .terminal:
             return
-        case .preparingThread(.notSent), .startingReview, .active,
-             .interrupting, .finishing:
+        case .preparingThread(.notSent), .startingReview, .rollingBackRecovery,
+             .active,
+             .interrupting, .finishing, .recovering, .finishingRecovery:
             throw contractFailure(.wrongPhase(operation: .recordThreadStartRejected))
         }
     }
@@ -321,8 +352,115 @@ package actor ReviewStartAdmission {
                 )
             }
             throw contractFailure(.wrongPhase(operation: .recordPreparedThread))
-        case .preparingThread(.notSent), .active, .interrupting, .finishing, .terminal:
+        case .preparingThread(.notSent), .rollingBackRecovery, .active,
+             .interrupting, .finishing,
+             .recovering, .finishingRecovery, .terminal:
             throw contractFailure(.wrongPhase(operation: .recordPreparedThread))
+        }
+    }
+
+    /// Installs an already-existing source thread for a replacement attempt.
+    /// Unlike `recordPreparedThread`, this transition proves that no new
+    /// `thread/start` request is part of the replacement.
+    package func recordPreparedRecoveryRun(
+        _ run: CodexReviewBackendModel.Review.Run
+    ) throws {
+        switch phase {
+        case .preparingThread(.notSent):
+            if let requestedCancellation {
+                phase = .terminal(.cancelledBeforeDispatch(requestedCancellation))
+                throw ReviewStartCancelledBeforeDispatch(
+                    cancellation: requestedCancellation
+                )
+            }
+            phase = .startingReview(preparedRun: run, dispatch: .notSent)
+        case .startingReview(let currentRun, .notSent) where currentRun == run:
+            return
+        case .preparingThread(.outcomeUnknown), .startingReview,
+             .rollingBackRecovery, .active,
+             .interrupting, .finishing, .recovering, .finishingRecovery,
+             .terminal:
+            throw contractFailure(.wrongPhase(
+                operation: .recordPreparedRecoveryRun
+            ))
+        }
+    }
+
+    package func admitRecoveryRollbackDispatch(
+        for predecessorRun: CodexReviewBackendModel.Review.Run
+    ) throws {
+        switch phase {
+        case .preparingThread(.notSent):
+            break
+        case .terminal(.cancelledBeforeDispatch(let cancellation)):
+            throw ReviewStartCancelledBeforeDispatch(cancellation: cancellation)
+        case .preparingThread(.outcomeUnknown), .startingReview,
+             .rollingBackRecovery, .active, .interrupting, .finishing,
+             .recovering, .finishingRecovery, .terminal:
+            throw contractFailure(.wrongPhase(
+                operation: .admitRecoveryRollbackDispatch
+            ))
+        }
+        if let requestedCancellation {
+            phase = .terminal(.cancelledBeforeDispatch(requestedCancellation))
+            throw ReviewStartCancelledBeforeDispatch(
+                cancellation: requestedCancellation
+            )
+        }
+        phase = .rollingBackRecovery(predecessorRun: predecessorRun)
+    }
+
+    package func recordRecoveryRollbackAcknowledged(
+        for predecessorRun: CodexReviewBackendModel.Review.Run
+    ) throws {
+        guard case .rollingBackRecovery(let currentRun) = phase else {
+            throw contractFailure(.wrongPhase(
+                operation: .recordRecoveryRollbackAcknowledged
+            ))
+        }
+        guard currentRun == predecessorRun else {
+            throw staleRunFailure(
+                operation: .recordRecoveryRollbackAcknowledged,
+                expected: currentRun,
+                received: predecessorRun
+            )
+        }
+        if let requestedCancellation {
+            phase = .terminal(.cancelledBeforeDispatch(requestedCancellation))
+            throw ReviewStartCancelledBeforeDispatch(
+                cancellation: requestedCancellation
+            )
+        }
+        phase = .preparingThread(.notSent)
+    }
+
+    package func recordRecoveryRollbackRejected(
+        _ failure: ReviewStartRequestFailure,
+        for predecessorRun: CodexReviewBackendModel.Review.Run
+    ) throws {
+        guard case .rejected = failure else {
+            throw contractFailure(.retryRequiresExplicitRejection(failure))
+        }
+        switch phase {
+        case .rollingBackRecovery(let currentRun):
+            guard currentRun == predecessorRun else {
+                throw staleRunFailure(
+                    operation: .recordRecoveryRollbackRejected,
+                    expected: currentRun,
+                    received: predecessorRun
+                )
+            }
+            phase = .terminal(.rejected(failure))
+        case .terminal(.rejected(let currentFailure)) where currentFailure == failure:
+            return
+        case .terminal:
+            return
+        case .preparingThread, .startingReview, .active, .interrupting,
+             .finishing, .recovering,
+             .finishingRecovery:
+            throw contractFailure(.wrongPhase(
+                operation: .recordRecoveryRollbackRejected
+            ))
         }
     }
 
@@ -344,7 +482,9 @@ package actor ReviewStartAdmission {
             throw contractFailure(.wrongPhase(operation: .admitReviewStartDispatch))
         case .terminal(.cancelledBeforeDispatch(let cancellation)):
             throw ReviewStartCancelledBeforeDispatch(cancellation: cancellation)
-        case .preparingThread, .active, .interrupting, .finishing, .terminal:
+        case .preparingThread, .rollingBackRecovery, .active, .interrupting,
+             .finishing, .recovering,
+             .finishingRecovery, .terminal:
             throw contractFailure(.wrongPhase(operation: .admitReviewStartDispatch))
         }
         guard currentRun == preparedRun else {
@@ -406,8 +546,9 @@ package actor ReviewStartAdmission {
             return
         case .terminal:
             return
-        case .preparingThread, .startingReview(_, .notSent), .active,
-             .interrupting, .finishing:
+        case .preparingThread, .startingReview(_, .notSent),
+             .rollingBackRecovery, .active,
+             .interrupting, .finishing, .recovering, .finishingRecovery:
             throw contractFailure(.wrongPhase(operation: .recordReviewStartRejected))
         }
     }
@@ -433,8 +574,9 @@ package actor ReviewStartAdmission {
                 expected: currentRun,
                 received: run
             )
-        case .preparingThread, .startingReview(_, .notSent), .interrupting,
-             .finishing, .terminal:
+        case .preparingThread, .startingReview(_, .notSent),
+             .rollingBackRecovery, .interrupting,
+             .finishing, .recovering, .finishingRecovery, .terminal:
             throw contractFailure(.wrongPhase(operation: .recordActiveRun))
         }
     }
@@ -451,6 +593,23 @@ package actor ReviewStartAdmission {
             run,
             operation: .interruptActiveRun
         )
+        if let recoveryTask {
+            recordJoinedCancellation(cancellation)
+            return try checkedInterruptResolution(
+                interruptResolution(
+                    for: try await recoveryTask.value,
+                    cancellation: requestedCancellation ?? cancellation
+                )
+            )
+        }
+        if case .terminal(.recovery(let disposition)) = phase {
+            return try checkedInterruptResolution(
+                interruptResolution(
+                    for: disposition,
+                    cancellation: requestedCancellation
+                )
+            )
+        }
         if let interruptionTask {
             return try await interruptionTask.value
         }
@@ -480,6 +639,61 @@ package actor ReviewStartAdmission {
         return try await task.value
     }
 
+    package func beginRecovery(
+        _ run: CodexReviewBackendModel.Review.Run,
+        trigger: ReviewAttemptRecoveryTrigger,
+        request: @escaping @Sendable (
+            ReviewInterruptRequestAdmission,
+            CodexReviewBackendModel.CancellationReason
+        ) async throws -> Void
+    ) async throws -> ReviewRecoveryDisposition {
+        let currentRun = try requireActiveRun(
+            run,
+            operation: .recoverActiveRun
+        )
+        if let recoveryTask {
+            return try await recoveryTask.value
+        }
+        if case .terminal(.recovery(let disposition)) = phase {
+            return disposition
+        }
+        guard interruptionTask == nil else {
+            throw ReviewAttemptContractFailure(
+                message: "Recovery cannot replace an admitted terminal cancellation."
+            )
+        }
+        if case .terminal(.active(let resolution)) = phase {
+            let disposition = makeRecoveryDisposition(
+                resolvedAttempt(from: resolution),
+                trigger: trigger,
+                requestWasAcknowledgedBeforeTerminal: false
+            )
+            if case .replacement = disposition {
+                _ = try interruptRequestAdmission(for: currentRun)
+            }
+            phase = .terminal(.recovery(disposition))
+            return disposition
+        }
+        guard case .active = phase else {
+            throw contractFailure(.wrongPhase(operation: .recoverActiveRun))
+        }
+        _ = try interruptRequestAdmission(for: currentRun)
+        phase = .recovering(
+            run: currentRun,
+            trigger: trigger,
+            request: .notSent
+        )
+        let task = Task {
+            try await self.performRecovery(
+                run: currentRun,
+                trigger: trigger,
+                request: request
+            )
+        }
+        recoveryTask = task
+        return try await task.value
+    }
+
     package func recordCanonicalTerminal(
         _ terminal: ReviewTerminalRecord,
         for run: CodexReviewBackendModel.Review.Run
@@ -487,7 +701,7 @@ package actor ReviewStartAdmission {
         _ = try requireActiveRun(run, operation: .recordCanonicalTerminal)
         let normalizedTerminal: ReviewTerminalRecord
         if case .interrupted = terminal,
-           let cancellation = activeInterruptionCancellation {
+           let cancellation = terminalInterruptionCancellation {
             normalizedTerminal = .interrupted(.requested(cancellation))
         } else {
             normalizedTerminal = terminal
@@ -514,6 +728,18 @@ package actor ReviewStartAdmission {
         )
     }
 
+    package func recordStreamTerminal(
+        _ failure: ReviewAttemptStreamFailure,
+        for run: CodexReviewBackendModel.Review.Run
+    ) throws {
+        _ = try requireActiveRun(run, operation: .recordActiveStreamTerminal)
+        try recordActiveTerminal(
+            .stream(failure),
+            for: run,
+            operation: .recordActiveStreamTerminal
+        )
+    }
+
     package func recordConnectionTerminal(
         _ failure: ReviewRuntimeCloseFailure
     ) throws {
@@ -521,12 +747,13 @@ package actor ReviewStartAdmission {
             throw contractFailure(.connectionTerminalRequiresConnectionFailure(failure))
         }
         switch phase {
-        case .preparingThread(.outcomeUnknown), .startingReview(_, .outcomeUnknown):
+        case .preparingThread(.outcomeUnknown), .startingReview(_, .outcomeUnknown),
+             .rollingBackRecovery:
             phase = .terminal(.connection(failure))
         case .terminal:
             return
         case .preparingThread(.notSent), .startingReview(_, .notSent), .active,
-             .interrupting, .finishing:
+             .interrupting, .finishing, .recovering, .finishingRecovery:
             throw contractFailure(.wrongPhase(operation: .recordConnectionTerminal))
         }
     }
@@ -535,14 +762,15 @@ package actor ReviewStartAdmission {
         _ failure: ReviewStartProtocolFailure
     ) throws {
         switch phase {
-        case .preparingThread(.outcomeUnknown), .startingReview(_, .outcomeUnknown):
+        case .preparingThread(.outcomeUnknown), .startingReview(_, .outcomeUnknown),
+             .rollingBackRecovery:
             phase = .terminal(.protocolFailure(failure))
         case .terminal(.protocolFailure(let currentFailure)) where currentFailure == failure:
             return
         case .terminal:
             return
         case .preparingThread(.notSent), .startingReview(_, .notSent), .active,
-             .interrupting, .finishing:
+             .interrupting, .finishing, .recovering, .finishingRecovery:
             throw contractFailure(.wrongPhase(operation: .recordProtocolTerminal))
         }
     }
@@ -554,16 +782,29 @@ package actor ReviewStartAdmission {
             cancellation
         case .terminal(.active(let resolution)):
             resolution.cancellation
+        case .rollingBackRecovery, .recovering, .finishingRecovery:
+            requestedCancellation
+        case .terminal(.recovery):
+            requestedCancellation
         case .preparingThread, .startingReview, .active, .terminal:
             requestedCancellation
         }
     }
 
     package func activeTerminalResolution() -> ReviewInterruptResolution? {
-        guard case .terminal(.active(let resolution)) = phase else {
+        switch phase {
+        case .terminal(.active(let resolution)):
+            return resolution
+        case .terminal(.recovery(let disposition)):
+            return interruptResolution(
+                for: disposition,
+                cancellation: requestedCancellation
+            )
+        case .preparingThread, .startingReview, .rollingBackRecovery, .active,
+             .interrupting,
+             .finishing, .recovering, .finishingRecovery, .terminal:
             return nil
         }
-        return resolution
     }
 
     package func currentPhase() -> Phase {
@@ -590,13 +831,72 @@ package actor ReviewStartAdmission {
             CodexReviewBackendModel.CancellationReason
         ) async throws -> Void
     ) async throws -> ReviewInterruptResolution {
+        let barrier = try await performInterruptionBarrier(
+            run: run,
+            reason: .init(message: cancellation.message),
+            request: request
+        )
+        let resolution = ReviewInterruptResolution(
+            run: run,
+            cancellation: cancellation,
+            terminal: barrier.terminal,
+            requestFailure: barrier.requestFailure
+        )
+        phase = .terminal(.active(resolution))
+        interruptionTask = nil
+        return try checkedInterruptResolution(resolution)
+    }
+
+    private func performRecovery(
+        run: CodexReviewBackendModel.Review.Run,
+        trigger: ReviewAttemptRecoveryTrigger,
+        request: @escaping @Sendable (
+            ReviewInterruptRequestAdmission,
+            CodexReviewBackendModel.CancellationReason
+        ) async throws -> Void
+    ) async throws -> ReviewRecoveryDisposition {
+        do {
+            let requestCancellation = requestedCancellation ?? trigger.cancellation
+            let barrier = try await performInterruptionBarrier(
+                run: run,
+                reason: .init(message: requestCancellation.message),
+                request: request
+            )
+            let resolved = ReviewResolvedAttemptTerminal(
+                run: run,
+                terminal: recoveryBarrierTerminal(from: barrier.terminal),
+                requestFailure: barrier.requestFailure
+            )
+            let disposition = makeRecoveryDisposition(
+                resolved,
+                trigger: trigger,
+                requestWasAcknowledgedBeforeTerminal:
+                    recoveryRequestWasAcknowledgedBeforeTerminal
+            )
+            phase = .terminal(.recovery(disposition))
+            recoveryTask = nil
+            return disposition
+        } catch {
+            recoveryTask = nil
+            throw error
+        }
+    }
+
+    private func performInterruptionBarrier(
+        run: CodexReviewBackendModel.Review.Run,
+        reason: CodexReviewBackendModel.CancellationReason,
+        request: @escaping @Sendable (
+            ReviewInterruptRequestAdmission,
+            CodexReviewBackendModel.CancellationReason
+        ) async throws -> Void
+    ) async throws -> (
+        terminal: ReviewInterruptTerminal,
+        requestFailure: ReviewInterruptRequestFailure?
+    ) {
         let requestResult: Result<Void, ReviewInterruptRequestFailure>
         if let requestAdmission = try beginInterruptRequestDispatch(for: run) {
             do {
-                try await request(
-                    requestAdmission,
-                    .init(message: cancellation.message)
-                )
+                try await request(requestAdmission, reason)
                 requestResult = .success(())
             } catch let failure as ReviewInterruptRequestFailure {
                 requestResult = .failure(failure)
@@ -615,9 +915,18 @@ package actor ReviewStartAdmission {
         if case .failure(let failure) = requestResult,
            case .rejected = failure.outcome,
            activeTerminalSource == nil {
+            switch phase {
+            case .recovering:
+                recoveryTask = nil
+            case .interrupting:
+                interruptionTask = nil
+            case .preparingThread, .startingReview, .rollingBackRecovery,
+                 .active, .finishing,
+                 .finishingRecovery, .terminal:
+                break
+            }
             requestedCancellation = nil
             phase = .active(run)
-            interruptionTask = nil
             throw failure
         }
 
@@ -631,24 +940,16 @@ package actor ReviewStartAdmission {
         var requestFailure: ReviewInterruptRequestFailure?
         if case .failure(let failure) = requestResult {
             if case .outcomeUnknown = failure.outcome,
-               case .connection(let connectionFailure) = terminal {
+               let barrierDiagnostic = barrierDiagnostic(for: terminal) {
                 requestFailure = .init(
                     outcome: failure.outcome,
-                    secondaryBarrierDiagnostic: connectionFailure.localizedDescription
+                    secondaryBarrierDiagnostic: barrierDiagnostic
                 )
             } else {
                 requestFailure = failure
             }
         }
-        let resolution = ReviewInterruptResolution(
-            run: run,
-            cancellation: cancellation,
-            terminal: terminal,
-            requestFailure: requestFailure
-        )
-        phase = .terminal(.active(resolution))
-        interruptionTask = nil
-        return try checkedInterruptResolution(resolution)
+        return (terminal, requestFailure)
     }
 
     private func recordActiveTerminal(
@@ -672,7 +973,22 @@ package actor ReviewStartAdmission {
                 request: request
             )
             resumeActiveTerminalWaiters(returning: terminal)
+        case .recovering(_, let trigger, let request):
+            phase = .finishingRecovery(
+                run: run,
+                trigger: trigger,
+                terminal: terminal,
+                request: request
+            )
+            resumeActiveTerminalWaiters(returning: terminal)
         case .finishing(_, _, let currentTerminal, _):
+            guard currentTerminal == terminal else {
+                throw conflictingActiveTerminalFailure(
+                    expected: currentTerminal,
+                    received: terminal
+                )
+            }
+        case .finishingRecovery(_, _, let currentTerminal, _):
             guard currentTerminal == terminal else {
                 throw conflictingActiveTerminalFailure(
                     expected: currentTerminal,
@@ -686,7 +1002,20 @@ package actor ReviewStartAdmission {
                     received: terminal
                 )
             }
-        case .preparingThread, .startingReview, .terminal:
+        case .terminal(.recovery(let disposition)):
+            let currentTerminal = interruptTerminal(
+                from: disposition.resolved.terminal
+            )
+            let normalizedReceived = interruptTerminal(
+                from: recoveryBarrierTerminal(from: terminal)
+            )
+            guard currentTerminal == normalizedReceived else {
+                throw conflictingActiveTerminalFailure(
+                    expected: currentTerminal,
+                    received: normalizedReceived
+                )
+            }
+        case .preparingThread, .startingReview, .rollingBackRecovery, .terminal:
             throw contractFailure(.wrongPhase(operation: operation))
         }
     }
@@ -710,10 +1039,28 @@ package actor ReviewStartAdmission {
                 request: .outcomeUnknown
             )
             return requestAdmission
-        case .finishing(_, _, _, .notSent), .terminal(.active):
+        case .recovering(let currentRun, let trigger, .notSent):
+            guard currentRun == run else {
+                throw staleRunFailure(
+                    operation: .recoverActiveRun,
+                    expected: currentRun,
+                    received: run
+                )
+            }
+            let requestAdmission = try interruptRequestAdmission(for: currentRun)
+            phase = .recovering(
+                run: currentRun,
+                trigger: trigger,
+                request: .outcomeUnknown
+            )
+            return requestAdmission
+        case .finishing(_, _, _, .notSent),
+             .finishingRecovery(_, _, _, .notSent),
+             .terminal(.active), .terminal(.recovery):
             return nil
-        case .preparingThread, .startingReview, .active, .interrupting,
-             .finishing, .terminal:
+        case .preparingThread, .startingReview, .rollingBackRecovery, .active,
+             .interrupting,
+             .finishing, .recovering, .finishingRecovery, .terminal:
             throw contractFailure(.wrongPhase(operation: .interruptActiveRun))
         }
     }
@@ -754,8 +1101,39 @@ package actor ReviewStartAdmission {
                 terminal: terminal,
                 request: .acknowledged
             )
-        case .preparingThread, .startingReview, .active, .interrupting,
-             .finishing, .terminal:
+        case .recovering(let currentRun, let trigger, .outcomeUnknown):
+            guard currentRun == run else {
+                throw staleRunFailure(
+                    operation: .recordInterruptRequestAcknowledged,
+                    expected: currentRun,
+                    received: run
+                )
+            }
+            phase = .recovering(
+                run: run,
+                trigger: trigger,
+                request: .acknowledged
+            )
+        case .finishingRecovery(
+            let currentRun,
+            _,
+            _,
+            .outcomeUnknown
+        ):
+            guard currentRun == run else {
+                throw staleRunFailure(
+                    operation: .recordInterruptRequestAcknowledged,
+                    expected: currentRun,
+                    received: run
+                )
+            }
+            // Preserve the request state captured when the terminal won. A
+            // late ACK drains the request but cannot move its linearization
+            // ahead of that already-recorded terminal.
+            return
+        case .preparingThread, .startingReview, .rollingBackRecovery, .active,
+             .interrupting,
+             .finishing, .recovering, .finishingRecovery, .terminal:
             throw contractFailure(.wrongPhase(
                 operation: .recordInterruptRequestAcknowledged
             ))
@@ -807,10 +1185,156 @@ package actor ReviewStartAdmission {
     ) throws -> ReviewInterruptResolution {
         if let requestFailure = resolution.requestFailure,
            case .outcomeUnknown = requestFailure.outcome,
-           case .connection = resolution.terminal {
+           barrierDiagnostic(for: resolution.terminal) != nil {
             throw requestFailure
         }
         return resolution
+    }
+
+    private func recordJoinedCancellation(_ cancellation: ReviewCancellation) {
+        if requestedCancellation == nil {
+            requestedCancellation = cancellation
+        }
+    }
+
+    private func resolvedAttempt(
+        from resolution: ReviewInterruptResolution
+    ) -> ReviewResolvedAttemptTerminal {
+        .init(
+            run: resolution.run,
+            terminal: recoveryBarrierTerminal(from: resolution.terminal),
+            requestFailure: resolution.requestFailure
+        )
+    }
+
+    private func interruptResolution(
+        for disposition: ReviewRecoveryDisposition,
+        cancellation: ReviewCancellation?
+    ) -> ReviewInterruptResolution {
+        let resolved = disposition.resolved
+        return .init(
+            run: resolved.run,
+            cancellation: cancellation,
+            terminal: interruptTerminal(from: resolved.terminal),
+            requestFailure: resolved.requestFailure
+        )
+    }
+
+    private func makeRecoveryDisposition(
+        _ resolved: ReviewResolvedAttemptTerminal,
+        trigger: ReviewAttemptRecoveryTrigger,
+        requestWasAcknowledgedBeforeTerminal: Bool
+    ) -> ReviewRecoveryDisposition {
+        switch resolved.terminal {
+        case .canonical(let terminal):
+            switch terminal {
+            case .completed, .failed:
+                return .productTerminal(.init(
+                    resolved: resolved,
+                    productTerminal: terminal
+                ))
+            case .interrupted(let cause):
+                if case .requested = cause {
+                    return .productTerminal(.init(
+                        resolved: resolved,
+                        productTerminal: terminal
+                    ))
+                }
+                if let requestedCancellation {
+                    let productTerminal: ReviewTerminalRecord =
+                        requestWasAcknowledgedBeforeTerminal
+                        ? .interrupted(.requested(requestedCancellation))
+                        : terminal
+                    return .productTerminal(.init(
+                        resolved: resolved,
+                        productTerminal: productTerminal
+                    ))
+                }
+                return .replacement(.init(resolved: resolved, trigger: trigger))
+            }
+        case .stream(let failure):
+            if let requestedCancellation {
+                let resolvedProductTerminal: ReviewTerminalRecord
+                if requestWasAcknowledgedBeforeTerminal {
+                    switch failure {
+                    case .recoverableNetwork, .ownerForcedConnectionClose,
+                         .unexpectedConnection:
+                        resolvedProductTerminal = .interrupted(
+                            .requested(requestedCancellation)
+                        )
+                    case .process, .protocolViolation, .workerContract,
+                         .ownerCancellation:
+                        resolvedProductTerminal = productTerminal(for: failure)
+                    }
+                } else {
+                    resolvedProductTerminal = productTerminal(for: failure)
+                }
+                return .productTerminal(.init(
+                    resolved: resolved,
+                    productTerminal: resolvedProductTerminal
+                ))
+            }
+            if failure.permitsRecoveryReplacement {
+                return .replacement(.init(resolved: resolved, trigger: trigger))
+            }
+            return .productTerminal(.init(
+                resolved: resolved,
+                productTerminal: productTerminal(for: failure)
+            ))
+        }
+    }
+
+    private func productTerminal(
+        for failure: ReviewAttemptStreamFailure
+    ) -> ReviewTerminalRecord {
+        switch failure {
+        case .process:
+            .interrupted(.previousProcessExit)
+        case .protocolViolation(let failure), .workerContract(let failure):
+            .failed(message: failure.localizedDescription)
+        case .ownerCancellation:
+            .failed(message: failure.localizedDescription)
+        case .recoverableNetwork, .ownerForcedConnectionClose,
+             .unexpectedConnection:
+            .interrupted(.transport(message: failure.localizedDescription))
+        }
+    }
+
+    private func recoveryBarrierTerminal(
+        from terminal: ReviewInterruptTerminal
+    ) -> ReviewAttemptBarrierTerminal {
+        switch terminal {
+        case .canonical(let terminal):
+            .canonical(terminal)
+        case .connection(let failure):
+            .stream(.unexpectedConnection(failure))
+        case .stream(let failure):
+            .stream(failure)
+        }
+    }
+
+    private func interruptTerminal(
+        from terminal: ReviewAttemptBarrierTerminal
+    ) -> ReviewInterruptTerminal {
+        switch terminal {
+        case .canonical(let terminal):
+            .canonical(terminal)
+        case .stream(let failure):
+            .stream(failure)
+        }
+    }
+
+    private func barrierDiagnostic(
+        for terminal: ReviewInterruptTerminal
+    ) -> String? {
+        switch terminal {
+        case .canonical:
+            nil
+        case .connection(let failure):
+            failure.localizedDescription
+        case .stream(let failure):
+            failure.localizedDescription
+        }
     }
 
     private func interruptRequestAdmission(
@@ -839,34 +1363,53 @@ package actor ReviewStartAdmission {
     private var activeRunIdentity: CodexReviewBackendModel.Review.Run? {
         switch phase {
         case .active(let run), .interrupting(let run, _, _),
-             .finishing(let run, _, _, _):
+             .finishing(let run, _, _, _), .recovering(let run, _, _),
+             .finishingRecovery(let run, _, _, _):
             run
         case .terminal(.active(let resolution)):
             resolution.run
-        case .preparingThread, .startingReview, .terminal:
+        case .terminal(.recovery(let disposition)):
+            disposition.resolved.run
+        case .preparingThread, .startingReview, .rollingBackRecovery, .terminal:
             nil
         }
     }
 
-    private var activeInterruptionCancellation: ReviewCancellation? {
+    private var terminalInterruptionCancellation: ReviewCancellation? {
         switch phase {
         case .interrupting(_, let cancellation, _),
              .finishing(_, let cancellation, _, _):
             cancellation
         case .terminal(.active(let resolution)):
             resolution.cancellation
-        case .preparingThread, .startingReview, .active, .terminal:
+        case .recovering, .finishingRecovery:
+            nil
+        case .preparingThread, .startingReview, .rollingBackRecovery,
+             .active, .terminal:
             nil
         }
+    }
+
+    private var recoveryRequestWasAcknowledgedBeforeTerminal: Bool {
+        guard case .finishingRecovery(_, _, _, let request) = phase else {
+            return false
+        }
+        return request == .acknowledged
     }
 
     private var activeTerminalSource: ReviewInterruptTerminal? {
         switch phase {
         case .finishing(_, _, let terminal, _):
             terminal
+        case .finishingRecovery(_, _, let terminal, _):
+            terminal
         case .terminal(.active(let resolution)):
             resolution.terminal
-        case .preparingThread, .startingReview, .active, .interrupting, .terminal:
+        case .terminal(.recovery(let disposition)):
+            interruptTerminal(from: disposition.resolved.terminal)
+        case .preparingThread, .startingReview, .rollingBackRecovery, .active,
+             .interrupting,
+             .recovering, .terminal:
             nil
         }
     }
