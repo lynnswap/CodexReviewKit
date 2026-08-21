@@ -126,13 +126,24 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         return try await readAuth()
     }
 
-    package func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt {
+    package func startReview(
+        _ request: CodexReviewBackendModel.Review.Start,
+        admission: ReviewStartAdmission
+    ) async throws -> BackendReviewAttempt {
         _ = try await client.initialize()
         await ensureNotificationRouterStarted()
         let control = AppServerReviewControl(client: client)
 
-        let thread = try await startReviewThread(request)
-        controlsByThreadID[thread.threadID] = control
+        let thread: AppServerAPI.Thread.Start.Response
+        do {
+            thread = try await startReviewThread(request, admission: admission)
+        } catch {
+            let failure = Self.startRequestFailure(for: error)
+            if case .rejected = failure {
+                try await admission.recordThreadStartRejected(failure)
+            }
+            throw error
+        }
         let attemptID = makeAppServerReviewAttemptID()
         let provisionalRun = CodexReviewBackendModel.Review.Run(
             attemptID: attemptID,
@@ -140,6 +151,22 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             reviewThreadID: thread.threadID,
             model: thread.model ?? request.model
         )
+        do {
+            try await admission.recordPreparedThread(provisionalRun)
+            try await admission.admitReviewStartDispatch(for: provisionalRun)
+        } catch {
+            let primaryDescription = error.localizedDescription
+            do {
+                try await cleanupReview(provisionalRun)
+            } catch let cleanupError {
+                appServerBackendLogger.error(
+                    "Review start admission failed: \(primaryDescription, privacy: .public). Secondary cleanup failure: \(cleanupError.localizedDescription, privacy: .public)"
+                )
+            }
+            throw error
+        }
+
+        controlsByThreadID[thread.threadID] = control
         let session = AppServerReviewEventSession(
             run: provisionalRun,
             control: control,
@@ -151,19 +178,42 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         let review: AppServerAPI.Review.Start.Response
         reviewStartRequestsInFlight += 1
         do {
-            review = try await client.send(AppServerAPI.Review.Start.Request(
+            review = try await client.sendStartRequest(AppServerAPI.Review.Start.Request(
                 params: .init(threadID: thread.threadID, target: request.request.target)
-            ))
+            ), overloadRetryAdmission: { event in
+                switch event {
+                case .rejected(let error):
+                    try await admission.recordReviewStartRejectedForRetry(
+                        Self.startRequestFailure(for: error),
+                        for: provisionalRun
+                    )
+                case .willDispatch:
+                    try await admission.admitReviewStartDispatch(for: provisionalRun)
+                }
+            })
         } catch {
             reviewStartRequestsInFlight -= 1
-            discardUnmatchedReviewNotificationsIfIdle()
-            let primaryDescription = error.localizedDescription
-            do {
-                try await cleanupReview(provisionalRun)
-            } catch let cleanupError {
-                appServerBackendLogger.error(
-                    "Review start failed: \(primaryDescription, privacy: .public). Secondary cleanup failure: \(cleanupError.localizedDescription, privacy: .public)"
-                )
+            let failure = Self.startRequestFailure(for: error)
+            if case .rejected = failure {
+                try await admission.recordReviewStartRejected(failure, for: provisionalRun)
+            } else if let protocolFailure = Self.protocolFailure(for: error) {
+                try await admission.recordProtocolTerminal(protocolFailure)
+            } else if let connectionFailure = Self.connectionFailure(for: error) {
+                try await admission.recordConnectionTerminal(connectionFailure)
+            }
+            let failureDisposition = await admission.failedReviewStartDisposition(
+                for: provisionalRun
+            )
+            if failureDisposition == .cleanup {
+                discardUnmatchedReviewNotificationsIfIdle()
+                let primaryDescription = error.localizedDescription
+                do {
+                    try await cleanupReview(provisionalRun)
+                } catch let cleanupError {
+                    appServerBackendLogger.error(
+                        "Review start failed: \(primaryDescription, privacy: .public). Secondary cleanup failure: \(cleanupError.localizedDescription, privacy: .public)"
+                    )
+                }
             }
             throw error
         }
@@ -175,6 +225,21 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             reviewThreadID: reviewThreadID,
             model: thread.model ?? request.model
         )
+        do {
+            try await admission.recordActiveRun(run)
+        } catch {
+            reviewStartRequestsInFlight -= 1
+            discardUnmatchedReviewNotificationsIfIdle()
+            let primaryDescription = error.localizedDescription
+            do {
+                try await cleanupReview(provisionalRun)
+            } catch let cleanupError {
+                appServerBackendLogger.error(
+                    "Review start activation failed: \(primaryDescription, privacy: .public). Secondary cleanup failure: \(cleanupError.localizedDescription, privacy: .public)"
+                )
+            }
+            throw error
+        }
         await session.updateRun(run)
         registerReviewEventSession(session, for: run)
         control.recordReviewStarted(turnThreadID: appServerTurnThreadID(for: run), turnID: review.turnID)
@@ -186,58 +251,104 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         return await session.attempt()
     }
 
-    private func startReviewThread(_ request: CodexReviewBackendModel.Review.Start) async throws -> AppServerAPI.Thread.Start.Response {
+    private func startReviewThread(
+        _ request: CodexReviewBackendModel.Review.Start,
+        admission: ReviewStartAdmission
+    ) async throws -> AppServerAPI.Thread.Start.Response {
         if threadStartPermissionStrategy == .legacySandbox {
             // Deprecated compatibility: installed Codex builds without the app-server v2
             // session-source flag can ignore permissions without failing the request.
-            return try await client.send(AppServerAPI.Thread.Start.Request(
+            return try await sendThreadStart(AppServerAPI.Thread.Start.Request(
                 params: threadStartParamsWithLegacySandbox(request)
-            ))
+            ), admission: admission)
         }
         do {
-            return try await startReviewThreadWithProfileIDPermissions(request)
+            return try await startReviewThreadWithProfileIDPermissions(
+                request,
+                admission: admission
+            )
         } catch let error as JSONRPC.Error where Self.shouldRetryThreadStartWithLegacySandbox(error) {
             // Deprecated compatibility: some builds accept the permissions field shape
             // without registering the danger-full-access built-in profile.
-            return try await client.send(AppServerAPI.Thread.Start.Request(
+            try await admission.recordThreadStartRejectedForRetry(
+                Self.startRequestFailure(for: error)
+            )
+            return try await sendThreadStart(AppServerAPI.Thread.Start.Request(
                 params: threadStartParamsWithLegacySandbox(request)
-            ))
+            ), admission: admission)
         } catch let error as JSONRPC.Error where Self.shouldRetryThreadStartWithObjectPermissions(error) {
             // Deprecated compatibility: installed Codex builds can require object-shaped
             // permissions while the latest local app-server source accepts a profile ID string.
-            return try await startReviewThreadWithProfileSelectionPermissions(request)
+            try await admission.recordThreadStartRejectedForRetry(
+                Self.startRequestFailure(for: error)
+            )
+            return try await startReviewThreadWithProfileSelectionPermissions(
+                request,
+                admission: admission
+            )
         }
     }
 
     private func startReviewThreadWithProfileIDPermissions(
-        _ request: CodexReviewBackendModel.Review.Start
+        _ request: CodexReviewBackendModel.Review.Start,
+        admission: ReviewStartAdmission
     ) async throws -> AppServerAPI.Thread.Start.Response {
-        try await client.send(AppServerAPI.Thread.Start.Request(
+        try await sendThreadStart(AppServerAPI.Thread.Start.Request(
             params: threadStartParams(
                 request,
                 permissions: .profileID(Self.reviewPermissionProfileID)
             )
-        ))
+        ), admission: admission)
     }
 
     private func startReviewThreadWithProfileSelectionPermissions(
-        _ request: CodexReviewBackendModel.Review.Start
+        _ request: CodexReviewBackendModel.Review.Start,
+        admission: ReviewStartAdmission
     ) async throws -> AppServerAPI.Thread.Start.Response {
         do {
-            return try await client.send(AppServerAPI.Thread.Start.Request(
+            return try await sendThreadStart(AppServerAPI.Thread.Start.Request(
                 params: threadStartParams(
                     request,
                     permissions: .profileSelection(.init(id: Self.reviewPermissionProfileID))
                 )
-            ))
+            ), admission: admission)
         } catch let error as JSONRPC.Error
             where Self.shouldRetryThreadStartWithLegacySandbox(error)
         {
             // Deprecated compatibility: installed Codex builds can know the permissions
             // object shape without registering the danger-full-access built-in profile.
-            return try await client.send(AppServerAPI.Thread.Start.Request(
+            try await admission.recordThreadStartRejectedForRetry(
+                Self.startRequestFailure(for: error)
+            )
+            return try await sendThreadStart(AppServerAPI.Thread.Start.Request(
                 params: threadStartParamsWithLegacySandbox(request)
-            ))
+            ), admission: admission)
+        }
+    }
+
+    private func sendThreadStart(
+        _ request: AppServerAPI.Thread.Start.Request,
+        admission: ReviewStartAdmission
+    ) async throws -> AppServerAPI.Thread.Start.Response {
+        try await admission.admitThreadStartDispatch()
+        do {
+            return try await client.sendStartRequest(request, overloadRetryAdmission: { event in
+                switch event {
+                case .rejected(let error):
+                    try await admission.recordThreadStartRejectedForRetry(
+                        Self.startRequestFailure(for: error)
+                    )
+                case .willDispatch:
+                    try await admission.admitThreadStartDispatch()
+                }
+            })
+        } catch {
+            if let protocolFailure = Self.protocolFailure(for: error) {
+                try await admission.recordProtocolTerminal(protocolFailure)
+            } else if let connectionFailure = Self.connectionFailure(for: error) {
+                try await admission.recordConnectionTerminal(connectionFailure)
+            }
+            throw error
         }
     }
 
@@ -282,6 +393,46 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         }
         return message.contains("unknown built-in profile")
             || message.contains("default_permissions refers to unknown")
+    }
+
+    private nonisolated static func startRequestFailure(
+        for error: any Error
+    ) -> ReviewStartRequestFailure {
+        if case JSONRPC.Error.responseError(let code, let message) = error {
+            return .rejected(code: code, message: message)
+        }
+        return .outcomeUnknown(message: error.localizedDescription)
+    }
+
+    private nonisolated static func connectionFailure(
+        for error: any Error
+    ) -> ReviewRuntimeCloseFailure? {
+        if let failure = error as? AppServerStartRequestFailure,
+           failure.stage == .transport {
+            return .connection(failure.localizedDescription)
+        }
+        guard let jsonRPCError = error as? JSONRPC.Error else {
+            return nil
+        }
+        switch jsonRPCError {
+        case .closed, .invalidMessage:
+            return .connection(jsonRPCError.localizedDescription)
+        case .responseError:
+            return nil
+        }
+    }
+
+    private nonisolated static func protocolFailure(
+        for error: any Error
+    ) -> ReviewStartProtocolFailure? {
+        if let failure = error as? AppServerStartRequestFailure,
+           failure.stage == .responseDecoding {
+            return .init(message: failure.localizedDescription)
+        }
+        guard case JSONRPC.Error.invalidMessage = error else {
+            return nil
+        }
+        return .init(message: error.localizedDescription)
     }
 
     package func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws {

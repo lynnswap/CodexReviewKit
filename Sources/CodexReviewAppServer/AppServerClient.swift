@@ -3,6 +3,30 @@ import OSLog
 
 private let logger = Logger(subsystem: "CodexReviewKit", category: "app-server-client")
 
+package enum AppServerOverloadRetryAdmissionEvent: Sendable {
+    case rejected(JSONRPC.Error)
+    case willDispatch
+}
+
+package struct AppServerStartRequestFailure: LocalizedError, Equatable, Sendable {
+    package enum Stage: String, Equatable, Sendable {
+        case transport
+        case responseDecoding
+    }
+
+    package var stage: Stage
+    package var underlyingDescription: String
+
+    package init(stage: Stage, underlyingDescription: String) {
+        self.stage = stage
+        self.underlyingDescription = underlyingDescription
+    }
+
+    package var errorDescription: String? {
+        "App-server start request failed during \(stage.rawValue): \(underlyingDescription)"
+    }
+}
+
 package actor AppServerClient {
     private static let appServerOverloadedErrorCode = -32001
     private static let overloadRetryDelays: [Duration] = [
@@ -78,11 +102,45 @@ package actor AppServerClient {
         )
     }
 
+    package func sendStartRequest<Request: AppServerAPI.Request>(
+        _ request: Request,
+        overloadRetryAdmission: @escaping @Sendable (
+            AppServerOverloadRetryAdmissionEvent
+        ) async throws -> Void
+    ) async throws -> Request.Response {
+        try await performSend(
+            method: Request.method,
+            params: request.params,
+            responseType: Request.Response.self,
+            scope: request.scope,
+            normalizesStartFailure: true,
+            overloadRetryAdmission: overloadRetryAdmission
+        )
+    }
+
     package func send<Params: Encodable & Sendable, Response: Decodable & Sendable>(
         method: String,
         params: Params,
         responseType: Response.Type,
         scope: AppServerAPI.RequestScope? = nil
+    ) async throws -> Response {
+        try await performSend(
+            method: method,
+            params: params,
+            responseType: responseType,
+            scope: scope,
+            normalizesStartFailure: false,
+            overloadRetryAdmission: nil
+        )
+    }
+
+    private func performSend<Params: Encodable & Sendable, Response: Decodable & Sendable>(
+        method: String,
+        params: Params,
+        responseType: Response.Type,
+        scope: AppServerAPI.RequestScope?,
+        normalizesStartFailure: Bool,
+        overloadRetryAdmission: (@Sendable (AppServerOverloadRetryAdmissionEvent) async throws -> Void)?
     ) async throws -> Response {
         try await serializer.run(scope: scope) { [transport, encoder, decoder, self] in
             let encodedParams = try encoder.encode(params)
@@ -91,12 +149,41 @@ package actor AppServerClient {
                 let requestID = await self.allocateRequestID()
                 logger.debug("JSON-RPC request \(requestID, privacy: .public) -> \(method, privacy: .public)")
                 do {
-                    let rawResponse = try await transport.send(.init(
-                        id: requestID,
-                        method: method,
-                        params: encodedParams
-                    ))
-                    let response = try decoder.decode(responseType, from: rawResponse)
+                    let rawResponse: Data
+                    do {
+                        rawResponse = try await transport.send(.init(
+                            id: requestID,
+                            method: method,
+                            params: encodedParams
+                        ))
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch let error as JSONRPC.Error {
+                        throw error
+                    } catch {
+                        guard normalizesStartFailure else {
+                            throw error
+                        }
+                        logger.error(
+                            "JSON-RPC transport failed for request \(requestID, privacy: .public) -> \(method, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                        )
+                        throw AppServerStartRequestFailure(
+                            stage: .transport,
+                            underlyingDescription: error.localizedDescription
+                        )
+                    }
+                    let response: Response
+                    do {
+                        response = try decoder.decode(responseType, from: rawResponse)
+                    } catch {
+                        guard normalizesStartFailure else {
+                            throw error
+                        }
+                        throw AppServerStartRequestFailure(
+                            stage: .responseDecoding,
+                            underlyingDescription: error.localizedDescription
+                        )
+                    }
                     logger.debug("JSON-RPC response \(requestID, privacy: .public) <- \(method, privacy: .public)")
                     return response
                 } catch let error as JSONRPC.Error {
@@ -106,9 +193,15 @@ package actor AppServerClient {
                         logger.error("JSON-RPC request \(requestID, privacy: .public) failed for \(method, privacy: .public): \(error.localizedDescription, privacy: .public)")
                         throw error
                     }
+                    if let overloadRetryAdmission {
+                        try await overloadRetryAdmission(.rejected(error))
+                    }
                     retryAttempt += 1
                     logger.warning("JSON-RPC request \(requestID, privacy: .public) overloaded for \(method, privacy: .public); retrying in \(String(describing: delay), privacy: .public)")
                     try await retrySleep(delay)
+                    if let overloadRetryAdmission {
+                        try await overloadRetryAdmission(.willDispatch)
+                    }
                 } catch {
                     logger.error("JSON-RPC request \(requestID, privacy: .public) failed for \(method, privacy: .public): \(error.localizedDescription, privacy: .public)")
                     throw error
