@@ -19,23 +19,40 @@ package protocol CodexReviewBackend: Sendable {
         _ run: CodexReviewBackendModel.Review.Run,
         reason: CodexReviewBackendModel.CancellationReason
     ) async throws -> CodexReviewBackendModel.Review.RecoveryToken
+    func prepareReviewRecovery(
+        _ candidate: ReviewRecoveryCandidate
+    ) async throws -> ReviewRecoveryHandoff
     func resumeReviewRecovery(
         _ token: CodexReviewBackendModel.Review.RecoveryToken,
         request: CodexReviewBackendModel.Review.Start
+    ) async throws -> BackendReviewAttempt
+    func resumeReviewRecovery(
+        _ handoff: ReviewRecoveryHandoff,
+        request: CodexReviewBackendModel.Review.Start,
+        admission: ReviewStartAdmission
     ) async throws -> BackendReviewAttempt
     func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws
 }
 
 package enum ReviewRuntimeCloseFailure: LocalizedError, Equatable, Sendable {
     case connection(String)
+    case process(String)
+    case worker(String)
     case cleanup(String)
+    case mcpHandlerDrain(String)
 
     package var errorDescription: String? {
         switch self {
         case .connection(let message):
             "App-server connection close failed: \(message)"
+        case .process(let message):
+            "App-server process close failed: \(message)"
+        case .worker(let message):
+            "Review worker close failed: \(message)"
         case .cleanup(let message):
             "Review cleanup failed: \(message)"
+        case .mcpHandlerDrain(let message):
+            "MCP handler drain failed: \(message)"
         }
     }
 }
@@ -47,6 +64,24 @@ package extension CodexReviewBackend {
         // Legacy callers cannot retain an unresolved admission after this call returns.
         // Remove this compatibility ownership once Store publishes one shared admission.
         try await startReview(request, admission: ReviewStartAdmission.compatibility())
+    }
+
+    func prepareReviewRecovery(
+        _: ReviewRecoveryCandidate
+    ) async throws -> ReviewRecoveryHandoff {
+        throw ReviewAttemptContractFailure(
+            message: "Typed review recovery preparation is not installed for this backend."
+        )
+    }
+
+    func resumeReviewRecovery(
+        _: ReviewRecoveryHandoff,
+        request _: CodexReviewBackendModel.Review.Start,
+        admission _: ReviewStartAdmission
+    ) async throws -> BackendReviewAttempt {
+        throw ReviewAttemptContractFailure(
+            message: "Typed review recovery resume is not installed for this backend."
+        )
     }
 }
 
@@ -64,14 +99,14 @@ package actor BackendReviewEventMailbox {
     private enum Terminal {
         case finished
         case cancelled
-        case failed(String)
+        case failed(ReviewAttemptStreamFailure)
     }
 
     private enum Delivery {
         case event(CodexReviewBackendModel.Review.Event)
         case finished
         case cancelled
-        case failed(String)
+        case failed(ReviewAttemptStreamFailure)
     }
 
     private var bufferedEvents: [CodexReviewBackendModel.Review.Event] = []
@@ -88,8 +123,8 @@ package actor BackendReviewEventMailbox {
             return nil
         case .cancelled:
             throw CancellationError()
-        case .failed(let message):
-            throw BackendReviewEventMailboxError(message: message)
+        case .failed(let failure):
+            throw BackendReviewEventMailboxError(failure: failure)
         }
     }
 
@@ -124,10 +159,25 @@ package actor BackendReviewEventMailbox {
     }
 
     package func fail(_ error: any Error) {
+        if error is CancellationError {
+            guard terminal == nil else {
+                return
+            }
+            terminal = .cancelled
+            resumeWaitersForTerminal()
+            return
+        }
+        fail(
+            error as? ReviewAttemptStreamFailure
+                ?? .workerContract(.init(message: error.localizedDescription))
+        )
+    }
+
+    package func fail(_ failure: ReviewAttemptStreamFailure) {
         guard terminal == nil else {
             return
         }
-        terminal = error is CancellationError ? .cancelled : .failed(error.localizedDescription)
+        terminal = .failed(failure)
         resumeWaitersForTerminal()
     }
 
@@ -195,8 +245,8 @@ package actor BackendReviewEventMailbox {
             return .finished
         case .cancelled:
             return .cancelled
-        case .failed(let message):
-            return .failed(message)
+        case .failed(let failure):
+            return .failed(failure)
         }
     }
 
@@ -211,14 +261,18 @@ package actor BackendReviewEventMailbox {
 }
 
 package struct BackendReviewEventMailboxError: LocalizedError, Sendable {
-    package var message: String
+    package var failure: ReviewAttemptStreamFailure
 
     package init(message: String) {
-        self.message = message
+        self.failure = .workerContract(.init(message: message))
+    }
+
+    package init(failure: ReviewAttemptStreamFailure) {
+        self.failure = failure
     }
 
     package var errorDescription: String? {
-        message
+        failure.localizedDescription
     }
 }
 
