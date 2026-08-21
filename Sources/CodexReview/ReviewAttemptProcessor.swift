@@ -187,6 +187,14 @@ package actor ReviewStartAdmission {
             startTask == nil,
             "ReviewStartAdmission owns exactly one registered start Task."
         )
+        if let requestedCancellation {
+            startFailed = true
+            let task = Task<BackendReviewAttempt, any Error> {
+                throw ReviewStartCancelledBeforeDispatch(cancellation: requestedCancellation)
+            }
+            startTask = task
+            return task
+        }
         phase = .preparingThread(.notSent)
         let task = Task {
             do {

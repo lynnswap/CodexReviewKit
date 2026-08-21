@@ -382,6 +382,7 @@ struct ReviewAttemptProcessorTests {
 
     @Test func queuedCancellationCompletesLocallyWithoutDispatch() async throws {
         let admission = ReviewStartAdmission(closePolicy: controlledClosePolicy(gate: AsyncGate()))
+        let startInvoked = InvocationProbe()
 
         let resolution = try await admission.cancel(
             .mcpClient(message: "Stop"),
@@ -390,6 +391,14 @@ struct ReviewAttemptProcessorTests {
         )
 
         #expect(resolution.terminal == .localCancellation(.mcpClient(message: "Stop")))
+        let startTask = await admission.start { _ in
+            await startInvoked.record()
+            return .init(run: canonicalRun)
+        }
+        await #expect(throws: ReviewStartCancelledBeforeDispatch.self) {
+            try await startTask.value
+        }
+        #expect(await startInvoked.invocationCount() == 0)
     }
 
     @Test func threadStartDispatchAdmissionRejectsDirectDuplicate() async throws {
