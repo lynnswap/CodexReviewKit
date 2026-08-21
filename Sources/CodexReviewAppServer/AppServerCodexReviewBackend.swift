@@ -730,7 +730,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             case .transportTerminated(let termination):
                 switch termination {
                 case .ownerClose:
-                    return .unexpectedConnection(.connection(
+                    return .ownerForcedConnectionClose(.connection(
                         failure.localizedDescription
                     ))
                 case .processExit, .processFailure:
@@ -883,6 +883,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             threadID: reviewThreadID,
             turnID: turnID
         )
+        let handoff = try await candidate.prepareHandoff(token: .init(
+            interruptedRun: run,
+            rollbackThreadID: interruption.threadID
+        ))
         markAttemptAbandoned(run, interruption: interruption)
         if let session = unregisterReviewEventSession(for: run) {
             await session.abandon()
@@ -891,13 +895,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                 completedReviewEventSessionMetricsByThreadID[threadID] = metrics
             }
         }
-        return try ReviewRecoveryHandoff(
-            candidate: candidate,
-            token: .init(
-                interruptedRun: run,
-                rollbackThreadID: interruption.threadID
-            )
-        )
+        return handoff
     }
 
     package func resumeReviewRecovery(

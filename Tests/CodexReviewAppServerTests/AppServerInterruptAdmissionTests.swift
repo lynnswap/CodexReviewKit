@@ -306,6 +306,83 @@ struct AppServerInterruptAdmissionTests {
         await transport.close()
     }
 
+    @Test(arguments: [
+        (
+            JSONRPC.Error.transportTerminated(.ownerClose),
+            ReviewAttemptStreamFailure.ownerForcedConnectionClose(.connection(
+                JSONRPC.TransportTermination.ownerClose.localizedDescription
+            ))
+        ),
+        (
+            JSONRPC.Error.closed,
+            ReviewAttemptStreamFailure.unexpectedConnection(.connection(
+                JSONRPC.Error.closed.localizedDescription
+            ))
+        ),
+    ])
+    func notificationRouterPreservesConnectionTerminationSource(
+        termination: JSONRPC.Error,
+        expected: ReviewAttemptStreamFailure
+    ) async throws {
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(
+            client: .init(transport: transport)
+        )
+        let run = CodexReviewBackendModel.Review.Run(
+            attemptID: "connection-source-attempt",
+            threadID: "parent-thread",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread",
+            model: "gpt-5"
+        )
+        let attempt = await backend.reviewAttemptForTesting(run)
+
+        await transport.finishNotificationStreams(throwing: termination)
+
+        do {
+            _ = try await attempt.events.next()
+            Issue.record("A connection termination did not end the event mailbox.")
+        } catch let failure as BackendReviewEventMailboxError {
+            #expect(failure.failure == expected)
+        }
+        await transport.close()
+    }
+
+    @Test func concurrentRecoveryPreparationClaimsTheCandidateOnce() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInterruptInitialize(transport)
+        await transport.enqueueFailure(.closed, for: "thread/rollback")
+        await transport.enqueueFailure(.closed, for: "thread/rollback")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let (candidate, _) = try await makeAppServerRecoveryCandidate()
+        let alias = candidate
+
+        async let first = prepareRecovery(backend, candidate: candidate)
+        async let second = prepareRecovery(backend, candidate: alias)
+        let results = await [first, second]
+        let handoffs = results.compactMap { result -> ReviewRecoveryHandoff? in
+            guard case .prepared(let handoff) = result else { return nil }
+            return handoff
+        }
+
+        #expect(handoffs.count == 1)
+        #expect(results.filter { $0 == .alreadyPrepared }.count == 1)
+        for handoff in handoffs {
+            await #expect(throws: JSONRPC.Error.closed) {
+                try await backend.resumeReviewRecovery(
+                    handoff,
+                    request: makeRecoveryStartRequest(),
+                    admission: ReviewStartAdmission()
+                )
+            }
+        }
+        let rollbackCount = await transport.recordedRequests()
+            .filter { $0.method == "thread/rollback" }
+            .count
+        #expect(rollbackCount == 1)
+        await transport.close()
+    }
+
     @Test func typedRecoveryRollbackTransportFailureConsumesHandoffWithoutRetry() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInterruptInitialize(transport)
@@ -458,6 +535,14 @@ private func makePreparedRecoveryHandoff(
     handoff: ReviewRecoveryHandoff,
     predecessor: CodexReviewBackendModel.Review.Run
 ) {
+    let (candidate, run) = try await makeAppServerRecoveryCandidate()
+    return (try await backend.prepareReviewRecovery(candidate), run)
+}
+
+private func makeAppServerRecoveryCandidate() async throws -> (
+    candidate: ReviewRecoveryCandidate,
+    predecessor: CodexReviewBackendModel.Review.Run
+) {
     let (admission, run) = try await makeAppServerInterruptAdmission()
     try await admission.recordCanonicalTerminal(
         .interrupted(.server(message: "Recover")),
@@ -470,7 +555,7 @@ private func makePreparedRecoveryHandoff(
     ) else {
         throw ReviewAttemptContractFailure(message: "Expected recovery candidate.")
     }
-    return (try await backend.prepareReviewRecovery(candidate), run)
+    return (candidate, run)
 }
 
 private func makeRecoveryStartRequest() -> CodexReviewBackendModel.Review.Start {
@@ -480,6 +565,25 @@ private func makeRecoveryStartRequest() -> CodexReviewBackendModel.Review.Start 
         request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
         model: "gpt-5"
     )
+}
+
+private enum RecoveryPreparationResult: Equatable, Sendable {
+    case prepared(ReviewRecoveryHandoff)
+    case alreadyPrepared
+    case otherFailure(String)
+}
+
+private func prepareRecovery(
+    _ backend: AppServerCodexReviewBackend,
+    candidate: ReviewRecoveryCandidate
+) async -> RecoveryPreparationResult {
+    do {
+        return .prepared(try await backend.prepareReviewRecovery(candidate))
+    } catch is ReviewRecoveryCandidateAlreadyPrepared {
+        return .alreadyPrepared
+    } catch {
+        return .otherFailure(error.localizedDescription)
+    }
 }
 
 private actor CloseCompletionProbe {

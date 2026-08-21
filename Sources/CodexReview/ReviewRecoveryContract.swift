@@ -91,9 +91,20 @@ package struct ReviewResolvedAttemptTerminal: Equatable, Sendable {
     }
 }
 
+package struct ReviewRecoveryCandidateAlreadyPrepared: LocalizedError, Equatable, Sendable {
+    package init() {}
+
+    package var errorDescription: String? {
+        "Review recovery candidate was already prepared."
+    }
+}
+
+/// Copies share one preparation owner. Exactly one caller can turn a resolved
+/// attempt into a handoff, even when preparation is requested concurrently.
 package struct ReviewRecoveryCandidate: Equatable, Sendable {
     package let resolved: ReviewResolvedAttemptTerminal
     package let trigger: ReviewAttemptRecoveryTrigger
+    private let preparationOwner: ReviewRecoveryCandidatePreparationOwner
 
     init(
         resolved: ReviewResolvedAttemptTerminal,
@@ -101,6 +112,34 @@ package struct ReviewRecoveryCandidate: Equatable, Sendable {
     ) {
         self.resolved = resolved
         self.trigger = trigger
+        preparationOwner = .init()
+    }
+
+    package func prepareHandoff(
+        token: CodexReviewBackendModel.Review.RecoveryToken
+    ) async throws -> ReviewRecoveryHandoff {
+        guard resolved.run == token.interruptedRun else {
+            throw ReviewAttemptContractFailure(
+                message: "Review recovery token does not belong to the resolved attempt."
+            )
+        }
+        try await preparationOwner.claim()
+        return ReviewRecoveryHandoff(candidate: self, token: token)
+    }
+
+    package static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.preparationOwner === rhs.preparationOwner
+    }
+}
+
+private actor ReviewRecoveryCandidatePreparationOwner {
+    private var isAvailable = true
+
+    func claim() throws {
+        guard isAvailable else {
+            throw ReviewRecoveryCandidateAlreadyPrepared()
+        }
+        isAvailable = false
     }
 }
 
@@ -158,15 +197,10 @@ package struct ReviewRecoveryHandoff: Equatable, Sendable {
     package let candidate: ReviewRecoveryCandidate
     private let consumptionOwner: ReviewRecoveryHandoffConsumptionOwner
 
-    package init(
+    fileprivate init(
         candidate: ReviewRecoveryCandidate,
         token: CodexReviewBackendModel.Review.RecoveryToken
-    ) throws {
-        guard candidate.resolved.run == token.interruptedRun else {
-            throw ReviewAttemptContractFailure(
-                message: "Review recovery token does not belong to the resolved attempt."
-            )
-        }
+    ) {
         self.candidate = candidate
         consumptionOwner = .init(token: token)
     }

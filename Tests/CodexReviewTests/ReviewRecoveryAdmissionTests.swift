@@ -288,10 +288,7 @@ struct ReviewRecoveryAdmissionTests {
             interruptedRun: candidate.resolved.run,
             rollbackThreadID: "review-thread"
         )
-        let handoff = try ReviewRecoveryHandoff(
-            candidate: candidate,
-            token: token
-        )
+        let handoff = try await candidate.prepareHandoff(token: token)
         let copy = handoff
 
         async let first = consume(handoff)

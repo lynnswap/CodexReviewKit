@@ -562,13 +562,10 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
             throw FakeCodexReviewBackendError(message: recoveryFailureMessage)
         }
         let run = candidate.resolved.run
-        return try .init(
-            candidate: candidate,
-            token: .init(
-                interruptedRun: run,
-                rollbackThreadID: run.reviewThreadID ?? run.threadID
-            )
-        )
+        return try await candidate.prepareHandoff(token: .init(
+            interruptedRun: run,
+            rollbackThreadID: run.reviewThreadID ?? run.threadID
+        ))
     }
 
     package func resumeReviewRecovery(
