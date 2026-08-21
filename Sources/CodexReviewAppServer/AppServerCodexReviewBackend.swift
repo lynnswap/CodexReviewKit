@@ -620,19 +620,6 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         }
     }
 
-    package func interruptActiveReviewsForShutdown(reason: CodexReviewBackendModel.CancellationReason) async {
-        let runs = await activeReviewRunsForShutdown()
-        guard runs.isEmpty == false else {
-            return
-        }
-        for run in runs {
-            if Task.isCancelled {
-                return
-            }
-            try? await interruptReview(run, reason: reason)
-        }
-    }
-
     package func notificationRouterMetricsForTesting() -> AppServerNotificationRouterMetrics {
         notificationRouterMetrics
     }

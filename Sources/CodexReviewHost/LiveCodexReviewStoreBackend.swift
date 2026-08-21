@@ -471,13 +471,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     private func cancelActiveReviewsForRuntimeTeardown(
         store: CodexReviewStore,
-        appServerBackend: AppServerCodexReviewBackend,
         reason: ReviewCancellation,
         timeoutWarning: String
     ) async {
-        store.recordActiveReviewCancellationRequestsForRuntimeStop(reason: reason)
         let didInterrupt = await runRuntimeShutdownCleanup(timeout: shutdownCleanupTimeout) {
-            await appServerBackend.interruptActiveReviewsForShutdown(reason: .init(message: reason.message))
+            _ = await store.requestActiveReviewCancellationsForRuntimeStop(reason: reason)
         }
         let locallyCancelledJobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
             reason: reason,
@@ -502,11 +500,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             return
         }
         logger.info("Stopping review runtime")
-        if let appServerBackend {
+        if appServerBackend != nil {
             let reason = ReviewCancellation.system(message: "Review runtime stopped.")
             await cancelActiveReviewsForRuntimeTeardown(
                 store: store,
-                appServerBackend: appServerBackend,
                 reason: reason,
                 timeoutWarning: "Timed out cleaning active reviews before stopping runtime"
             )
@@ -1176,11 +1173,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             return
         }
         let message = "Review runtime stopped unexpectedly: \(error.localizedDescription)"
-        if let appServerBackend {
+        if appServerBackend != nil {
             let reason = ReviewCancellation.system(message: message)
             await cancelActiveReviewsForRuntimeTeardown(
                 store: store,
-                appServerBackend: appServerBackend,
                 reason: reason,
                 timeoutWarning: "Timed out cleaning active reviews after runtime failure"
             )

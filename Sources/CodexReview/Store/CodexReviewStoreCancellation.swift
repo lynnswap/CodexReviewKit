@@ -148,11 +148,35 @@ extension CodexReviewStore {
     package func requestActiveReviewCancellationsForRuntimeStop(
         reason: ReviewCancellation = .system(message: "Review runtime stopped.")
     ) async -> [String] {
-        let activeJobIDs = orderedJobs
-            .filter { $0.isTerminal == false }
-            .map(\.id)
+        let activeJobIDs = recordActiveReviewCancellationRequestsForRuntimeStop(reason: reason)
+        var initialCancellations: [(ReviewStartAdmission, ReviewCancellation)] = []
+        var activeRuns: [CodexReviewBackendModel.Review.Run] = []
         for jobID in activeJobIDs {
-            _ = try? await cancelReview(jobID: jobID, cancellation: reason)
+            if reviewRecoveryWaitingJobIDs.contains(jobID) {
+                continue
+            }
+            switch reviewAttemptOwnerships[jobID] {
+            case .queued, .starting:
+                if let receipt = recordInitialAttemptCancellation(reason, jobID: jobID) {
+                    initialCancellations.append((receipt.admission, receipt.cancellation))
+                }
+            case .active(let activeAttempt):
+                activeRuns.append(activeAttempt.run)
+            case nil:
+                continue
+            }
+        }
+        for (admission, cancellation) in initialCancellations {
+            await admission.recordCancellation(cancellation)
+        }
+        for run in activeRuns {
+            if Task.isCancelled {
+                break
+            }
+            try? await backend.interruptReview(
+                run,
+                reason: .init(message: reason.message)
+            )
         }
         return activeJobIDs
     }
@@ -174,7 +198,7 @@ extension CodexReviewStore {
                 try? completeCancellationLocally(
                     jobID: job.id,
                     sessionID: job.sessionID,
-                    cancellation: reason
+                    cancellation: job.core.lifecycle.cancellation ?? reason
                 )
             }
             if cancelWorkers {

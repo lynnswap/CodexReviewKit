@@ -87,7 +87,7 @@ extension CodexReviewStore {
         insertReviewJob(job)
         markReviewRunning(job, startedAt: createdAt)
         let admission = ReviewStartAdmission()
-        reviewAttemptOwnerships[jobID] = .queued(admission)
+        reviewAttemptOwnerships[jobID] = .queued(.init(admission: admission))
         launchReviewWorker(
             jobID: jobID,
             sessionID: sessionID,
@@ -133,6 +133,7 @@ extension CodexReviewStore {
             model: settings.effectiveModel
         )
         var run: CodexReviewBackendModel.Review.Run?
+        var initialCancellation: ReviewCancellation?
         do {
             try beginInitialAttemptStart(jobID: jobID, admission: admission)
             let backendAttempt = try await backend.startReview(
@@ -141,7 +142,7 @@ extension CodexReviewStore {
             )
             let backendRun = backendAttempt.run
             run = backendRun
-            try await activateInitialAttempt(
+            initialCancellation = try await activateInitialAttempt(
                 jobID: jobID,
                 run: backendRun,
                 admission: admission
@@ -150,28 +151,18 @@ extension CodexReviewStore {
                 throw CancellationError()
             }
             projectBackendRun(backendRun, to: job)
-            if let startupCancellation = await admission.cancellationRequest() {
+            if let initialCancellation {
                 try? await backend.interruptReview(
                     backendRun,
-                    reason: .init(message: startupCancellation.message)
+                    reason: .init(message: initialCancellation.message)
                 )
                 if job.isTerminal == false {
                     try completeCancellationLocally(
                         jobID: job.id,
                         sessionID: job.sessionID,
-                        cancellation: startupCancellation
+                        cancellation: initialCancellation
                     )
                 }
-            } else if job.cancellationRequested {
-                try await backend.interruptReview(
-                    backendRun,
-                    reason: .init(message: job.core.lifecycle.cancellation?.message ?? "Cancellation requested.")
-                )
-                try completeCancellationLocally(
-                    jobID: job.id,
-                    sessionID: job.sessionID,
-                    cancellation: job.core.lifecycle.cancellation ?? .system()
-                )
             }
 
             if job.isTerminal {
@@ -196,7 +187,8 @@ extension CodexReviewStore {
                 )
             }
         } catch let error where error is CancellationError || Task.isCancelled {
-            let startupCancellation = await admission.cancellationRequest()
+            let startupCancellation = initialCancellation
+                ?? initialAttemptCancellation(jobID: jobID, admission: admission)
             if let cleanupRun = activeRun(for: jobID) ?? run {
                 await interruptReviewAfterTaskCancellation(cleanupRun, job: job)
                 await cleanupReviewAndRetainFailure(cleanupRun, for: job)
@@ -210,7 +202,8 @@ extension CodexReviewStore {
             reviewRecoveryWaitingJobIDs.remove(jobID)
         } catch {
             let primaryError = error
-            let startupCancellation = await admission.cancellationRequest()
+            let startupCancellation = initialCancellation
+                ?? initialAttemptCancellation(jobID: jobID, admission: admission)
             let cleanupFailure: ReviewRuntimeCloseFailure?
             if let cleanupRun = activeRun(for: jobID) ?? run {
                 cleanupFailure = await cleanupReviewFailure(cleanupRun)
@@ -249,28 +242,28 @@ extension CodexReviewStore {
         jobID: String,
         admission: ReviewStartAdmission
     ) throws {
-        guard case .queued(let currentAdmission) = reviewAttemptOwnerships[jobID],
-              currentAdmission === admission
+        guard case .queued(let initialAttempt) = reviewAttemptOwnerships[jobID],
+              initialAttempt.admission === admission
         else {
             throw ReviewAttemptOwnershipFailure(
                 message: "Initial review start no longer owns the queued admission."
             )
         }
-        reviewAttemptOwnerships[jobID] = .starting(admission)
+        reviewAttemptOwnerships[jobID] = .starting(initialAttempt)
     }
 
     private func activateInitialAttempt(
         jobID: String,
         run: CodexReviewBackendModel.Review.Run,
         admission: ReviewStartAdmission
-    ) async throws {
+    ) async throws -> ReviewCancellation? {
         guard await admission.currentPhase() == .active(run) else {
             throw ReviewAttemptOwnershipFailure(
                 message: "Initial review start returned before its exact run became active."
             )
         }
-        guard case .starting(let currentAdmission) = reviewAttemptOwnerships[jobID],
-              currentAdmission === admission
+        guard case .starting(let initialAttempt) = reviewAttemptOwnerships[jobID],
+              initialAttempt.admission === admission
         else {
             throw ReviewAttemptOwnershipFailure(
                 message: "Initial review start completed after its ownership changed."
@@ -280,6 +273,44 @@ extension CodexReviewStore {
             run: run,
             origin: .initial(admission)
         ))
+        return initialAttempt.cancellation
+    }
+
+    private func initialAttemptCancellation(
+        jobID: String,
+        admission: ReviewStartAdmission
+    ) -> ReviewCancellation? {
+        switch reviewAttemptOwnerships[jobID] {
+        case .queued(let initialAttempt) where initialAttempt.admission === admission:
+            initialAttempt.cancellation
+        case .starting(let initialAttempt) where initialAttempt.admission === admission:
+            initialAttempt.cancellation
+        case .queued, .starting, .active, nil:
+            nil
+        }
+    }
+
+    package func recordInitialAttemptCancellation(
+        _ cancellation: ReviewCancellation,
+        jobID: String
+    ) -> (admission: ReviewStartAdmission, cancellation: ReviewCancellation)? {
+        let receipt: (ReviewStartAdmission, ReviewCancellation)
+        switch reviewAttemptOwnerships[jobID] {
+        case .queued(var initialAttempt):
+            initialAttempt.recordCancellation(cancellation)
+            reviewAttemptOwnerships[jobID] = .queued(initialAttempt)
+            receipt = (initialAttempt.admission, initialAttempt.cancellation ?? cancellation)
+        case .starting(var initialAttempt):
+            initialAttempt.recordCancellation(cancellation)
+            reviewAttemptOwnerships[jobID] = .starting(initialAttempt)
+            receipt = (initialAttempt.admission, initialAttempt.cancellation ?? cancellation)
+        case .active, nil:
+            return nil
+        }
+        if let job = job(id: jobID), job.isTerminal == false {
+            recordCancellationRequest(receipt.1, for: job)
+        }
+        return (admission: receipt.0, cancellation: receipt.1)
     }
 
     private func activeRun(for jobID: String) -> CodexReviewBackendModel.Review.Run? {
@@ -544,13 +575,14 @@ extension CodexReviewStore {
         recordCancellationRequest(cancellation, for: job)
 
         if job.core.lifecycle.status == .queued {
-            if case .queued(let admission) = reviewAttemptOwnerships[jobID] {
-                await admission.recordCancellation(cancellation)
+            let receipt = recordInitialAttemptCancellation(cancellation, jobID: jobID)
+            if let receipt {
+                await receipt.admission.recordCancellation(receipt.cancellation)
             }
             try completeCancellationLocally(
                 jobID: job.id,
                 sessionID: job.sessionID,
-                cancellation: cancellation
+                cancellation: receipt?.cancellation ?? cancellation
             )
             return .init(jobID: job.id, cancelled: true, core: job.core)
         }
@@ -566,8 +598,13 @@ extension CodexReviewStore {
         }
 
         switch reviewAttemptOwnerships[jobID] {
-        case .queued(let admission), .starting(let admission):
-            await admission.recordCancellation(cancellation)
+        case .queued, .starting:
+            guard let receipt = recordInitialAttemptCancellation(cancellation, jobID: jobID) else {
+                throw ReviewAttemptOwnershipFailure(
+                    message: "Initial review cancellation lost its Store ownership."
+                )
+            }
+            await receipt.admission.recordCancellation(receipt.cancellation)
             guard job.isTerminal == false else {
                 return .init(
                     jobID: job.id,
@@ -578,7 +615,7 @@ extension CodexReviewStore {
             try completeCancellationLocally(
                 jobID: job.id,
                 sessionID: job.sessionID,
-                cancellation: cancellation
+                cancellation: receipt.cancellation
             )
             return .init(jobID: job.id, cancelled: true, core: job.core)
         case .active(let activeAttempt):

@@ -198,6 +198,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     private var didEnterStartReview = false
     private var startReviewEntryWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var startReviewGate: AsyncGate?
+    private var startReviewActivatedGate: AsyncGate?
     private var startReviewGateIgnoresCancellation = false
     private var startReviewWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var resumeReviewRecoveryGate: AsyncGate?
@@ -246,6 +247,10 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     package func holdStartReviewIgnoringCancellation(with gate: AsyncGate) {
         startReviewGate = gate
         startReviewGateIgnoresCancellation = true
+    }
+
+    package func holdStartReviewAfterActivation(with gate: AsyncGate) {
+        startReviewActivatedGate = gate
     }
 
     package func failInterrupts(message: String) {
@@ -536,6 +541,9 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
             }
         }
         try await admission.recordActiveRun(nextRun)
+        if let startReviewActivatedGate {
+            await startReviewActivatedGate.wait()
+        }
         return .init(run: nextRun, events: eventMailbox(for: nextRun))
     }
 

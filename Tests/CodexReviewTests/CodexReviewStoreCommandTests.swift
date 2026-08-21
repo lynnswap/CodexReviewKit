@@ -100,10 +100,11 @@ struct CodexReviewStoreCommandTests {
             )
             try await backend.waitForStartReview(timeout: .seconds(2))
 
-            guard case .starting(let admission) = store.reviewAttemptOwnerships["job-1"] else {
+            guard case .starting(let initialAttempt) = store.reviewAttemptOwnerships["job-1"] else {
                 Issue.record("Expected one starting-attempt owner before backend completion.")
                 return
             }
+            let admission = initialAttempt.admission
             #expect(await backend.receivedStartAdmission(admission))
             #expect(store.reviewAttemptOwnerships["job-1"]?.activeRun == nil)
 
@@ -1663,6 +1664,133 @@ struct CodexReviewStoreCommandTests {
 
             #expect(store.reviewWorkerTasks["job-1"] == nil)
             #expect(store.reviewAttemptOwnerships["job-1"] == nil)
+        }
+    }
+
+    @Test func runtimeStopRequestLeavesStartingAttemptPendingUnderAdmission() async throws {
+        let backend = FakeCodexReviewBackend()
+        let dispatchGate = AsyncGate()
+        await backend.holdBeforeStartReviewDispatch(with: dispatchGate)
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let review = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+            )
+            try await backend.waitForStartReviewEntry(timeout: .seconds(2))
+
+            let jobIDs = await store.requestActiveReviewCancellationsForRuntimeStop()
+            let pending = try store.readReview(jobID: "job-1")
+
+            #expect(jobIDs == ["job-1"])
+            #expect(pending.core.lifecycle.status == .running)
+            #expect(pending.cancellable == false)
+            #expect(pending.core.lifecycle.cancellation?.message == "Review runtime stopped.")
+            #expect(await backend.recordedCommands().isEmpty)
+
+            await dispatchGate.open()
+            let cancelled = try await review
+            #expect(cancelled.core.lifecycle.status == .cancelled)
+        }
+    }
+
+    @Test func runtimeStopStartingToActiveHandoffInterruptsExactlyOnce() async throws {
+        let run = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1"
+        )
+        let backend = FakeCodexReviewBackend(nextRun: run)
+        let activationGate = AsyncGate()
+        await backend.holdStartReviewAfterActivation(with: activationGate)
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let review = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+            )
+            let backendActivatedWhileStoreStarting = await waitUntil {
+                guard case .starting(let initialAttempt) = store.reviewAttemptOwnerships["job-1"] else {
+                    return false
+                }
+                return await initialAttempt.admission.currentPhase() == .active(run)
+            }
+            try #require(backendActivatedWhileStoreStarting)
+
+            let jobIDs = await store.requestActiveReviewCancellationsForRuntimeStop()
+            guard case .starting(let pendingAttempt) = store.reviewAttemptOwnerships["job-1"] else {
+                Issue.record("Expected Store to retain starting ownership until backend return.")
+                return
+            }
+            #expect(jobIDs == ["job-1"])
+            #expect(pendingAttempt.cancellation == .system(message: "Review runtime stopped."))
+            #expect(try store.readReview(jobID: "job-1").core.lifecycle.status == .running)
+
+            await activationGate.open()
+            let cancelled = try await review
+            let interrupts = await backend.recordedCommands().filter {
+                if case .interruptReview = $0 { true } else { false }
+            }
+
+            #expect(cancelled.core.lifecycle.status == .cancelled)
+            #expect(interrupts == [.interruptReview(
+                run,
+                .init(message: "Review runtime stopped.")
+            )])
+        }
+    }
+
+    @Test func startingAttemptCancellationReceiptKeepsFirstReason() async throws {
+        let backend = FakeCodexReviewBackend()
+        let dispatchGate = AsyncGate()
+        await backend.holdBeforeStartReviewDispatch(with: dispatchGate)
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let review = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+            )
+            try await backend.waitForStartReviewEntry(timeout: .seconds(2))
+            let firstReason = ReviewCancellation.mcpClient(message: "First")
+            let secondReason = ReviewCancellation.system(message: "Second")
+
+            let first = try #require(store.recordInitialAttemptCancellation(
+                firstReason,
+                jobID: "job-1"
+            ))
+            let second = try #require(store.recordInitialAttemptCancellation(
+                secondReason,
+                jobID: "job-1"
+            ))
+
+            #expect(first.cancellation == firstReason)
+            #expect(second.cancellation == firstReason)
+            #expect(first.admission === second.admission)
+            #expect(try store.readReview(jobID: "job-1").core.lifecycle.cancellation == firstReason)
+
+            await second.admission.recordCancellation(second.cancellation)
+            await first.admission.recordCancellation(first.cancellation)
+            let locallyCancelledJobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
+                reason: secondReason,
+                cancelWorkers: false
+            )
+            store.cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
+            await dispatchGate.open()
+            let cancelled = try await review
+
+            #expect(locallyCancelledJobIDs == ["job-1"])
+            #expect(cancelled.core.lifecycle.status == .cancelled)
+            #expect(cancelled.core.lifecycle.cancellation == firstReason)
+            #expect(await backend.recordedCommands().isEmpty)
         }
     }
 

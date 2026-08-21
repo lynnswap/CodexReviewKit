@@ -19,9 +19,28 @@ package struct ReviewActiveAttempt: Sendable {
     }
 }
 
+package struct ReviewInitialAttemptOwnership: Sendable {
+    package var admission: ReviewStartAdmission
+    package var cancellation: ReviewCancellation?
+
+    package init(
+        admission: ReviewStartAdmission,
+        cancellation: ReviewCancellation? = nil
+    ) {
+        self.admission = admission
+        self.cancellation = cancellation
+    }
+
+    package mutating func recordCancellation(_ cancellation: ReviewCancellation) {
+        if self.cancellation == nil {
+            self.cancellation = cancellation
+        }
+    }
+}
+
 package enum ReviewAttemptOwnership: Sendable {
-    case queued(ReviewStartAdmission)
-    case starting(ReviewStartAdmission)
+    case queued(ReviewInitialAttemptOwnership)
+    case starting(ReviewInitialAttemptOwnership)
     case active(ReviewActiveAttempt)
 
     package var activeRun: CodexReviewBackendModel.Review.Run? {
