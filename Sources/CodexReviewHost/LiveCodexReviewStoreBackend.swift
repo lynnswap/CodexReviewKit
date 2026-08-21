@@ -97,7 +97,7 @@ package protocol CodexReviewMCPHTTPServing: AnyObject, Sendable {
     var url: URL { get async }
 
     func start() async throws
-    func stop() async
+    func stop() async throws
 }
 
 extension CodexReviewMCPHTTPServer: CodexReviewMCPHTTPServing {}
@@ -423,8 +423,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             observeAuthNotifications(client: client, backend: backend, store: store)
             if let mcpHTTPServerFactory {
                 let mcpHTTPServer = mcpHTTPServerFactory(store, mcpHTTPServerConfiguration)
-                try await mcpHTTPServer.start()
                 startedHTTPServer = mcpHTTPServer
+                try await mcpHTTPServer.start()
                 self.mcpHTTPServer = mcpHTTPServer
             }
             store.transitionToRunning(serverURL: await self.mcpHTTPServer?.url)
@@ -440,7 +440,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             self.mcpHTTPServer = nil
             authNotificationTask?.cancel()
             authNotificationTask = nil
-            await startedHTTPServer?.stop()
+            await stopMCPHTTPServer(
+                startedHTTPServer,
+                context: "runtime startup cleanup"
+            )
             await closeAppServerRuntime(
                 backend: startedBackend,
                 fallbackClient: startedClient,
@@ -521,7 +524,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         self.mcpHTTPServer = nil
         authNotificationTask?.cancel()
         authNotificationTask = nil
-        await mcpHTTPServer?.stop()
+        await stopMCPHTTPServer(mcpHTTPServer, context: "runtime stop")
         self.appServerBackend = nil
         await cleanupLoginRuntime(loginCleanup)
         await closeAppServerRuntime(
@@ -1203,7 +1206,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         mcpHTTPServer = nil
         authNotificationTask = nil
         store.transitionToFailed(message)
-        await failedMCPHTTPServer?.stop()
+        await stopMCPHTTPServer(
+            failedMCPHTTPServer,
+            context: "failed runtime cleanup"
+        )
         await cleanupLoginRuntime(loginCleanup)
         await closeAppServerRuntime(
             backend: failedBackend,
@@ -1581,6 +1587,22 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         } catch {
             logger.error(
                 "Failed to close app-server during \(context, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+        }
+    }
+
+    private func stopMCPHTTPServer(
+        _ server: (any CodexReviewMCPHTTPServing)?,
+        context: String
+    ) async {
+        guard let server else {
+            return
+        }
+        do {
+            try await server.stop()
+        } catch {
+            logger.error(
+                "Failed to stop MCP HTTP server during \(context, privacy: .public): \(error.localizedDescription, privacy: .public)"
             )
         }
     }

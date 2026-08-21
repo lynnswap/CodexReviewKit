@@ -39,6 +39,40 @@ package extension CodexReviewMCPHTTPServer {
             }
         }
     }
+
+    struct LifecycleError: Swift.Error, LocalizedError, Equatable, Sendable {
+        package enum Resource: String, Equatable, Sendable {
+            case listener
+            case eventLoopGroup
+        }
+
+        package struct Failure: Equatable, Sendable {
+            package let resource: Resource
+            package let message: String
+
+            package init(resource: Resource, message: String) {
+                self.resource = resource
+                self.message = message
+            }
+        }
+
+        package let first: Failure
+        package let additional: [Failure]
+
+        package init(first: Failure, additional: [Failure] = []) {
+            self.first = first
+            self.additional = additional
+        }
+
+        package var failures: [Failure] {
+            [first] + additional
+        }
+
+        package var errorDescription: String? {
+            failures.map { "\($0.resource.rawValue): \($0.message)" }
+                .joined(separator: "; ")
+        }
+    }
 }
 
 package extension CodexReviewMCPHTTPServer {
@@ -98,7 +132,126 @@ package extension CodexReviewMCPHTTPServer {
     }
 }
 
+private actor MCPHTTPLifecycleCompletionGate {
+    private var shouldHoldNextCompletion = false
+    private var releaseWasRequested = false
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var holdWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func holdNextCompletion() {
+        precondition(
+            shouldHoldNextCompletion == false && continuation == nil,
+            "MCPHTTPLifecycleCompletionGate owns at most one held operation."
+        )
+        shouldHoldNextCompletion = true
+        releaseWasRequested = false
+    }
+
+    func waitIfNeeded() async {
+        guard shouldHoldNextCompletion else {
+            return
+        }
+        let waiters = holdWaiters
+        holdWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
+        if releaseWasRequested {
+            reset()
+            return
+        }
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+        reset()
+    }
+
+    func waitUntilHolding() async {
+        if continuation != nil {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            if self.continuation != nil {
+                continuation.resume()
+            } else {
+                holdWaiters.append(continuation)
+            }
+        }
+    }
+
+    func release() {
+        guard shouldHoldNextCompletion else {
+            return
+        }
+        if let continuation {
+            self.continuation = nil
+            continuation.resume()
+        } else {
+            releaseWasRequested = true
+        }
+    }
+
+    private func reset() {
+        shouldHoldNextCompletion = false
+        releaseWasRequested = false
+    }
+}
+
 package actor CodexReviewMCPHTTPServer {
+    private struct StartingGenerationFailure: Swift.Error, @unchecked Sendable {
+        let primary: any Swift.Error
+        let teardownResult: Result<Void, LifecycleError>
+    }
+
+    private typealias StartingGenerationResult = Result<RunningGeneration, StartingGenerationFailure>
+    private typealias StoppingGenerationResult = Result<Void, LifecycleError>
+
+    private final class StartingGeneration: @unchecked Sendable {
+        let id: UInt64
+        let task: Task<StartingGenerationResult, Never>
+        var admissionClosed = false
+
+        init(id: UInt64, task: Task<StartingGenerationResult, Never>) {
+            self.id = id
+            self.task = task
+        }
+    }
+
+    private final class RunningGeneration: @unchecked Sendable {
+        let id: UInt64
+        let listener: any Channel
+        let eventLoopGroup: MultiThreadedEventLoopGroup
+        let cleanupTask: Task<Void, Never>
+        let boundURL: URL
+        var admissionClosed = false
+        var listenerCloseTask: Task<StoppingGenerationResult, Never>?
+
+        init(
+            id: UInt64,
+            listener: any Channel,
+            eventLoopGroup: MultiThreadedEventLoopGroup,
+            cleanupTask: Task<Void, Never>,
+            boundURL: URL
+        ) {
+            self.id = id
+            self.listener = listener
+            self.eventLoopGroup = eventLoopGroup
+            self.cleanupTask = cleanupTask
+            self.boundURL = boundURL
+        }
+    }
+
+    private enum LifecycleState {
+        case stopped(StoppingGenerationResult)
+        case starting(StartingGeneration)
+        case running(RunningGeneration)
+        case stopping(
+            id: UInt64,
+            resources: RunningGeneration?,
+            task: Task<StoppingGenerationResult, Never>
+        )
+    }
+
     private struct SessionContext {
         let server: Server
         let transport: StatefulHTTPServerTransport
@@ -117,11 +270,23 @@ package actor CodexReviewMCPHTTPServer {
 
     private let adapter: CodexReviewMCPServer
     private let configuration: CodexReviewMCPHTTPServer.Configuration
-    private var channel: Channel?
-    private var eventLoopGroup: MultiThreadedEventLoopGroup?
+    private var lifecycleState: LifecycleState = .stopped(.success(()))
+    private var nextGenerationID: UInt64 = 0
     private var sessions: [String: SessionContext] = [:]
-    private var cleanupTask: Task<Void, Never>?
-    private var boundURL: URL?
+    private let startCompletionGate = MCPHTTPLifecycleCompletionGate()
+    private let joinedStartCompletionGate = MCPHTTPLifecycleCompletionGate()
+    private let stopCompletionGate = MCPHTTPLifecycleCompletionGate()
+    private var eventLoopGroupShutdownCount = 0
+    private var nextListenerCloseFailureForTesting: LifecycleError.Failure?
+    private var nextEventLoopGroupShutdownFailureForTesting: LifecycleError.Failure?
+    private var lastStartingAdmissionClosedGenerationID: UInt64?
+    private var startingAdmissionCloseWaiters: [CheckedContinuation<Void, Never>] = []
+    private var didStartJoinStoppingGeneration = false
+    private var startStoppingJoinWaiters: [CheckedContinuation<Void, Never>] = []
+    private var didStopJoinStoppingGeneration = false
+    private var stopStoppingJoinWaiters: [CheckedContinuation<Void, Never>] = []
+    private var didStartJoinStartingGeneration = false
+    private var startStartingJoinWaiters: [CheckedContinuation<Void, Never>] = []
 
     package init(
         adapter: CodexReviewMCPServer,
@@ -132,7 +297,13 @@ package actor CodexReviewMCPHTTPServer {
     }
 
     package var url: URL {
-        boundURL ?? configuration.url()
+        switch lifecycleState {
+        case .running(let resources),
+             .stopping(_, let resources?, _):
+            resources.boundURL
+        case .stopped, .starting, .stopping:
+            configuration.url()
+        }
     }
 
     package var endpoint: String {
@@ -170,10 +341,44 @@ package actor CodexReviewMCPHTTPServer {
     }
 
     package func start() async throws {
-        guard channel == nil else {
-            return
-        }
+        while true {
+            switch lifecycleState {
+            case .stopped(let result):
+                try result.get()
+                nextGenerationID &+= 1
+                let id = nextGenerationID
+                let task = Task<StartingGenerationResult, Never> { [self] in
+                    await performStartGeneration(id: id)
+                }
+                let operation = StartingGeneration(id: id, task: task)
+                lifecycleState = .starting(operation)
+                let result = await task.value
+                try publishStartResult(result, operation: operation)
+                return
 
+            case .starting(let operation):
+                recordStartJoinedStartingGenerationForTesting()
+                await joinedStartCompletionGate.waitIfNeeded()
+                let result = await operation.task.value
+                try publishStartResult(result, operation: operation)
+                return
+
+            case .running(let resources):
+                guard resources.admissionClosed == false else {
+                    throw CancellationError()
+                }
+                return
+
+            case .stopping(let id, _, let task):
+                recordStartJoinedStoppingGenerationForTesting()
+                let result = await task.value
+                finishStopIfCurrent(id: id, result: result)
+                try result.get()
+            }
+        }
+    }
+
+    private func performStartGeneration(id: UInt64) async -> StartingGenerationResult {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 128)
@@ -187,40 +392,439 @@ package actor CodexReviewMCPHTTPServer {
             .childChannelOption(ChannelOptions.maxMessagesPerRead, value: 1)
             .childChannelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
 
+        var listener: (any Channel)?
         do {
+            try Task.checkCancellation()
             let channel = try await bootstrap.bind(
                 host: configuration.host,
                 port: configuration.port
             ).get()
-            self.eventLoopGroup = group
-            self.channel = channel
+            listener = channel
+            await startCompletionGate.waitIfNeeded()
+            try Task.checkCancellation()
             let actualPort = channel.localAddress?.port
-            boundURL = configuration.url(boundPort: actualPort)
-            cleanupTask = Task { [weak self] in
+            let cleanupTask = Task<Void, Never> { [weak self] in
                 await self?.sessionCleanupLoop()
             }
-            logger.info("MCP Streamable HTTP server listening at \(self.url.absoluteString, privacy: .public)")
+            return .success(RunningGeneration(
+                id: id,
+                listener: channel,
+                eventLoopGroup: group,
+                cleanupTask: cleanupTask,
+                boundURL: configuration.url(boundPort: actualPort)
+            ))
         } catch {
-            try? await group.shutdownGracefully()
-            throw CodexReviewMCPHTTPServer.Error.classifyStartError(
-                error,
-                configuration: configuration
-            )
+            var failures: [LifecycleError.Failure] = []
+            if let listener {
+                do {
+                    try await listener.close()
+                } catch {
+                    failures.append(.init(
+                        resource: .listener,
+                        message: error.localizedDescription
+                    ))
+                }
+                if let listenerFailure = consumeListenerCloseFailureForTesting() {
+                    failures.append(listenerFailure)
+                }
+            }
+            do {
+                try await group.shutdownGracefully()
+            } catch {
+                failures.append(.init(
+                    resource: .eventLoopGroup,
+                    message: error.localizedDescription
+                ))
+            }
+            if let groupFailure = consumeEventLoopGroupShutdownFailureForTesting() {
+                failures.append(groupFailure)
+            }
+            return .failure(.init(
+                primary: CodexReviewMCPHTTPServer.Error.classifyStartError(
+                    error,
+                    configuration: configuration
+                ),
+                teardownResult: lifecycleResult(failures)
+            ))
         }
     }
 
-    package func stop() async {
-        cleanupTask?.cancel()
-        cleanupTask = nil
-        await closeAllSessions()
-        try? await channel?.close()
-        channel = nil
-        if let eventLoopGroup {
-            try? await eventLoopGroup.shutdownGracefully()
+    private func publishStartResult(
+        _ result: StartingGenerationResult,
+        operation: StartingGeneration
+    ) throws {
+        switch result {
+        case .success(let resources):
+            if case .running(let current) = lifecycleState,
+               current === resources {
+                return
+            }
+            if case .stopping(_, let current?, _) = lifecycleState,
+               current === resources {
+                return
+            }
+            guard case .starting(let current) = lifecycleState,
+                  current === operation,
+                  operation.admissionClosed == false else {
+                throw CancellationError()
+            }
+            lifecycleState = .running(resources)
+            logger.info(
+                "MCP Streamable HTTP server listening at \(resources.boundURL.absoluteString, privacy: .public)"
+            )
+        case .failure(let failure):
+            if case .starting(let current) = lifecycleState,
+               current === operation {
+                lifecycleState = .stopped(failure.teardownResult)
+            }
+            throw failure.primary
         }
-        eventLoopGroup = nil
-        boundURL = nil
+    }
+
+    package func stop() async throws {
+        let id: UInt64
+        let task: Task<StoppingGenerationResult, Never>
+        switch lifecycleState {
+        case .stopped(let result):
+            try result.get()
+            return
+
+        case .stopping(let currentID, _, let currentTask):
+            recordStopJoinedStoppingGenerationForTesting()
+            id = currentID
+            task = currentTask
+
+        case .running(let resources):
+            resources.admissionClosed = true
+            id = resources.id
+            let groupFailure = consumeEventLoopGroupShutdownFailureForTesting()
+            let newTask = Task<StoppingGenerationResult, Never> { [self] in
+                await performStopGeneration(
+                    resources,
+                    injectedGroupFailure: groupFailure
+                )
+            }
+            lifecycleState = .stopping(
+                id: id,
+                resources: resources,
+                task: newTask
+            )
+            task = newTask
+
+        case .starting(let operation):
+            closeStartingAdmission(operation)
+            id = operation.id
+            let newTask = Task<StoppingGenerationResult, Never> { [self] in
+                switch await operation.task.value {
+                case .success(let resources):
+                    resources.admissionClosed = true
+                    return await performStopGeneration(
+                        resources,
+                        injectedGroupFailure: consumeEventLoopGroupShutdownFailureForTesting()
+                    )
+                case .failure(let failure):
+                    return failure.teardownResult
+                }
+            }
+            lifecycleState = .stopping(id: id, resources: nil, task: newTask)
+            task = newTask
+        }
+
+        let result = await task.value
+        finishStopIfCurrent(id: id, result: result)
+        try result.get()
+    }
+
+    package func closeAdmission() async {
+        switch lifecycleState {
+        case .stopped:
+            return
+        case .starting(let operation):
+            closeStartingAdmission(operation)
+            let id = operation.id
+            let task = Task<StoppingGenerationResult, Never> { [self] in
+                switch await operation.task.value {
+                case .success(let resources):
+                    resources.admissionClosed = true
+                    return await performStopGeneration(
+                        resources,
+                        injectedGroupFailure: consumeEventLoopGroupShutdownFailureForTesting()
+                    )
+                case .failure(let failure):
+                    return failure.teardownResult
+                }
+            }
+            lifecycleState = .stopping(id: id, resources: nil, task: task)
+            let result = await task.value
+            finishStopIfCurrent(id: id, result: result)
+        case .running(let resources):
+            resources.admissionClosed = true
+            _ = await listenerCloseTask(for: resources).value
+        case .stopping(let id, _, let task):
+            let result = await task.value
+            finishStopIfCurrent(id: id, result: result)
+        }
+    }
+
+    private func closeStartingAdmission(_ operation: StartingGeneration) {
+        guard operation.admissionClosed == false else {
+            return
+        }
+        operation.admissionClosed = true
+        operation.task.cancel()
+        lastStartingAdmissionClosedGenerationID = operation.id
+        let waiters = startingAdmissionCloseWaiters
+        startingAdmissionCloseWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+
+    private func performStopGeneration(
+        _ resources: RunningGeneration,
+        injectedGroupFailure: LifecycleError.Failure?
+    ) async -> StoppingGenerationResult {
+        let listenerCloseTask = listenerCloseTask(for: resources)
+        resources.cleanupTask.cancel()
+        await closeAllSessions()
+        let listenerResult = await listenerCloseTask.value
+        await resources.cleanupTask.value
+        await stopCompletionGate.waitIfNeeded()
+
+        var failures: [LifecycleError.Failure] = []
+        if case .failure(let error) = listenerResult {
+            failures.append(contentsOf: error.failures)
+        }
+        do {
+            try await resources.eventLoopGroup.shutdownGracefully()
+        } catch {
+            failures.append(.init(
+                resource: .eventLoopGroup,
+                message: error.localizedDescription
+            ))
+        }
+        if let injectedGroupFailure {
+            failures.append(injectedGroupFailure)
+        }
+        eventLoopGroupShutdownCount += 1
         logger.info("MCP Streamable HTTP server stopped")
+        return lifecycleResult(failures)
+    }
+
+    private func listenerCloseTask(
+        for resources: RunningGeneration
+    ) -> Task<StoppingGenerationResult, Never> {
+        if let listenerCloseTask = resources.listenerCloseTask {
+            return listenerCloseTask
+        }
+        let listener = resources.listener
+        let injectedFailure = consumeListenerCloseFailureForTesting()
+        let task = Task<StoppingGenerationResult, Never> {
+            var failures: [LifecycleError.Failure] = []
+            do {
+                try await listener.close()
+            } catch {
+                failures.append(.init(
+                    resource: .listener,
+                    message: error.localizedDescription
+                ))
+            }
+            if let injectedFailure {
+                failures.append(injectedFailure)
+            }
+            guard let first = failures.first else {
+                return .success(())
+            }
+            return .failure(.init(
+                first: first,
+                additional: Array(failures.dropFirst())
+            ))
+        }
+        resources.listenerCloseTask = task
+        return task
+    }
+
+    private func finishStopIfCurrent(
+        id: UInt64,
+        result: StoppingGenerationResult
+    ) {
+        guard case .stopping(let currentID, _, _) = lifecycleState,
+              currentID == id else {
+            return
+        }
+        lifecycleState = .stopped(result)
+    }
+
+    private func lifecycleResult(
+        _ failures: [LifecycleError.Failure]
+    ) -> StoppingGenerationResult {
+        guard let first = failures.first else {
+            return .success(())
+        }
+        return .failure(.init(
+            first: first,
+            additional: Array(failures.dropFirst())
+        ))
+    }
+
+    private func consumeListenerCloseFailureForTesting() -> LifecycleError.Failure? {
+        defer { nextListenerCloseFailureForTesting = nil }
+        return nextListenerCloseFailureForTesting
+    }
+
+    private func consumeEventLoopGroupShutdownFailureForTesting() -> LifecycleError.Failure? {
+        defer { nextEventLoopGroupShutdownFailureForTesting = nil }
+        return nextEventLoopGroupShutdownFailureForTesting
+    }
+
+    private func recordStartJoinedStoppingGenerationForTesting() {
+        didStartJoinStoppingGeneration = true
+        let waiters = startStoppingJoinWaiters
+        startStoppingJoinWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+
+    private func recordStartJoinedStartingGenerationForTesting() {
+        didStartJoinStartingGeneration = true
+        let waiters = startStartingJoinWaiters
+        startStartingJoinWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+
+    private func recordStopJoinedStoppingGenerationForTesting() {
+        didStopJoinStoppingGeneration = true
+        let waiters = stopStoppingJoinWaiters
+        stopStoppingJoinWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+
+    package func holdNextStartCompletionForTesting() async {
+        lastStartingAdmissionClosedGenerationID = nil
+        didStartJoinStartingGeneration = false
+        await startCompletionGate.holdNextCompletion()
+    }
+
+    package func waitUntilStartCompletionIsHeldForTesting() async {
+        await startCompletionGate.waitUntilHolding()
+    }
+
+    package func releaseStartCompletionForTesting() async {
+        await startCompletionGate.release()
+    }
+
+    package func waitUntilStartingGenerationAdmissionIsClosedForTesting() async {
+        if lastStartingAdmissionClosedGenerationID != nil {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            if lastStartingAdmissionClosedGenerationID != nil {
+                continuation.resume()
+            } else {
+                startingAdmissionCloseWaiters.append(continuation)
+            }
+        }
+    }
+
+    package func waitUntilStartJoinsStartingGenerationForTesting() async {
+        if didStartJoinStartingGeneration {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            if didStartJoinStartingGeneration {
+                continuation.resume()
+            } else {
+                startStartingJoinWaiters.append(continuation)
+            }
+        }
+    }
+
+    package func holdNextJoinedStartCompletionForTesting() async {
+        await joinedStartCompletionGate.holdNextCompletion()
+    }
+
+    package func waitUntilJoinedStartCompletionIsHeldForTesting() async {
+        await joinedStartCompletionGate.waitUntilHolding()
+    }
+
+    package func releaseJoinedStartCompletionForTesting() async {
+        await joinedStartCompletionGate.release()
+    }
+
+    package func holdNextStopCompletionForTesting() async {
+        didStartJoinStoppingGeneration = false
+        didStopJoinStoppingGeneration = false
+        await stopCompletionGate.holdNextCompletion()
+    }
+
+    package func waitUntilStopCompletionIsHeldForTesting() async {
+        await stopCompletionGate.waitUntilHolding()
+    }
+
+    package func releaseStopCompletionForTesting() async {
+        await stopCompletionGate.release()
+    }
+
+    package func waitUntilStartJoinsStoppingGenerationForTesting() async {
+        if didStartJoinStoppingGeneration {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            if didStartJoinStoppingGeneration {
+                continuation.resume()
+            } else {
+                startStoppingJoinWaiters.append(continuation)
+            }
+        }
+    }
+
+    package func waitUntilStopJoinsStoppingGenerationForTesting() async {
+        if didStopJoinStoppingGeneration {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            if didStopJoinStoppingGeneration {
+                continuation.resume()
+            } else {
+                stopStoppingJoinWaiters.append(continuation)
+            }
+        }
+    }
+
+    package func injectNextListenerCloseFailureForTesting(_ message: String) {
+        nextListenerCloseFailureForTesting = .init(
+            resource: .listener,
+            message: message
+        )
+    }
+
+    package func injectNextEventLoopGroupShutdownFailureForTesting(_ message: String) {
+        nextEventLoopGroupShutdownFailureForTesting = .init(
+            resource: .eventLoopGroup,
+            message: message
+        )
+    }
+
+    package func currentGenerationIDForTesting() -> UInt64? {
+        switch lifecycleState {
+        case .starting(let operation):
+            operation.id
+        case .running(let resources):
+            resources.id
+        case .stopping(let id, _, _):
+            id
+        case .stopped:
+            nil
+        }
+    }
+
+    package func eventLoopGroupShutdownCountForTesting() -> Int {
+        eventLoopGroupShutdownCount
     }
 
     package func handleHTTPRequest(_ request: HTTPRequest) async -> HTTPResponse {

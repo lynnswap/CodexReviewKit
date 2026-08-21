@@ -141,7 +141,7 @@ struct CodexReviewMCPHTTPServerTests {
         #expect(response.statusCode == 200)
         #expect(response.headers[HTTPHeaderName.sessionID]?.isEmpty == false)
         #expect(denied.statusCode == 421)
-        await server.stop()
+        try await server.stop()
     }
 
     @Test func streamableHTTPClassifiesAddressInUseBindError() {
@@ -160,6 +160,198 @@ struct CodexReviewMCPHTTPServerTests {
             host: "127.0.0.1",
             port: 54321
         ))
+    }
+
+    @Test func startingGenerationAdmissionCloseCannotBeReopened() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+        let server = CodexReviewMCPHTTPServer(
+            adapter: CodexReviewMCPServer(store: store),
+            configuration: .init(host: "127.0.0.1", port: 0)
+        )
+        await server.holdNextStartCompletionForTesting()
+
+        let startTask = Task {
+            try await server.start()
+        }
+        await server.waitUntilStartCompletionIsHeldForTesting()
+        let closeAdmissionTask = Task {
+            await server.closeAdmission()
+        }
+        await server.waitUntilStartingGenerationAdmissionIsClosedForTesting()
+
+        #expect(await server.url.port == 0)
+        await server.releaseStartCompletionForTesting()
+        await #expect(throws: CancellationError.self) {
+            try await startTask.value
+        }
+        await closeAdmissionTask.value
+        #expect(await server.currentGenerationIDForTesting() == nil)
+        #expect(await server.url.port == 0)
+
+        try await server.start()
+        #expect(await server.currentGenerationIDForTesting() == 2)
+        #expect(await server.url.port != 0)
+        try await server.stop()
+    }
+
+    @Test func listenerGenerationConcurrentStopAndRestartJoinOneTeardown() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+        let server = CodexReviewMCPHTTPServer(
+            adapter: CodexReviewMCPServer(store: store),
+            configuration: .init(host: "127.0.0.1", port: 0)
+        )
+        await server.holdNextStartCompletionForTesting()
+        let firstStart = Task {
+            try await server.start()
+        }
+        await server.waitUntilStartCompletionIsHeldForTesting()
+        await server.holdNextJoinedStartCompletionForTesting()
+        let joinedStart = Task {
+            try await server.start()
+        }
+        await server.waitUntilJoinedStartCompletionIsHeldForTesting()
+        await server.releaseStartCompletionForTesting()
+        try await firstStart.value
+        let firstURL = await server.url
+        let firstGeneration = await server.currentGenerationIDForTesting()
+        await server.holdNextStopCompletionForTesting()
+
+        let firstStop = Task {
+            try await server.stop()
+        }
+        await server.waitUntilStopCompletionIsHeldForTesting()
+        await server.releaseJoinedStartCompletionForTesting()
+        try await joinedStart.value
+        let secondStop = Task {
+            try await server.stop()
+        }
+        let restart = Task {
+            try await server.start()
+        }
+        await server.waitUntilStopJoinsStoppingGenerationForTesting()
+        await server.waitUntilStartJoinsStoppingGenerationForTesting()
+
+        #expect(await server.url == firstURL)
+        await server.releaseStopCompletionForTesting()
+        try await firstStop.value
+        try await secondStop.value
+        try await restart.value
+
+        #expect(firstGeneration == 1)
+        #expect(await server.currentGenerationIDForTesting() == 2)
+        #expect(await server.url.port != 0)
+        #expect(await server.eventLoopGroupShutdownCountForTesting() == 1)
+        try await server.stop()
+        #expect(await server.eventLoopGroupShutdownCountForTesting() == 2)
+    }
+
+    @Test func listenerGenerationStopFailureIsRetainedAndReplayed() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+        let server = CodexReviewMCPHTTPServer(
+            adapter: CodexReviewMCPServer(store: store),
+            configuration: .init(host: "127.0.0.1", port: 0)
+        )
+        try await server.start()
+        await server.injectNextListenerCloseFailureForTesting("injected listener close failure")
+        await server.injectNextEventLoopGroupShutdownFailureForTesting("injected group shutdown failure")
+
+        let firstError = try #require(await lifecycleError {
+            try await server.stop()
+        })
+        let replayedError = try #require(await lifecycleError {
+            try await server.stop()
+        })
+
+        #expect(firstError == .init(
+            first: .init(resource: .listener, message: "injected listener close failure"),
+            additional: [
+                .init(resource: .eventLoopGroup, message: "injected group shutdown failure"),
+            ]
+        ))
+        #expect(replayedError == firstError)
+        #expect(await server.eventLoopGroupShutdownCountForTesting() == 1)
+        await #expect(throws: CodexReviewMCPHTTPServer.LifecycleError.self) {
+            try await server.start()
+        }
+    }
+
+    @Test func runningGenerationAdmissionCloseIsRetainedByStop() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+        let server = CodexReviewMCPHTTPServer(
+            adapter: CodexReviewMCPServer(store: store),
+            configuration: .init(host: "127.0.0.1", port: 0)
+        )
+        try await server.start()
+        let runningURL = await server.url
+        await server.injectNextListenerCloseFailureForTesting("injected admission close failure")
+
+        await server.closeAdmission()
+
+        #expect(await server.url == runningURL)
+        await #expect(throws: CancellationError.self) {
+            try await server.start()
+        }
+        let firstError = try #require(await lifecycleError {
+            try await server.stop()
+        })
+        let replayedError = try #require(await lifecycleError {
+            try await server.stop()
+        })
+        #expect(firstError == .init(
+            first: .init(resource: .listener, message: "injected admission close failure")
+        ))
+        #expect(replayedError == firstError)
+        #expect(await server.eventLoopGroupShutdownCountForTesting() == 1)
+    }
+
+    @Test func portZeroPublishesOneStableActualURLPerListenerGeneration() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+        let server = CodexReviewMCPHTTPServer(
+            adapter: CodexReviewMCPServer(store: store),
+            configuration: .init(host: "127.0.0.1", port: 0)
+        )
+
+        #expect(await server.url.port == 0)
+        await server.holdNextStartCompletionForTesting()
+        let firstStart = Task {
+            try await server.start()
+        }
+        await server.waitUntilStartCompletionIsHeldForTesting()
+        let joinedStart = Task {
+            try await server.start()
+        }
+        await server.waitUntilStartJoinsStartingGenerationForTesting()
+        await server.releaseStartCompletionForTesting()
+        try await firstStart.value
+        try await joinedStart.value
+        let firstURL = await server.url
+        #expect(firstURL.port != 0)
+        #expect(await server.url == firstURL)
+        #expect(await server.currentGenerationIDForTesting() == 1)
+        try await server.stop()
+        #expect(await server.url.port == 0)
+
+        try await server.start()
+        let secondURL = await server.url
+        #expect(secondURL.port != 0)
+        #expect(await server.url == secondURL)
+        #expect(await server.currentGenerationIDForTesting() == 2)
+        try await server.stop()
     }
 
     @Test func streamableHTTPCallsReviewStartWithCustomTarget() async throws {
@@ -1257,6 +1449,20 @@ struct CodexReviewMCPHTTPServerTests {
         }
     }
 
+    private func lifecycleError(
+        operation: () async throws -> Void
+    ) async -> CodexReviewMCPHTTPServer.LifecycleError? {
+        do {
+            try await operation()
+            return nil
+        } catch let error as CodexReviewMCPHTTPServer.LifecycleError {
+            return error
+        } catch {
+            Issue.record("Unexpected lifecycle error: \(error)")
+            return nil
+        }
+    }
+
     private func withHTTPServer<T>(
         store: CodexReviewStore,
         configuration: CodexReviewMCPHTTPServer.Configuration = .init(port: 0),
@@ -1271,10 +1477,10 @@ struct CodexReviewMCPHTTPServerTests {
         try await server.start()
         do {
             let result = try await operation(server)
-            await server.stop()
+            try await server.stop()
             return result
         } catch {
-            await server.stop()
+            try? await server.stop()
             throw error
         }
     }

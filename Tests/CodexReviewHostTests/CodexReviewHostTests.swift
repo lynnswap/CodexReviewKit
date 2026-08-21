@@ -280,6 +280,79 @@ struct CodexReviewHostTests {
         await store.stop()
     }
 
+    @Test func liveStoreKeepsThrowingMCPStopAtItsNonthrowingBoundary() async throws {
+        let homeURL = try temporaryHome()
+        let firstTransport = FakeJSONRPCTransport()
+        let secondTransport = FakeJSONRPCTransport()
+        for transport in [firstTransport, secondTransport] {
+            try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+            try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
+            try await transport.enqueue(
+                AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+                for: "config/read"
+            )
+            try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        }
+        let firstServer = ControlledMCPHTTPServer(
+            endpoint: try #require(URL(string: "http://127.0.0.1:19432/mcp")),
+            stopFailure: .injected
+        )
+        let secondServer = ControlledMCPHTTPServer(
+            endpoint: try #require(URL(string: "http://127.0.0.1:19433/mcp"))
+        )
+        var servers = [firstServer, secondServer]
+        var transports = [firstTransport, secondTransport]
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            mcpHTTPServerFactory: { _, _ in servers.removeFirst() },
+            mcpHTTPServerBindChecker: { _ in },
+            transportFactory: { _ in transports.removeFirst() }
+        )
+
+        await store.start()
+        #expect(store.serverURL == firstServer.endpoint)
+        await store.stop()
+        #expect(store.serverState == .stopped)
+        #expect(firstServer.startCallCount == 1)
+        #expect(firstServer.stopCallCount == 1)
+
+        await store.start()
+        #expect(store.serverURL == secondServer.endpoint)
+        #expect(secondServer.startCallCount == 1)
+        await store.stop()
+        #expect(secondServer.stopCallCount == 1)
+        #expect(servers.isEmpty)
+        #expect(transports.isEmpty)
+    }
+
+    @Test func liveStoreStopsMCPServerAfterItsStartFails() async throws {
+        let homeURL = try temporaryHome()
+        let transport = FakeJSONRPCTransport()
+        let server = ControlledMCPHTTPServer(
+            endpoint: try #require(URL(string: "http://127.0.0.1:19434/mcp")),
+            startFailure: .injected
+        )
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            mcpHTTPServerFactory: { _, _ in server },
+            mcpHTTPServerBindChecker: { _ in },
+            transportFactory: { _ in transport }
+        )
+
+        await store.start()
+
+        guard case .failed(let message) = store.serverState else {
+            Issue.record("Expected failed server state.")
+            return
+        }
+        #expect(message == HostCloseFailure.injected.localizedDescription)
+        #expect(store.serverURL == nil)
+        #expect(server.startCallCount == 1)
+        #expect(server.stopCallCount == 1)
+    }
+
     @Test func liveStoreReportsMCPPortOwnerWhenEndpointPortInUseAndDoesNotLaunchAppServer() async throws {
         let homeURL = try temporaryHome()
         let port = 54321
@@ -2026,6 +2099,45 @@ private func failedMessage(from phase: CodexReviewAuthModel.Phase) -> String? {
     return message
 }
 
+@MainActor
+private final class ControlledMCPHTTPServer: CodexReviewMCPHTTPServing {
+    let endpoint: URL
+    private let startFailure: HostCloseFailure?
+    private let stopFailure: HostCloseFailure?
+    private(set) var startCallCount = 0
+    private(set) var stopCallCount = 0
+
+    init(
+        endpoint: URL,
+        startFailure: HostCloseFailure? = nil,
+        stopFailure: HostCloseFailure? = nil
+    ) {
+        self.endpoint = endpoint
+        self.startFailure = startFailure
+        self.stopFailure = stopFailure
+    }
+
+    var url: URL {
+        get async {
+            endpoint
+        }
+    }
+
+    func start() async throws {
+        startCallCount += 1
+        if let startFailure {
+            throw startFailure
+        }
+    }
+
+    func stop() async throws {
+        stopCallCount += 1
+        if let stopFailure {
+            throw stopFailure
+        }
+    }
+}
+
 private final class NoopMCPHTTPServer: CodexReviewMCPHTTPServing, @unchecked Sendable {
     private let endpoint: URL
 
@@ -2041,7 +2153,7 @@ private final class NoopMCPHTTPServer: CodexReviewMCPHTTPServing, @unchecked Sen
 
     func start() async throws {}
 
-    func stop() async {}
+    func stop() async throws {}
 }
 
 @MainActor
