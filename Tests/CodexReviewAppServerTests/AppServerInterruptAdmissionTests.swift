@@ -188,6 +188,121 @@ struct AppServerInterruptAdmissionTests {
         #expect(params.turnID == run.turnID)
         #expect(await admission.currentPhase() == .active(run))
     }
+
+    @Test func typedRecoveryPreparationRetainsTheBarrierWithoutAnotherInterrupt() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInterruptInitialize(transport)
+        await transport.enqueueFailure(.closed, for: "turn/interrupt")
+        let backend = AppServerCodexReviewBackend(
+            client: .init(transport: transport)
+        )
+        let (admission, run) = try await makeAppServerInterruptAdmission()
+        let streamFailure = ReviewAttemptStreamFailure.recoverableNetwork(
+            .connection("Network transport ended")
+        )
+
+        let recovery = Task {
+            try await admission.beginRecovery(
+                run,
+                trigger: .recoverableNetworkLoss,
+                request: { requestAdmission, reason in
+                    try await backend.interruptReview(
+                        requestAdmission,
+                        reason: reason
+                    )
+                }
+            )
+        }
+        await transport.waitForRequestCount(2)
+        try await admission.recordStreamTerminal(streamFailure, for: run)
+
+        guard case .replacement(let candidate) = try await recovery.value else {
+            Issue.record("A recoverable transport terminal was not tokenizable.")
+            return
+        }
+        let handoff = try await backend.prepareReviewRecovery(candidate)
+
+        #expect(handoff.candidate == candidate)
+        #expect(handoff.token.interruptedRun == run)
+        #expect(handoff.candidate.resolved.requestFailure?.outcome == .outcomeUnknown(
+            message: JSONRPC.Error.closed.localizedDescription
+        ))
+        #expect(
+            handoff.candidate.resolved.requestFailure?.secondaryBarrierDiagnostic
+                == streamFailure.localizedDescription
+        )
+        #expect(
+            await transport.recordedRequests().map(\.method)
+                == ["initialize", "turn/interrupt"]
+        )
+    }
+
+    @Test func notificationRouterRetainsTypedStreamFailureForAdmission() async throws {
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(
+            client: .init(transport: transport)
+        )
+        let run = CodexReviewBackendModel.Review.Run(
+            attemptID: "typed-stream-attempt",
+            threadID: "parent-thread",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread",
+            model: "gpt-5"
+        )
+        let attempt = await backend.reviewAttemptForTesting(run)
+
+        try await transport.emitServerNotification(
+            method: "error",
+            params: UnroutedRecoveryErrorNotification(
+                message: "Routing failed",
+                willRetry: false
+            )
+        )
+
+        do {
+            _ = try await attempt.events.next()
+            Issue.record("A routing violation did not terminate the event mailbox.")
+        } catch let failure as BackendReviewEventMailboxError {
+            #expect(failure.failure == .protocolViolation(.init(
+                message: ReviewIngestionError.missingRoutingIdentity(
+                    method: "error"
+                ).localizedDescription
+            )))
+        }
+        await transport.close()
+    }
+
+    @Test func notificationRouterMapsProcessTerminationBeforeStoreConsumption() async throws {
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(
+            client: .init(transport: transport)
+        )
+        let run = CodexReviewBackendModel.Review.Run(
+            attemptID: "process-stream-attempt",
+            threadID: "parent-thread",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread",
+            model: "gpt-5"
+        )
+        let attempt = await backend.reviewAttemptForTesting(run)
+        let termination = JSONRPC.TransportTermination.processExit(
+            "App-server exited with status 1"
+        )
+
+        await transport.finishNotificationStreams(
+            throwing: JSONRPC.Error.transportTerminated(termination)
+        )
+
+        do {
+            _ = try await attempt.events.next()
+            Issue.record("A process exit did not terminate the event mailbox.")
+        } catch let failure as BackendReviewEventMailboxError {
+            #expect(failure.failure == .process(.process(
+                termination.localizedDescription
+            )))
+        }
+        await transport.close()
+    }
 }
 
 private func makeAppServerInterruptAdmission() async throws -> (
@@ -220,4 +335,23 @@ private func enqueueInterruptInitialize(_ transport: FakeJSONRPCTransport) async
         AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"),
         for: "initialize"
     )
+}
+
+private struct UnroutedRecoveryErrorNotification: Encodable, Sendable {
+    var message: String
+    var willRetry: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case error
+        case willRetry
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(
+            AppServerAPI.Turn.Error(message: message),
+            forKey: .error
+        )
+        try container.encode(willRetry, forKey: .willRetry)
+    }
 }
