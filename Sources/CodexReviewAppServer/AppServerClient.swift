@@ -226,14 +226,8 @@ package actor AppServerClient {
         await transport.notificationStream()
     }
 
-    package func close() async {
-        do {
-            try await transport.close()
-        } catch {
-            logger.error(
-                "Failed to close codex app-server transport: \(error.localizedDescription, privacy: .public)"
-            )
-        }
+    package func close() async throws {
+        try await transport.close()
     }
 
     private func allocateRequestID() -> Int {

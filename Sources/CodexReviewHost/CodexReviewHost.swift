@@ -7,7 +7,7 @@ import CodexReviewMCPServer
 package final class CodexReviewHost {
     package let store: CodexReviewStore
     package let mcpServer: CodexReviewMCPServer
-    private let shutdown: @Sendable () async -> Void
+    private let shutdown: @Sendable () async throws -> Void
     private var endpoint: URL?
 
     package init(
@@ -15,7 +15,7 @@ package final class CodexReviewHost {
         clock: CodexReviewClock = .init(),
         idGenerator: CodexReviewIDGenerator = .init(),
         endpoint: URL? = nil,
-        shutdown: @escaping @Sendable () async -> Void = {}
+        shutdown: @escaping @Sendable () async throws -> Void = {}
     ) {
         self.shutdown = shutdown
         self.endpoint = endpoint
@@ -38,7 +38,7 @@ package final class CodexReviewHost {
             backend: backend,
             endpoint: endpoint,
             shutdown: {
-                await client.close()
+                try await backend.runtimeOwnerLifecycleHandle.closeAndWait()
             }
         )
     }
@@ -51,9 +51,9 @@ package final class CodexReviewHost {
         await store.refreshSettings()
     }
 
-    package func stop() async {
+    package func stop() async throws {
         await store.stop()
-        await shutdown()
+        try await shutdown()
     }
 }
 

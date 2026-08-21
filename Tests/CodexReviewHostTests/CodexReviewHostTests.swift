@@ -8,10 +8,41 @@ import CodexReviewHost
 import CodexReviewMCPServer
 import CodexReviewTesting
 
+private enum HostCloseFailure: LocalizedError, Equatable, Sendable {
+    case injected
+
+    var errorDescription: String? {
+        "Injected host close failure."
+    }
+}
+
+private actor HostCloseFailureTransport: JSONRPC.Transport {
+    private var closeCallCount = 0
+
+    func send(_: JSONRPC.Request) async throws -> Data {
+        Data("{}".utf8)
+    }
+
+    func notify(_: JSONRPC.Notification) async throws {}
+
+    func notificationStream() async -> AsyncThrowingStream<JSONRPC.Notification, Error> {
+        AsyncThrowingStream { _ in }
+    }
+
+    func close() async throws {
+        closeCallCount += 1
+        throw HostCloseFailure.injected
+    }
+
+    func recordedCloseCallCount() -> Int {
+        closeCallCount
+    }
+}
+
 @Suite("host composition")
 @MainActor
 struct CodexReviewHostTests {
-    @Test func hostStartsAndStopsRuntimeWithFakeBackend() async {
+    @Test func hostStartsAndStopsRuntimeWithFakeBackend() async throws {
         let backend = FakeCodexReviewBackend()
         let host = CodexReviewHost(
             backend: backend,
@@ -22,8 +53,22 @@ struct CodexReviewHostTests {
         #expect(host.store.serverState == .running)
         #expect(host.store.serverURL == URL(string: "http://localhost:9417/mcp"))
 
-        await host.stop()
+        try await host.stop()
         #expect(host.store.serverState == .stopped)
+    }
+
+    @Test func hostStopReplaysAppServerLifecycleCloseFailure() async {
+        let transport = HostCloseFailureTransport()
+        let host = CodexReviewHost(appServerTransport: transport)
+
+        await #expect(throws: HostCloseFailure.injected) {
+            try await host.stop()
+        }
+        await #expect(throws: HostCloseFailure.injected) {
+            try await host.stop()
+        }
+
+        #expect(await transport.recordedCloseCallCount() == 1)
     }
 
     @Test func hostStartLoadsSettingsBeforeStandaloneReviews() async throws {
