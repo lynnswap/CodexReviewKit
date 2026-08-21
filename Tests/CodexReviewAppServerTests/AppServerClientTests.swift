@@ -34,8 +34,8 @@ private extension AppServerCodexReviewBackend {
         try await beginReviewRecovery(attempt.run, reason: reason)
     }
 
-    func cleanupReview(_ attempt: BackendReviewAttempt) async {
-        await cleanupReview(attempt.run)
+    func cleanupReview(_ attempt: BackendReviewAttempt) async throws {
+        try await cleanupReview(attempt.run)
     }
 }
 
@@ -2797,6 +2797,10 @@ struct AppServerClientTests {
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         try await transport.enqueue(EmptyResponse(), for: "thread/rollback")
         try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-2", reviewThreadID: "review-thread-2"), for: "review/start")
+        try await transport.enqueue(
+            AppServerAPI.Thread.Unsubscribe.Response(status: .unsubscribed),
+            for: "thread/unsubscribe"
+        )
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
         let run = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
@@ -2815,7 +2819,7 @@ struct AppServerClientTests {
             ),
             reason: .init(message: "Network unavailable; waiting to reconnect.")
         )
-        await backend.cleanupReview(recovered)
+        try await backend.cleanupReview(recovered)
 
         let deleteThreadIDs = try await transport.recordedRequests()
             .filter { $0.method == "thread/delete" }
@@ -5480,6 +5484,9 @@ struct AppServerClientTests {
         try await enqueueInitialize(transport)
         try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1"), for: "thread/start")
         await transport.enqueueFailure(.responseError(code: -32602, message: "invalid target"), for: "review/start")
+        await transport.enqueueFailure(.responseError(code: -32000, message: "clean failed"), for: "thread/backgroundTerminals/clean")
+        await transport.enqueueFailure(.responseError(code: -32000, message: "unsubscribe failed"), for: "thread/unsubscribe")
+        await transport.enqueueFailure(.responseError(code: -32000, message: "delete failed"), for: "thread/delete")
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
 
         await #expect(throws: JSONRPC.Error.responseError(code: -32602, message: "invalid target")) {
@@ -5499,6 +5506,81 @@ struct AppServerClientTests {
             "thread/unsubscribe",
             "thread/delete",
         ])
+    }
+
+    @Test func backendCleanupAttemptsEveryStepAndAggregatesFailuresInOrder() async throws {
+        let transport = FakeJSONRPCTransport()
+        await transport.enqueueFailure(
+            .responseError(code: -32000, message: "clean failed"),
+            for: "thread/backgroundTerminals/clean"
+        )
+        await transport.enqueueFailure(
+            .responseError(code: -32000, message: "unsubscribe failed"),
+            for: "thread/unsubscribe"
+        )
+        await transport.enqueueFailure(
+            .responseError(code: -32000, message: "review delete failed"),
+            for: "thread/delete"
+        )
+        await transport.enqueueFailure(
+            .responseError(code: -32000, message: "canonical delete failed"),
+            for: "thread/delete"
+        )
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let run = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1"
+        )
+
+        await #expect(throws: ReviewRuntimeCloseFailure.cleanup(
+            "thread/backgroundTerminals/clean for thread-1: clean failed; "
+                + "thread/unsubscribe for thread-1: unsubscribe failed; "
+                + "thread/delete for review-thread-1: review delete failed; "
+                + "thread/delete for thread-1: canonical delete failed"
+        )) {
+            try await backend.cleanupReview(run)
+        }
+
+        let requests = await transport.recordedRequests()
+        #expect(requests.map(\.method) == [
+            "thread/backgroundTerminals/clean",
+            "thread/unsubscribe",
+            "thread/delete",
+            "thread/delete",
+        ])
+        let deletedThreadIDs = try requests
+            .filter { $0.method == "thread/delete" }
+            .map { request in
+                try JSONDecoder().decode(AppServerAPI.Thread.Delete.Params.self, from: request.params).threadID
+            }
+        #expect(deletedThreadIDs == ["review-thread-1", "thread-1"])
+    }
+
+    @Test @MainActor
+    func storeRetainsCleanupFailureAsSecondaryDiagnosticWithoutMaskingPrimary() async throws {
+        let backend = FakeCodexReviewBackend()
+        await backend.failCleanup(message: "cleanup failed")
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+
+        async let result = store.startReview(
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        )
+        await backend.finishEvents(throwing: TestPrimaryReviewFailure())
+        let read = try await result
+
+        #expect(read.core.lifecycle.status == .failed)
+        #expect(read.core.lifecycle.errorMessage == "primary review failed")
+        #expect(read.logs.contains(where: {
+            $0.kind == .diagnostic
+                && $0.text == "Review cleanup failed: cleanup failed"
+        }))
+        await backend.finishEventMailboxes()
+        await store.cancelAndDrainReviewWorkersForTesting()
     }
 
     private func waitUntil(timeout: Duration = .seconds(2), condition: () async -> Bool) async -> Bool {
@@ -5524,6 +5606,10 @@ struct AppServerClientTests {
         }
         return true
     }
+}
+
+private struct TestPrimaryReviewFailure: LocalizedError {
+    var errorDescription: String? { "primary review failed" }
 }
 
 private func enqueueInitialize(_ transport: FakeJSONRPCTransport) async throws {

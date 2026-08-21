@@ -20,7 +20,18 @@ package protocol CodexReviewBackend: Sendable {
         _ token: CodexReviewBackendModel.Review.RecoveryToken,
         request: CodexReviewBackendModel.Review.Start
     ) async throws -> BackendReviewAttempt
-    func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async
+    func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws
+}
+
+package enum ReviewRuntimeCloseFailure: LocalizedError, Equatable, Sendable {
+    case cleanup(String)
+
+    package var errorDescription: String? {
+        switch self {
+        case .cleanup(let message):
+            "Review cleanup failed: \(message)"
+        }
+    }
 }
 
 package struct BackendReviewAttempt: Sendable {

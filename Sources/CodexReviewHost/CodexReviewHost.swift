@@ -258,8 +258,8 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
         try await backend.resumeReviewRecovery(token, request: request)
     }
 
-    func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async {
-        await backend.cleanupReview(run)
+    func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws {
+        try await backend.cleanupReview(run)
     }
 
     private static func monitorSettings(
