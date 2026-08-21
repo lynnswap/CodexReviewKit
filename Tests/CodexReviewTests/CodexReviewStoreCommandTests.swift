@@ -859,6 +859,53 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func graceForceCloseMarksDirectRuntimeFailed() async throws {
+        let backend = FakeCodexReviewBackend()
+        let interruptGate = AsyncGate()
+        let graceStarted = AsyncGate()
+        let graceGate = AsyncGate()
+        await backend.holdInterruptReview(with: interruptGate)
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" }),
+            reviewRuntimeClosePolicy: .init(
+                terminalGrace: .seconds(10),
+                sleep: { _ in
+                    await graceStarted.open()
+                    await graceGate.wait()
+                    try Task.checkCancellation()
+                }
+            )
+        )
+        store.transitionToRunning(serverURL: nil)
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+            await backend.waitForStartReview()
+            let cancellation = Task { @MainActor in
+                try await store.cancelReview(
+                    jobID: "job-1",
+                    cancellation: .mcpClient(message: "Stop")
+                )
+            }
+            await backend.waitForInterruptReview()
+            await graceStarted.wait()
+            await graceGate.open()
+
+            _ = try await cancellation.value
+            let read = try await result
+
+            #expect(read.core.lifecycle.terminal?.kind == .interrupted)
+            guard case .failed(let message) = store.serverState else {
+                Issue.record("Expected the force-closed runtime to be failed.")
+                return
+            }
+            #expect(message.contains("Connection force-closed"))
+        }
+    }
+
     @Test func transientNetworkOutageDoesNotRecoverReview() async throws {
         let backend = FakeCodexReviewBackend()
         let networkMonitor = ManualCodexReviewNetworkMonitor()

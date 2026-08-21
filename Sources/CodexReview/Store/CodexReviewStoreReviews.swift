@@ -443,6 +443,7 @@ extension CodexReviewStore {
                     try await backend.forceCloseReviewConnection()
                 }
             )
+            await markRuntimeFailedAfterForcedClose(admission)
             await reviewWorkerTasks[jobID]?.value
             if job.isTerminal == false,
                case .localCancellation = resolution.terminal {
@@ -457,6 +458,7 @@ extension CodexReviewStore {
                 try cleanupResult.get()
             }
         } catch {
+            await markRuntimeFailedAfterForcedClose(admission)
             let phase = await admission.currentPhase()
             if case .finishing = phase {
                 await reviewWorkerTasks[jobID]?.value
@@ -612,6 +614,15 @@ extension CodexReviewStore {
         } else {
             markReviewFailed(job, message: fallbackMessage)
         }
+    }
+
+    private func markRuntimeFailedAfterForcedClose(
+        _ admission: ReviewStartAdmission
+    ) async {
+        guard let failure = await admission.successfulForcedCloseTerminal() else {
+            return
+        }
+        transitionToFailed(failure.localizedDescription)
     }
 
     private func consumeReviewEvents(

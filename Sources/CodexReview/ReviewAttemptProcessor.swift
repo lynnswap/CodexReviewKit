@@ -407,6 +407,16 @@ package actor ReviewStartAdmission {
         return failure
     }
 
+    package func successfulForcedCloseTerminal() -> ReviewRuntimeCloseFailure? {
+        guard graceDidExpire,
+              case .success? = forceCloseResult,
+              case .connection(let failure) = terminal
+        else {
+            return nil
+        }
+        return failure
+    }
+
     private func finishStart(
         with result: Result<BackendReviewAttempt, any Error>
     ) {
