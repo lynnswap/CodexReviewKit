@@ -471,13 +471,22 @@ extension CodexReviewStore {
                     run,
                     reason: .init(message: cancellation.message)
                 )
-                try completeCancellationLocally(
-                    jobID: job.id,
-                    sessionID: job.sessionID,
-                    cancellation: cancellation
-                )
-                reviewWorkerTasks[jobID]?.cancel()
+                if job.isTerminal == false {
+                    try completeCancellationLocally(
+                        jobID: job.id,
+                        sessionID: job.sessionID,
+                        cancellation: cancellation
+                    )
+                    reviewWorkerTasks[jobID]?.cancel()
+                }
             } catch {
+                guard job.isTerminal == false else {
+                    return .init(
+                        jobID: job.id,
+                        cancelled: job.core.lifecycle.status == .cancelled,
+                        core: job.core
+                    )
+                }
                 try recordCancellationFailure(
                     jobID: job.id,
                     sessionID: job.sessionID,
@@ -491,13 +500,22 @@ extension CodexReviewStore {
                     run,
                     reason: .init(message: cancellation.message)
                 )
-                try completeCancellationLocally(
-                    jobID: job.id,
-                    sessionID: job.sessionID,
-                    cancellation: cancellation
-                )
-                reviewWorkerTasks[jobID]?.cancel()
+                if job.isTerminal == false {
+                    try completeCancellationLocally(
+                        jobID: job.id,
+                        sessionID: job.sessionID,
+                        cancellation: cancellation
+                    )
+                    reviewWorkerTasks[jobID]?.cancel()
+                }
             } catch {
+                guard job.isTerminal == false else {
+                    return .init(
+                        jobID: job.id,
+                        cancelled: job.core.lifecycle.status == .cancelled,
+                        core: job.core
+                    )
+                }
                 try recordCancellationFailure(
                     jobID: job.id,
                     sessionID: job.sessionID,
@@ -520,7 +538,11 @@ extension CodexReviewStore {
                 cancellation: cancellation
             )
         }
-        return .init(jobID: job.id, cancelled: true, core: job.core)
+        return .init(
+            jobID: job.id,
+            cancelled: job.core.lifecycle.status == .cancelled,
+            core: job.core
+        )
     }
 
     package func closeSession(
@@ -668,13 +690,16 @@ extension CodexReviewStore {
                 recoveryState.currentRun = handleReviewEvent(
                     event.event,
                     job: job,
+                    sourceRun: event.subscriptionRun,
                     currentRun: recoveryState.currentRun
                 )
                 if job.isTerminal {
                     return recoveryState.currentRun
                 }
             case .reviewEventsFinished(let finishedRun):
-                guard activeEventSubscriptionID == finishedRun.subscriptionID else {
+                guard activeEventSubscriptionID == finishedRun.subscriptionID,
+                      activeRuns[job.id] == finishedRun.run
+                else {
                     continue
                 }
                 if recoveryState.shouldIgnoreFinishedEvent(for: finishedRun.run) {
@@ -688,7 +713,8 @@ extension CodexReviewStore {
                 }
             case .reviewEventsFailed(let failedRun):
                 guard activeEventSubscriptionID == failedRun.subscriptionID,
-                      recoveryState.shouldConsumeEvent(from: failedRun.run)
+                      recoveryState.shouldConsumeEvent(from: failedRun.run),
+                      activeRuns[job.id] == failedRun.run
                 else {
                     continue
                 }
@@ -893,16 +919,16 @@ extension CodexReviewStore {
         return true
     }
 
-    private func handleReviewEvent(
+    func handleReviewEvent(
         _ event: CodexReviewBackendModel.Review.Event,
         job: CodexReviewJob,
+        sourceRun: CodexReviewBackendModel.Review.Run,
         currentRun: CodexReviewBackendModel.Review.Run
     ) -> CodexReviewBackendModel.Review.Run {
-        guard job.isTerminal == false else {
+        guard activeRuns[job.id] == sourceRun else {
             return currentRun
         }
-        if event.completesReviewRun, completePendingCancellationIfNeeded(for: job) {
-            writeDiagnosticsIfNeeded()
+        guard job.isTerminal == false else {
             return currentRun
         }
         let updatedRun = currentRun
@@ -954,17 +980,21 @@ extension CodexReviewStore {
                 timestamp: clock.now()
             ))
         case .completed(let summary, let result):
+            clearPendingCancellationProjection(for: job)
             completeReview(job, summary: summary, result: result)
         case .failed(let message):
+            clearPendingCancellationProjection(for: job)
             markReviewFailed(job, message: message)
         case .cancelled(let message):
-            if let cancellation = job.core.lifecycle.cancellation {
+            if job.cancellationRequested,
+               let cancellation = job.core.lifecycle.cancellation {
                 try? completeCancellationLocally(
                     jobID: job.id,
                     sessionID: job.sessionID,
                     cancellation: cancellation
                 )
             } else {
+                clearPendingCancellationProjection(for: job)
                 markReviewInterrupted(
                     job,
                     cause: .server(message: message?.nilIfEmpty)
@@ -973,6 +1003,12 @@ extension CodexReviewStore {
         }
         writeDiagnosticsIfNeeded()
         return updatedRun
+    }
+
+    private func clearPendingCancellationProjection(for job: CodexReviewJob) {
+        job.cancellationRequested = false
+        job.core.lifecycle.cancellation = nil
+        job.core.lifecycle.errorMessage = nil
     }
 
     private func completePendingCancellationIfNeeded(for job: CodexReviewJob) -> Bool {
@@ -1204,17 +1240,6 @@ private func shouldAppendReviewReadLogDelta(for kind: ReviewLogEntry.Kind) -> Bo
          .progress,
          .event:
         return false
-    }
-}
-
-private extension CodexReviewBackendModel.Review.Event {
-    var completesReviewRun: Bool {
-        switch self {
-        case .completed, .failed, .cancelled:
-            true
-        case .started, .message, .messageDelta, .log, .logEntry:
-            false
-        }
     }
 }
 
