@@ -50,6 +50,10 @@ package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend, Sendable {
     ) async throws -> BackendReviewAttempt
     func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws
     func forceCloseReviewConnection() async throws
+    func invalidateRuntimeAfterForcedReviewConnectionClose(
+        _ failure: ReviewRuntimeCloseFailure,
+        store: CodexReviewStore
+    ) async
     func beginReviewRecovery(
         _ run: CodexReviewBackendModel.Review.Run,
         reason: CodexReviewBackendModel.CancellationReason
@@ -64,5 +68,12 @@ package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend, Sendable {
 extension CodexReviewStoreBackend {
     package var handlesActiveReviewStopCleanup: Bool {
         false
+    }
+
+    package func invalidateRuntimeAfterForcedReviewConnectionClose(
+        _ failure: ReviewRuntimeCloseFailure,
+        store: CodexReviewStore
+    ) async {
+        store.transitionToFailed(failure.localizedDescription)
     }
 }

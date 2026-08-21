@@ -159,6 +159,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     private var authenticationTask: Task<Void, Never>?
     private var authNotificationTask: Task<Void, Never>?
     private var loginNotificationTask: Task<Void, Never>?
+    private var forcedCloseRuntimeCleanupTask: Task<Void, Never>?
+    private var forceClosedReviewConnectionPendingInvalidation = false
     private var settingsSnapshot = CodexReviewSettings.Snapshot()
     private let codexHomeURL: URL
     private let mcpHTTPServerConfiguration: CodexReviewMCPHTTPServer.Configuration
@@ -348,6 +350,13 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     func start(store: CodexReviewStore, forceRestartIfNeeded: Bool) async {
         logger.info("Starting review runtime; forceRestartIfNeeded=\(forceRestartIfNeeded, privacy: .public)")
+        if let forcedCloseRuntimeCleanupTask {
+            await forcedCloseRuntimeCleanupTask.value
+        }
+        guard forceClosedReviewConnectionPendingInvalidation == false else {
+            store.transitionToFailed("Review runtime connection was force-closed.")
+            return
+        }
         if appServerBackend != nil, forceRestartIfNeeded == false {
             logger.info("Review runtime already has an app-server backend")
             store.transitionToRunning(serverURL: await mcpHTTPServer?.url)
@@ -441,6 +450,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     func stop(store: CodexReviewStore) async {
+        if let forcedCloseRuntimeCleanupTask {
+            await forcedCloseRuntimeCleanupTask.value
+        }
         let client = client
         let appServerBackend = appServerBackend
         let mcpHTTPServer = mcpHTTPServer
@@ -469,7 +481,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         logger.info("Review runtime stopped")
     }
 
-    func waitUntilStopped() async {}
+    func waitUntilStopped() async {
+        await forcedCloseRuntimeCleanupTask?.value
+    }
 
     func refreshSettings() async throws -> CodexReviewSettings.Snapshot {
         guard let appServerBackend else {
@@ -1011,7 +1025,46 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         guard let appServerBackend else {
             throw ReviewRuntimeCloseFailure.connection("Review runtime is not running.")
         }
-        try await appServerBackend.forceCloseReviewConnection()
+        forceClosedReviewConnectionPendingInvalidation = true
+        do {
+            try await appServerBackend.forceCloseReviewConnection()
+        } catch {
+            if self.appServerBackend === appServerBackend {
+                forceClosedReviewConnectionPendingInvalidation = false
+            }
+            throw error
+        }
+    }
+
+    func invalidateRuntimeAfterForcedReviewConnectionClose(
+        _ failure: ReviewRuntimeCloseFailure,
+        store: CodexReviewStore
+    ) async {
+        guard forceClosedReviewConnectionPendingInvalidation else {
+            return
+        }
+        forceClosedReviewConnectionPendingInvalidation = false
+
+        let failedClient = client
+        let failedMCPHTTPServer = mcpHTTPServer
+        let loginCleanup = takeLoginRuntimeForCleanup()
+        client = nil
+        appServerBackend = nil
+        mcpHTTPServer = nil
+        authNotificationTask?.cancel()
+        authNotificationTask = nil
+        store.transitionToFailed(failure.localizedDescription)
+
+        forcedCloseRuntimeCleanupTask = Task { @MainActor [weak self] in
+            await failedMCPHTTPServer?.stop()
+            guard let self else {
+                try? await failedClient?.close()
+                return
+            }
+            await self.cleanupLoginRuntime(loginCleanup)
+            await self.closeClientAfterFailure(failedClient)
+            self.forcedCloseRuntimeCleanupTask = nil
+        }
     }
 
     func beginReviewRecovery(
@@ -1126,17 +1179,21 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             } catch is CancellationError {
             } catch {
                 logger.error("Auth notification stream ended: \(error.localizedDescription, privacy: .public)")
-                await markRuntimeFailedAfterNotificationStreamError(error, store: store)
+                await markRuntimeFailedAfterNotificationStreamError(
+                    error,
+                    failedClient: client,
+                    store: store
+                )
             }
         }
     }
 
     private func markRuntimeFailedAfterNotificationStreamError(
         _ error: any Error,
+        failedClient: AppServerClient,
         store: CodexReviewStore
     ) async {
-        let loginCleanup = takeLoginRuntimeForCleanup()
-        guard client != nil || appServerBackend != nil || mcpHTTPServer != nil || loginCleanup.isEmpty == false else {
+        guard client === failedClient else {
             return
         }
         let message = "Review runtime stopped unexpectedly: \(error.localizedDescription)"
@@ -1148,7 +1205,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 timeoutWarning: "Timed out cleaning active reviews after runtime failure"
             )
         }
-        let failedClient = client
+        guard client === failedClient else {
+            return
+        }
+        let loginCleanup = takeLoginRuntimeForCleanup()
         let failedMCPHTTPServer = mcpHTTPServer
         client = nil
         appServerBackend = nil

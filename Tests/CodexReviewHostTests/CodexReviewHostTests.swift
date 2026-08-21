@@ -1352,6 +1352,90 @@ struct CodexReviewHostTests {
         #expect(await stopFinished.isCompleted())
     }
 
+    @Test func liveStoreRestartAfterGraceForceCloseCreatesNewRuntime() async throws {
+        let homeURL = try temporaryHome()
+        let interruptGate = AsyncGate()
+        let graceStarted = AsyncGate()
+        let graceGate = AsyncGate()
+        let firstTransport = FakeJSONRPCTransport()
+        await firstTransport.holdNextIgnoringCancellation(
+            method: "turn/interrupt",
+            gate: interruptGate
+        )
+        try await firstTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await firstTransport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
+        try await firstTransport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await firstTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await firstTransport.enqueue(
+            AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"),
+            for: "thread/start"
+        )
+        try await firstTransport.enqueue(
+            AppServerAPI.Review.Start.Response(turnID: "turn-1"),
+            for: "review/start"
+        )
+        let secondTransport = FakeJSONRPCTransport()
+        try await secondTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await secondTransport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
+        try await secondTransport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await secondTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        var runtimeLaunchCount = 0
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            mcpHTTPServerFactory: nil,
+            reviewRuntimeClosePolicy: .init(
+                terminalGrace: .seconds(10),
+                sleep: { _ in
+                    await graceStarted.open()
+                    await graceGate.wait()
+                    try Task.checkCancellation()
+                }
+            ),
+            transportFactory: { _ in
+                runtimeLaunchCount += 1
+                return runtimeLaunchCount == 1 ? firstTransport : secondTransport
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        let review = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        await firstTransport.waitForRequest(method: "review/start")
+        let cancellation = Task { @MainActor in
+            try await store.cancelReview(
+                jobID: try #require(store.jobs.first?.id),
+                cancellation: .mcpClient(message: "Stop")
+            )
+        }
+        await firstTransport.waitForRequest(method: "turn/interrupt")
+        await graceStarted.wait()
+        await graceGate.open()
+        await waitUntil {
+            if case .failed = store.serverState {
+                return true
+            }
+            return false
+        }
+        await store.start()
+        _ = try? await cancellation.value
+        _ = try await review.value
+
+        #expect(runtimeLaunchCount == 2)
+        #expect(store.serverState == .running)
+        await store.stop()
+    }
+
     @Test func liveStoreStopDrainsRecoveryWaitingWorkerCleanupBeforeDroppingBackend() async throws {
         let homeURL = try temporaryHome()
         let cleanupGate = AsyncGate()
