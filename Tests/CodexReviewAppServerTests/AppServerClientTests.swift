@@ -5560,18 +5560,45 @@ struct AppServerClientTests {
     @Test @MainActor
     func storeRetainsCleanupFailureAsSecondaryDiagnosticWithoutMaskingPrimary() async throws {
         let backend = FakeCodexReviewBackend()
+        let cleanupGate = AsyncGate()
+        await backend.holdCleanupReview(with: cleanupGate)
         await backend.failCleanup(message: "cleanup failed")
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "job-1" })
         )
 
-        async let result = store.startReview(
+        let initial = try await store.startReview(
             sessionID: "session-1",
-            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+            waitTimeout: .zero
         )
-        await backend.finishEvents(throwing: TestPrimaryReviewFailure())
-        let read = try await result
+        #expect(initial.core.lifecycle.status == .running)
+        await backend.yield(.failed("primary review failed"))
+        let cleanupStarted = await waitUntilOnMainActor {
+            await backend.recordedCommands().contains(.cleanupReview(.init(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                reviewThreadID: "review-thread-1"
+            )))
+        }
+        #expect(cleanupStarted)
+        #expect(try store.readReview(jobID: "job-1").core.lifecycle.status == .failed)
+        let result = Task { @MainActor in
+            try await store.awaitReview(
+                sessionID: "session-1",
+                jobID: "job-1",
+                timeout: .seconds(5)
+            )
+        }
+        let waiterRegistered = await waitUntilOnMainActor {
+            store.reviewTerminalWaiters["job-1"]?.count == 1
+        }
+        #expect(waiterRegistered)
+        #expect(store.reviewTerminalWaiters["job-1"]?.count == 1)
+
+        await cleanupGate.open()
+        let read = try await result.value
 
         #expect(read.core.lifecycle.status == .failed)
         #expect(read.core.lifecycle.errorMessage == "primary review failed")
@@ -5579,6 +5606,44 @@ struct AppServerClientTests {
             $0.kind == .diagnostic
                 && $0.text == "Review cleanup failed: cleanup failed"
         }))
+        await backend.finishEventMailboxes()
+        await store.cancelAndDrainReviewWorkersForTesting()
+    }
+
+    @Test @MainActor
+    func storeRuntimeStopDetachmentFinalizesResultWithoutWaitingForDetachedWorker() async throws {
+        let backend = FakeCodexReviewBackend()
+        let startGate = AsyncGate()
+        await backend.holdStartReviewIgnoringCancellation(with: startGate)
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        let result = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        try await backend.waitForStartReview(timeout: .seconds(2))
+        let waiterRegistered = await waitUntilOnMainActor {
+            store.reviewTerminalWaiters["job-1"]?.count == 1
+        }
+        #expect(waiterRegistered)
+
+        let jobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
+            reason: .system(message: "Review runtime stopped."),
+            cancelWorkers: false
+        )
+        #expect(store.reviewTerminalWaiters["job-1"]?.count == 1)
+        store.cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: jobIDs)
+
+        #expect(store.reviewTerminalWaiters["job-1"] == nil)
+        #expect(store.runtimeStopDetachedReviewWorkerTasks["job-1"] != nil)
+        #expect(try await result.value.core.lifecycle.status == .cancelled)
+
+        await startGate.open()
+        #expect(await store.drainRuntimeStopDetachedReviewWorkers(timeout: .seconds(2)))
         await backend.finishEventMailboxes()
         await store.cancelAndDrainReviewWorkersForTesting()
     }
@@ -5595,6 +5660,22 @@ struct AppServerClientTests {
         return true
     }
 
+    @MainActor
+    private func waitUntilOnMainActor(
+        timeout: Duration = .seconds(2),
+        condition: @MainActor () async -> Bool
+    ) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now + timeout
+        while await condition() == false {
+            if clock.now >= deadline {
+                return false
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return true
+    }
+
     private func waitUntil(timeout: Duration, condition: () -> Bool) async -> Bool {
         let clock = ContinuousClock()
         let deadline = clock.now + timeout
@@ -5606,10 +5687,6 @@ struct AppServerClientTests {
         }
         return true
     }
-}
-
-private struct TestPrimaryReviewFailure: LocalizedError {
-    var errorDescription: String? { "primary review failed" }
 }
 
 private func enqueueInitialize(_ transport: FakeJSONRPCTransport) async throws {

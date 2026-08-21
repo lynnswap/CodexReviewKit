@@ -194,6 +194,7 @@ extension CodexReviewStore {
             reviewRecoveryWaitingJobIDs.remove(jobID)
             startingJobIDs.remove(jobID)
             startupCancellations.removeValue(forKey: jobID)
+            resumeReviewWaiters(for: jobID)
         }
     }
 
