@@ -185,6 +185,22 @@ public final class CodexReviewStore {
         case .transitioning(_, .stop, let task):
             await task.value
             return
+        case .transitioning(let generation, .runtimeFailure, let failureTask):
+            let explicitGeneration = generation.successor()
+            let task = Task<Void, Never> { @MainActor [weak self] in
+                await failureTask.value
+                self?.finishRuntimeStop(
+                    generation: explicitGeneration,
+                    purpose: .stop
+                )
+            }
+            runtimeState = .transitioning(
+                generation: explicitGeneration,
+                purpose: .stop,
+                task: task
+            )
+            await task.value
+            return
         case .acquiring, .running, .transitioning, .failed:
             break
         }
@@ -192,7 +208,8 @@ public final class CodexReviewStore {
         let task = Task<Void, Never> { @MainActor [weak self] in
             await self?.performRuntimeStop(
                 previousState: previousState,
-                invalidatedGeneration: invalidatedGeneration
+                invalidatedGeneration: invalidatedGeneration,
+                purpose: .stop
             )
         }
         runtimeState = .transitioning(
@@ -294,11 +311,28 @@ public final class CodexReviewStore {
         else {
             return
         }
-        let stoppedGeneration = generation.successor()
-        await stop()
-        guard case .stopped(stoppedGeneration) = runtimeState else {
+        let invalidatedGeneration = generation.successor()
+        let previousState = runtimeState
+        let task = Task<Void, Never> { @MainActor [weak self] in
+            await self?.performRuntimeStop(
+                previousState: previousState,
+                invalidatedGeneration: invalidatedGeneration,
+                purpose: .runtimeFailure
+            )
+        }
+        runtimeState = .transitioning(
+            generation: invalidatedGeneration,
+            purpose: .runtimeFailure,
+            task: task
+        )
+        await task.value
+        guard isCurrentTransition(
+            invalidatedGeneration,
+            purpose: .runtimeFailure
+        ) else {
             return
         }
+        runtimeState = .stopped(invalidatedGeneration)
         transitionToFailed(message)
     }
 
@@ -396,7 +430,8 @@ public final class CodexReviewStore {
 
     private func performRuntimeStop(
         previousState: ReviewStoreRuntimeState,
-        invalidatedGeneration: ReviewRuntimeGeneration
+        invalidatedGeneration: ReviewRuntimeGeneration,
+        purpose: ReviewRuntimeTransitionPurpose
     ) async {
         switch previousState {
         case .acquiring(_, let task):
@@ -408,7 +443,7 @@ public final class CodexReviewStore {
             await runtime.handle.closeAdmission()
             await stopPublishedRuntimeSemantics()
             await stopMCPServer()
-            await closeRuntime(runtime, purpose: .stop, admissionAlreadyClosed: true)
+            await closeRuntime(runtime, purpose: purpose, admissionAlreadyClosed: true)
 
         case .transitioning(_, _, let task):
             task.cancel()
@@ -422,16 +457,27 @@ public final class CodexReviewStore {
             break
         }
 
+        guard purpose == .stop else {
+            return
+        }
+        finishRuntimeStop(generation: invalidatedGeneration, purpose: purpose)
+    }
+
+    private func finishRuntimeStop(
+        generation: ReviewRuntimeGeneration,
+        purpose: ReviewRuntimeTransitionPurpose
+    ) {
         guard case .transitioning(
             let currentGeneration,
-            .stop,
+            let currentPurpose,
             _
         ) = runtimeState,
-              currentGeneration == invalidatedGeneration
+              currentGeneration == generation,
+              currentPurpose == purpose
         else {
             return
         }
-        runtimeState = .stopped(invalidatedGeneration)
+        runtimeState = .stopped(generation)
         transitionToStopped()
     }
 

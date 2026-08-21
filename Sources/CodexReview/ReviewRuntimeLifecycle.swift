@@ -15,6 +15,7 @@ package enum ReviewRuntimeTransitionPurpose: Equatable, Sendable {
     case start
     case restartSameAccount
     case stop
+    case runtimeFailure
 }
 package struct RuntimePublicationSnapshot: Sendable {
     package let authentication: CodexReviewBackendModel.Auth.Snapshot

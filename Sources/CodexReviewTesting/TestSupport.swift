@@ -185,6 +185,8 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
 
     private var settings: CodexReviewBackendModel.Settings.Snapshot
     private var settingsUpdateFailureMessage: String?
+    private var settingsUpdateGate: AsyncGate?
+    private var settingsUpdateStartedGate = AsyncGate()
     private var auth: CodexReviewBackendModel.Auth.Snapshot
     private var commands: [Command] = []
     private var startAdmissionIdentities: [ObjectIdentifier] = []
@@ -258,6 +260,19 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
 
     package func failNextSettingsUpdate(message: String) {
         settingsUpdateFailureMessage = message
+    }
+
+    package func holdNextSettingsUpdate(with gate: AsyncGate) {
+        settingsUpdateGate = gate
+        settingsUpdateStartedGate = AsyncGate()
+    }
+
+    package func waitForSettingsUpdate() async {
+        await settingsUpdateStartedGate.wait()
+    }
+
+    package func setSettingsSnapshot(_ snapshot: CodexReviewBackendModel.Settings.Snapshot) {
+        settings = snapshot
     }
 
     package func holdInterruptReview(with gate: AsyncGate) {
@@ -443,6 +458,9 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
 
     package func applySettings(_ change: CodexReviewBackendModel.Settings.Change) async throws -> CodexReviewBackendModel.Settings.Snapshot {
         commands.append(.applySettings(change))
+        await settingsUpdateStartedGate.open()
+        await settingsUpdateGate?.waitIgnoringCancellation()
+        settingsUpdateGate = nil
         if let settingsUpdateFailureMessage {
             self.settingsUpdateFailureMessage = nil
             throw FakeCodexReviewBackendError(message: settingsUpdateFailureMessage)
@@ -823,6 +841,8 @@ package final class TestingRuntimeLifecycleHandle: RuntimeLifecycleHandle {
 
     private let onActivate: @MainActor @Sendable () -> Void
     private let onClose: @MainActor @Sendable () -> Void
+    private var closeGate: AsyncGate?
+    private var closeStartedGate = AsyncGate()
     private var didClose = false
 
     package init(
@@ -842,8 +862,20 @@ package final class TestingRuntimeLifecycleHandle: RuntimeLifecycleHandle {
         closeAdmissionCallCount += 1
     }
 
+    package func holdClose(with gate: AsyncGate) {
+        closeGate = gate
+        closeStartedGate = AsyncGate()
+    }
+
+    package func waitForClose() async {
+        await closeStartedGate.wait()
+    }
+
     package func close(purpose: ReviewRuntimeTransitionPurpose) async throws {
         closePurposes.append(purpose)
+        await closeStartedGate.open()
+        await closeGate?.waitIgnoringCancellation()
+        closeGate = nil
         guard didClose == false else {
             return
         }

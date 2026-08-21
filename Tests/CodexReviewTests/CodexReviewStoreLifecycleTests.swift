@@ -211,6 +211,7 @@ struct CodexReviewStoreLifecycleTests {
     }
 
     @Test func failedSettingsEditRollsBackToPublishedRuntimeSnapshot() async {
+        let updateGate = AsyncGate()
         let reviewBackend = FakeCodexReviewBackend(settings: .init(
             model: "runtime-model",
             reasoningEffort: "high",
@@ -221,17 +222,30 @@ struct CodexReviewStoreLifecycleTests {
             seed: .init(initialSettingsSnapshot: .init(model: "seed-model"))
         ))
         await store.start()
+        await reviewBackend.holdNextSettingsUpdate(with: updateGate)
         await reviewBackend.failNextSettingsUpdate(message: "Injected settings failure.")
+        let updateTask = Task { @MainActor in
+            await store.updateSettingsModel("edited-model")
+        }
+        await reviewBackend.waitForSettingsUpdate()
+        await reviewBackend.setSettingsSnapshot(.init(
+            model: "fresh-runtime-model",
+            reasoningEffort: "medium",
+            serviceTier: "flex"
+        ))
+        await store.restart()
 
-        await store.updateSettingsModel("edited-model")
+        await updateGate.open()
+        await updateTask.value
 
-        #expect(store.settings.selectedModel == "runtime-model")
-        #expect(store.settings.selectedReasoningEffort == .high)
-        #expect(store.settings.selectedServiceTier == .fast)
-        #expect(store.settings.lastErrorMessage == "Injected settings failure.")
+        #expect(store.settings.selectedModel == "fresh-runtime-model")
+        #expect(store.settings.selectedReasoningEffort == .medium)
+        #expect(store.settings.selectedServiceTier == .flex)
+        #expect(store.settings.lastErrorMessage == nil)
     }
 
     @Test func modelEditDoesNotRepersistPublishedRuntimeReasoningAndTier() async throws {
+        let updateGate = AsyncGate()
         let reviewBackend = FakeCodexReviewBackend(settings: .init(
             model: "runtime-model",
             reasoningEffort: "high",
@@ -245,7 +259,30 @@ struct CodexReviewStoreLifecycleTests {
             ))
         ))
         await store.start()
+        await reviewBackend.holdNextSettingsUpdate(with: updateGate)
+        let staleUpdateTask = Task { @MainActor in
+            await store.updateSettingsModel("stale-model")
+        }
+        await reviewBackend.waitForSettingsUpdate()
+        await store.updateSettingsModel("queued-stale-model")
+        await store.refreshSettings()
+        let freshSnapshot = CodexReviewBackendModel.Settings.Snapshot(
+            model: "fresh-runtime-model",
+            reasoningEffort: "medium",
+            serviceTier: "flex"
+        )
+        await reviewBackend.setSettingsSnapshot(freshSnapshot)
+        await store.restart()
+        let commandCountAfterRestart = await reviewBackend.recordedCommands().count
 
+        await updateGate.open()
+        await staleUpdateTask.value
+        #expect(store.settings.selectedModel == "fresh-runtime-model")
+        #expect(store.settings.selectedReasoningEffort == .medium)
+        #expect(store.settings.selectedServiceTier == .flex)
+        #expect(await reviewBackend.recordedCommands().count == commandCountAfterRestart)
+
+        await reviewBackend.setSettingsSnapshot(freshSnapshot)
         await store.updateSettingsModel("edited-model")
 
         let command = try #require(await reviewBackend.recordedCommands().last)
@@ -255,5 +292,40 @@ struct CodexReviewStoreLifecycleTests {
         }
         #expect(change.updatesReasoningEffort == false)
         #expect(change.updatesServiceTier == false)
+    }
+
+    @Test func explicitStopSuppressesJoinedRuntimeFailurePublication() async throws {
+        let closeGate = AsyncGate()
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+        let handle = try #require(backend.lastPreparedRuntimeHandle)
+        handle.holdClose(with: closeGate)
+
+        let failureTask = Task { @MainActor in
+            await store.failRuntime(handle: handle, message: "Injected runtime failure.")
+        }
+        await handle.waitForClose()
+        let stopTask = Task { @MainActor in await store.stop() }
+        for _ in 0..<1_000 {
+            if case .transitioning(_, .stop, _) = store.runtimeState {
+                break
+            }
+            await Task.yield()
+        }
+        guard case .transitioning(_, .stop, _) = store.runtimeState else {
+            Issue.record("Explicit stop did not supersede runtime failure.")
+            await closeGate.open()
+            await stopTask.value
+            await failureTask.value
+            return
+        }
+
+        await closeGate.open()
+        await stopTask.value
+        await failureTask.value
+
+        #expect(store.serverState == .stopped)
+        #expect(handle.closePurposes == [.runtimeFailure])
     }
 }

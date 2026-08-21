@@ -32,6 +32,7 @@ package final class CodexReviewSettingsService {
     private var pendingRefresh = false
     private var pendingSelection: SettingsStore.Selection?
     private var lastPersistedSelection: SettingsStore.Selection
+    private var mutationRevision: UInt64 = 0
 
     package init(
         initialSnapshot: CodexReviewSettings.Snapshot,
@@ -55,6 +56,9 @@ package final class CodexReviewSettingsService {
         guard let settingsStore else {
             return
         }
+        mutationRevision &+= 1
+        pendingRefresh = false
+        pendingSelection = nil
         settingsStore.apply(snapshot: snapshot)
         lastPersistedSelection = settingsStore.currentSelection()
     }
@@ -75,14 +79,19 @@ package final class CodexReviewSettingsService {
             return
         }
 
+        let revision = mutationRevision
         settingsStore.beginLoading()
         do {
             let snapshot = try await backend.refreshSettings()
-            settingsStore.apply(snapshot: snapshot)
-            lastPersistedSelection = settingsStore.currentSelection()
+            if mutationRevision == revision {
+                settingsStore.apply(snapshot: snapshot)
+                lastPersistedSelection = settingsStore.currentSelection()
+            }
             settingsStore.finishLoading(errorMessage: nil)
         } catch {
-            settingsStore.finishLoading(errorMessage: error.localizedDescription)
+            settingsStore.finishLoading(
+                errorMessage: mutationRevision == revision ? error.localizedDescription : nil
+            )
         }
         await drainPendingWorkIfNeeded()
     }
@@ -172,6 +181,7 @@ package final class CodexReviewSettingsService {
             return
         }
 
+        let revision = mutationRevision
         settingsStore.beginLoading()
         do {
             try await persistSelection(
@@ -179,16 +189,22 @@ package final class CodexReviewSettingsService {
                 previous: previous,
                 candidate: candidate
             )
-            lastPersistedSelection = settingsStore.selectionAfterPersisting(
-                trigger: trigger,
-                previous: previous,
-                candidate: candidate
-            )
+            if mutationRevision == revision {
+                lastPersistedSelection = settingsStore.selectionAfterPersisting(
+                    trigger: trigger,
+                    previous: previous,
+                    candidate: candidate
+                )
+            }
             settingsStore.finishLoading(errorMessage: nil)
         } catch {
-            settingsStore.apply(snapshot: settingsStore.snapshot(selection: previous))
-            lastPersistedSelection = previous
-            settingsStore.finishLoading(errorMessage: error.localizedDescription)
+            if mutationRevision == revision {
+                settingsStore.apply(snapshot: settingsStore.snapshot(selection: previous))
+                lastPersistedSelection = previous
+            }
+            settingsStore.finishLoading(
+                errorMessage: mutationRevision == revision ? error.localizedDescription : nil
+            )
         }
         await drainPendingWorkIfNeeded()
     }
