@@ -629,6 +629,84 @@ struct AppServerClientTests {
         #expect(await closeCompletions.value() == 1)
     }
 
+    @Test func processTransportRejectsSendAndNotifyWithFinalCloseFailure() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "codex-review-close-request-race-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let closeStarted = AsyncGate()
+        let closeGate = AsyncGate()
+        let requestsAdmitted = AsyncGate()
+        let requestAdmissions = CallCounter()
+        let failure = TransportCloseTestError.injected
+        let transport = try AppServerProcessTransport(
+            configuration: .init(
+                executable: "/bin/cat",
+                arguments: [],
+                environment: [
+                    "HOME": directory.path,
+                    "PATH": "/bin:/usr/bin",
+                ]
+            ),
+            closeCompletionForTesting: {
+                await closeStarted.open()
+                await closeGate.waitIgnoringCancellation()
+                throw failure
+            },
+            closedRequestAdmissionForTesting: {
+                if await requestAdmissions.record() == 2 {
+                    await requestsAdmitted.open()
+                }
+            }
+        )
+        let sendCompletion = CompletionProbe()
+        let notifyCompletion = CompletionProbe()
+
+        let close = Task { try await transport.close() }
+        await closeStarted.wait()
+        let send = Task {
+            do {
+                _ = try await transport.send(.init(
+                    id: 1,
+                    method: "test/request",
+                    params: Data("{}".utf8)
+                ))
+                await sendCompletion.recordCompletion()
+            } catch {
+                await sendCompletion.recordCompletion()
+                throw error
+            }
+        }
+        let notify = Task {
+            do {
+                try await transport.notify(.init(
+                    method: "test/notification",
+                    params: Data("{}".utf8)
+                ))
+                await notifyCompletion.recordCompletion()
+            } catch {
+                await notifyCompletion.recordCompletion()
+                throw error
+            }
+        }
+        await requestsAdmitted.wait()
+        #expect(await sendCompletion.hasCompleted() == false)
+        #expect(await notifyCompletion.hasCompleted() == false)
+
+        await closeGate.open()
+        await #expect(throws: failure) {
+            try await close.value
+        }
+        let expected = JSONRPC.Error.transportTerminated(.processFailure(
+            failure.localizedDescription
+        ))
+        await #expect(throws: expected) {
+            try await send.value
+        }
+        await #expect(throws: expected) {
+            try await notify.value
+        }
+    }
+
     @Test func spontaneousProcessExitReplaysTypedCauseToLateSubscriber() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appending(path: "codex-review-process-exit-\(UUID().uuidString)")
@@ -2646,6 +2724,49 @@ struct AppServerClientTests {
         await #expect(throws: BackendReviewEventMailboxError.self) {
             _ = try await iterator.next()
         }
+    }
+
+    @Test func backendLifecycleCloseJoinsAdmittedCleanupReview() async throws {
+        let transport = DeferredNotificationCloseTransport()
+        try await transport.enqueue(EmptyResponse(), for: "thread/backgroundTerminals/clean")
+        try await transport.enqueue(
+            AppServerAPI.Thread.Unsubscribe.Response(status: .unsubscribed),
+            for: "thread/unsubscribe"
+        )
+        try await transport.enqueue(EmptyResponse(), for: "thread/delete")
+        let cleanupBarrier = RequestBarrier()
+        await transport.holdNext(
+            method: "thread/backgroundTerminals/clean",
+            barrier: cleanupBarrier
+        )
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let lifecycle = backend.runtimeOwnerLifecycleHandle
+        let run = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-1",
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "thread-1"
+        )
+        let closeCompletion = CompletionProbe()
+
+        let cleanup = Task {
+            try await backend.cleanupReview(run)
+        }
+        await cleanupBarrier.waitUntilEntered()
+        let close = Task {
+            try await lifecycle.closeAndWait()
+            await closeCompletion.recordCompletion()
+        }
+        await backend.waitForRuntimeOwnerCloseCallersForTesting(1)
+        await transport.waitForCloseCall()
+        await backend.waitForAdmittedReviewOperationDrainForTesting()
+        #expect(await closeCompletion.hasCompleted() == false)
+
+        await cleanupBarrier.open()
+        try await cleanup.value
+        try await close.value
+        #expect(await closeCompletion.hasCompleted())
+        #expect(await transport.recordedCloseCallCount() == 1)
     }
 
     @Test func backendPreservesNotificationStreamErrorForLateEventStreamSubscriber() async throws {

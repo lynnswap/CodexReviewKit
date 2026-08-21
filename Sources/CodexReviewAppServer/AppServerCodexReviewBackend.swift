@@ -107,6 +107,8 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     private struct LifecycleTestingObservation {
         var closeCallerCount = 0
         var closeCallerWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+        var operationDrainStarted = false
+        var operationDrainWaiters: [CheckedContinuation<Void, Never>] = []
         var clientCloseResultRecorded = false
         var clientCloseResultWaiters: [CheckedContinuation<Void, Never>] = []
 
@@ -140,6 +142,28 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             clientCloseResultWaiters.removeAll(keepingCapacity: false)
             for waiter in waiters {
                 waiter.resume()
+            }
+        }
+
+        mutating func recordOperationDrainStarted() {
+            guard operationDrainStarted == false else {
+                return
+            }
+            operationDrainStarted = true
+            let waiters = operationDrainWaiters
+            operationDrainWaiters.removeAll(keepingCapacity: false)
+            for waiter in waiters {
+                waiter.resume()
+            }
+        }
+
+        mutating func appendOperationDrainWaiter(
+            _ continuation: CheckedContinuation<Void, Never>
+        ) {
+            if operationDrainStarted {
+                continuation.resume()
+            } else {
+                operationDrainWaiters.append(continuation)
             }
         }
 
@@ -222,6 +246,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     private func waitForAdmittedReviewOperations() async {
+        lifecycleTestingObservation.recordOperationDrainStarted()
         if reviewOperationRegistry.admitted.isEmpty {
             return
         }
@@ -359,7 +384,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         } catch {
             let primaryDescription = error.localizedDescription
             do {
-                try await cleanupReview(provisionalRun)
+                try await performCleanupReview(provisionalRun)
             } catch let cleanupError {
                 appServerBackendLogger.error(
                     "Review start admission failed: \(primaryDescription, privacy: .public). Secondary cleanup failure: \(cleanupError.localizedDescription, privacy: .public)"
@@ -411,7 +436,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             if failureDisposition == .cleanup {
                 let primaryDescription = error.localizedDescription
                 do {
-                    try await cleanupReview(provisionalRun)
+                    try await performCleanupReview(provisionalRun)
                 } catch let cleanupError {
                     appServerBackendLogger.error(
                         "Review start failed: \(primaryDescription, privacy: .public). Secondary cleanup failure: \(cleanupError.localizedDescription, privacy: .public)"
@@ -435,7 +460,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             discardUnmatchedReviewNotificationsIfIdle()
             let primaryDescription = error.localizedDescription
             do {
-                try await cleanupReview(run)
+                try await performCleanupReview(run)
             } catch let cleanupError {
                 appServerBackendLogger.error(
                     "Review start activation failed: \(primaryDescription, privacy: .public). Secondary cleanup failure: \(cleanupError.localizedDescription, privacy: .public)"
@@ -840,6 +865,15 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     package func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws {
+        let operationID = try admitReviewOperation()
+        defer { finishReviewOperation(operationID) }
+
+        try await performCleanupReview(run)
+    }
+
+    private func performCleanupReview(
+        _ run: CodexReviewBackendModel.Review.Run
+    ) async throws {
         controlsByThreadID.removeValue(forKey: run.threadID)
         var cleanupThreadIDs = cleanupThreadIDs(for: run)
         let session = unregisterReviewEventSession(for: run)
@@ -964,6 +998,12 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     package func waitForClientCloseResultBeforeRouterWaitForTesting() async {
         await withCheckedContinuation { continuation in
             lifecycleTestingObservation.appendClientCloseResultWaiter(continuation)
+        }
+    }
+
+    package func waitForAdmittedReviewOperationDrainForTesting() async {
+        await withCheckedContinuation { continuation in
+            lifecycleTestingObservation.appendOperationDrainWaiter(continuation)
         }
     }
 

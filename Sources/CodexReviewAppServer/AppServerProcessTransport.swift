@@ -63,6 +63,7 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
     private let stderrEvents: AppServerPipeReadEventSource
     private let closeAdmissionForTesting: (@Sendable () async -> Void)?
     private let closeCompletionForTesting: (@Sendable () async throws -> Void)?
+    private let closedRequestAdmissionForTesting: (@Sendable () async -> Void)?
     private var framer = JSONRPC.Framer()
     private var pending: [Int: PendingResponse] = [:]
     private var notificationContinuations: [UUID: AsyncThrowingStream<JSONRPC.Notification, Error>.Continuation] = [:]
@@ -76,7 +77,8 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
     package init(
         configuration: Configuration = .init(),
         closeAdmissionForTesting: (@Sendable () async -> Void)? = nil,
-        closeCompletionForTesting: (@Sendable () async throws -> Void)? = nil
+        closeCompletionForTesting: (@Sendable () async throws -> Void)? = nil,
+        closedRequestAdmissionForTesting: (@Sendable () async -> Void)? = nil
     ) throws {
         guard FileManager.default.isExecutableFile(atPath: configuration.executable) else {
             throw AppServerProcessTransportError.executableNotFound(
@@ -110,6 +112,7 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
         self.stderrEvents = stderrEvents
         self.closeAdmissionForTesting = closeAdmissionForTesting
         self.closeCompletionForTesting = closeCompletionForTesting
+        self.closedRequestAdmissionForTesting = closedRequestAdmissionForTesting
         logger.info("Launching codex app-server: \(configuration.executable, privacy: .public) \(configuration.arguments.joined(separator: " "), privacy: .public)")
         logger.info("Using codex app-server home: \(configuration.codexHomeURL.path, privacy: .public)")
         logger.info("codex app-server launched with pid \(process.processIdentifier, privacy: .public)")
@@ -119,7 +122,7 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
 
     package func send(_ request: JSONRPC.Request) async throws -> Data {
         ensureReaderTasksStarted()
-        try throwIfClosed()
+        try await throwIfClosed()
         let payload = try makeRequestPayload(request)
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
@@ -140,7 +143,7 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
 
     package func notify(_ notification: JSONRPC.Notification) async throws {
         ensureReaderTasksStarted()
-        try throwIfClosed()
+        try await throwIfClosed()
         let payload = try makeNotificationPayload(notification)
         try stdin.fileHandleForWriting.write(contentsOf: payload)
     }
@@ -476,7 +479,11 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
         }
     }
 
-    private func throwIfClosed() throws {
+    private func throwIfClosed() async throws {
+        if let closeTask {
+            await closedRequestAdmissionForTesting?()
+            _ = await closeTask.result
+        }
         if closed {
             throw terminalError ?? JSONRPC.Error.closed
         }
