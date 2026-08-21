@@ -188,10 +188,13 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     private var nextRecoveredRun: CodexReviewBackendModel.Review.Run?
     private var interruptFailureMessage: String?
     private var recoveryFailureMessage: String?
+    private var cleanupFailure: ReviewRuntimeCloseFailure?
     private var interruptReviewGate: AsyncGate?
+    private var cleanupReviewGate: AsyncGate?
     private var interruptReviewWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var beginReviewRecoveryWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var startReviewGate: AsyncGate?
+    private var startReviewGateIgnoresCancellation = false
     private var startReviewWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var resumeReviewRecoveryGate: AsyncGate?
     private var resumeReviewRecoveryWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
@@ -229,6 +232,12 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
 
     package func holdStartReview(with gate: AsyncGate) {
         startReviewGate = gate
+        startReviewGateIgnoresCancellation = false
+    }
+
+    package func holdStartReviewIgnoringCancellation(with gate: AsyncGate) {
+        startReviewGate = gate
+        startReviewGateIgnoresCancellation = true
     }
 
     package func failInterrupts(message: String) {
@@ -239,8 +248,16 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         recoveryFailureMessage = message
     }
 
+    package func failCleanup(message: String) {
+        cleanupFailure = .cleanup(message)
+    }
+
     package func holdInterruptReview(with gate: AsyncGate) {
         interruptReviewGate = gate
+    }
+
+    package func holdCleanupReview(with gate: AsyncGate) {
+        cleanupReviewGate = gate
     }
 
     package func holdResumeReviewRecovery(with gate: AsyncGate) {
@@ -455,7 +472,11 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
             waiter.resume()
         }
         if let startReviewGate {
-            await startReviewGate.wait()
+            if startReviewGateIgnoresCancellation {
+                await startReviewGate.waitIgnoringCancellation()
+            } else {
+                await startReviewGate.wait()
+            }
         }
         return .init(run: nextRun, events: eventMailbox(for: nextRun))
     }
@@ -521,8 +542,14 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         return .init(run: recoveredRun, events: eventMailbox(for: recoveredRun))
     }
 
-    package func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async {
+    package func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws {
         commands.append(.cleanupReview(run))
+        if let cleanupReviewGate {
+            await cleanupReviewGate.wait()
+        }
+        if let cleanupFailure {
+            throw cleanupFailure
+        }
     }
 
     package func yield(_ event: CodexReviewBackendModel.Review.Event, for run: CodexReviewBackendModel.Review.Run? = nil) async {
@@ -839,8 +866,8 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         try await reviewBackend.resumeReviewRecovery(token, request: request)
     }
 
-    package func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async {
-        await reviewBackend.cleanupReview(run)
+    package func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws {
+        try await reviewBackend.cleanupReview(run)
     }
 
     package func refreshSettings() async throws -> CodexReviewSettings.Snapshot {

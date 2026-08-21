@@ -34,8 +34,8 @@ private extension AppServerCodexReviewBackend {
         try await beginReviewRecovery(attempt.run, reason: reason)
     }
 
-    func cleanupReview(_ attempt: BackendReviewAttempt) async {
-        await cleanupReview(attempt.run)
+    func cleanupReview(_ attempt: BackendReviewAttempt) async throws {
+        try await cleanupReview(attempt.run)
     }
 }
 
@@ -2797,6 +2797,10 @@ struct AppServerClientTests {
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         try await transport.enqueue(EmptyResponse(), for: "thread/rollback")
         try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-2", reviewThreadID: "review-thread-2"), for: "review/start")
+        try await transport.enqueue(
+            AppServerAPI.Thread.Unsubscribe.Response(status: .unsubscribed),
+            for: "thread/unsubscribe"
+        )
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
         let run = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
@@ -2815,7 +2819,7 @@ struct AppServerClientTests {
             ),
             reason: .init(message: "Network unavailable; waiting to reconnect.")
         )
-        await backend.cleanupReview(recovered)
+        try await backend.cleanupReview(recovered)
 
         let deleteThreadIDs = try await transport.recordedRequests()
             .filter { $0.method == "thread/delete" }
@@ -5480,6 +5484,9 @@ struct AppServerClientTests {
         try await enqueueInitialize(transport)
         try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1"), for: "thread/start")
         await transport.enqueueFailure(.responseError(code: -32602, message: "invalid target"), for: "review/start")
+        await transport.enqueueFailure(.responseError(code: -32000, message: "clean failed"), for: "thread/backgroundTerminals/clean")
+        await transport.enqueueFailure(.responseError(code: -32000, message: "unsubscribe failed"), for: "thread/unsubscribe")
+        await transport.enqueueFailure(.responseError(code: -32000, message: "delete failed"), for: "thread/delete")
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
 
         await #expect(throws: JSONRPC.Error.responseError(code: -32602, message: "invalid target")) {
@@ -5501,6 +5508,146 @@ struct AppServerClientTests {
         ])
     }
 
+    @Test func backendCleanupAttemptsEveryStepAndAggregatesFailuresInOrder() async throws {
+        let transport = FakeJSONRPCTransport()
+        await transport.enqueueFailure(
+            .responseError(code: -32000, message: "clean failed"),
+            for: "thread/backgroundTerminals/clean"
+        )
+        await transport.enqueueFailure(
+            .responseError(code: -32000, message: "unsubscribe failed"),
+            for: "thread/unsubscribe"
+        )
+        await transport.enqueueFailure(
+            .responseError(code: -32000, message: "review delete failed"),
+            for: "thread/delete"
+        )
+        await transport.enqueueFailure(
+            .responseError(code: -32000, message: "canonical delete failed"),
+            for: "thread/delete"
+        )
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let run = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1"
+        )
+
+        await #expect(throws: ReviewRuntimeCloseFailure.cleanup(
+            "thread/backgroundTerminals/clean for thread-1: clean failed; "
+                + "thread/unsubscribe for thread-1: unsubscribe failed; "
+                + "thread/delete for review-thread-1: review delete failed; "
+                + "thread/delete for thread-1: canonical delete failed"
+        )) {
+            try await backend.cleanupReview(run)
+        }
+
+        let requests = await transport.recordedRequests()
+        #expect(requests.map(\.method) == [
+            "thread/backgroundTerminals/clean",
+            "thread/unsubscribe",
+            "thread/delete",
+            "thread/delete",
+        ])
+        let deletedThreadIDs = try requests
+            .filter { $0.method == "thread/delete" }
+            .map { request in
+                try JSONDecoder().decode(AppServerAPI.Thread.Delete.Params.self, from: request.params).threadID
+            }
+        #expect(deletedThreadIDs == ["review-thread-1", "thread-1"])
+    }
+
+    @Test @MainActor
+    func storeRetainsCleanupFailureAsSecondaryDiagnosticWithoutMaskingPrimary() async throws {
+        let backend = FakeCodexReviewBackend()
+        let cleanupGate = AsyncGate()
+        await backend.holdCleanupReview(with: cleanupGate)
+        await backend.failCleanup(message: "cleanup failed")
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+
+        let initial = try await store.startReview(
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+            waitTimeout: .zero
+        )
+        #expect(initial.core.lifecycle.status == .running)
+        await backend.yield(.failed("primary review failed"))
+        let cleanupStarted = await waitUntilOnMainActor {
+            await backend.recordedCommands().contains(.cleanupReview(.init(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                reviewThreadID: "review-thread-1"
+            )))
+        }
+        #expect(cleanupStarted)
+        #expect(try store.readReview(jobID: "job-1").core.lifecycle.status == .failed)
+        let result = Task { @MainActor in
+            try await store.awaitReview(
+                sessionID: "session-1",
+                jobID: "job-1",
+                timeout: .seconds(5)
+            )
+        }
+        let waiterRegistered = await waitUntilOnMainActor {
+            store.reviewTerminalWaiters["job-1"]?.count == 1
+        }
+        #expect(waiterRegistered)
+        #expect(store.reviewTerminalWaiters["job-1"]?.count == 1)
+
+        await cleanupGate.open()
+        let read = try await result.value
+
+        #expect(read.core.lifecycle.status == .failed)
+        #expect(read.core.lifecycle.errorMessage == "primary review failed")
+        #expect(read.logs.contains(where: {
+            $0.kind == .diagnostic
+                && $0.text == "Review cleanup failed: cleanup failed"
+        }))
+        await backend.finishEventMailboxes()
+        await store.cancelAndDrainReviewWorkersForTesting()
+    }
+
+    @Test @MainActor
+    func storeRuntimeStopDetachmentFinalizesResultWithoutWaitingForDetachedWorker() async throws {
+        let backend = FakeCodexReviewBackend()
+        let startGate = AsyncGate()
+        await backend.holdStartReviewIgnoringCancellation(with: startGate)
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        let result = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        try await backend.waitForStartReview(timeout: .seconds(2))
+        let waiterRegistered = await waitUntilOnMainActor {
+            store.reviewTerminalWaiters["job-1"]?.count == 1
+        }
+        #expect(waiterRegistered)
+
+        let jobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
+            reason: .system(message: "Review runtime stopped."),
+            cancelWorkers: false
+        )
+        #expect(store.reviewTerminalWaiters["job-1"]?.count == 1)
+        store.cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: jobIDs)
+
+        #expect(store.reviewTerminalWaiters["job-1"] == nil)
+        #expect(store.runtimeStopDetachedReviewWorkerTasks["job-1"] != nil)
+        #expect(try await result.value.core.lifecycle.status == .cancelled)
+
+        await startGate.open()
+        #expect(await store.drainRuntimeStopDetachedReviewWorkers(timeout: .seconds(2)))
+        await backend.finishEventMailboxes()
+        await store.cancelAndDrainReviewWorkersForTesting()
+    }
+
     private func waitUntil(timeout: Duration = .seconds(2), condition: () async -> Bool) async -> Bool {
         let clock = ContinuousClock()
         let deadline = clock.now + timeout
@@ -5509,6 +5656,22 @@ struct AppServerClientTests {
                 return false
             }
             try? await Task.sleep(for: .milliseconds(50))
+        }
+        return true
+    }
+
+    @MainActor
+    private func waitUntilOnMainActor(
+        timeout: Duration = .seconds(2),
+        condition: @MainActor () async -> Bool
+    ) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now + timeout
+        while await condition() == false {
+            if clock.now >= deadline {
+                return false
+            }
+            try? await Task.sleep(for: .milliseconds(10))
         }
         return true
     }

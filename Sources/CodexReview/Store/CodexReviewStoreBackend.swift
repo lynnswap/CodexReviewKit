@@ -54,7 +54,7 @@ package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend {
         _ token: CodexReviewBackendModel.Review.RecoveryToken,
         request: CodexReviewBackendModel.Review.Start
     ) async throws -> BackendReviewAttempt
-    func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async
+    func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws
 }
 
 extension CodexReviewStoreBackend {

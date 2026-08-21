@@ -157,7 +157,14 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         } catch {
             reviewStartRequestsInFlight -= 1
             discardUnmatchedReviewNotificationsIfIdle()
-            await cleanupReview(provisionalRun)
+            let primaryDescription = error.localizedDescription
+            do {
+                try await cleanupReview(provisionalRun)
+            } catch let cleanupError {
+                appServerBackendLogger.error(
+                    "Review start failed: \(primaryDescription, privacy: .public). Secondary cleanup failure: \(cleanupError.localizedDescription, privacy: .public)"
+                )
+            }
             throw error
         }
         let reviewThreadID = review.reviewThreadID ?? thread.threadID
@@ -383,8 +390,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         return await session.attempt()
     }
 
-    package func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async {
-        _ = try? await client.initialize()
+    package func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws {
         controlsByThreadID.removeValue(forKey: run.threadID)
         var cleanupThreadIDs = cleanupThreadIDs(for: run)
         if let session = unregisterReviewEventSession(for: run) {
@@ -395,21 +401,43 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                 completedReviewEventSessionMetricsByThreadID[threadID] = metrics
             }
         }
-        let _: EmptyResponse? = try? await client.send(AppServerAPI.Thread.BackgroundTerminals.Clean.Request(
-            params: .init(threadID: run.threadID)
-        ))
-        let _: AppServerAPI.Thread.Unsubscribe.Response? = try? await client.send(AppServerAPI.Thread.Unsubscribe.Request(
-            params: .init(threadID: run.threadID)
-        ))
-        for threadID in cleanupThreadIDs {
-            let _: EmptyResponse? = try? await client.send(AppServerAPI.Thread.Delete.Request(
-                params: .init(threadID: threadID)
+        var failureMessages: [String] = []
+        do {
+            let _: EmptyResponse = try await client.send(AppServerAPI.Thread.BackgroundTerminals.Clean.Request(
+                params: .init(threadID: run.threadID)
             ))
+        } catch {
+            failureMessages.append(
+                "thread/backgroundTerminals/clean for \(run.threadID): \(error.localizedDescription)"
+            )
+        }
+        do {
+            let _: AppServerAPI.Thread.Unsubscribe.Response = try await client.send(AppServerAPI.Thread.Unsubscribe.Request(
+                params: .init(threadID: run.threadID)
+            ))
+        } catch {
+            failureMessages.append(
+                "thread/unsubscribe for \(run.threadID): \(error.localizedDescription)"
+            )
+        }
+        for threadID in cleanupThreadIDs {
+            do {
+                let _: EmptyResponse = try await client.send(AppServerAPI.Thread.Delete.Request(
+                    params: .init(threadID: threadID)
+                ))
+            } catch {
+                failureMessages.append(
+                    "thread/delete for \(threadID): \(error.localizedDescription)"
+                )
+            }
         }
         for threadID in cleanupThreadIDs {
             reviewEventSessionCanonicalThreadIDByThreadID.removeValue(forKey: threadID)
         }
         reviewThreadIDsForCleanupByThreadID.removeValue(forKey: run.threadID)
+        if failureMessages.isEmpty == false {
+            throw ReviewRuntimeCloseFailure.cleanup(failureMessages.joined(separator: "; "))
+        }
     }
 
     package func cleanupActiveReviewsForShutdown(reason: CodexReviewBackendModel.CancellationReason) async {
@@ -425,7 +453,13 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             if Task.isCancelled {
                 return
             }
-            await cleanupReview(run)
+            do {
+                try await cleanupReview(run)
+            } catch {
+                appServerBackendLogger.error(
+                    "Active review cleanup failed during shutdown: \(error.localizedDescription, privacy: .public)"
+                )
+            }
         }
     }
 

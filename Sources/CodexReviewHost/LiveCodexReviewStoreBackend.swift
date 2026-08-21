@@ -1067,11 +1067,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         return try await appServerBackend.resumeReviewRecovery(token, request: request)
     }
 
-    func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async {
+    func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws {
         guard let appServerBackend else {
-            return
+            throw ReviewRuntimeCloseFailure.cleanup("Review runtime is not running.")
         }
-        await appServerBackend.cleanupReview(run)
+        try await appServerBackend.cleanupReview(run)
     }
 
     @discardableResult

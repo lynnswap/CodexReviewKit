@@ -46,7 +46,7 @@ extension CodexReviewStore {
         if let sessionID, job.sessionID != sessionID {
             throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
         }
-        if job.isTerminal == false {
+        if isReviewResultFinalized(jobID: jobID) == false {
             await waitForReviewTerminal(jobID: jobID, timeout: timeout)
         }
         return try readReview(sessionID: sessionID, jobID: jobID)
@@ -146,7 +146,7 @@ extension CodexReviewStore {
             }
 
             if job.isTerminal {
-                await backend.cleanupReview(backendRun)
+                await cleanupReviewAndRetainFailure(backendRun, for: job)
                 activeRuns.removeValue(forKey: jobID)
                 reviewRecoveryWaitingJobIDs.remove(jobID)
             } else {
@@ -156,7 +156,7 @@ extension CodexReviewStore {
                     startRequest: startRequest
                 )
                 run = currentRun
-                await backend.cleanupReview(currentRun)
+                await cleanupReviewAndRetainFailure(currentRun, for: job)
                 activeRuns.removeValue(forKey: jobID)
                 reviewRecoveryWaitingJobIDs.remove(jobID)
             }
@@ -165,7 +165,7 @@ extension CodexReviewStore {
             let startupCancellation = startupCancellations.removeValue(forKey: jobID)
             if let cleanupRun = activeRuns[jobID] ?? run {
                 await interruptReviewAfterTaskCancellation(cleanupRun, job: job)
-                await backend.cleanupReview(cleanupRun)
+                await cleanupReviewAndRetainFailure(cleanupRun, for: job)
             } else if job.isTerminal == false || startupCancellation != nil {
                 try? completeCancellationLocally(
                     jobID: job.id,
@@ -176,10 +176,14 @@ extension CodexReviewStore {
             activeRuns.removeValue(forKey: jobID)
             reviewRecoveryWaitingJobIDs.remove(jobID)
         } catch {
+            let primaryError = error
             startingJobIDs.remove(jobID)
             let startupCancellation = startupCancellations.removeValue(forKey: jobID)
+            let cleanupFailure: ReviewRuntimeCloseFailure?
             if let cleanupRun = activeRuns[jobID] ?? run {
-                await backend.cleanupReview(cleanupRun)
+                cleanupFailure = await cleanupReviewFailure(cleanupRun)
+            } else {
+                cleanupFailure = nil
             }
             activeRuns.removeValue(forKey: jobID)
             reviewRecoveryWaitingJobIDs.remove(jobID)
@@ -190,13 +194,16 @@ extension CodexReviewStore {
                     cancellation: startupCancellation
                 )
             } else if job.isTerminal == false,
-                      let transportFailure = error as? ReviewWorkerInputQueueError {
+                      let transportFailure = primaryError as? ReviewWorkerInputQueueError {
                 markReviewInterrupted(
                     job,
                     cause: .transport(message: transportFailure.message)
                 )
             } else if job.isTerminal == false {
-                markReviewFailed(job, message: error.localizedDescription)
+                markReviewFailed(job, message: primaryError.localizedDescription)
+            }
+            if let cleanupFailure {
+                retainCleanupFailure(cleanupFailure, for: job)
             }
         }
         reviewWorkerTasks.removeValue(forKey: jobID)
@@ -204,6 +211,40 @@ extension CodexReviewStore {
         if job.isTerminal {
             resumeReviewWaiters(for: jobID)
         }
+    }
+
+    private func cleanupReviewAndRetainFailure(
+        _ run: CodexReviewBackendModel.Review.Run,
+        for job: CodexReviewJob
+    ) async {
+        if let failure = await cleanupReviewFailure(run) {
+            retainCleanupFailure(failure, for: job)
+        }
+    }
+
+    private func cleanupReviewFailure(
+        _ run: CodexReviewBackendModel.Review.Run
+    ) async -> ReviewRuntimeCloseFailure? {
+        do {
+            try await backend.cleanupReview(run)
+            return nil
+        } catch let failure as ReviewRuntimeCloseFailure {
+            return failure
+        } catch {
+            return .cleanup(error.localizedDescription)
+        }
+    }
+
+    private func retainCleanupFailure(
+        _ failure: ReviewRuntimeCloseFailure,
+        for job: CodexReviewJob
+    ) {
+        job.appendLogEntry(.init(
+            kind: .diagnostic,
+            text: failure.localizedDescription,
+            timestamp: clock.now()
+        ))
+        writeDiagnosticsIfNeeded()
     }
 
     private func interruptReviewAfterTaskCancellation(_ run: CodexReviewBackendModel.Review.Run, job: CodexReviewJob) async {
@@ -808,7 +849,7 @@ extension CodexReviewStore {
                 recoveredRun,
                 reason: .init(message: job.core.lifecycle.cancellation?.message ?? "Cancellation requested.")
             )
-            await backend.cleanupReview(recoveredRun)
+            await cleanupReviewAndRetainFailure(recoveredRun, for: job)
             throw CancellationError()
         }
 
@@ -819,7 +860,7 @@ extension CodexReviewStore {
                     reason: .init(message: job.core.lifecycle.cancellation?.message ?? "Cancellation requested.")
                 )
             }
-            await backend.cleanupReview(recoveredRun)
+            await cleanupReviewAndRetainFailure(recoveredRun, for: job)
             return true
         }
 
@@ -836,15 +877,19 @@ extension CodexReviewStore {
                 cancellation: cancellation
             )
         } catch {
-            await backend.cleanupReview(recoveredRun)
+            let primaryError = error
+            let cleanupFailure = await cleanupReviewFailure(recoveredRun)
             try? recordCancellationFailure(
                 jobID: job.id,
                 sessionID: job.sessionID,
-                message: error.localizedDescription
+                message: primaryError.localizedDescription
             )
-            throw error
+            if let cleanupFailure {
+                retainCleanupFailure(cleanupFailure, for: job)
+            }
+            throw primaryError
         }
-        await backend.cleanupReview(recoveredRun)
+        await cleanupReviewAndRetainFailure(recoveredRun, for: job)
         return true
     }
 
@@ -994,7 +1039,7 @@ extension CodexReviewStore {
     }
 
     private func waitForReviewTerminal(jobID: String, timeout: Duration?) async {
-        guard job(id: jobID)?.isTerminal == false else {
+        guard isReviewResultFinalized(jobID: jobID) == false else {
             return
         }
         let waiterID = UUID()
@@ -1011,7 +1056,7 @@ extension CodexReviewStore {
 
         await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
-                if job(id: jobID)?.isTerminal != false {
+                if isReviewResultFinalized(jobID: jobID) {
                     timeoutTask?.cancel()
                     continuation.resume()
                     return
@@ -1032,11 +1077,27 @@ extension CodexReviewStore {
     }
 
     package func resumeReviewWaiters(for jobID: String) {
+        guard isReviewResultFinalized(jobID: jobID) else {
+            return
+        }
         let waiters = reviewTerminalWaiters.removeValue(forKey: jobID) ?? []
         for waiter in waiters {
             waiter.timeoutTask?.cancel()
             waiter.continuation.resume()
         }
+    }
+
+    private func isReviewResultFinalized(jobID: String) -> Bool {
+        guard let job = job(id: jobID) else {
+            return true
+        }
+        guard job.isTerminal else {
+            return false
+        }
+        // Terminal state is published before backend cleanup. The live worker remains the
+        // result owner until cleanup and any secondary diagnostic are finalized. Runtime-stop
+        // detachment is the explicit boundary that transfers only lifecycle cleanup ownership.
+        return reviewWorkerTasks[jobID] == nil
     }
 
     private func resumeReviewWaiter(jobID: String, waiterID: UUID) {
