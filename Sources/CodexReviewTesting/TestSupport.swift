@@ -194,6 +194,9 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     private var cleanupReviewGate: AsyncGate?
     private var interruptReviewWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var beginReviewRecoveryWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+    private var beforeStartReviewDispatchGate: AsyncGate?
+    private var didEnterStartReview = false
+    private var startReviewEntryWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var startReviewGate: AsyncGate?
     private var startReviewGateIgnoresCancellation = false
     private var startReviewWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
@@ -234,6 +237,10 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     package func holdStartReview(with gate: AsyncGate) {
         startReviewGate = gate
         startReviewGateIgnoresCancellation = false
+    }
+
+    package func holdBeforeStartReviewDispatch(with gate: AsyncGate) {
+        beforeStartReviewDispatchGate = gate
     }
 
     package func holdStartReviewIgnoringCancellation(with gate: AsyncGate) {
@@ -304,6 +311,28 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     package func waitForStartReview(timeout: Duration = .seconds(2)) async throws {
         try await withFakeBackendTimeout(operation: "startReview", timeout: timeout) {
             await self.waitForStartReview()
+        }
+    }
+
+    package func waitForStartReviewEntry() async {
+        if didEnterStartReview {
+            return
+        }
+        let waiterID = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                startReviewEntryWaiters[waiterID] = continuation
+            }
+        } onCancel: {
+            Task {
+                await self.cancelStartReviewEntryWaiter(id: waiterID)
+            }
+        }
+    }
+
+    package func waitForStartReviewEntry(timeout: Duration = .seconds(2)) async throws {
+        try await withFakeBackendTimeout(operation: "startReview entry", timeout: timeout) {
+            await self.waitForStartReviewEntry()
         }
     }
 
@@ -469,6 +498,15 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         _ request: CodexReviewBackendModel.Review.Start,
         admission: ReviewStartAdmission
     ) async throws -> BackendReviewAttempt {
+        didEnterStartReview = true
+        let entryWaiters = Array(startReviewEntryWaiters.values)
+        startReviewEntryWaiters.removeAll(keepingCapacity: false)
+        for waiter in entryWaiters {
+            waiter.resume()
+        }
+        if let beforeStartReviewDispatchGate {
+            await beforeStartReviewDispatchGate.wait()
+        }
         startAdmissionIdentities.append(ObjectIdentifier(admission))
         try await admission.admitThreadStartDispatch()
         commands.append(.startReview(request))
@@ -614,6 +652,10 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         startReviewWaiters.removeValue(forKey: id)?.resume()
     }
 
+    private func cancelStartReviewEntryWaiter(id: UUID) {
+        startReviewEntryWaiters.removeValue(forKey: id)?.resume()
+    }
+
     private func cancelInterruptReviewWaiter(id: UUID) {
         interruptReviewWaiters.removeValue(forKey: id)?.resume()
     }
@@ -652,7 +694,7 @@ package final class StoreSnapshotProbe {
                     lastAgentMessage: job.core.output.lastAgentMessage,
                     logs: job.logEntries,
                     run: job.core.run,
-                    activeRun: store.activeRuns[job.id],
+                    activeRun: store.reviewAttemptOwnerships[job.id]?.activeRun,
                     cancellationRequested: job.cancellationRequested
                 )
             }

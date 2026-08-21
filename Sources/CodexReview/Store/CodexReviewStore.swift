@@ -1,6 +1,38 @@
 import Foundation
 import Observation
 
+package struct ReviewActiveAttempt: Sendable {
+    package enum Origin: Sendable {
+        case initial(ReviewStartAdmission)
+        case recovered
+    }
+
+    package var run: CodexReviewBackendModel.Review.Run
+    package var origin: Origin
+
+    package var initialAdmission: ReviewStartAdmission? {
+        if case .initial(let admission) = origin {
+            admission
+        } else {
+            nil
+        }
+    }
+}
+
+package enum ReviewAttemptOwnership: Sendable {
+    case queued(ReviewStartAdmission)
+    case starting(ReviewStartAdmission)
+    case active(ReviewActiveAttempt)
+
+    package var activeRun: CodexReviewBackendModel.Review.Run? {
+        if case .active(let attempt) = self {
+            attempt.run
+        } else {
+            nil
+        }
+    }
+}
+
 @MainActor
 @Observable
 public final class CodexReviewStore {
@@ -28,10 +60,8 @@ public final class CodexReviewStore {
     @ObservationIgnored package var previewSupportRetainer: AnyObject?
     @ObservationIgnored package let clock: CodexReviewClock
     @ObservationIgnored package let idGenerator: CodexReviewIDGenerator
-    @ObservationIgnored package var activeRuns: [String: CodexReviewBackendModel.Review.Run] = [:]
+    @ObservationIgnored package var reviewAttemptOwnerships: [String: ReviewAttemptOwnership] = [:]
     @ObservationIgnored package var reviewRecoveryWaitingJobIDs: Set<String> = []
-    @ObservationIgnored package var startingJobIDs: Set<String> = []
-    @ObservationIgnored package var startupCancellations: [String: ReviewCancellation] = [:]
     @ObservationIgnored package var reviewWorkerTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored package var runtimeStopDetachedReviewWorkerTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored package var reviewTerminalWaiters: [String: [ReviewTerminalWaiter]] = [:]

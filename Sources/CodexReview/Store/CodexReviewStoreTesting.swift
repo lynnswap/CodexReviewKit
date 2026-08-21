@@ -77,6 +77,20 @@ extension CodexReviewStore {
             job.sortOrder = Double(workspaceJobs.count - index - 1)
         }
         self.jobs = Set(resolvedJobs)
+        reviewAttemptOwnerships = Dictionary(uniqueKeysWithValues: resolvedJobs.compactMap { job in
+            guard job.core.lifecycle.status == .running,
+                  let threadID = job.core.run.threadID
+            else {
+                return nil
+            }
+            let run = CodexReviewBackendModel.Review.Run(
+                threadID: threadID,
+                turnID: job.core.run.turnID,
+                reviewThreadID: job.core.run.reviewThreadID,
+                model: job.core.run.model
+            )
+            return (job.id, .active(.init(run: run, origin: .recovered)))
+        })
         if let settingsSnapshot {
             settings.loadForTesting(snapshot: settingsSnapshot)
         }
@@ -94,9 +108,7 @@ extension CodexReviewStore {
 
         reviewWorkerTasks.removeAll(keepingCapacity: false)
         runtimeStopDetachedReviewWorkerTasks.removeAll(keepingCapacity: false)
-        startingJobIDs.removeAll(keepingCapacity: false)
-        startupCancellations.removeAll(keepingCapacity: false)
-        activeRuns.removeAll(keepingCapacity: false)
+        reviewAttemptOwnerships.removeAll(keepingCapacity: false)
         reviewRecoveryWaitingJobIDs.removeAll(keepingCapacity: false)
 
         let waiters = reviewTerminalWaiters.values.flatMap { $0 }
