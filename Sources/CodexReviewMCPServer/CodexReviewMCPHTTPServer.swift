@@ -9,10 +9,14 @@ import CodexReview
 
 private let logger = Logger(subsystem: "CodexReviewKit", category: "mcp-http")
 
+private enum TrackedHTTPStreamLifetime {
+    case open(ActiveRequestCompletion)
+    case finite(MCPHTTPNetworkResourceOwner.FiniteResponseOperation)
+}
+
 private struct TrackedHTTPResponse {
     var response: HTTPResponse
-    var streamCompletion: ActiveRequestCompletion? = nil
-    var isFiniteResponseStream = false
+    var streamLifetime: TrackedHTTPStreamLifetime? = nil
 }
 
 package extension CodexReviewMCPHTTPServer {
@@ -459,6 +463,8 @@ package actor CodexReviewMCPHTTPServer {
     private let networkResources = MCPHTTPNetworkResourceOwner()
     private var admittedHandlerDrainDidBegin = false
     private var admittedHandlerDrainStartWaiters: [CheckedContinuation<Void, Never>] = []
+    private var finiteResponseDrainDidBegin = false
+    private var finiteResponseDrainStartWaiters: [CheckedContinuation<Void, Never>] = []
     private var eventLoopGroupShutdownCount = 0
     private var eventLoopGroupShutdownWaiters: [
         (count: Int, continuation: CheckedContinuation<Void, Never>)
@@ -665,6 +671,7 @@ package actor CodexReviewMCPHTTPServer {
             pendingCloseFailures.removeAll(keepingCapacity: false)
             admissionRegistry.open()
             admittedHandlerDrainDidBegin = false
+            finiteResponseDrainDidBegin = false
             lifecycleState = .running(resources)
             logger.info(
                 "MCP Streamable HTTP server listening at \(resources.boundURL.absoluteString, privacy: .public)"
@@ -747,8 +754,8 @@ package actor CodexReviewMCPHTTPServer {
         await waitForAdmittedHandlers()
         await resources.cleanupTask.value
         await networkResources.waitForTasksDrained(kind: .domainHandler)
-        await networkResources.waitForTasksDrained(kind: .finiteResponseSource)
-        await networkResources.waitForTasksDrained(kind: .finiteResponseWriter)
+        beginFiniteResponseDrain()
+        await networkResources.waitForTasksDrained(kind: .finiteResponse)
         await closeAllSessions()
         await networkResources.closeAndDrainChildren()
         await networkResources.closeTaskAdmissionCancelAndDrain()
@@ -894,6 +901,15 @@ package actor CodexReviewMCPHTTPServer {
         await admissionRegistry.waitUntilDrained()
     }
 
+    private func beginFiniteResponseDrain() {
+        finiteResponseDrainDidBegin = true
+        let waiters = finiteResponseDrainStartWaiters
+        finiteResponseDrainStartWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+
     package func handleHTTPRequest(_ request: HTTPRequest) async -> HTTPResponse {
         guard let admission = admissionRegistry.admit() else {
             return .error(
@@ -901,9 +917,12 @@ package actor CodexReviewMCPHTTPServer {
                 .internalError("MCP server is not accepting requests.")
             )
         }
-        let response = await performTrackedHTTPRequest(request).response
+        let trackedResponse = await performTrackedHTTPRequest(request)
+        if case .finite(let operation) = trackedResponse.streamLifetime {
+            operation.waiveWriter()
+        }
         admissionRegistry.finish(admission)
-        return response
+        return trackedResponse.response
     }
 
     fileprivate func handleAdmittedHTTPRequest(
@@ -1031,35 +1050,77 @@ package actor CodexReviewMCPHTTPServer {
                 }
                 receipt.install(task)
             }
+            let finiteResponseOperation: MCPHTTPNetworkResourceOwner.FiniteResponseOperation?
+            if isFiniteResponseStream {
+                guard let operation = networkResources.registerFiniteResponseOperation() else {
+                    completion.finish()
+                    return (
+                        .init(response: .error(
+                            statusCode: 503,
+                            .internalError("MCP server is not accepting responses.")
+                        )),
+                        true
+                    )
+                }
+                finiteResponseOperation = operation
+            } else {
+                finiteResponseOperation = nil
+            }
             let trackedStream = AsyncThrowingStream<Data, Swift.Error>(bufferingPolicy: .unbounded) { continuation in
                 let heartbeatTask = makeStreamHeartbeatTask(continuation: continuation)
-                guard let receipt = networkResources.registerTask(
-                    kind: isFiniteResponseStream ? .finiteResponseSource : .streamBridge
-                ) else {
-                    heartbeatTask?.cancel()
-                    completion.finish()
-                    continuation.finish()
-                    return
-                }
-                let task = Task {
-                    defer {
+                if isFiniteResponseStream {
+                    guard let finiteResponseOperation else {
                         heartbeatTask?.cancel()
                         completion.finish()
-                        receipt.finish()
-                    }
-                    do {
-                        for try await chunk in stream {
-                            continuation.yield(chunk)
-                        }
                         continuation.finish()
-                    } catch {
-                        continuation.finish(throwing: error)
+                        return
                     }
-                }
-                receipt.install(task)
-                continuation.onTermination = { _ in
-                    heartbeatTask?.cancel()
-                    if isFiniteResponseStream == false {
+                    let task = Task {
+                        defer {
+                            heartbeatTask?.cancel()
+                            completion.finish()
+                            finiteResponseOperation.finishSource()
+                        }
+                        do {
+                            for try await chunk in stream {
+                                continuation.yield(chunk)
+                            }
+                            continuation.finish()
+                        } catch {
+                            continuation.finish(throwing: error)
+                        }
+                    }
+                    finiteResponseOperation.installSource(task)
+                    continuation.onTermination = { _ in
+                        heartbeatTask?.cancel()
+                    }
+                } else {
+                    guard let receipt = networkResources.registerTask(
+                        kind: .streamBridge
+                    ) else {
+                        heartbeatTask?.cancel()
+                        completion.finish()
+                        continuation.finish()
+                        return
+                    }
+                    let task = Task {
+                        defer {
+                            heartbeatTask?.cancel()
+                            completion.finish()
+                            receipt.finish()
+                        }
+                        do {
+                            for try await chunk in stream {
+                                continuation.yield(chunk)
+                            }
+                            continuation.finish()
+                        } catch {
+                            continuation.finish(throwing: error)
+                        }
+                    }
+                    receipt.install(task)
+                    continuation.onTermination = { _ in
+                        heartbeatTask?.cancel()
                         task.cancel()
                         completion.finish()
                     }
@@ -1068,8 +1129,9 @@ package actor CodexReviewMCPHTTPServer {
             return (
                 .init(
                     response: .stream(trackedStream, headers: headers),
-                    streamCompletion: isFiniteResponseStream ? nil : completion,
-                    isFiniteResponseStream: isFiniteResponseStream
+                    streamLifetime: finiteResponseOperation.map {
+                        .finite($0)
+                    } ?? .open(completion)
                 ),
                 false
             )
@@ -1206,6 +1268,23 @@ package actor CodexReviewMCPHTTPServer {
         }
     }
 
+    package func waitForFiniteResponseDrainToBeginForTesting() async {
+        if finiteResponseDrainDidBegin {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            if finiteResponseDrainDidBegin {
+                continuation.resume()
+            } else {
+                finiteResponseDrainStartWaiters.append(continuation)
+            }
+        }
+    }
+
+    package func waitForFiniteResponsesToDrainForTesting() async {
+        await networkResources.waitForTasksDrained(kind: .finiteResponse)
+    }
+
     package func networkResourceCountsForTesting() -> (children: Int, tasks: Int) {
         networkResources.resourceCountsForTesting()
     }
@@ -1236,13 +1315,13 @@ package actor CodexReviewMCPHTTPServer {
         )
     }
 
-    package func holdNextFiniteResponseSourceCompletionForTesting() {
+    package func holdNextFiniteResponseCompletionForTesting() {
         networkResources.holdNextTaskCompletionForTesting(
-            kind: .finiteResponseSource
+            kind: .finiteResponse
         )
     }
 
-    package func finiteResponseSourceCompletionIsHeldForTesting() -> Bool {
+    package func finiteResponseCompletionIsHeldForTesting() -> Bool {
         networkResources.hasHeldTaskCompletionForTesting()
     }
 
@@ -1473,6 +1552,53 @@ private final class MCPHTTPStreamOwnership: @unchecked Sendable {
     }
 }
 
+private enum MCPHTTPActiveStreamOwnership: Sendable {
+    case open(MCPHTTPStreamOwnership)
+    case finite(MCPHTTPNetworkResourceOwner.FiniteResponseOperation)
+
+    var id: UUID {
+        switch self {
+        case .open(let ownership): ownership.id
+        case .finite(let operation): operation.id
+        }
+    }
+
+    var completion: ActiveRequestCompletion? {
+        switch self {
+        case .open(let ownership): ownership.completion
+        case .finite: nil
+        }
+    }
+
+    func install(_ task: Task<Void, Never>) {
+        switch self {
+        case .open(let ownership): ownership.install(task)
+        case .finite(let operation): operation.installWriter(task)
+        }
+    }
+
+    func terminateFromChannel() {
+        switch self {
+        case .open(let ownership): ownership.terminateFromChannel()
+        case .finite(let operation): operation.terminateWriterFromChannel()
+        }
+    }
+
+    func claimTaskTermination() -> Bool {
+        switch self {
+        case .open(let ownership): ownership.claimTaskTermination()
+        case .finite(let operation): operation.claimWriterTaskTermination()
+        }
+    }
+
+    func finishTask() {
+        switch self {
+        case .open(let ownership): ownership.finishTask()
+        case .finite(let operation): operation.finishWriter()
+        }
+    }
+}
+
 private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
@@ -1509,7 +1635,7 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
     private let networkResources: MCPHTTPNetworkResourceOwner
     private let childRegistration: MCPHTTPNetworkResourceOwner.ChildRegistration
     private var requestState: RequestState?
-    private var activeStreamOwnership: MCPHTTPStreamOwnership?
+    private var activeStreamOwnership: MCPHTTPActiveStreamOwnership?
 
     init(
         server: CodexReviewMCPHTTPServer,
@@ -1702,24 +1828,33 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
 
         switch response {
         case .stream(let stream, _):
-            guard let streamReceipt = networkResources.registerTask(
-                kind: trackedResponse.isFiniteResponseStream
-                    ? .finiteResponseWriter
-                    : .streamWriter,
-                child: childRegistration
-            ) else {
-                trackedResponse.streamCompletion?.finish()
+            let ownership: MCPHTTPActiveStreamOwnership
+            switch trackedResponse.streamLifetime {
+            case .finite(let operation):
+                guard operation.claimWriter() else {
+                    return
+                }
+                ownership = .finite(operation)
+            case .open(let completion):
+                guard let streamReceipt = networkResources.registerTask(
+                    kind: .streamWriter,
+                    child: childRegistration
+                ) else {
+                    completion.finish()
+                    return
+                }
+                ownership = .open(MCPHTTPStreamOwnership(
+                    receipt: streamReceipt,
+                    completion: completion
+                ))
+            case nil:
                 return
             }
-            let ownership = MCPHTTPStreamOwnership(
-                receipt: streamReceipt,
-                completion: trackedResponse.streamCompletion
-            )
             let registration = eventLoop.makePromise(of: Void.self)
             eventLoop.execute {
                 guard context.channel.isActive else {
-                    trackedResponse.streamCompletion?.finish()
-                    streamReceipt.finish()
+                    ownership.completion?.finish()
+                    ownership.finishTask()
                     registration.succeed(())
                     return
                 }
@@ -1810,14 +1945,14 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
     }
 
     private func finishStreamTask(
-        _ ownership: MCPHTTPStreamOwnership,
+        _ ownership: MCPHTTPActiveStreamOwnership,
         context: ChannelHandlerContext,
         eventLoop: any EventLoop
     ) async {
         if ownership.claimTaskTermination() {
             let completion = eventLoop.makePromise(of: Void.self)
             eventLoop.execute {
-                if self.activeStreamOwnership === ownership {
+                if self.activeStreamOwnership?.id == ownership.id {
                     self.activeStreamOwnership = nil
                 }
                 ownership.completion?.finish()

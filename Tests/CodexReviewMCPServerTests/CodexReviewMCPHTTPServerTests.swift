@@ -618,6 +618,74 @@ struct CodexReviewMCPHTTPServerTests {
         }
     }
 
+    @Test func stopRacingReturnedFiniteReviewListResponseJoinsOneOperation() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+        let server = CodexReviewMCPHTTPServer(
+            adapter: CodexReviewMCPServer(store: store),
+            configuration: .init(host: "127.0.0.1", port: 0)
+        )
+        try await server.start()
+        let endpoint = await server.url
+        let sessionID = try await initializeSession(endpoint: endpoint)
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [.init(cwd: "/tmp/project")],
+            jobs: [CodexReviewJob.makeForTesting(
+                id: "running",
+                sessionID: sessionID,
+                cwd: "/tmp/project",
+                targetSummary: "Running",
+                status: .running,
+                summary: "Running"
+            )]
+        )
+        await server.waitForFiniteResponsesToDrainForTesting()
+        await server.holdNextFiniteResponseCompletionForTesting()
+
+        let response = try await postJSONRPC(
+            endpoint: endpoint,
+            sessionID: sessionID,
+            body: [
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": [
+                    "name": "review_list",
+                    "arguments": ["limit": 20],
+                ],
+            ]
+        )
+        let items = try #require(
+            response.value(for: ["result", "structuredContent", "items"])
+                as? [[String: Any]]
+        )
+        #expect(items.first?["jobId"] as? String == "running")
+        await server.waitForHeldNetworkTaskCompletionForTesting()
+
+        let stopFinished = CompletionFlag()
+        let stopTask = Task {
+            try await server.stop()
+            await stopFinished.complete()
+        }
+        await server.waitForFiniteResponseDrainToBeginForTesting()
+
+        #expect(await stopFinished.isCompleted() == false)
+        #expect(await server.sessionActiveRequestCountForTesting(sessionID: sessionID) != nil)
+        #expect(await server.eventLoopGroupShutdownCountForTesting() == 0)
+
+        await server.releaseHeldNetworkTaskCompletionForTesting()
+        try await stopTask.value
+
+        #expect(await stopFinished.isCompleted())
+        #expect(await server.sessionActiveRequestCountForTesting(sessionID: sessionID) == nil)
+        let resources = await server.networkResourceCountsForTesting()
+        #expect(resources.children == 0)
+        #expect(resources.tasks == 0)
+    }
+
     @Test func streamableHTTPScopesReviewReadToTransportSession() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
@@ -1231,7 +1299,7 @@ struct CodexReviewMCPHTTPServerTests {
         #expect(resources.tasks == 0)
     }
 
-    @Test func stopDrainsFinitePOSTResponseSourceAfterClientCloses() async throws {
+    @Test func stopDrainsFinitePOSTResponseAfterClientCloses() async throws {
         let backend = FakeCodexReviewBackend()
         let requestGate = AsyncGate()
         await backend.holdStartReview(with: requestGate)
@@ -1246,7 +1314,7 @@ struct CodexReviewMCPHTTPServerTests {
         try await server.start()
         let endpoint = await server.url
         let sessionID = try await initializeSession(endpoint: endpoint)
-        await server.holdNextFiniteResponseSourceCompletionForTesting()
+        await server.holdNextFiniteResponseCompletionForTesting()
         let requestBody = try makeJSONBody([
             "jsonrpc": "2.0",
             "id": 2,
@@ -1277,7 +1345,7 @@ struct CodexReviewMCPHTTPServerTests {
         }
         await server.waitForAdmittedHandlerDrainToBeginForTesting()
 
-        #expect(await server.finiteResponseSourceCompletionIsHeldForTesting() == false)
+        #expect(await server.finiteResponseCompletionIsHeldForTesting() == false)
         #expect(await server.sessionActiveRequestCountForTesting(sessionID: sessionID) != nil)
         #expect(await stopFinished.isCompleted() == false)
 
@@ -1285,7 +1353,7 @@ struct CodexReviewMCPHTTPServerTests {
         await backend.yield(.completed(summary: "Done", result: "review text"))
         await server.waitForHeldNetworkTaskCompletionForTesting()
 
-        #expect(await server.finiteResponseSourceCompletionIsHeldForTesting())
+        #expect(await server.finiteResponseCompletionIsHeldForTesting())
         #expect(await server.sessionActiveRequestCountForTesting(sessionID: sessionID) != nil)
         #expect(await stopFinished.isCompleted() == false)
         #expect(await server.eventLoopGroupShutdownCountForTesting() == 0)

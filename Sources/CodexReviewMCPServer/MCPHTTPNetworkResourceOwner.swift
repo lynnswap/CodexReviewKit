@@ -9,8 +9,7 @@ final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
     enum TaskKind: Hashable, Sendable {
         case domainHandler
         case response
-        case finiteResponseSource
-        case finiteResponseWriter
+        case finiteResponse
         case streamBridge
         case streamHeartbeat
         case streamWriter
@@ -46,17 +45,23 @@ final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         func install<Success: Sendable, Failure: Error>(
             _ task: Task<Success, Failure>
         ) {
+            installCancellation { task.cancel() }
+        }
+
+        fileprivate func installCancellation(
+            _ cancelTask: @escaping @Sendable () -> Void
+        ) {
             let shouldCancel: Bool
             lock.lock()
             if didFinish {
                 shouldCancel = false
             } else {
-                cancelTask = { task.cancel() }
+                self.cancelTask = cancelTask
                 shouldCancel = cancellationWasRequested
             }
             lock.unlock()
             if shouldCancel {
-                task.cancel()
+                cancelTask()
             }
         }
 
@@ -81,6 +86,184 @@ final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             owner = self.owner
             lock.unlock()
             owner?.finishTask(id: id, kind: kind)
+        }
+    }
+
+    final class FiniteResponseOperation: @unchecked Sendable {
+        private enum WriterDisposition: Equatable {
+            case unresolved
+            case required
+            case waived
+        }
+
+        private enum WriterTerminationOwner: Equatable {
+            case active
+            case channel
+            case task
+        }
+
+        let id = UUID()
+        private let receipt: TaskReceipt
+        private let lock = NSLock()
+        private var sourceCancellation: (@Sendable () -> Void)?
+        private var writerCancellation: (@Sendable () -> Void)?
+        private var sourceFinished = false
+        private var writerFinished = false
+        private var writerDisposition = WriterDisposition.unresolved
+        private var writerTerminationOwner = WriterTerminationOwner.active
+        private var cancellationWasRequested = false
+        private var writerCancellationWasRequested = false
+        private var didFinish = false
+
+        fileprivate init(receipt: TaskReceipt) {
+            self.receipt = receipt
+        }
+
+        fileprivate func installOwnerCancellation() {
+            receipt.installCancellation { [self] in
+                cancelAll()
+            }
+        }
+
+        func installSource(_ task: Task<Void, Never>) {
+            let shouldCancel: Bool
+            lock.lock()
+            if sourceFinished {
+                shouldCancel = false
+            } else {
+                sourceCancellation = { task.cancel() }
+                shouldCancel = cancellationWasRequested
+            }
+            lock.unlock()
+            if shouldCancel {
+                task.cancel()
+            }
+        }
+
+        func finishSource() {
+            let shouldFinish: Bool
+            lock.lock()
+            guard sourceFinished == false else {
+                lock.unlock()
+                return
+            }
+            sourceFinished = true
+            sourceCancellation = nil
+            shouldFinish = claimCompletionIfReadyLocked()
+            lock.unlock()
+            if shouldFinish {
+                receipt.finish()
+            }
+        }
+
+        func claimWriter() -> Bool {
+            lock.lock()
+            guard writerDisposition == .unresolved else {
+                lock.unlock()
+                return false
+            }
+            writerDisposition = .required
+            lock.unlock()
+            return true
+        }
+
+        func waiveWriter() {
+            let shouldFinish: Bool
+            lock.lock()
+            guard writerDisposition == .unresolved else {
+                lock.unlock()
+                return
+            }
+            writerDisposition = .waived
+            shouldFinish = claimCompletionIfReadyLocked()
+            lock.unlock()
+            if shouldFinish {
+                receipt.finish()
+            }
+        }
+
+        func installWriter(_ task: Task<Void, Never>) {
+            let shouldCancel: Bool
+            lock.lock()
+            if writerFinished {
+                shouldCancel = false
+            } else {
+                writerCancellation = { task.cancel() }
+                shouldCancel = cancellationWasRequested
+                    || writerCancellationWasRequested
+            }
+            lock.unlock()
+            if shouldCancel {
+                task.cancel()
+            }
+        }
+
+        func terminateWriterFromChannel() {
+            let cancelWriter: (@Sendable () -> Void)?
+            lock.lock()
+            guard writerTerminationOwner == .active else {
+                lock.unlock()
+                return
+            }
+            writerTerminationOwner = .channel
+            writerCancellationWasRequested = true
+            cancelWriter = writerCancellation
+            lock.unlock()
+            cancelWriter?()
+        }
+
+        func claimWriterTaskTermination() -> Bool {
+            lock.lock()
+            guard writerTerminationOwner == .active else {
+                lock.unlock()
+                return false
+            }
+            writerTerminationOwner = .task
+            lock.unlock()
+            return true
+        }
+
+        func finishWriter() {
+            let shouldFinish: Bool
+            lock.lock()
+            guard writerFinished == false else {
+                lock.unlock()
+                return
+            }
+            writerFinished = true
+            writerCancellation = nil
+            shouldFinish = claimCompletionIfReadyLocked()
+            lock.unlock()
+            if shouldFinish {
+                receipt.finish()
+            }
+        }
+
+        private func cancelAll() {
+            let cancelSource: (@Sendable () -> Void)?
+            let cancelWriter: (@Sendable () -> Void)?
+            lock.lock()
+            cancellationWasRequested = true
+            cancelSource = sourceCancellation
+            cancelWriter = writerCancellation
+            lock.unlock()
+            cancelSource?()
+            cancelWriter?()
+        }
+
+        private func claimCompletionIfReadyLocked() -> Bool {
+            guard didFinish == false, sourceFinished else {
+                return false
+            }
+            switch writerDisposition {
+            case .unresolved:
+                return false
+            case .required where writerFinished == false:
+                return false
+            case .required, .waived:
+                didFinish = true
+                return true
+            }
         }
     }
 
@@ -232,6 +415,15 @@ final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             waiter.resume()
         }
         return receipt
+    }
+
+    func registerFiniteResponseOperation() -> FiniteResponseOperation? {
+        guard let receipt = registerTask(kind: .finiteResponse) else {
+            return nil
+        }
+        let operation = FiniteResponseOperation(receipt: receipt)
+        operation.installOwnerCancellation()
+        return operation
     }
 
     func performTask<Success: Sendable>(
