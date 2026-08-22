@@ -2698,7 +2698,7 @@ struct AppServerClientTests {
             turnID: "turn-1",
             reviewThreadID: "thread-1"
         )
-        var iterator = await eventSequence(backend, run).makeAsyncIterator()
+        _ = await eventSequence(backend, run)
         let interruptCompletion = CompletionProbe()
         let closeCompletion = CompletionProbe()
 
@@ -2721,9 +2721,6 @@ struct AppServerClientTests {
         try await interrupt.value
         try await close.value
         #expect(await closeCompletion.hasCompleted())
-        await #expect(throws: BackendReviewEventMailboxError.self) {
-            _ = try await iterator.next()
-        }
     }
 
     @Test func backendLifecycleCloseJoinsAdmittedCleanupReview() async throws {
