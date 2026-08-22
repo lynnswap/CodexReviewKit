@@ -184,6 +184,9 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     }
 
     private var settings: CodexReviewBackendModel.Settings.Snapshot
+    private var settingsUpdateFailureMessage: String?
+    private var settingsUpdateGate: AsyncGate?
+    private var settingsUpdateStartedGate = AsyncGate()
     private var auth: CodexReviewBackendModel.Auth.Snapshot
     private var commands: [Command] = []
     private var startAdmissionIdentities: [ObjectIdentifier] = []
@@ -253,6 +256,27 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
 
     package func failCleanup(message: String) {
         cleanupFailure = .cleanup(message)
+    }
+
+    package func failNextSettingsUpdate(message: String) {
+        settingsUpdateFailureMessage = message
+    }
+
+    package func holdNextSettingsUpdate(with gate: AsyncGate) {
+        settingsUpdateGate = gate
+        settingsUpdateStartedGate = AsyncGate()
+    }
+
+    package func waitForSettingsUpdate() async {
+        await settingsUpdateStartedGate.wait()
+    }
+
+    package func settingsSnapshot() -> CodexReviewBackendModel.Settings.Snapshot {
+        settings
+    }
+
+    package func setSettingsSnapshot(_ snapshot: CodexReviewBackendModel.Settings.Snapshot) {
+        settings = snapshot
     }
 
     package func holdInterruptReview(with gate: AsyncGate) {
@@ -438,6 +462,13 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
 
     package func applySettings(_ change: CodexReviewBackendModel.Settings.Change) async throws -> CodexReviewBackendModel.Settings.Snapshot {
         commands.append(.applySettings(change))
+        await settingsUpdateStartedGate.open()
+        await settingsUpdateGate?.waitIgnoringCancellation()
+        settingsUpdateGate = nil
+        if let settingsUpdateFailureMessage {
+            self.settingsUpdateFailureMessage = nil
+            throw FakeCodexReviewBackendError(message: settingsUpdateFailureMessage)
+        }
         settings = .init(
             model: change.updatesModel ? change.model : settings.model,
             fallbackModel: settings.fallbackModel,
@@ -988,12 +1019,14 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         serviceTier: CodexReviewSettings.ServiceTier?,
         persistServiceTier: Bool
     ) async throws {
-        var change = CodexReviewBackendModel.Settings.Change(model: model)
+        var change = CodexReviewBackendModel.Settings.Change(model: model, updatesModel: true)
         if persistReasoningEffort {
             change.reasoningEffort = reasoningEffort?.rawValue
+            change.updatesReasoningEffort = true
         }
         if persistServiceTier {
             change.serviceTier = serviceTier?.rawValue
+            change.updatesServiceTier = true
         }
         _ = try await reviewBackend.applySettings(change)
     }
@@ -1001,13 +1034,13 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     package func updateSettingsReasoningEffort(
         _ reasoningEffort: CodexReviewSettings.ReasoningEffort?
     ) async throws {
-        _ = try await reviewBackend.applySettings(.init(reasoningEffort: reasoningEffort?.rawValue))
+        _ = try await reviewBackend.applySettings(.init(reasoningEffort: reasoningEffort?.rawValue, updatesReasoningEffort: true))
     }
 
     package func updateSettingsServiceTier(
         _ serviceTier: CodexReviewSettings.ServiceTier?
     ) async throws {
-        _ = try await reviewBackend.applySettings(.init(serviceTier: serviceTier?.rawValue))
+        _ = try await reviewBackend.applySettings(.init(serviceTier: serviceTier?.rawValue, updatesServiceTier: true))
     }
 }
 
