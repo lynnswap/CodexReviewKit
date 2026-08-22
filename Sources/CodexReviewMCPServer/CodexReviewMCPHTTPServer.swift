@@ -208,11 +208,17 @@ package actor CodexReviewMCPHTTPServer {
 
     private final class StartingGeneration: @unchecked Sendable {
         let id: UInt64
+        let networkResources: MCPHTTPNetworkResourceOwner
         let task: Task<StartingGenerationResult, Never>
         var admissionClosed = false
 
-        init(id: UInt64, task: Task<StartingGenerationResult, Never>) {
+        init(
+            id: UInt64,
+            networkResources: MCPHTTPNetworkResourceOwner,
+            task: Task<StartingGenerationResult, Never>
+        ) {
             self.id = id
+            self.networkResources = networkResources
             self.task = task
         }
     }
@@ -223,6 +229,7 @@ package actor CodexReviewMCPHTTPServer {
         let eventLoopGroup: MultiThreadedEventLoopGroup
         let cleanupTask: Task<Void, Never>
         let boundURL: URL
+        let networkResources: MCPHTTPNetworkResourceOwner
         var admissionClosed = false
         var listenerCloseTask: Task<StoppingGenerationResult, Never>?
 
@@ -231,13 +238,15 @@ package actor CodexReviewMCPHTTPServer {
             listener: any Channel,
             eventLoopGroup: MultiThreadedEventLoopGroup,
             cleanupTask: Task<Void, Never>,
-            boundURL: URL
+            boundURL: URL,
+            networkResources: MCPHTTPNetworkResourceOwner
         ) {
             self.id = id
             self.listener = listener
             self.eventLoopGroup = eventLoopGroup
             self.cleanupTask = cleanupTask
             self.boundURL = boundURL
+            self.networkResources = networkResources
         }
     }
 
@@ -347,10 +356,18 @@ package actor CodexReviewMCPHTTPServer {
                 try result.get()
                 nextGenerationID &+= 1
                 let id = nextGenerationID
+                let networkResources = MCPHTTPNetworkResourceOwner(generationID: id)
                 let task = Task<StartingGenerationResult, Never> { [self] in
-                    await performStartGeneration(id: id)
+                    await performStartGeneration(
+                        id: id,
+                        networkResources: networkResources
+                    )
                 }
-                let operation = StartingGeneration(id: id, task: task)
+                let operation = StartingGeneration(
+                    id: id,
+                    networkResources: networkResources,
+                    task: task
+                )
                 lifecycleState = .starting(operation)
                 let result = await task.value
                 try publishStartResult(result, operation: operation)
@@ -378,14 +395,23 @@ package actor CodexReviewMCPHTTPServer {
         }
     }
 
-    private func performStartGeneration(id: UInt64) async -> StartingGenerationResult {
+    private func performStartGeneration(
+        id: UInt64,
+        networkResources: MCPHTTPNetworkResourceOwner
+    ) async -> StartingGenerationResult {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 128)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
-                channel.pipeline.configureHTTPServerPipeline().flatMap {
-                    channel.pipeline.addHandler(CodexReviewMCPHTTPHandler(server: self))
+                guard let connection = networkResources.admitConnection(channel) else {
+                    return channel.close(mode: .all)
+                }
+                return channel.pipeline.configureHTTPServerPipeline().flatMap {
+                    channel.pipeline.addHandler(CodexReviewMCPHTTPHandler(
+                        server: self,
+                        connection: connection
+                    ))
                 }
             }
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
@@ -411,10 +437,13 @@ package actor CodexReviewMCPHTTPServer {
                 listener: channel,
                 eventLoopGroup: group,
                 cleanupTask: cleanupTask,
-                boundURL: configuration.url(boundPort: actualPort)
+                boundURL: configuration.url(boundPort: actualPort),
+                networkResources: networkResources
             ))
         } catch {
             var failures: [LifecycleError.Failure] = []
+            networkResources.closeAdmission()
+            let closingNetworkResources = networkResources.beginClosing(.serverStop)
             if let listener {
                 do {
                     try await listener.close()
@@ -428,6 +457,7 @@ package actor CodexReviewMCPHTTPServer {
                     failures.append(listenerFailure)
                 }
             }
+            await closingNetworkResources.waitUntilClosed()
             do {
                 try await group.shutdownGracefully()
             } catch {
@@ -496,11 +526,14 @@ package actor CodexReviewMCPHTTPServer {
 
         case .running(let resources):
             resources.admissionClosed = true
+            resources.networkResources.closeAdmission()
+            let closingNetworkResources = resources.networkResources.beginClosing(.serverStop)
             id = resources.id
             let groupFailure = consumeEventLoopGroupShutdownFailureForTesting()
             let newTask = Task<StoppingGenerationResult, Never> { [self] in
                 await performStopGeneration(
                     resources,
+                    closingNetworkResources: closingNetworkResources,
                     injectedGroupFailure: groupFailure
                 )
             }
@@ -512,7 +545,7 @@ package actor CodexReviewMCPHTTPServer {
             task = newTask
 
         case .starting(let operation):
-            closeStartingAdmission(operation)
+            let closingNetworkResources = closeStartingAdmission(operation)
             id = operation.id
             let newTask = Task<StoppingGenerationResult, Never> { [self] in
                 switch await operation.task.value {
@@ -520,6 +553,7 @@ package actor CodexReviewMCPHTTPServer {
                     resources.admissionClosed = true
                     return await performStopGeneration(
                         resources,
+                        closingNetworkResources: closingNetworkResources,
                         injectedGroupFailure: consumeEventLoopGroupShutdownFailureForTesting()
                     )
                 case .failure(let failure):
@@ -540,7 +574,7 @@ package actor CodexReviewMCPHTTPServer {
         case .stopped:
             return
         case .starting(let operation):
-            closeStartingAdmission(operation)
+            let closingNetworkResources = closeStartingAdmission(operation)
             let id = operation.id
             let task = Task<StoppingGenerationResult, Never> { [self] in
                 switch await operation.task.value {
@@ -548,6 +582,7 @@ package actor CodexReviewMCPHTTPServer {
                     resources.admissionClosed = true
                     return await performStopGeneration(
                         resources,
+                        closingNetworkResources: closingNetworkResources,
                         injectedGroupFailure: consumeEventLoopGroupShutdownFailureForTesting()
                     )
                 case .failure(let failure):
@@ -559,6 +594,7 @@ package actor CodexReviewMCPHTTPServer {
             finishStopIfCurrent(id: id, result: result)
         case .running(let resources):
             resources.admissionClosed = true
+            resources.networkResources.closeAdmission()
             _ = await listenerCloseTask(for: resources).value
         case .stopping(let id, _, let task):
             let result = await task.value
@@ -566,22 +602,26 @@ package actor CodexReviewMCPHTTPServer {
         }
     }
 
-    private func closeStartingAdmission(_ operation: StartingGeneration) {
-        guard operation.admissionClosed == false else {
-            return
+    private func closeStartingAdmission(
+        _ operation: StartingGeneration
+    ) -> MCPHTTPNetworkResourceOwner.ClosingGeneration {
+        if operation.admissionClosed == false {
+            operation.admissionClosed = true
+            operation.networkResources.closeAdmission()
+            operation.task.cancel()
+            lastStartingAdmissionClosedGenerationID = operation.id
+            let waiters = startingAdmissionCloseWaiters
+            startingAdmissionCloseWaiters.removeAll(keepingCapacity: false)
+            for waiter in waiters {
+                waiter.resume()
+            }
         }
-        operation.admissionClosed = true
-        operation.task.cancel()
-        lastStartingAdmissionClosedGenerationID = operation.id
-        let waiters = startingAdmissionCloseWaiters
-        startingAdmissionCloseWaiters.removeAll(keepingCapacity: false)
-        for waiter in waiters {
-            waiter.resume()
-        }
+        return operation.networkResources.beginClosing(.serverStop)
     }
 
     private func performStopGeneration(
         _ resources: RunningGeneration,
+        closingNetworkResources: MCPHTTPNetworkResourceOwner.ClosingGeneration,
         injectedGroupFailure: LifecycleError.Failure?
     ) async -> StoppingGenerationResult {
         let listenerCloseTask = listenerCloseTask(for: resources)
@@ -589,6 +629,7 @@ package actor CodexReviewMCPHTTPServer {
         await closeAllSessions()
         let listenerResult = await listenerCloseTask.value
         await resources.cleanupTask.value
+        await closingNetworkResources.waitUntilClosed()
         await stopCompletionGate.waitIfNeeded()
 
         var failures: [LifecycleError.Failure] = []
@@ -1171,13 +1212,18 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
     }
 
     private let server: CodexReviewMCPHTTPServer
+    private let connection: MCPHTTPNetworkResourceOwner.Connection
     private var requestState: RequestState?
     private var activeStreamTask: Task<Void, Never>?
     private var activeStreamID: UUID?
     private var activeStreamCompletion: ActiveRequestCompletion?
 
-    init(server: CodexReviewMCPHTTPServer) {
+    init(
+        server: CodexReviewMCPHTTPServer,
+        connection: MCPHTTPNetworkResourceOwner.Connection
+    ) {
         self.server = server
+        self.connection = connection
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -1195,10 +1241,21 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
                 return
             }
             requestState = nil
+            guard let admittedRequest = connection.admitRequest() else {
+                context.close(promise: nil)
+                return
+            }
             nonisolated(unsafe) let context = context
-            Task {
+            let task = Task { [self] in
+                defer {
+                    admittedRequest.lease.acknowledgeCompletion()
+                }
+                guard await admittedRequest.lease.waitUntilStartIsAllowed() else {
+                    return
+                }
                 await handleRequest(state: state, context: context)
             }
+            admittedRequest.lease.install(task)
         }
     }
 
@@ -1208,12 +1265,14 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
     }
 
     func channelInactive(context: ChannelHandlerContext) {
+        connection.peerClosed()
         finishActiveStream()
         context.fireChannelInactive()
     }
 
     func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
         if case ChannelEvent.inputClosed = event {
+            connection.peerClosed()
             finishActiveStream()
             context.close(promise: nil)
             return
@@ -1222,6 +1281,7 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
     }
 
     func errorCaught(context: ChannelHandlerContext, error: any Error) {
+        connection.transportFailed(error.localizedDescription)
         finishActiveStream()
         context.close(promise: nil)
     }
