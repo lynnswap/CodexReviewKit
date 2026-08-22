@@ -397,10 +397,13 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     func start(store: CodexReviewStore, forceRestartIfNeeded: Bool) async {
         logger.info("Starting review runtime; forceRestartIfNeeded=\(forceRestartIfNeeded, privacy: .public)")
-        if appServerBackend != nil {
+        if appServerBackend != nil, forceRestartIfNeeded == false {
             logger.info("Review runtime already has an app-server backend")
             store.transitionToRunning(serverURL: await mcpHTTPServer?.url)
             return
+        }
+        if forceRestartIfNeeded {
+            await stop(store: store)
         }
 
         var startedClient: AppServerClient?
@@ -681,7 +684,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             return
         }
         await attachedStore.closeActiveReviewSessions(reason: .system(message: "Account switched."))
-        await attachedStore.start(forceRestartIfNeeded: true)
+        await stop(store: attachedStore)
+        await start(store: attachedStore, forceRestartIfNeeded: true)
     }
 
     func removeAccount(auth: CodexReviewAuthModel, accountKey: String) async throws {
@@ -717,7 +721,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 return
             }
             await attachedStore.closeActiveReviewSessions(reason: .system(message: "Account removed."))
-            await attachedStore.start(forceRestartIfNeeded: true)
+            await stop(store: attachedStore)
+            await start(store: attachedStore, forceRestartIfNeeded: true)
         }
     }
 
@@ -772,7 +777,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         auth.selectPersistedAccount(nil)
         auth.applyPersistedAccountStates(remaining.map(savedAccountPayload(from:)), activeAccountKey: nil)
         if shouldRecycleRuntime, let attachedStore {
-            await attachedStore.start(forceRestartIfNeeded: true)
+            await stop(store: attachedStore)
+            await start(store: attachedStore, forceRestartIfNeeded: true)
         }
     }
 

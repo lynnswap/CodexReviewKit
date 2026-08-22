@@ -143,39 +143,21 @@ public final class CodexReviewStore {
 
     public func start(forceRestartIfNeeded: Bool = false) async {
         let admissionGeneration = admitRuntimeLifecycleRequest()
-        await start(
-            forceRestartIfNeeded: forceRestartIfNeeded,
-            admissionGeneration: admissionGeneration
-        )
-    }
-
-    private func start(
-        forceRestartIfNeeded: Bool,
-        admissionGeneration: UInt64
-    ) async {
         if let teardownTask = runtimeTeardownOperation?.task {
             await teardownTask.value
             guard admissionGeneration == runtimeLifecycleGeneration else {
                 return
             }
         }
-        let shouldRestartRunningRuntime: Bool
         switch serverState {
         case .stopped, .failed:
-            shouldRestartRunningRuntime = false
+            break
         case .starting:
             return
         case .running where forceRestartIfNeeded == false:
             return
         case .running:
-            shouldRestartRunningRuntime = true
-        }
-        if shouldRestartRunningRuntime {
-            let teardownTask = admitRuntimeTeardown(intent: .explicitStop)
-            await teardownTask.value
-            guard admissionGeneration == runtimeLifecycleGeneration else {
-                return
-            }
+            break
         }
         serverState = .starting
         serverURL = nil
@@ -275,16 +257,8 @@ public final class CodexReviewStore {
     }
 
     public func restart() async {
-        let admissionGeneration = admitRuntimeLifecycleRequest()
-        let teardownTask = admitRuntimeTeardown(intent: .explicitStop)
-        await teardownTask.value
-        guard admissionGeneration == runtimeLifecycleGeneration else {
-            return
-        }
-        await start(
-            forceRestartIfNeeded: true,
-            admissionGeneration: admissionGeneration
-        )
+        await stop()
+        await start(forceRestartIfNeeded: true)
     }
 
     public func waitUntilStopped() async {

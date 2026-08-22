@@ -1602,7 +1602,7 @@ struct CodexReviewHostTests {
 
         let generationBeforeStart = store.runtimeLifecycleAdmissionGeneration
         let pendingStart = Task { @MainActor in
-            await store.start(forceRestartIfNeeded: true)
+            await store.start()
         }
         try #require(await waitUntil(timeout: .seconds(2)) {
             store.runtimeLifecycleAdmissionGeneration > generationBeforeStart
