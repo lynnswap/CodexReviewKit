@@ -49,14 +49,53 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         case reserved
         case installed
         case running
+        case responding
         case closing(TerminalCause)
         case closed(TerminalCause?)
+    }
+
+    package enum ResponseSourceKind: Equatable, Sendable {
+        case finite
+        case open
+    }
+
+    package enum ResponseWorkPhase: Equatable, Sendable {
+        case notReserved
+        case reserved
+        case installed
+        case running
+        case completed
+    }
+
+    package enum ResponseEndPhase: Equatable, Sendable {
+        case notExpected
+        case pending
+        case acknowledged
+        case closed
     }
 
     package struct RequestSnapshot: Equatable, Sendable {
         package let id: UUID
         package let admissionOrdinal: UInt64
         package let phase: RequestWorkPhase
+        package let responseSourceKind: ResponseSourceKind?
+        package let responseSource: ResponseWorkPhase
+        package let writer: ResponseWorkPhase
+        package let responseEnd: ResponseEndPhase
+        package let responseIsReady: Bool
+
+        package var writerIsRunning: Bool {
+            writer == .running
+        }
+
+        package var terminalCause: TerminalCause? {
+            switch phase {
+            case .closing(let cause), .closed(let cause?):
+                cause
+            case .reserved, .installed, .running, .responding, .closed:
+                nil
+            }
+        }
     }
 
     package struct ConnectionSnapshot: Equatable, Sendable {
@@ -68,6 +107,7 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
     }
 
     package struct Snapshot: Equatable, Sendable {
+        package let revision: UInt64
         package let generationID: UInt64
         package let phase: GenerationPhase
         package let connections: [ConnectionSnapshot]
@@ -77,74 +117,42 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         }
     }
 
-    package final class WorkLease: @unchecked Sendable {
-        fileprivate let id: UUID
-        private weak var operation: RequestOperation?
-
-        fileprivate init(operation: RequestOperation, id: UUID) {
-            self.id = id
-            self.operation = operation
-        }
-
-        package func install(_ task: Task<Void, Never>) {
-            operation?.install(task: task, leaseID: id)
-        }
-
-        package func waitUntilStartIsAllowed() async -> Bool {
-            guard let operation else {
-                return false
-            }
-            return await operation.waitUntilStartIsAllowed(leaseID: id)
-        }
-
-        package func acknowledgeCompletion() {
-            operation?.acknowledgeCompletion(leaseID: id)
-        }
-    }
-
-    package final class RequestOperation: @unchecked Sendable {
-        private enum WorkState {
+    fileprivate final class WorkSlot: @unchecked Sendable {
+        private enum State {
             case reserved
             case installed(@Sendable () -> Void)
             case running(@Sendable () -> Void)
-            case acknowledged
+            case completed
         }
 
-        package let id = UUID()
-        package let admissionOrdinal: UInt64
-        private weak var connection: Connection?
+        let id = UUID()
+        private weak var operation: RequestOperation?
         private let lock = NSLock()
-        private let leaseID: UUID
-        private var workState: WorkState = .reserved
-        private var terminalCause: TerminalCause?
+        private var state: State = .reserved
+        private var cancellationWasRequested = false
         private var startWasRequested = false
         private var startWaiter: CheckedContinuation<Bool, Never>?
-        private var closeWaiters: [CheckedContinuation<TerminalCause?, Never>] = []
 
-        fileprivate init(admissionOrdinal: UInt64, connection: Connection) {
-            self.admissionOrdinal = admissionOrdinal
-            self.connection = connection
-            let leaseID = UUID()
-            self.leaseID = leaseID
+        func attach(to operation: RequestOperation) {
+            precondition(self.operation == nil)
+            self.operation = operation
         }
 
-        fileprivate func makeLease() -> WorkLease {
-            WorkLease(operation: self, id: leaseID)
+        func makeLease() -> WorkLease {
+            WorkLease(slot: self, id: id)
         }
 
-        fileprivate func beginClosing(_ cause: TerminalCause) {
+        func requestCancellation() {
             var cancellation: (@Sendable () -> Void)?
             var waiter: CheckedContinuation<Bool, Never>?
             lock.lock()
-            if terminalCause == nil {
-                terminalCause = cause
-            }
-            switch workState {
+            cancellationWasRequested = true
+            switch state {
             case .installed(let cancel), .running(let cancel):
                 cancellation = cancel
                 waiter = startWaiter
                 startWaiter = nil
-            case .reserved, .acknowledged:
+            case .reserved, .completed:
                 break
             }
             lock.unlock()
@@ -152,11 +160,283 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             waiter?.resume(returning: false)
         }
 
+        func install(task: Task<Void, Never>, leaseID: UUID) {
+            var shouldCancel = false
+            var waiter: CheckedContinuation<Bool, Never>?
+            lock.lock()
+            precondition(id == leaseID, "A WorkLease belongs to exactly one response operation slot.")
+            guard case .reserved = state else {
+                lock.unlock()
+                preconditionFailure("A WorkLease can be installed exactly once.")
+            }
+            let cancellation: @Sendable () -> Void = { task.cancel() }
+            if startWasRequested {
+                waiter = startWaiter
+                startWaiter = nil
+                if cancellationWasRequested == false {
+                    state = .running(cancellation)
+                } else {
+                    state = .installed(cancellation)
+                    shouldCancel = true
+                }
+            } else {
+                state = .installed(cancellation)
+                shouldCancel = cancellationWasRequested
+            }
+            lock.unlock()
+            if shouldCancel {
+                task.cancel()
+            }
+            waiter?.resume(returning: shouldCancel == false)
+        }
+
+        func waitUntilStartIsAllowed(leaseID: UUID) async -> Bool {
+            await withCheckedContinuation { continuation in
+                var cancellation: (@Sendable () -> Void)?
+                lock.lock()
+                precondition(id == leaseID, "A WorkLease belongs to exactly one response operation slot.")
+                precondition(startWasRequested == false, "A WorkLease can start exactly once.")
+                startWasRequested = true
+                switch state {
+                case .reserved:
+                    startWaiter = continuation
+                    lock.unlock()
+                case .installed(let cancel):
+                    if cancellationWasRequested == false {
+                        state = .running(cancel)
+                        lock.unlock()
+                        continuation.resume(returning: true)
+                    } else {
+                        cancellation = cancel
+                        lock.unlock()
+                        cancellation?()
+                        continuation.resume(returning: false)
+                    }
+                case .running, .completed:
+                    lock.unlock()
+                    preconditionFailure("A WorkLease can start exactly once.")
+                }
+            }
+        }
+
+        func acknowledgeCompletion(leaseID: UUID) {
+            lock.lock()
+            precondition(id == leaseID, "A WorkLease belongs to exactly one response operation slot.")
+            guard case .completed = state else {
+                state = .completed
+                lock.unlock()
+                operation?.workSlotDidComplete(self)
+                return
+            }
+            lock.unlock()
+        }
+
+        var isCompleted: Bool {
+            lock.lock()
+            let result = if case .completed = state { true } else { false }
+            lock.unlock()
+            return result
+        }
+
+        var snapshot: ResponseWorkPhase {
+            lock.lock()
+            let snapshot: ResponseWorkPhase = switch state {
+            case .reserved: .reserved
+            case .installed: .installed
+            case .running: .running
+            case .completed: .completed
+            }
+            lock.unlock()
+            return snapshot
+        }
+    }
+
+    package final class WorkLease: @unchecked Sendable {
+        fileprivate let id: UUID
+        private let slot: WorkSlot
+
+        fileprivate init(slot: WorkSlot, id: UUID) {
+            self.id = id
+            self.slot = slot
+        }
+
+        package func install(_ task: Task<Void, Never>) {
+            slot.install(task: task, leaseID: id)
+        }
+
+        package func waitUntilStartIsAllowed() async -> Bool {
+            await slot.waitUntilStartIsAllowed(leaseID: id)
+        }
+
+        package func acknowledgeCompletion() {
+            slot.acknowledgeCompletion(leaseID: id)
+        }
+    }
+
+    package final class RequestOperation: @unchecked Sendable {
+        private enum Outcome {
+            case open
+            case responded
+            case cancelled(TerminalCause)
+        }
+
+        private enum ResponseQueueState {
+            case handling
+            case ready(CheckedContinuation<Bool, Never>?)
+            case turnGranted
+        }
+
+        package let id = UUID()
+        package let admissionOrdinal: UInt64
+        private weak var connection: Connection?
+        private let lock = NSLock()
+        private let handlerSlot = WorkSlot()
+        private var sourceSlot: (kind: ResponseSourceKind, slot: WorkSlot)?
+        private var writerSlot: WorkSlot?
+        private var responseQueueState: ResponseQueueState = .handling
+        private var responseEnd: ResponseEndPhase = .notExpected
+        private var outcome: Outcome = .open
+        private var didClose = false
+        private var closeWaiters: [CheckedContinuation<TerminalCause?, Never>] = []
+
+        fileprivate init(admissionOrdinal: UInt64, connection: Connection) {
+            self.admissionOrdinal = admissionOrdinal
+            self.connection = connection
+            handlerSlot.attach(to: self)
+        }
+
+        fileprivate func makeLease() -> WorkLease {
+            handlerSlot.makeLease()
+        }
+
+        func reserveResponseSource(_ kind: ResponseSourceKind) -> WorkLease? {
+            lock.lock()
+            guard case .open = outcome,
+                  responseEnd == .notExpected,
+                  sourceSlot == nil else {
+                lock.unlock()
+                return nil
+            }
+            let slot = WorkSlot()
+            slot.attach(to: self)
+            sourceSlot = (kind, slot)
+            responseEnd = .pending
+            lock.unlock()
+            notifyChanged()
+            return slot.makeLease()
+        }
+
+        func markResponseSourceNotRequired() -> Bool {
+            lock.lock()
+            guard case .open = outcome,
+                  responseEnd == .notExpected,
+                  sourceSlot == nil else {
+                lock.unlock()
+                return false
+            }
+            responseEnd = .pending
+            lock.unlock()
+            notifyChanged()
+            return true
+        }
+
+        fileprivate func markResponseReady() -> Bool {
+            lock.lock()
+            guard case .open = outcome,
+                  responseEnd == .pending,
+                  case .handling = responseQueueState else {
+                lock.unlock()
+                return false
+            }
+            responseQueueState = .ready(nil)
+            lock.unlock()
+            notifyChanged()
+            return true
+        }
+
+        fileprivate var isResponseReady: Bool {
+            lock.lock()
+            let result = if case .ready = responseQueueState { true } else { false }
+            lock.unlock()
+            return result
+        }
+
+        fileprivate func grantWriterTurn() -> Bool {
+            let waiter: CheckedContinuation<Bool, Never>?
+            lock.lock()
+            guard case .open = outcome,
+                  case .ready(let continuation) = responseQueueState else {
+                lock.unlock()
+                return false
+            }
+            waiter = continuation
+            responseQueueState = .turnGranted
+            lock.unlock()
+            waiter?.resume(returning: true)
+            notifyChanged()
+            return true
+        }
+
+        fileprivate func waitForWriterTurn() async -> Bool {
+            await withCheckedContinuation { continuation in
+                lock.lock()
+                guard case .open = outcome else {
+                    lock.unlock()
+                    continuation.resume(returning: false)
+                    return
+                }
+                switch responseQueueState {
+                case .turnGranted:
+                    lock.unlock()
+                    continuation.resume(returning: true)
+                case .ready(nil):
+                    responseQueueState = .ready(continuation)
+                    lock.unlock()
+                case .handling, .ready:
+                    lock.unlock()
+                    preconditionFailure("A response can wait for its FIFO writer turn exactly once.")
+                }
+            }
+        }
+
+        func reserveWriter() -> WorkLease? {
+            lock.lock()
+            guard case .open = outcome,
+                  case .turnGranted = responseQueueState,
+                  writerSlot == nil else {
+                lock.unlock()
+                return nil
+            }
+            let slot = WorkSlot()
+            slot.attach(to: self)
+            writerSlot = slot
+            lock.unlock()
+            notifyChanged()
+            return slot.makeLease()
+        }
+
+        func acknowledgeResponseEnd() {
+            lock.lock()
+            guard case .open = outcome, responseEnd == .pending else {
+                lock.unlock()
+                return
+            }
+            responseEnd = .acknowledged
+            outcome = .responded
+            lock.unlock()
+            notifyChanged()
+            finishIfPossible()
+        }
+
+        fileprivate func beginClosing(_ cause: TerminalCause) {
+            transitionToTerminal(.cancelled(cause))
+        }
+
         package func waitUntilClosed() async -> TerminalCause? {
             await withCheckedContinuation { continuation in
                 lock.lock()
-                if case .acknowledged = workState {
-                    let cause = terminalCause
+                if didClose {
+                    let cause = terminalCauseLocked
                     lock.unlock()
                     continuation.resume(returning: cause)
                 } else {
@@ -166,100 +446,124 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             }
         }
 
-        fileprivate func install(task: Task<Void, Never>, leaseID: UUID) {
-            var shouldCancel = false
-            var waiter: CheckedContinuation<Bool, Never>?
+        fileprivate func workSlotDidComplete(_ slot: WorkSlot) {
             lock.lock()
-            precondition(self.leaseID == leaseID, "A request WorkLease belongs to exactly one admitted operation.")
-            guard case .reserved = workState else {
-                lock.unlock()
-                preconditionFailure("A request WorkLease can be installed exactly once.")
-            }
-            let cancellation: @Sendable () -> Void = { task.cancel() }
-            if startWasRequested {
-                waiter = startWaiter
-                startWaiter = nil
-                if terminalCause == nil {
-                    workState = .running(cancellation)
-                } else {
-                    workState = .installed(cancellation)
-                    shouldCancel = true
-                }
-            } else {
-                workState = .installed(cancellation)
-                shouldCancel = terminalCause != nil
+            if slot === handlerSlot,
+               case .open = outcome,
+               responseEnd == .notExpected {
+                responseEnd = .acknowledged
+                outcome = .responded
             }
             lock.unlock()
-            if shouldCancel {
-                task.cancel()
-            }
-            waiter?.resume(returning: shouldCancel == false)
-        }
-
-        fileprivate func waitUntilStartIsAllowed(leaseID: UUID) async -> Bool {
-            await withCheckedContinuation { continuation in
-                var cancellation: (@Sendable () -> Void)?
-                lock.lock()
-                precondition(self.leaseID == leaseID, "A request WorkLease belongs to exactly one admitted operation.")
-                precondition(startWasRequested == false, "A request WorkLease can start exactly once.")
-                startWasRequested = true
-                switch workState {
-                case .reserved:
-                    startWaiter = continuation
-                    lock.unlock()
-                case .installed(let cancel):
-                    if terminalCause == nil {
-                        workState = .running(cancel)
-                        lock.unlock()
-                        continuation.resume(returning: true)
-                    } else {
-                        cancellation = cancel
-                        lock.unlock()
-                        cancellation?()
-                        continuation.resume(returning: false)
-                    }
-                case .running, .acknowledged:
-                    lock.unlock()
-                    preconditionFailure("A request WorkLease can start exactly once.")
-                }
-            }
-        }
-
-        fileprivate func acknowledgeCompletion(leaseID: UUID) {
-            let waiters: [CheckedContinuation<TerminalCause?, Never>]
-            let cause: TerminalCause?
-            lock.lock()
-            precondition(self.leaseID == leaseID, "A request WorkLease belongs to exactly one admitted operation.")
-            guard case .acknowledged = workState else {
-                workState = .acknowledged
-                cause = terminalCause
-                waiters = closeWaiters
-                closeWaiters.removeAll(keepingCapacity: false)
-                lock.unlock()
-                for waiter in waiters {
-                    waiter.resume(returning: cause)
-                }
-                connection?.requestDidClose(self)
-                return
-            }
-            lock.unlock()
+            notifyChanged()
+            finishIfPossible()
         }
 
         fileprivate func snapshot() -> RequestSnapshot {
             lock.lock()
+            let terminalCause = terminalCauseLocked
+            let handlerPhase = handlerSlot.snapshot
             let phase: RequestWorkPhase
-            switch workState {
-            case .reserved:
-                phase = terminalCause.map(RequestWorkPhase.closing) ?? .reserved
-            case .installed:
-                phase = terminalCause.map(RequestWorkPhase.closing) ?? .installed
-            case .running:
-                phase = terminalCause.map(RequestWorkPhase.closing) ?? .running
-            case .acknowledged:
+            if didClose {
                 phase = .closed(terminalCause)
+            } else if let terminalCause {
+                phase = .closing(terminalCause)
+            } else {
+                phase = switch handlerPhase {
+                case .reserved: .reserved
+                case .installed: .installed
+                case .running: .running
+                case .completed, .notReserved: .responding
+                }
+            }
+            let sourceKind = sourceSlot?.kind
+            let sourcePhase = sourceSlot?.slot.snapshot ?? .notReserved
+            let writerPhase = writerSlot?.snapshot ?? .notReserved
+            let responseEnd = responseEnd
+            let responseIsReady = switch responseQueueState {
+            case .handling:
+                false
+            case .ready, .turnGranted:
+                true
             }
             lock.unlock()
-            return .init(id: id, admissionOrdinal: admissionOrdinal, phase: phase)
+            return .init(
+                id: id,
+                admissionOrdinal: admissionOrdinal,
+                phase: phase,
+                responseSourceKind: sourceKind,
+                responseSource: sourcePhase,
+                writer: writerPhase,
+                responseEnd: responseEnd,
+                responseIsReady: responseIsReady
+            )
+        }
+
+        private var terminalCauseLocked: TerminalCause? {
+            if case .cancelled(let cause) = outcome {
+                return cause
+            }
+            return nil
+        }
+
+        private func transitionToTerminal(_ requestedOutcome: Outcome) {
+            let slots: [WorkSlot]
+            let waiter: CheckedContinuation<Bool, Never>?
+            lock.lock()
+            if case .open = outcome {
+                outcome = requestedOutcome
+                if responseEnd == .pending || responseEnd == .notExpected {
+                    responseEnd = .closed
+                }
+            }
+            if case .ready(let continuation) = responseQueueState {
+                waiter = continuation
+                responseQueueState = .turnGranted
+            } else {
+                waiter = nil
+            }
+            slots = [handlerSlot, sourceSlot?.slot, writerSlot].compactMap { $0 }
+            lock.unlock()
+            waiter?.resume(returning: false)
+            for slot in slots {
+                slot.requestCancellation()
+            }
+            notifyChanged()
+            finishIfPossible()
+        }
+
+        private func finishIfPossible() {
+            let waiters: [CheckedContinuation<TerminalCause?, Never>]
+            let cause: TerminalCause?
+            lock.lock()
+            guard didClose == false,
+                  isTerminalLocked,
+                  handlerSlot.isCompleted,
+                  sourceSlot?.slot.isCompleted != false,
+                  writerSlot?.isCompleted != false else {
+                lock.unlock()
+                return
+            }
+            didClose = true
+            cause = terminalCauseLocked
+            waiters = closeWaiters
+            closeWaiters.removeAll(keepingCapacity: false)
+            lock.unlock()
+            for waiter in waiters {
+                waiter.resume(returning: cause)
+            }
+            connection?.requestDidClose(self)
+        }
+
+        private var isTerminalLocked: Bool {
+            if case .open = outcome {
+                return false
+            }
+            return true
+        }
+
+        private func notifyChanged() {
+            connection?.requestDidChange()
         }
     }
 
@@ -276,7 +580,8 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         private let lock = NSLock()
         private var phase: ConnectionPhase = .accepting
         private var nextRequestOrdinal: UInt64 = 0
-        private var requests: [UUID: RequestOperation] = [:]
+        private var requests: [RequestOperation] = []
+        private var activeWriterRequestID: UUID?
         private var closeAcknowledged = false
         private var closeWaiters: [CheckedContinuation<Void, Never>] = []
 
@@ -308,9 +613,18 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
                 connection: self
             )
             let lease = operation.makeLease()
-            requests[operation.id] = operation
+            requests.append(operation)
             lock.unlock()
+            owner?.changed()
             return .init(operation: operation, lease: lease)
+        }
+
+        package func supplyResponse(for operation: RequestOperation) async -> Bool {
+            guard operation.markResponseReady() else {
+                return false
+            }
+            pumpWriterQueue()
+            return await operation.waitForWriterTurn()
         }
 
         package func peerClosed() {
@@ -340,6 +654,7 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
                 phase = .admissionClosed
             }
             lock.unlock()
+            owner?.changed()
         }
 
         fileprivate func beginClosing(_ cause: TerminalCause) {
@@ -350,7 +665,10 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             var didClose = false
             var waiters: [CheckedContinuation<Void, Never>] = []
             lock.lock()
-            requests.removeValue(forKey: operation.id)
+            requests.removeAll { $0 === operation }
+            if activeWriterRequestID == operation.id {
+                activeWriterRequestID = nil
+            }
             if case .closing = phase, closeAcknowledged, requests.isEmpty {
                 phase = .closed
                 waiters = closeWaiters
@@ -363,16 +681,22 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             }
             if didClose {
                 owner?.connectionDidClose(self)
+            } else {
+                pumpWriterQueue()
+                owner?.changed()
             }
+        }
+
+        fileprivate func requestDidChange() {
+            pumpWriterQueue()
+            owner?.changed()
         }
 
         fileprivate func snapshot() -> ConnectionSnapshot {
             lock.lock()
             let phase = phase
             let closeAcknowledged = closeAcknowledged
-            let requests = requests.values.sorted {
-                $0.admissionOrdinal < $1.admissionOrdinal
-            }
+            let requests = requests
             lock.unlock()
             return .init(
                 id: id,
@@ -393,7 +717,7 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             switch phase {
             case .accepting, .admissionClosed:
                 phase = .closing(cause)
-                requests = Array(self.requests.values)
+                requests = self.requests
                 shouldSignalClose = signalResourceClose
             case .closing, .closed:
                 requests = []
@@ -415,7 +739,7 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             switch phase {
             case .accepting, .admissionClosed:
                 phase = .closing(.peerClosed)
-                requests = Array(self.requests.values)
+                requests = self.requests
             case .closing, .closed:
                 requests = []
             }
@@ -444,6 +768,30 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
                 owner?.connectionDidClose(self)
             }
         }
+
+        private func pumpWriterQueue() {
+            let operation: RequestOperation?
+            lock.lock()
+            if activeWriterRequestID == nil,
+               let head = requests.first,
+               head.isResponseReady {
+                activeWriterRequestID = head.id
+                operation = head
+            } else {
+                operation = nil
+            }
+            lock.unlock()
+            guard let operation else {
+                return
+            }
+            if operation.grantWriterTurn() == false {
+                lock.lock()
+                if activeWriterRequestID == operation.id {
+                    activeWriterRequestID = nil
+                }
+                lock.unlock()
+            }
+        }
     }
 
     package final class ClosingGeneration: @unchecked Sendable {
@@ -469,11 +817,18 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         case closed
     }
 
+    private struct SnapshotWaiter {
+        let revision: UInt64
+        let continuation: CheckedContinuation<Snapshot, Never>
+    }
+
     package let generationID: UInt64
     private let lock = NSLock()
     private var state: State = .accepting(.init(connections: [:]))
     private var nextConnectionOrdinal: UInt64 = 0
+    private var revision: UInt64 = 0
     private var closeWaiters: [CheckedContinuation<Void, Never>] = []
+    private var snapshotWaiters: [SnapshotWaiter] = []
 
     package init(generationID: UInt64) {
         self.generationID = generationID
@@ -500,6 +855,7 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         state = .accepting(accepting)
         lock.unlock()
         connection.installCloseAcknowledgement()
+        changed()
         return connection
     }
 
@@ -519,6 +875,7 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         for connection in connections {
             connection.closeAdmission()
         }
+        changed()
     }
 
     package func beginClosing(_ cause: TerminalCause) -> ClosingGeneration {
@@ -556,11 +913,13 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         for waiter in waiters {
             waiter.resume()
         }
+        changed()
         return ClosingGeneration(owner: self)
     }
 
     package func snapshot() -> Snapshot {
         lock.lock()
+        let revision = revision
         let phase: GenerationPhase
         let connections: [Connection]
         switch state {
@@ -579,12 +938,29 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         }
         lock.unlock()
         return .init(
+            revision: revision,
             generationID: generationID,
             phase: phase,
             connections: connections.sorted {
                 $0.admissionOrdinal < $1.admissionOrdinal
             }.map { $0.snapshot() }
         )
+    }
+
+    package func nextSnapshot(after priorRevision: UInt64) async -> Snapshot {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if revision > priorRevision {
+                lock.unlock()
+                continuation.resume(returning: snapshot())
+            } else {
+                snapshotWaiters.append(.init(
+                    revision: priorRevision,
+                    continuation: continuation
+                ))
+                lock.unlock()
+            }
+        }
     }
 
     fileprivate func connectionDidClose(_ connection: Connection) {
@@ -612,6 +988,24 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         lock.unlock()
         for waiter in waiters {
             waiter.resume()
+        }
+        changed()
+    }
+
+    fileprivate func changed() {
+        let waiters: [CheckedContinuation<Snapshot, Never>]
+        lock.lock()
+        revision &+= 1
+        let ready = snapshotWaiters.filter { revision > $0.revision }
+        snapshotWaiters.removeAll { revision > $0.revision }
+        waiters = ready.map(\.continuation)
+        lock.unlock()
+        guard waiters.isEmpty == false else {
+            return
+        }
+        let current = snapshot()
+        for waiter in waiters {
+            waiter.resume(returning: current)
         }
     }
 
