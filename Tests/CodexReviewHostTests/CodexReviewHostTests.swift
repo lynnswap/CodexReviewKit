@@ -57,6 +57,58 @@ struct CodexReviewHostTests {
         #expect(host.store.serverState == .stopped)
     }
 
+    @Test func directRuntimeFailureUsesExactCancellationReason() async throws {
+        let interruptGate = AsyncGate()
+        let backend = FakeCodexReviewBackend()
+        await backend.holdInterruptReview(with: interruptGate)
+        let host = CodexReviewHost(backend: backend)
+        await host.start()
+        let review = Task { @MainActor in
+            try await host.store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        let active = await StoreSnapshotProbe(store: host.store).waitUntil {
+            $0.job()?.activeRun != nil
+        }
+        try #require(active?.job()?.activeRun != nil)
+
+        let failure = Task { @MainActor in
+            await host.store.stop(intent: .unexpectedFailure("Injected direct failure."))
+        }
+        try await backend.waitForInterruptReview(timeout: .seconds(2))
+        let expected = "Review runtime stopped unexpectedly: Injected direct failure."
+        let command = try #require(await backend.recordedCommands().last)
+        guard case .interruptReview(_, let reason) = command else {
+            Issue.record("Expected an interrupt request.")
+            return
+        }
+        #expect(reason.message == expected)
+        #expect(host.store.jobs.first?.core.lifecycle.cancellation?.message == expected)
+
+        await interruptGate.open()
+        await failure.value
+        let result = try await review.value
+        #expect(result.core.lifecycle.cancellation?.message == expected)
+        #expect(host.store.serverState == .failed(expected))
+    }
+
+    @Test func teardownIntentDerivesReasonStateAndDiagnosticsFromOneValue() {
+        let explicit = ReviewRuntimeTeardownIntent.explicitStop
+        #expect(explicit.reviewCancellation == .system(message: "Review runtime stopped."))
+        #expect(explicit.finalState == .stopped)
+        #expect(explicit.diagnosticContext == "runtime stop")
+        #expect(explicit.cleanupTimeoutWarning == "Timed out cleaning active reviews before stopping runtime")
+
+        let failure = ReviewRuntimeTeardownIntent.unexpectedFailure("Connection lost.")
+        let message = "Review runtime stopped unexpectedly: Connection lost."
+        #expect(failure.reviewCancellation == .system(message: message))
+        #expect(failure.finalState == .failed(message))
+        #expect(failure.diagnosticContext == "runtime failure")
+        #expect(failure.cleanupTimeoutWarning == "Timed out cleaning active reviews after runtime failure")
+    }
+
     @Test func hostStopReplaysAppServerLifecycleCloseFailure() async {
         let transport = HostCloseFailureTransport()
         let host = CodexReviewHost(appServerTransport: transport)
@@ -1503,6 +1555,65 @@ struct CodexReviewHostTests {
         }
         #expect(message.contains("JSON-RPC transport is closed"))
         #expect(store.serverURL == nil)
+    }
+
+    @Test func explicitStopJoinsLiveRuntimeFailureWithoutRewritingCleanupReason() async throws {
+        let homeURL = try temporaryHome()
+        let interruptGate = AsyncGate()
+        let transport = FakeJSONRPCTransport()
+        await transport.holdNext(method: "turn/interrupt", gate: interruptGate)
+        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
+        try await transport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await transport.enqueue(
+            AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"),
+            for: "thread/start"
+        )
+        try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-1"), for: "review/start")
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transport: transport
+        )
+        await store.start(forceRestartIfNeeded: true)
+        let review = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            store.jobs.first?.core.run.turnID == "turn-1"
+        })
+
+        let failure = Task { @MainActor in
+            await store.stop(intent: .unexpectedFailure("Injected live failure."))
+        }
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            store.jobs.first?.cancellationRequested == true
+        })
+        let expected = "Review runtime stopped unexpectedly: Injected live failure."
+        #expect(store.jobs.first?.core.lifecycle.cancellation?.message == expected)
+        let explicitStop = Task { @MainActor in await store.stop() }
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            store.runtimeTeardownFinalState == .stopped
+        })
+        #expect(await transport.recordedRequests().map(\.method).filter { $0 == "turn/interrupt" }.count == 1)
+
+        await interruptGate.open()
+        await failure.value
+        await explicitStop.value
+        let result = try await review.value
+        #expect(result.core.lifecycle.cancellation?.message == expected)
+        #expect(store.serverState == .stopped)
+        let methods = await transport.recordedRequests().map(\.method)
+        #expect(methods.filter { $0 == "turn/interrupt" }.count == 1)
+        #expect(methods.filter { $0 == "thread/delete" }.count == 1)
     }
 
     @Test func liveStoreCleansIsolatedLoginRuntimeWhenMainNotificationStreamCloses() async throws {
