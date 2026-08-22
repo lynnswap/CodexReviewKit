@@ -5,6 +5,7 @@ package class PreviewCodexReviewStoreBackend: CodexReviewStoreBackend {
     package let seed: CodexReviewStoreSeed
     package var isActive = false
     package var currentSettingsSnapshot: CodexReviewSettings.Snapshot
+    package let mcpServerLifecycle: any MCPServerLifecycleOwner = NoMCPServerLifecycleOwner()
 
     package init(seed: CodexReviewStoreSeed = .init()) {
         self.seed = seed
@@ -17,9 +18,11 @@ package class PreviewCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     package func attachStore(_: CodexReviewStore) {}
 
-    package func start(store: CodexReviewStore, forceRestartIfNeeded _: Bool) async {
-        isActive = true
-        store.transitionToFailed(Self.previewUnavailableMessage)
+    package func prepareRuntime(
+        generation _: ReviewRuntimeGeneration,
+        purpose _: ReviewRuntimeTransitionPurpose
+    ) async throws -> PreparedRuntime {
+        throw CodexReviewAPI.Error.io(Self.previewUnavailableMessage)
     }
 
     package func stop(store _: CodexReviewStore) async {

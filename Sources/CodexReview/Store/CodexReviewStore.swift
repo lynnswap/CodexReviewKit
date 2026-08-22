@@ -4,13 +4,6 @@ import Observation
 @MainActor
 @Observable
 public final class CodexReviewStore {
-    private struct RuntimeTeardownOperation {
-        let id: UUID
-        let cleanupIntent: ReviewRuntimeTeardownIntent
-        var finalIntent: ReviewRuntimeTeardownIntent
-        let task: Task<Void, Never>
-    }
-
     package struct ReviewTerminalWaiter {
         package var id: UUID
         package var continuation: CheckedContinuation<Void, Never>
@@ -27,10 +20,13 @@ public final class CodexReviewStore {
         backend.seed.shouldAutoStartEmbeddedServer
     }
     package var runtimeTeardownFinalState: ReviewRuntimeTeardownIntent.FinalState? {
-        runtimeTeardownOperation?.finalIntent.finalState
+        guard case .tearingDown(_, _, let finalIntent, _) = runtimeState else {
+            return nil
+        }
+        return finalIntent.finalState
     }
     package var runtimeLifecycleAdmissionGeneration: UInt64 {
-        runtimeLifecycleGeneration
+        runtimeState.generation.rawValue
     }
 
     @ObservationIgnored package let diagnosticsURL: URL?
@@ -50,8 +46,9 @@ public final class CodexReviewStore {
     @ObservationIgnored package var reviewTerminalWaiters: [String: [ReviewTerminalWaiter]] = [:]
     @ObservationIgnored package var closedSessions: Set<String> = []
     @ObservationIgnored package var accountRateLimitAutoRefreshDriver: CodexReviewStoreRateLimitAutoRefreshDriver?
-    @ObservationIgnored private var runtimeTeardownOperation: RuntimeTeardownOperation?
-    @ObservationIgnored private var runtimeLifecycleGeneration: UInt64 = 0
+    @ObservationIgnored package var runtimeState: ReviewStoreRuntimeState = .stopped(
+        .init(rawValue: 0)
+    )
 
     package init(
         backend: any CodexReviewStoreBackend = PreviewCodexReviewStoreBackend(),
@@ -93,7 +90,14 @@ public final class CodexReviewStore {
 
     isolated deinit {
         accountRateLimitAutoRefreshDriver?.cancel()
-        runtimeTeardownOperation?.task.cancel()
+        switch runtimeState {
+        case .acquiring(_, _, let task),
+             .replacing(_, _, _, let task),
+             .tearingDown(_, _, _, let task):
+            task.cancel()
+        case .stopped, .running, .failed:
+            break
+        }
         for task in reviewWorkerTasks.values {
             task.cancel()
         }
@@ -142,29 +146,55 @@ public final class CodexReviewStore {
     }
 
     public func start(forceRestartIfNeeded: Bool = false) async {
-        let admissionGeneration = admitRuntimeLifecycleRequest()
-        if let teardownTask = runtimeTeardownOperation?.task {
-            await teardownTask.value
-            guard admissionGeneration == runtimeLifecycleGeneration else {
-                return
-            }
-        }
-        switch serverState {
-        case .stopped, .failed:
-            break
-        case .starting:
-            return
+        let previousState = runtimeState
+        switch previousState {
         case .running where forceRestartIfNeeded == false:
             return
-        case .running:
+        case .acquiring(_, _, let task) where forceRestartIfNeeded == false,
+             .replacing(_, _, _, let task) where forceRestartIfNeeded == false:
+            await task.value
+            return
+        case .stopped, .acquiring, .running, .replacing, .tearingDown, .failed:
             break
         }
-        serverState = .starting
-        serverURL = nil
-        writeDiagnosticsIfNeeded()
-        await backend.start(store: self, forceRestartIfNeeded: forceRestartIfNeeded)
-        await settingsService.refreshIfRunning(serverState: serverState)
-        startAccountRateLimitAutoRefresh()
+
+        let generation = previousState.generation.successor()
+        switch previousState {
+        case .running(_, let runtime, let mcp):
+            await beginRuntimeReplacement(
+                generation: generation,
+                context: .init(retiringRuntime: runtime),
+                retainedMCP: mcp
+            )
+        case .replacing(_, let context, let retainedMCP, let task):
+            task.cancel()
+            await beginRuntimeReplacement(
+                generation: generation,
+                context: context,
+                retainedMCP: retainedMCP,
+                predecessor: task
+            )
+        case .failed(_, let retainedMCP?):
+            await beginRuntimeReplacement(
+                generation: generation,
+                context: .init(retiringRuntime: nil),
+                retainedMCP: retainedMCP
+            )
+        case .acquiring(_, let context, let task):
+            task.cancel()
+            await beginRuntimeAcquisition(
+                generation: generation,
+                context: context,
+                predecessor: task
+            )
+        case .tearingDown(_, _, _, let task):
+            await beginRuntimeAcquisition(
+                generation: generation,
+                predecessor: task
+            )
+        case .stopped, .failed:
+            await beginRuntimeAcquisition(generation: generation)
+        }
     }
 
     public func stop() async {
@@ -172,7 +202,6 @@ public final class CodexReviewStore {
     }
 
     package func stop(intent: ReviewRuntimeTeardownIntent) async {
-        _ = admitRuntimeLifecycleRequest()
         let task = admitRuntimeTeardown(intent: intent)
         await task.value
     }
@@ -180,27 +209,51 @@ public final class CodexReviewStore {
     package func requestRuntimeTeardown(
         intent: ReviewRuntimeTeardownIntent
     ) {
-        _ = admitRuntimeLifecycleRequest()
         _ = admitRuntimeTeardown(intent: intent)
     }
 
-    private func admitRuntimeLifecycleRequest() -> UInt64 {
-        runtimeLifecycleGeneration += 1
-        return runtimeLifecycleGeneration
+    package func requestRuntimeFailure(
+        handle: any RuntimeLifecycleHandle,
+        cause: String
+    ) {
+        guard case .running(_, let runtime, _) = runtimeState,
+              runtime.handle === handle
+        else {
+            return
+        }
+        _ = admitRuntimeTeardown(intent: .unexpectedFailure(cause))
     }
 
     private func admitRuntimeTeardown(
         intent: ReviewRuntimeTeardownIntent
     ) -> Task<Void, Never> {
-        if var operation = runtimeTeardownOperation {
-            if intent.supersedesConcurrentFinalState {
-                operation.finalIntent = intent
-                runtimeTeardownOperation = operation
+        if case .tearingDown(
+            let currentGeneration,
+            let cleanupIntent,
+            let finalIntent,
+            let currentTask
+        ) = runtimeState {
+            guard intent.supersedesConcurrentFinalState,
+                  finalIntent != intent
+            else {
+                return currentTask
             }
-            return operation.task
+            let generation = currentGeneration.successor()
+            let task = Task<Void, Never> { @MainActor [weak self] in
+                await currentTask.value
+                self?.finishRuntimeTeardown(generation: generation)
+            }
+            runtimeState = .tearingDown(
+                generation: generation,
+                cleanupIntent: cleanupIntent,
+                finalIntent: intent,
+                task: task
+            )
+            return task
         }
 
-        let operationID = UUID()
+        let previousState = runtimeState
+        let generation = previousState.generation.successor()
         if case .failed(let message) = intent.finalState {
             transitionToFailed(message)
         }
@@ -208,11 +261,15 @@ public final class CodexReviewStore {
             guard let self else {
                 return
             }
-            await self.performRuntimeTeardown(intent: intent)
-            self.finishRuntimeTeardown(operationID: operationID)
+            await self.performRuntimeTeardown(
+                previousState: previousState,
+                generation: generation,
+                intent: intent
+            )
+            self.finishRuntimeTeardown(generation: generation)
         }
-        runtimeTeardownOperation = .init(
-            id: operationID,
+        runtimeState = .tearingDown(
+            generation: generation,
             cleanupIntent: intent,
             finalIntent: intent,
             task: task
@@ -221,6 +278,448 @@ public final class CodexReviewStore {
     }
 
     private func performRuntimeTeardown(
+        previousState: ReviewStoreRuntimeState,
+        generation: ReviewRuntimeGeneration,
+        intent: ReviewRuntimeTeardownIntent
+    ) async {
+        switch previousState {
+        case .acquiring(_, let context, let task):
+            task.cancel()
+            await task.value
+            if let recyclingState = context.takeRecyclingState() {
+                await performRuntimeTeardown(
+                    previousState: recyclingState,
+                    generation: generation,
+                    intent: intent
+                )
+            }
+
+        case .replacing(_, let context, _, let task):
+            task.cancel()
+            await task.value
+            if let retiringRuntime = context.takeRetiringRuntime() {
+                await closePublishedRuntimeForReplacement(retiringRuntime)
+            }
+            await stopMCPServer()
+
+        case .running(_, let runtime, _):
+            await runtime.handle.closeAdmission()
+            await stopPublishedRuntimeSemantics(intent: intent)
+            await stopMCPServer()
+            await closeRuntime(
+                runtime,
+                purpose: intent == .explicitStop ? .stop : .runtimeFailure,
+                admissionAlreadyClosed: true
+            )
+
+        case .tearingDown(_, _, _, let task):
+            await task.value
+
+        case .failed(_, let retainedMCP):
+            if retainedMCP != nil {
+                await stopMCPServer()
+            }
+
+        case .stopped:
+            break
+        }
+    }
+
+    private func finishRuntimeTeardown(
+        generation: ReviewRuntimeGeneration
+    ) {
+        guard case .tearingDown(
+            let currentGeneration,
+            _,
+            let finalIntent,
+            _
+        ) = runtimeState,
+              currentGeneration == generation
+        else {
+            return
+        }
+        switch finalIntent.finalState {
+        case .stopped:
+            runtimeState = .stopped(generation)
+            transitionToStopped()
+        case .failed(let message):
+            runtimeState = .failed(generation: generation, retainedMCP: nil)
+            transitionToFailed(message)
+        }
+    }
+
+    public func restart() async {
+        await start(forceRestartIfNeeded: true)
+    }
+
+    package func recycleRuntimeAfterAccountChange() async {
+        await admitRuntimeRecycleAfterAccountChange()?.value
+    }
+
+    package func admitRuntimeRecycleAfterAccountChange() -> Task<Void, Never>? {
+        let previousState = runtimeState
+        let predecessor: Task<Void, Never>?
+        let context: RuntimeAcquisitionContext
+        switch previousState {
+        case .acquiring(_, let currentContext, let task):
+            task.cancel()
+            predecessor = task
+            context = currentContext
+        case .replacing(_, _, _, let task):
+            task.cancel()
+            predecessor = task
+            context = .init(recycling: previousState)
+        case .running:
+            predecessor = nil
+            context = .init(recycling: previousState)
+        case .stopped, .tearingDown, .failed:
+            return nil
+        }
+
+        let generation = previousState.generation.successor()
+        serverState = .starting
+        serverURL = nil
+        writeDiagnosticsIfNeeded()
+        let task = Task<Void, Never> { @MainActor [weak self] in
+            if let predecessor {
+                await predecessor.value
+            }
+            guard let self, self.isCurrentAcquisition(generation) else {
+                return
+            }
+            await self.performRuntimeAcquisition(
+                generation: generation,
+                context: context
+            )
+        }
+        runtimeState = .acquiring(
+            generation: generation,
+            context: context,
+            task: task
+        )
+        return task
+    }
+
+    public func waitUntilStopped() async {
+        if case .tearingDown(_, _, _, let task) = runtimeState {
+            await task.value
+        }
+        await backend.waitUntilStopped()
+    }
+
+    private func beginRuntimeAcquisition(
+        generation: ReviewRuntimeGeneration,
+        context: RuntimeAcquisitionContext = .init(),
+        predecessor: Task<Void, Never>? = nil
+    ) async {
+        if predecessor == nil {
+            serverState = .starting
+            serverURL = nil
+            writeDiagnosticsIfNeeded()
+        }
+        let task = Task<Void, Never> { @MainActor [weak self] in
+            if let predecessor {
+                await predecessor.value
+            }
+            guard let self, self.isCurrentAcquisition(generation) else {
+                return
+            }
+            if predecessor != nil {
+                self.serverState = .starting
+                self.serverURL = nil
+                self.writeDiagnosticsIfNeeded()
+            }
+            await self.performRuntimeAcquisition(
+                generation: generation,
+                context: context
+            )
+        }
+        runtimeState = .acquiring(
+            generation: generation,
+            context: context,
+            task: task
+        )
+        await task.value
+    }
+
+    private func performRuntimeAcquisition(
+        generation: ReviewRuntimeGeneration,
+        context: RuntimeAcquisitionContext
+    ) async {
+        guard isCurrentAcquisition(generation) else {
+            if let recyclingState = context.takeRecyclingState() {
+                await performRuntimeTeardown(
+                    previousState: recyclingState,
+                    generation: generation,
+                    intent: .explicitStop
+                )
+            }
+            return
+        }
+        var cutoverToken: CodexReviewSettingsService.RuntimeCutoverToken?
+        var settingsServiceOwnsCutover = false
+        var preparedRuntime: PreparedRuntime?
+        var preparedMCPServer: PreparedMCPServer?
+
+        do {
+            let token = try await settingsService.beginRuntimeCutover()
+            cutoverToken = token
+
+            if let previousState = context.takeRecyclingState() {
+                await performRuntimeTeardown(
+                    previousState: previousState,
+                    generation: generation,
+                    intent: .explicitStop
+                )
+            }
+            guard isCurrentAcquisition(generation) else {
+                cancelRuntimeCutover(token)
+                return
+            }
+
+            let mcpPreparation = try await backend.mcpServerLifecycle.prepare()
+            preparedMCPServer = mcpPreparation
+            guard isCurrentAcquisition(generation) else {
+                await stopMCPServer()
+                cancelRuntimeCutover(token)
+                return
+            }
+
+            let runtime = try await backend.prepareRuntime(
+                generation: generation,
+                purpose: .start
+            )
+            preparedRuntime = runtime
+            guard isCurrentAcquisition(generation) else {
+                await closeRuntime(runtime, purpose: .start)
+                await stopMCPServer()
+                cancelRuntimeCutover(token)
+                return
+            }
+
+            try await runtime.handle.activate()
+            guard isCurrentAcquisition(generation) else {
+                await closeRuntime(runtime, purpose: .start)
+                await stopMCPServer()
+                cancelRuntimeCutover(token)
+                return
+            }
+
+            let mcpSnapshot = try await backend.mcpServerLifecycle.activate(mcpPreparation)
+            guard isCurrentAcquisition(generation) else {
+                await closeRuntime(runtime, purpose: .start)
+                await stopMCPServer()
+                cancelRuntimeCutover(token)
+                return
+            }
+
+            settingsServiceOwnsCutover = true
+            try await settingsService.commitRuntimeSnapshot(
+                token: token,
+                snapshot: runtime.snapshot.settings
+            )
+            guard isCurrentAcquisition(generation) else {
+                await closeRuntime(runtime, purpose: .start)
+                await stopMCPServer()
+                return
+            }
+
+            try backend.commitRuntimePublication(
+                runtime.snapshot,
+                handle: runtime.handle,
+                auth: auth
+            )
+            guard isCurrentAcquisition(generation) else {
+                await closeRuntime(runtime, purpose: .start)
+                await stopMCPServer()
+                return
+            }
+
+            let retainedMCP = RetainedMCPServer(serverURL: mcpSnapshot.serverURL)
+            runtimeState = .running(
+                generation: generation,
+                runtime: runtime,
+                mcp: retainedMCP
+            )
+            publishRuntime(serverURL: retainedMCP.serverURL)
+            await backend.waitForRuntimePublication(handle: runtime.handle)
+        } catch {
+            if let recyclingState = context.takeRecyclingState() {
+                await performRuntimeTeardown(
+                    previousState: recyclingState,
+                    generation: generation,
+                    intent: .explicitStop
+                )
+            }
+            if let preparedRuntime {
+                await closeRuntime(preparedRuntime, purpose: .start)
+            }
+            if preparedMCPServer != nil {
+                await stopMCPServer()
+            }
+            let isCurrentGeneration = isCurrentAcquisition(generation)
+            let wasIntentionallyCancelled = Task.isCancelled || isCurrentGeneration == false
+            if let cutoverToken, settingsServiceOwnsCutover == false {
+                if wasIntentionallyCancelled {
+                    cancelRuntimeCutover(cutoverToken)
+                } else {
+                    abortRuntimeCutover(cutoverToken, message: error.localizedDescription)
+                }
+            }
+            guard wasIntentionallyCancelled == false else {
+                return
+            }
+            runtimeState = .failed(generation: generation, retainedMCP: nil)
+            transitionToFailed(error.localizedDescription)
+        }
+    }
+
+    private func beginRuntimeReplacement(
+        generation: ReviewRuntimeGeneration,
+        context: RuntimeReplacementContext,
+        retainedMCP: RetainedMCPServer,
+        predecessor: Task<Void, Never>? = nil
+    ) async {
+        serverState = .starting
+        serverURL = retainedMCP.serverURL
+        writeDiagnosticsIfNeeded()
+        let task = Task<Void, Never> { @MainActor [weak self] in
+            if let predecessor {
+                await predecessor.value
+            }
+            guard let self else {
+                return
+            }
+            await self.performRuntimeReplacement(
+                generation: generation,
+                context: context,
+                retainedMCP: retainedMCP
+            )
+        }
+        runtimeState = .replacing(
+            generation: generation,
+            context: context,
+            retainedMCP: retainedMCP,
+            task: task
+        )
+        await task.value
+    }
+
+    private func performRuntimeReplacement(
+        generation: ReviewRuntimeGeneration,
+        context: RuntimeReplacementContext,
+        retainedMCP: RetainedMCPServer
+    ) async {
+        guard isCurrentReplacement(generation) else {
+            return
+        }
+        var cutoverToken: CodexReviewSettingsService.RuntimeCutoverToken?
+        var settingsServiceOwnsCutover = false
+        var closedPreviousRuntime = false
+        var preparedRuntime: PreparedRuntime?
+
+        do {
+            let token = try await settingsService.beginRuntimeCutover()
+            cutoverToken = token
+
+            if let retiringRuntime = context.takeRetiringRuntime() {
+                await closePublishedRuntimeForReplacement(retiringRuntime)
+                closedPreviousRuntime = true
+            }
+            guard isCurrentReplacement(generation) else {
+                cancelRuntimeCutover(token)
+                return
+            }
+
+            let runtime = try await backend.prepareRuntime(
+                generation: generation,
+                purpose: .restartSameAccount
+            )
+            preparedRuntime = runtime
+            guard isCurrentReplacement(generation) else {
+                await closeRuntime(runtime, purpose: .restartSameAccount)
+                cancelRuntimeCutover(token)
+                return
+            }
+
+            try await runtime.handle.activate()
+            guard isCurrentReplacement(generation) else {
+                await closeRuntime(runtime, purpose: .restartSameAccount)
+                cancelRuntimeCutover(token)
+                return
+            }
+
+            settingsServiceOwnsCutover = true
+            try await settingsService.commitRuntimeSnapshot(
+                token: token,
+                snapshot: runtime.snapshot.settings
+            )
+            guard isCurrentReplacement(generation) else {
+                await closeRuntime(runtime, purpose: .restartSameAccount)
+                return
+            }
+
+            try backend.commitRuntimePublication(
+                runtime.snapshot,
+                handle: runtime.handle,
+                auth: auth
+            )
+            guard isCurrentReplacement(generation) else {
+                await closeRuntime(runtime, purpose: .restartSameAccount)
+                return
+            }
+
+            runtimeState = .running(
+                generation: generation,
+                runtime: runtime,
+                mcp: retainedMCP
+            )
+            publishRuntime(serverURL: retainedMCP.serverURL)
+            await backend.waitForRuntimePublication(handle: runtime.handle)
+        } catch {
+            if closedPreviousRuntime == false,
+               let retiringRuntime = context.takeRetiringRuntime()
+            {
+                await closePublishedRuntimeForReplacement(retiringRuntime)
+            }
+            if let preparedRuntime {
+                await closeRuntime(preparedRuntime, purpose: .restartSameAccount)
+            }
+            let isCurrentGeneration = isCurrentReplacement(generation)
+            let wasIntentionallyCancelled = Task.isCancelled || isCurrentGeneration == false
+            if let cutoverToken, settingsServiceOwnsCutover == false {
+                if wasIntentionallyCancelled {
+                    cancelRuntimeCutover(cutoverToken)
+                } else {
+                    abortRuntimeCutover(cutoverToken, message: error.localizedDescription)
+                }
+            }
+            guard wasIntentionallyCancelled == false else {
+                return
+            }
+            runtimeState = .failed(
+                generation: generation,
+                retainedMCP: retainedMCP
+            )
+            serverURL = retainedMCP.serverURL
+            serverState = .failed(error.localizedDescription)
+            writeDiagnosticsIfNeeded()
+        }
+    }
+
+    private func closePublishedRuntimeForReplacement(
+        _ runtime: PreparedRuntime
+    ) async {
+        await runtime.handle.closeAdmission()
+        await stopPublishedRuntimeSemantics(intent: .explicitStop)
+        await closeRuntime(
+            runtime,
+            purpose: .restartSameAccount,
+            admissionAlreadyClosed: true
+        )
+    }
+
+    private func stopPublishedRuntimeSemantics(
         intent: ReviewRuntimeTeardownIntent
     ) async {
         let locallyCancelledJobIDs: [String]
@@ -241,28 +740,80 @@ public final class CodexReviewStore {
         )
     }
 
-    private func finishRuntimeTeardown(operationID: UUID) {
-        guard let operation = runtimeTeardownOperation,
-              operation.id == operationID
-        else {
-            return
+    private func closeRuntime(
+        _ runtime: PreparedRuntime,
+        purpose: ReviewRuntimeTransitionPurpose,
+        admissionAlreadyClosed: Bool = false
+    ) async {
+        if admissionAlreadyClosed == false {
+            await runtime.handle.closeAdmission()
         }
-        runtimeTeardownOperation = nil
-        switch operation.finalIntent.finalState {
-        case .stopped:
-            transitionToStopped()
-        case .failed(let message):
-            transitionToFailed(message)
+        do {
+            try await runtime.handle.close(purpose: purpose)
+        } catch {
+            writeDiagnosticsIfNeeded()
+        }
+        do {
+            try await runtime.handle.waitUntilClosed()
+        } catch {
+            writeDiagnosticsIfNeeded()
         }
     }
 
-    public func restart() async {
-        await stop()
-        await start(forceRestartIfNeeded: true)
+    private func stopMCPServer() async {
+        do {
+            try await backend.mcpServerLifecycle.stop()
+        } catch {
+            writeDiagnosticsIfNeeded()
+        }
     }
 
-    public func waitUntilStopped() async {
-        await backend.waitUntilStopped()
+    private func abortRuntimeCutover(
+        _ token: CodexReviewSettingsService.RuntimeCutoverToken,
+        message: String
+    ) {
+        do {
+            try settingsService.abortRuntimeCutover(token: token, message: message)
+        } catch {
+            preconditionFailure(
+                "CodexReviewStore must consume its current runtime cutover token exactly once: \(error)"
+            )
+        }
+    }
+
+    private func cancelRuntimeCutover(
+        _ token: CodexReviewSettingsService.RuntimeCutoverToken
+    ) {
+        do {
+            try settingsService.cancelRuntimeCutover(token: token)
+        } catch {
+            preconditionFailure(
+                "CodexReviewStore must consume its current runtime cutover token exactly once: \(error)"
+            )
+        }
+    }
+
+    private func isCurrentAcquisition(
+        _ generation: ReviewRuntimeGeneration
+    ) -> Bool {
+        guard case .acquiring(let currentGeneration, _, _) = runtimeState else {
+            return false
+        }
+        return currentGeneration == generation
+    }
+
+    private func isCurrentReplacement(
+        _ generation: ReviewRuntimeGeneration
+    ) -> Bool {
+        guard case .replacing(let currentGeneration, _, _, _) = runtimeState else {
+            return false
+        }
+        return currentGeneration == generation
+    }
+
+    private func publishRuntime(serverURL: URL?) {
+        transitionToRunning(serverURL: serverURL)
+        startAccountRateLimitAutoRefresh()
     }
 
     public func refreshAuthentication() async {

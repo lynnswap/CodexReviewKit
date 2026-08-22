@@ -7,6 +7,7 @@ import CodexReviewMCPServer
 package final class CodexReviewHost {
     package let store: CodexReviewStore
     package let mcpServer: CodexReviewMCPServer
+    private let directBackend: DirectCodexReviewStoreBackend
     private let shutdown: @Sendable () async throws -> Void
     private var endpoint: URL?
 
@@ -17,10 +18,15 @@ package final class CodexReviewHost {
         endpoint: URL? = nil,
         shutdown: @escaping @Sendable () async throws -> Void = {}
     ) {
-        self.shutdown = shutdown
         self.endpoint = endpoint
+        let directBackend = DirectCodexReviewStoreBackend(
+            backend: backend,
+            endpoint: endpoint
+        )
+        self.directBackend = directBackend
+        self.shutdown = shutdown
         let store = CodexReviewStore(
-            backend: DirectCodexReviewStoreBackend(backend: backend),
+            backend: directBackend,
             clock: clock,
             idGenerator: idGenerator
         )
@@ -44,11 +50,15 @@ package final class CodexReviewHost {
     }
 
     package func start(endpoint: URL? = nil) async {
+        let endpointChanged = endpoint != nil && endpoint != self.endpoint
         if let endpoint {
             self.endpoint = endpoint
         }
-        store.transitionToRunning(serverURL: self.endpoint)
-        await store.refreshSettings()
+        directBackend.updateEndpoint(self.endpoint)
+        if endpointChanged {
+            await store.stop()
+        }
+        await store.start()
     }
 
     package func stop() async throws {
@@ -60,7 +70,9 @@ package final class CodexReviewHost {
 @MainActor
 private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
     let seed = CodexReviewStoreSeed()
+    let mcpServerLifecycle: any MCPServerLifecycleOwner
     private let backend: any CodexReviewBackend
+    private let mcpLifecycleOwner: NoMCPServerLifecycleOwner
     private var currentSettingsSnapshot = CodexReviewSettings.Snapshot()
     private var loginChallenge: CodexReviewBackendModel.Login.Challenge?
     private var active = false
@@ -73,14 +85,33 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
         currentSettingsSnapshot
     }
 
-    init(backend: any CodexReviewBackend) {
+    init(backend: any CodexReviewBackend, endpoint: URL?) {
         self.backend = backend
+        let mcpLifecycleOwner = NoMCPServerLifecycleOwner(serverURL: endpoint)
+        self.mcpLifecycleOwner = mcpLifecycleOwner
+        self.mcpServerLifecycle = mcpLifecycleOwner
     }
 
     func attachStore(_: CodexReviewStore) {}
 
-    func start(store _: CodexReviewStore, forceRestartIfNeeded _: Bool) async {
-        active = true
+    func updateEndpoint(_ endpoint: URL?) {
+        mcpLifecycleOwner.updateServerURL(endpoint)
+    }
+
+    func prepareRuntime(
+        generation _: ReviewRuntimeGeneration,
+        purpose _: ReviewRuntimeTransitionPurpose
+    ) async throws -> PreparedRuntime {
+        let settings = try await Self.monitorSettings(from: backend.readSettings())
+        let authentication = try await backend.readAuth()
+        return PreparedRuntime(
+            snapshot: .init(authentication: authentication, settings: settings),
+            handle: DirectRuntimeLifecycleHandle(
+                onActivate: { [weak self] in self?.active = true },
+                onCloseAdmission: { [weak self] in self?.active = false },
+                onClose: { [weak self] in self?.active = false }
+            )
+        )
     }
 
     func stop(store _: CodexReviewStore) async {
@@ -90,6 +121,7 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
     func waitUntilStopped() async {}
 
     func refreshSettings() async throws -> CodexReviewSettings.Snapshot {
+        guard active else { return currentSettingsSnapshot }
         currentSettingsSnapshot = try await Self.monitorSettings(from: backend.readSettings())
         return currentSettingsSnapshot
     }
@@ -101,6 +133,7 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
         serviceTier: CodexReviewSettings.ServiceTier?,
         persistServiceTier: Bool
     ) async throws {
+        guard active else { return }
         var change = CodexReviewBackendModel.Settings.Change(
             model: model,
             updatesModel: true
@@ -119,6 +152,7 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
     func updateSettingsReasoningEffort(
         _ reasoningEffort: CodexReviewSettings.ReasoningEffort?
     ) async throws {
+        guard active else { return }
         currentSettingsSnapshot = try await Self.monitorSettings(
             from: backend.applySettings(.init(
                 reasoningEffort: reasoningEffort?.rawValue,
@@ -130,6 +164,7 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
     func updateSettingsServiceTier(
         _ serviceTier: CodexReviewSettings.ServiceTier?
     ) async throws {
+        guard active else { return }
         currentSettingsSnapshot = try await Self.monitorSettings(
             from: backend.applySettings(.init(
                 serviceTier: serviceTier?.rawValue,
@@ -139,6 +174,7 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     func refreshAuth(auth: CodexReviewAuthModel) async {
+        guard active else { return }
         do {
             Self.applyAuthSnapshot(try await backend.readAuth(), to: auth)
         } catch {
@@ -147,6 +183,7 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     func signIn(auth: CodexReviewAuthModel) async {
+        guard active else { return }
         do {
             let challenge = try await backend.startLogin(.init())
             loginChallenge = challenge
@@ -162,6 +199,7 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     func addAccount(auth: CodexReviewAuthModel) async {
+        guard active else { return }
         await signIn(auth: auth)
     }
 
@@ -237,7 +275,10 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
         _ request: CodexReviewBackendModel.Review.Start,
         admission: ReviewStartAdmission
     ) async throws -> BackendReviewAttempt {
-        try await backend.startReview(request, admission: admission)
+        guard active else {
+            throw CodexReviewAPI.Error.io("Review runtime is not running.")
+        }
+        return try await backend.startReview(request, admission: admission)
     }
 
     func interruptReview(
@@ -309,6 +350,51 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
         } else {
             auth.selectPersistedAccount(nil)
             auth.updatePhase(.signedOut)
+        }
+    }
+}
+
+@MainActor
+private final class DirectRuntimeLifecycleHandle: RuntimeLifecycleHandle {
+    private let onActivate: @MainActor @Sendable () -> Void
+    private let onCloseAdmission: @MainActor @Sendable () -> Void
+    private let onClose: @MainActor @Sendable () -> Void
+    private var isActivated = false
+    private var didClose = false
+
+    init(
+        onActivate: @escaping @MainActor @Sendable () -> Void,
+        onCloseAdmission: @escaping @MainActor @Sendable () -> Void,
+        onClose: @escaping @MainActor @Sendable () -> Void
+    ) {
+        self.onActivate = onActivate
+        self.onCloseAdmission = onCloseAdmission
+        self.onClose = onClose
+    }
+
+    func activate() async throws {
+        guard isActivated == false, didClose == false else {
+            throw CancellationError()
+        }
+        isActivated = true
+        onActivate()
+    }
+
+    func closeAdmission() async {
+        onCloseAdmission()
+    }
+
+    func close(purpose _: ReviewRuntimeTransitionPurpose) async throws {
+        guard didClose == false else {
+            return
+        }
+        didClose = true
+        onClose()
+    }
+
+    func waitUntilClosed() async throws {
+        guard didClose else {
+            throw CancellationError()
         }
     }
 }
