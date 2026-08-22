@@ -28,6 +28,7 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
     package enum TerminalCause: Equatable, Sendable {
         case serverStop
         case peerClosed
+        case responseComplete
         case transportFailure(String)
     }
 
@@ -53,10 +54,27 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         case closed(TerminalCause?)
     }
 
+    package enum ResponseEndPhase: Equatable, Sendable {
+        case notExpected
+        case pending
+        case acknowledged
+        case closed
+    }
+
     package struct RequestSnapshot: Equatable, Sendable {
         package let id: UUID
         package let admissionOrdinal: UInt64
         package let phase: RequestWorkPhase
+        package let responseEnd: ResponseEndPhase
+
+        package var terminalCause: TerminalCause? {
+            switch phase {
+            case .closing(let cause), .closed(let cause?):
+                cause
+            case .reserved, .installed, .running, .closed:
+                nil
+            }
+        }
     }
 
     package struct ConnectionSnapshot: Equatable, Sendable {
@@ -117,6 +135,8 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         private let leaseID: UUID
         private var workState: WorkState = .reserved
         private var terminalCause: TerminalCause?
+        private var responseEnd: ResponseEndPhase = .notExpected
+        private var didClose = false
         private var startWasRequested = false
         private var startWaiter: CheckedContinuation<Bool, Never>?
         private var closeWaiters: [CheckedContinuation<TerminalCause?, Never>] = []
@@ -136,26 +156,52 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             var cancellation: (@Sendable () -> Void)?
             var waiter: CheckedContinuation<Bool, Never>?
             lock.lock()
-            if terminalCause == nil {
+            if terminalCause == nil, responseEnd != .acknowledged {
                 terminalCause = cause
-            }
-            switch workState {
-            case .installed(let cancel), .running(let cancel):
-                cancellation = cancel
-                waiter = startWaiter
-                startWaiter = nil
-            case .reserved, .acknowledged:
-                break
+                responseEnd = .closed
+                switch workState {
+                case .installed(let cancel), .running(let cancel):
+                    cancellation = cancel
+                    waiter = startWaiter
+                    startWaiter = nil
+                case .reserved, .acknowledged:
+                    break
+                }
             }
             lock.unlock()
             cancellation?()
             waiter?.resume(returning: false)
+            finishIfPossible()
+        }
+
+        package func beginResponse() -> Bool {
+            lock.lock()
+            guard terminalCause == nil,
+                  didClose == false,
+                  responseEnd == .notExpected else {
+                lock.unlock()
+                return false
+            }
+            responseEnd = .pending
+            lock.unlock()
+            return true
+        }
+
+        package func acknowledgeResponseEnd() {
+            lock.lock()
+            guard terminalCause == nil, responseEnd == .pending else {
+                lock.unlock()
+                return
+            }
+            responseEnd = .acknowledged
+            lock.unlock()
+            finishIfPossible()
         }
 
         package func waitUntilClosed() async -> TerminalCause? {
             await withCheckedContinuation { continuation in
                 lock.lock()
-                if case .acknowledged = workState {
+                if didClose {
                     let cause = terminalCause
                     lock.unlock()
                     continuation.resume(returning: cause)
@@ -226,20 +272,15 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         }
 
         fileprivate func acknowledgeCompletion(leaseID: UUID) {
-            let waiters: [CheckedContinuation<TerminalCause?, Never>]
-            let cause: TerminalCause?
             lock.lock()
             precondition(self.leaseID == leaseID, "A request WorkLease belongs to exactly one admitted operation.")
             guard case .acknowledged = workState else {
                 workState = .acknowledged
-                cause = terminalCause
-                waiters = closeWaiters
-                closeWaiters.removeAll(keepingCapacity: false)
-                lock.unlock()
-                for waiter in waiters {
-                    waiter.resume(returning: cause)
+                if responseEnd == .notExpected, terminalCause == nil {
+                    responseEnd = .acknowledged
                 }
-                connection?.requestDidClose(self)
+                lock.unlock()
+                finishIfPossible()
                 return
             }
             lock.unlock()
@@ -248,18 +289,46 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         fileprivate func snapshot() -> RequestSnapshot {
             lock.lock()
             let phase: RequestWorkPhase
-            switch workState {
-            case .reserved:
-                phase = terminalCause.map(RequestWorkPhase.closing) ?? .reserved
-            case .installed:
-                phase = terminalCause.map(RequestWorkPhase.closing) ?? .installed
-            case .running:
-                phase = terminalCause.map(RequestWorkPhase.closing) ?? .running
-            case .acknowledged:
+            if didClose {
                 phase = .closed(terminalCause)
+            } else if let terminalCause {
+                phase = .closing(terminalCause)
+            } else {
+                phase = switch workState {
+                case .reserved: .reserved
+                case .installed: .installed
+                case .running, .acknowledged: .running
+                }
             }
+            let responseEnd = responseEnd
             lock.unlock()
-            return .init(id: id, admissionOrdinal: admissionOrdinal, phase: phase)
+            return .init(
+                id: id,
+                admissionOrdinal: admissionOrdinal,
+                phase: phase,
+                responseEnd: responseEnd
+            )
+        }
+
+        private func finishIfPossible() {
+            let waiters: [CheckedContinuation<TerminalCause?, Never>]
+            let cause: TerminalCause?
+            lock.lock()
+            guard didClose == false,
+                  case .acknowledged = workState,
+                  responseEnd == .acknowledged || responseEnd == .closed else {
+                lock.unlock()
+                return
+            }
+            didClose = true
+            cause = terminalCause
+            waiters = closeWaiters
+            closeWaiters.removeAll(keepingCapacity: false)
+            lock.unlock()
+            for waiter in waiters {
+                waiter.resume(returning: cause)
+            }
+            connection?.requestDidClose(self)
         }
     }
 
@@ -278,6 +347,7 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         private var nextRequestOrdinal: UInt64 = 0
         private var requests: [UUID: RequestOperation] = [:]
         private var closeAcknowledged = false
+        private var closeAcknowledgementWaiters: [CheckedContinuation<Void, Never>] = []
         private var closeWaiters: [CheckedContinuation<Void, Never>] = []
 
         fileprivate init(
@@ -322,6 +392,20 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
 
         package func transportFailed(_ message: String) {
             beginClosing(.transportFailure(message), signalResourceClose: true)
+        }
+
+        package func closeAfterResponse() async {
+            beginClosing(.responseComplete, signalResourceClose: true)
+            await withCheckedContinuation { continuation in
+                lock.lock()
+                if closeAcknowledged {
+                    lock.unlock()
+                    continuation.resume()
+                } else {
+                    closeAcknowledgementWaiters.append(continuation)
+                    lock.unlock()
+                }
+            }
         }
 
         package func waitUntilClosed() async {
@@ -413,8 +497,11 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
 
         private func acknowledgePeerClose() {
             let requests: [RequestOperation]
+            let acknowledgementWaiters: [CheckedContinuation<Void, Never>]
             lock.lock()
             closeAcknowledged = true
+            acknowledgementWaiters = closeAcknowledgementWaiters
+            closeAcknowledgementWaiters.removeAll(keepingCapacity: false)
             switch phase {
             case .accepting, .admissionClosed:
                 phase = .closing(.peerClosed)
@@ -423,6 +510,9 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
                 requests = []
             }
             lock.unlock()
+            for waiter in acknowledgementWaiters {
+                waiter.resume()
+            }
             for request in requests {
                 request.beginClosing(.peerClosed)
             }
