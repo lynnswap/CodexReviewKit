@@ -380,7 +380,7 @@ private final class DirectRuntimeLifecycleHandle: RuntimeLifecycleHandle {
         onActivate()
     }
 
-    func closeAdmission() async {
+    func closeAdmission() {
         onCloseAdmission()
     }
 

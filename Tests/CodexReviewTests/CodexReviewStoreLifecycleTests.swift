@@ -142,6 +142,7 @@ struct CodexReviewStoreLifecycleTests {
         let retiringHandle = try #require(backend.lastPreparedRuntimeHandle)
 
         let recycle = try #require(store.admitRuntimeRecycleAfterAccountChange())
+        #expect(retiringHandle.closeAdmissionCallCount == 1)
         store.requestRuntimeTeardown(intent: .explicitStop)
         await store.stop()
         await recycle.value
@@ -164,6 +165,7 @@ struct CodexReviewStoreLifecycleTests {
         let retiringHandle = try #require(backend.lastPreparedRuntimeHandle)
 
         let recycle = try #require(store.admitRuntimeRecycleAfterAccountChange())
+        #expect(retiringHandle.closeAdmissionCallCount == 1)
         let successor = try #require(store.admitRuntimeRecycleAfterAccountChange())
         await successor.value
         await recycle.value
@@ -177,6 +179,22 @@ struct CodexReviewStoreLifecycleTests {
         #expect(store.serverState == .running)
         #expect(store.settings.lastErrorMessage == nil)
         await store.stop()
+    }
+
+    @Test func explicitStopAdmissionClosesPublishedRuntimeBeforeTeardownTaskEntry() async throws {
+        let backend = TestingCodexReviewStoreBackend(
+            reviewBackend: FakeCodexReviewBackend()
+        )
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+        let handle = try #require(backend.lastPreparedRuntimeHandle)
+
+        store.requestRuntimeTeardown(intent: .explicitStop)
+
+        #expect(handle.closeAdmissionCallCount == 1)
+        await store.stop()
+        #expect(handle.closePurposes == [.stop])
+        #expect(handle.waitUntilClosedCallCount == 1)
     }
 
     @Test func sameAccountRestartRetainsMCPListenerAndURL() async throws {
@@ -342,6 +360,7 @@ struct CodexReviewStoreLifecycleTests {
 
         let restart = Task { @MainActor in await store.restart() }
         try await waitForCutoverStatus(.draining, service: store.settingsService)
+        #expect(firstHandle.closeAdmissionCallCount == 1)
         await store.updateSettingsModel("deferred-edit")
         #expect(backend.lastPreparedRuntimeHandle === firstHandle)
         #expect(await reviewBackend.recordedCommands().filter {
@@ -419,6 +438,7 @@ struct CodexReviewStoreLifecycleTests {
         handle.holdClose(with: closeGate)
 
         store.requestRuntimeFailure(handle: handle, cause: "Injected runtime failure.")
+        #expect(handle.closeAdmissionCallCount == 1)
         await handle.waitForClose()
         let expected = "Review runtime stopped unexpectedly: Injected runtime failure."
         #expect(store.serverState == .failed(expected))
