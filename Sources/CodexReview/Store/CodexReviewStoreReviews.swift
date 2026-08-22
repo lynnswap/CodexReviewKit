@@ -15,15 +15,14 @@ extension CodexReviewStore {
         sessionID: String,
         request: CodexReviewAPI.Start.Request
     ) async throws -> CodexReviewAPI.Read.Result {
-        let jobID = try beginReview(sessionID: sessionID, request: request)
-        return try await withTaskCancellationHandler {
-            _ = try await awaitReview(sessionID: sessionID, jobID: jobID)
-            await reviewWorkerTasks[jobID]?.value
-            return try readReview(sessionID: sessionID, jobID: jobID)
-        } onCancel: {
-            Task { @MainActor [weak self] in
-                self?.reviewWorkerTasks[jobID]?.cancel()
-            }
+        try await performThrowingRegisteredStoreWork(
+            kind: .reviewMutation("start")
+        ) { @MainActor store in
+            try await store.performStartReview(
+                sessionID: sessionID,
+                request: request,
+                waitTimeout: nil
+            )
         }
     }
 
@@ -33,8 +32,42 @@ extension CodexReviewStore {
         request: CodexReviewAPI.Start.Request,
         waitTimeout: Duration
     ) async throws -> CodexReviewAPI.Read.Result {
+        try await performThrowingRegisteredStoreWork(
+            kind: .reviewMutation("start")
+        ) { @MainActor store in
+            try await store.performStartReview(
+                sessionID: sessionID,
+                request: request,
+                waitTimeout: waitTimeout
+            )
+        }
+    }
+
+    private func performStartReview(
+        sessionID: String,
+        request: CodexReviewAPI.Start.Request,
+        waitTimeout: Duration?
+    ) async throws -> CodexReviewAPI.Read.Result {
         let jobID = try beginReview(sessionID: sessionID, request: request)
-        return try await awaitReview(sessionID: sessionID, jobID: jobID, timeout: waitTimeout)
+        let workerTask = reviewWorkerTasks[jobID]
+        guard let waitTimeout else {
+            return try await withTaskCancellationHandler {
+                _ = try await awaitReview(sessionID: sessionID, jobID: jobID)
+                await workerTask?.value
+                return try readReview(sessionID: sessionID, jobID: jobID)
+            } onCancel: {
+                workerTask?.cancel()
+            }
+        }
+        _ = try await awaitReview(
+            sessionID: sessionID,
+            jobID: jobID,
+            timeout: waitTimeout
+        )
+        if storeWorkRegistry.acceptsNewWork == false {
+            await workerTask?.value
+        }
+        return try readReview(sessionID: sessionID, jobID: jobID)
     }
 
     package func awaitReview(
@@ -76,22 +109,54 @@ extension CodexReviewStore {
             ),
             logEntries: []
         )
+        guard let workerTask = makeReviewWorker(
+            jobID: jobID,
+            sessionID: sessionID,
+            request: validatedRequest
+        ) else {
+            throw CodexReviewAPI.Error.io("Review Store work admission is closed.")
+        }
         insertReviewJob(job)
         markReviewRunning(job, startedAt: createdAt)
         startingJobIDs.insert(jobID)
-        launchReviewWorker(jobID: jobID, sessionID: sessionID, request: validatedRequest)
+        reviewWorkerTasks[jobID]?.cancel()
+        reviewWorkerTasks[jobID] = workerTask
         return jobID
     }
 
-    private func launchReviewWorker(
+    private func makeReviewWorker(
         jobID: String,
         sessionID: String,
         request: CodexReviewAPI.Start.Request
-    ) {
-        reviewWorkerTasks[jobID]?.cancel()
-        reviewWorkerTasks[jobID] = Task { [weak self] in
-            await self?.runReviewWorker(jobID: jobID, sessionID: sessionID, request: request)
+    ) -> Task<Void, Never>? {
+        startRegisteredStoreWork(
+            kind: .reviewWorker(jobID: jobID),
+            cancelledBeforeEntry: .runFinalizer { store in
+                store.finishReviewWorkerCancelledBeforeStart(jobID: jobID)
+            }
+        ) { @MainActor store in
+            await store.runReviewWorker(
+                jobID: jobID,
+                sessionID: sessionID,
+                request: request
+            )
         }
+    }
+
+    private func finishReviewWorkerCancelledBeforeStart(jobID: String) {
+        startingJobIDs.remove(jobID)
+        startupCancellations.removeValue(forKey: jobID)
+        activeRuns.removeValue(forKey: jobID)
+        reviewRecoveryWaitingJobIDs.remove(jobID)
+        if let job = job(id: jobID), job.isTerminal == false {
+            try? completeCancellationLocally(
+                jobID: job.id,
+                sessionID: job.sessionID,
+                cancellation: job.core.lifecycle.cancellation ?? .system()
+            )
+        }
+        reviewWorkerTasks.removeValue(forKey: jobID)
+        resumeReviewWaiters(for: jobID)
     }
 
     private func runReviewWorker(
@@ -181,7 +246,10 @@ extension CodexReviewStore {
             let startupCancellation = startupCancellations.removeValue(forKey: jobID)
             let cleanupFailure: ReviewRuntimeCloseFailure?
             if let cleanupRun = activeRuns[jobID] ?? run {
-                cleanupFailure = await cleanupReviewFailure(cleanupRun)
+                cleanupFailure = await cleanupReviewFailure(
+                    cleanupRun,
+                    jobID: jobID
+                )
             } else {
                 cleanupFailure = nil
             }
@@ -207,7 +275,6 @@ extension CodexReviewStore {
             }
         }
         reviewWorkerTasks.removeValue(forKey: jobID)
-        runtimeStopDetachedReviewWorkerTasks.removeValue(forKey: jobID)
         if job.isTerminal {
             resumeReviewWaiters(for: jobID)
         }
@@ -217,9 +284,20 @@ extension CodexReviewStore {
         _ run: CodexReviewBackendModel.Review.Run,
         for job: CodexReviewJob
     ) async {
-        if let failure = await cleanupReviewFailure(run) {
+        if let failure = await cleanupReviewFailure(run, jobID: job.id) {
             retainCleanupFailure(failure, for: job)
         }
+    }
+
+    private func cleanupReviewFailure(
+        _ run: CodexReviewBackendModel.Review.Run,
+        jobID: String
+    ) async -> ReviewRuntimeCloseFailure? {
+        reviewWorkerCleanupJobIDs.insert(jobID)
+        defer {
+            reviewWorkerCleanupJobIDs.remove(jobID)
+        }
+        return await cleanupReviewFailure(run)
     }
 
     private func cleanupReviewFailure(
@@ -267,11 +345,18 @@ extension CodexReviewStore {
                 cancellation: cancellation
             )
         } catch {
-            try? recordCancellationFailure(
-                jobID: job.id,
-                sessionID: job.sessionID,
-                message: error.localizedDescription
-            )
+            if storeWorkRegistry.acceptsNewWork {
+                try? recordCancellationFailure(
+                    jobID: job.id,
+                    sessionID: job.sessionID,
+                    message: error.localizedDescription
+                )
+            } else {
+                markReviewFailed(
+                    job,
+                    message: error.localizedDescription
+                )
+            }
         }
     }
 
@@ -428,16 +513,47 @@ extension CodexReviewStore {
         sessionID: String,
         cancellation: ReviewCancellation = .system()
     ) async throws -> CodexReviewAPI.Cancel.Outcome {
-        guard let job = job(id: jobID), job.sessionID == sessionID else {
-            throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
+        try await performThrowingRegisteredStoreWork(
+            kind: .reviewMutation("cancel")
+        ) { @MainActor store in
+            guard let job = store.job(id: jobID), job.sessionID == sessionID else {
+                throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
+            }
+            return try await store.performCancelReview(
+                jobID: jobID,
+                cancellation: cancellation
+            )
         }
-        return try await cancelReview(jobID: jobID, cancellation: cancellation)
     }
 
     @discardableResult
     package func cancelReview(
         jobID: String,
         cancellation: ReviewCancellation = .system()
+    ) async throws -> CodexReviewAPI.Cancel.Outcome {
+        try await performThrowingRegisteredStoreWork(
+            kind: .reviewMutation("cancel")
+        ) { @MainActor store in
+            try await store.performCancelReview(
+                jobID: jobID,
+                cancellation: cancellation
+            )
+        }
+    }
+
+    package func cancelReviewForLifecycleTeardown(
+        jobID: String,
+        cancellation: ReviewCancellation
+    ) async throws -> CodexReviewAPI.Cancel.Outcome {
+        try await performCancelReview(
+            jobID: jobID,
+            cancellation: cancellation
+        )
+    }
+
+    private func performCancelReview(
+        jobID: String,
+        cancellation: ReviewCancellation
     ) async throws -> CodexReviewAPI.Cancel.Outcome {
         let job = try job(jobID: jobID)
         guard job.isTerminal == false else {
@@ -549,18 +665,36 @@ extension CodexReviewStore {
         _ sessionID: String,
         reason: ReviewCancellation = .sessionClosed()
     ) async {
+        await performRegisteredStoreWork(
+            kind: .reviewMutation("close-session")
+        ) { @MainActor store in
+            await store.performCloseSession(sessionID, reason: reason)
+        }
+    }
+
+    private func performCloseSession(
+        _ sessionID: String,
+        reason: ReviewCancellation
+    ) async {
         closedSessions.insert(sessionID)
         for jobID in activeJobIDs(for: sessionID) {
-            _ = try? await cancelReview(jobID: jobID, cancellation: reason)
+            _ = try? await performCancelReview(jobID: jobID, cancellation: reason)
         }
     }
 
     package func closeActiveReviewSessions(reason: ReviewCancellation) async {
-        let jobIDs = orderedJobs
-            .filter { $0.isTerminal == false }
-            .map(\.id)
-        for jobID in jobIDs {
-            _ = try? await cancelReview(jobID: jobID, cancellation: reason)
+        await performRegisteredStoreWork(
+            kind: .reviewMutation("close-active-sessions")
+        ) { @MainActor store in
+            let jobIDs = store.orderedJobs
+                .filter { $0.isTerminal == false }
+                .map(\.id)
+            for jobID in jobIDs {
+                _ = try? await store.performCancelReview(
+                    jobID: jobID,
+                    cancellation: reason
+                )
+            }
         }
     }
 
@@ -671,9 +805,30 @@ extension CodexReviewStore {
         startRequest: CodexReviewBackendModel.Review.Start
     ) async throws -> CodexReviewBackendModel.Review.Run {
         let inputs = await reviewWorkerInputs(for: initialAttempt)
-        defer {
-            inputs.cancel()
+        do {
+            let result = try await consumeReviewEvents(
+                inputs: inputs,
+                initialAttempt: initialAttempt,
+                job: job,
+                startRequest: startRequest
+            )
+            if job.isTerminal {
+                reviewWorkerCleanupJobIDs.insert(job.id)
+            }
+            await inputs.cancelAndWait()
+            return result
+        } catch {
+            await inputs.cancelAndWait()
+            throw error
         }
+    }
+
+    private func consumeReviewEvents(
+        inputs: ReviewWorkerInputs,
+        initialAttempt: BackendReviewAttempt,
+        job: CodexReviewJob,
+        startRequest: CodexReviewBackendModel.Review.Start
+    ) async throws -> CodexReviewBackendModel.Review.Run {
         var recoveryState = ReviewNetworkRecoveryLoopState(currentRun: initialAttempt.run)
         var activeEventSubscriptionID: Int? = inputs.initialEventSubscriptionID
         while let input = await inputs.next() {
@@ -1079,8 +1234,10 @@ extension CodexReviewStore {
             return
         }
         let waiterID = UUID()
-        let timeoutTask = timeout.map { duration in
-            Task { @MainActor [weak self] in
+        let timeoutTask = timeout.flatMap { duration in
+            startRegisteredStoreWork(
+                kind: .reviewWaiter(jobID: jobID)
+            ) { @MainActor [weak self] _ in
                 do {
                     try await Task.sleep(for: duration)
                 } catch {
@@ -1130,9 +1287,8 @@ extension CodexReviewStore {
         guard job.isTerminal else {
             return false
         }
-        // Terminal state is published before backend cleanup. The live worker remains the
-        // result owner until cleanup and any secondary diagnostic are finalized. Runtime-stop
-        // detachment is the explicit boundary that transfers only lifecycle cleanup ownership.
+        // Terminal state is published before backend cleanup. The worker remains the result
+        // owner until cleanup and any secondary diagnostic are finalized.
         return reviewWorkerTasks[jobID] == nil
     }
 
@@ -1439,13 +1595,12 @@ private struct ReviewWorkerInputs {
         await eventSource.cancelActiveSubscription()
     }
 
-    func cancel() {
+    func cancelAndWait() async {
         networkTask.cancel()
-        Task {
-            await eventSource.cancel()
-            await signalCoordinator.cancel()
-            await queue.finish()
-        }
+        await eventSource.cancelAndWait()
+        await signalCoordinator.cancelAndWait()
+        await queue.finish()
+        await networkTask.value
     }
 }
 
@@ -1551,11 +1706,11 @@ private actor ReviewWorkerEventSource {
         self.queue = queue
     }
 
-    func subscribe(to attempt: BackendReviewAttempt) -> Int {
+    func subscribe(to attempt: BackendReviewAttempt) async -> Int {
         subscriptionID += 1
         let subscriptionID = subscriptionID
         activeSubscriptionID = subscriptionID
-        cancelEventTasks()
+        await cancelEventTasksAndWait()
         let run = attempt.run
         let events = attempt.events
         eventTasks[subscriptionID] = Task {
@@ -1574,23 +1729,27 @@ private actor ReviewWorkerEventSource {
         return subscriptionID
     }
 
-    func cancelActiveSubscription() {
+    func cancelActiveSubscription() async {
         subscriptionID += 1
         activeSubscriptionID = nil
-        cancelEventTasks()
+        await cancelEventTasksAndWait()
     }
 
-    func cancel() {
+    func cancelAndWait() async {
         subscriptionID += 1
         activeSubscriptionID = nil
-        cancelEventTasks()
+        await cancelEventTasksAndWait()
     }
 
-    private func cancelEventTasks() {
-        for task in eventTasks.values {
+    private func cancelEventTasksAndWait() async {
+        let tasks = eventTasks.sorted { $0.key < $1.key }.map(\.value)
+        eventTasks.removeAll(keepingCapacity: true)
+        for task in tasks {
             task.cancel()
         }
-        eventTasks.removeAll(keepingCapacity: true)
+        for task in tasks {
+            await task.value
+        }
     }
 
     private func yieldReviewEvent(
@@ -1661,9 +1820,12 @@ private actor ReviewNetworkSignalCoordinator {
     private let policy: CodexReviewNetworkRecoveryPolicy
     private let tracker: ReviewNetworkStatusTracker
     private let queue: ReviewWorkerInputQueue
-    private var outageTask: Task<Void, Never>?
+    private var admissionIsOpen = true
+    private var nextTaskID = 0
+    private var ownedTasks: [Int: Task<Void, Never>] = [:]
+    private var outageTaskID: Int?
     private var outageGeneration = 0
-    private var recoveryTask: Task<Void, Never>?
+    private var recoveryTaskID: Int?
     private var recoveryGeneration = 0
 
     init(
@@ -1677,50 +1839,71 @@ private actor ReviewNetworkSignalCoordinator {
     }
 
     func observe(_ snapshot: CodexReviewNetworkSnapshot) async {
+        guard admissionIsOpen else {
+            return
+        }
         await tracker.update(snapshot)
+        guard admissionIsOpen else {
+            return
+        }
         switch snapshot.status {
         case .satisfied:
             outageGeneration += 1
-            outageTask?.cancel()
-            outageTask = nil
+            cancelOwnedTask(outageTaskID)
+            outageTaskID = nil
             recoveryGeneration += 1
             let recoveryGeneration = recoveryGeneration
-            recoveryTask?.cancel()
-            recoveryTask = nil
+            cancelOwnedTask(recoveryTaskID)
+            recoveryTaskID = nil
             await queue.send(.networkSnapshot(snapshot, recoveryGeneration: recoveryGeneration))
             scheduleRecoveryConfirmationIfNeeded(generation: recoveryGeneration)
         case .unsatisfied, .requiresConnection:
             recoveryGeneration += 1
             let recoveryGeneration = recoveryGeneration
-            recoveryTask?.cancel()
-            recoveryTask = nil
+            cancelOwnedTask(recoveryTaskID)
+            recoveryTaskID = nil
             await queue.send(.networkSnapshot(snapshot, recoveryGeneration: recoveryGeneration))
             scheduleOutageConfirmationIfNeeded()
         }
     }
 
-    func cancel() {
-        outageTask?.cancel()
-        outageTask = nil
-        recoveryTask?.cancel()
-        recoveryTask = nil
+    func cancelAndWait() async {
+        admissionIsOpen = false
+        outageGeneration += 1
+        recoveryGeneration += 1
+        outageTaskID = nil
+        recoveryTaskID = nil
+        let tasks = ownedTasks.sorted { $0.key < $1.key }.map(\.value)
+        for task in tasks {
+            task.cancel()
+        }
+        for task in tasks {
+            await task.value
+        }
+        ownedTasks.removeAll(keepingCapacity: false)
     }
 
     private func scheduleOutageConfirmationIfNeeded() {
-        guard outageTask == nil else {
+        guard admissionIsOpen, outageTaskID == nil else {
             return
         }
         let policy = policy
         outageGeneration += 1
         let generation = outageGeneration
-        outageTask = Task {
+        nextTaskID += 1
+        let taskID = nextTaskID
+        let task = Task {
             do {
                 try await policy.sleep(policy.outageDebounce)
             } catch {
+                self.finishOwnedTask(taskID)
                 return
             }
             await self.confirmOutageIfCurrent(generation: generation)
+            self.finishOwnedTask(taskID)
         }
+        ownedTasks[taskID] = task
+        outageTaskID = taskID
     }
 
     private func confirmOutageIfCurrent(generation: Int) async {
@@ -1735,29 +1918,51 @@ private actor ReviewNetworkSignalCoordinator {
     }
 
     private func scheduleRecoveryConfirmationIfNeeded(generation: Int) {
-        guard recoveryTask == nil else {
+        guard admissionIsOpen, recoveryTaskID == nil else {
             return
         }
         let policy = policy
-        recoveryTask = Task {
+        nextTaskID += 1
+        let taskID = nextTaskID
+        let task = Task {
             do {
                 try await policy.sleep(policy.recoverySettle)
             } catch {
+                self.finishOwnedTask(taskID)
                 return
             }
             await self.confirmRecoveryIfCurrent(generation: generation)
+            self.finishOwnedTask(taskID)
         }
+        ownedTasks[taskID] = task
+        recoveryTaskID = taskID
     }
 
     private func confirmRecoveryIfCurrent(generation: Int) async {
         guard generation == recoveryGeneration else {
             return
         }
-        recoveryTask = nil
         let latest = await tracker.latestSnapshot()
         guard latest.status == .satisfied else {
             return
         }
         await queue.send(.networkRecoverySettled(recoveryGeneration: generation))
+    }
+
+    private func cancelOwnedTask(_ taskID: Int?) {
+        guard let taskID else {
+            return
+        }
+        ownedTasks[taskID]?.cancel()
+    }
+
+    private func finishOwnedTask(_ taskID: Int) {
+        ownedTasks.removeValue(forKey: taskID)
+        if outageTaskID == taskID {
+            outageTaskID = nil
+        }
+        if recoveryTaskID == taskID {
+            recoveryTaskID = nil
+        }
     }
 }

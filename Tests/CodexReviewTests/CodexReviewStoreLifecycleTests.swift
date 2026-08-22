@@ -413,6 +413,201 @@ struct CodexReviewStoreLifecycleTests {
         #expect(store.settings.lastErrorMessage == nil)
     }
 
+    @Test func registeredWorkCloseJoinsOneTaskAndReplaysOneResult() async throws {
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(
+                reviewBackend: FakeCodexReviewBackend()
+            )
+        )
+        let entered = AsyncGate()
+        let release = AsyncGate()
+        let work = Task { @MainActor in
+            await store.performRegisteredStoreWork(
+                kind: .testing("held work")
+            ) { _ in
+                await entered.open()
+                await release.waitIgnoringCancellation()
+            }
+        }
+        await entered.wait()
+
+        let reason = ReviewCancellation.system(message: "Store work closed.")
+        let firstClose = Task { @MainActor in
+            await store.closeRegisteredStoreWork(reason: reason)
+        }
+        try await waitForStoreWorkStatus(.closing, store: store)
+        let secondClose = Task { @MainActor in
+            await store.closeRegisteredStoreWork(reason: reason)
+        }
+
+        #expect(store.storeWorkRegistry.closeTaskCreationCount == 1)
+        #expect(store.storeWorkRegistry.activeOrdinals == [1])
+        #expect(store.startRegisteredStoreWork(
+            kind: .testing("rejected"),
+            operation: { _ in }
+        ) == nil)
+
+        await release.open()
+        await work.value
+        let firstResult = await firstClose.value
+        let secondResult = await secondClose.value
+        let replayedResult = await store.closeRegisteredStoreWork(reason: reason)
+
+        #expect(firstResult == .success)
+        #expect(secondResult == firstResult)
+        #expect(replayedResult == firstResult)
+        #expect(store.storeWorkRegistryStatus == .closed)
+        #expect(store.storeWorkRegistry.closeTaskCreationCount == 1)
+        #expect(store.storeWorkRegistry.activeOrdinals.isEmpty)
+        await #expect(throws: CodexReviewAPI.Error.self) {
+            _ = try await store.startReview(
+                sessionID: "closed-session",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+    }
+
+    @Test func registeredWorkFailuresStayInAdmissionOrder() async throws {
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(
+                reviewBackend: FakeCodexReviewBackend()
+            )
+        )
+        let firstEntered = AsyncGate()
+        let firstRelease = AsyncGate()
+        let secondEntered = AsyncGate()
+        let secondRelease = AsyncGate()
+        let first = Task { @MainActor in
+            try? await store.performThrowingRegisteredStoreWork(
+                kind: .testing("first work")
+            ) { _ in
+                await firstEntered.open()
+                await firstRelease.waitIgnoringCancellation()
+                throw StoreWorkTestFailure.first
+            }
+        }
+        await firstEntered.wait()
+        let second = Task { @MainActor in
+            try? await store.performThrowingRegisteredStoreWork(
+                kind: .testing("second work")
+            ) { _ in
+                await secondEntered.open()
+                await secondRelease.waitIgnoringCancellation()
+                throw StoreWorkTestFailure.second
+            }
+        }
+        await secondEntered.wait()
+
+        let close = Task { @MainActor in
+            await store.closeRegisteredStoreWork(
+                reason: .system(message: "Store work closed.")
+            )
+        }
+        try await waitForStoreWorkStatus(.closing, store: store)
+        await secondRelease.open()
+        await firstRelease.open()
+        await first.value
+        await second.value
+        let result = await close.value
+        let failures = try #require(result.failures)
+
+        #expect(failures.first.ordinal == 1)
+        #expect(failures.first.kind == .testing("first work"))
+        #expect(failures.first.cause == .operation("first work failed"))
+        #expect(failures.additionalInOrdinalOrder.count == 1)
+        #expect(failures.additionalInOrdinalOrder[0].ordinal == 2)
+        #expect(failures.additionalInOrdinalOrder[0].kind == .testing("second work"))
+        #expect(failures.additionalInOrdinalOrder[0].cause == .operation("second work failed"))
+        #expect(await store.closeRegisteredStoreWork(
+            reason: .system(message: "ignored replay reason")
+        ) == result)
+    }
+
+    @Test func registeredWorkCloseAwaitsReviewWorkerWithExactReason() async throws {
+        let backend = FakeCodexReviewBackend()
+        let startGate = AsyncGate()
+        await backend.holdStartReviewIgnoringCancellation(with: startGate)
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        await store.start()
+        let review = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        try await backend.waitForStartReview(timeout: .seconds(2))
+        let awaitCompletion = StoreWorkCompletion()
+        let awaiter = Task { @MainActor in
+            let result = try await store.awaitReview(
+                sessionID: "session-1",
+                jobID: "job-1"
+            )
+            await awaitCompletion.complete()
+            return result
+        }
+        try await waitForReviewWaiterCount(2, jobID: "job-1", store: store)
+        let reason = ReviewCancellation.system(message: "Store work owner closed.")
+
+        let close = Task { @MainActor in
+            await store.closeRegisteredStoreWork(reason: reason)
+        }
+        try await waitForStoreWorkStatus(.closing, store: store)
+        try await waitForReviewWorkerCancellation(jobID: "job-1", store: store)
+        #expect(store.reviewWorkerTasks["job-1"]?.isCancelled == true)
+        #expect(store.storeWorkRegistry.activeOrdinals.isEmpty == false)
+        #expect(await awaitCompletion.isComplete() == false)
+
+        await startGate.open()
+        #expect(await close.value == .success)
+        let result = try await review.value
+        let awaitedResult = try await awaiter.value
+
+        #expect(result.core.lifecycle.status == .cancelled)
+        #expect(awaitedResult.core.lifecycle.status == .cancelled)
+        #expect(result.core.lifecycle.cancellation == reason)
+        #expect(store.reviewWorkerTasks["job-1"] == nil)
+        #expect(store.storeWorkRegistry.activeOrdinals.isEmpty)
+        await store.stop()
+    }
+
+    @Test func registeredWorkCloseAppliesPreEntryCancellationPolicy() async throws {
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(
+                reviewBackend: FakeCodexReviewBackend()
+            )
+        )
+        var skippedOperationRan = false
+        var finalizerRan = false
+        var finalizedOperationRan = false
+        let skippedTask = try #require(store.startRegisteredStoreWork(
+            kind: .testing("skip before entry")
+        ) { _ in
+            skippedOperationRan = true
+        })
+        let finalizedTask = try #require(store.startRegisteredStoreWork(
+            kind: .testing("finalize before entry"),
+            cancelledBeforeEntry: .runFinalizer { _ in
+                finalizerRan = true
+            }
+        ) { _ in
+            finalizedOperationRan = true
+        })
+        let closeOperation = store.storeWorkRegistry.beginClosing(onAdmissionClosed: {})
+        let result = await closeOperation.task.value
+        store.storeWorkRegistry.completeClosing(closeOperation, result: result)
+        await skippedTask.value
+        await finalizedTask.value
+
+        #expect(result == .success)
+        #expect(skippedOperationRan == false)
+        #expect(finalizerRan)
+        #expect(finalizedOperationRan == false)
+        #expect(store.storeWorkRegistry.activeOrdinals.isEmpty)
+    }
+
     @Test func staleRuntimeFailureCannotTearDownFreshGeneration() async throws {
         let backend = TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
         let store = CodexReviewStore.makeTestingStore(backend: backend)
@@ -454,6 +649,32 @@ struct CodexReviewStoreLifecycleTests {
     }
 }
 
+private enum StoreWorkTestFailure: LocalizedError, Sendable {
+    case first
+    case second
+
+    var errorDescription: String? {
+        switch self {
+        case .first:
+            "first work failed"
+        case .second:
+            "second work failed"
+        }
+    }
+}
+
+private actor StoreWorkCompletion {
+    private var completed = false
+
+    func complete() {
+        completed = true
+    }
+
+    func isComplete() -> Bool {
+        completed
+    }
+}
+
 @MainActor
 private func waitForCutoverStatus(
     _ expected: CodexReviewSettingsService.RuntimeCutoverStatus,
@@ -477,6 +698,52 @@ private func waitForTeardownFinalState(
     let clock = ContinuousClock()
     let deadline = clock.now + .seconds(2)
     while store.runtimeTeardownFinalState != expected {
+        guard clock.now < deadline else {
+            throw CancellationError()
+        }
+        await Task.yield()
+    }
+}
+
+@MainActor
+private func waitForStoreWorkStatus(
+    _ expected: ReviewStoreWorkRegistryStatus,
+    store: CodexReviewStore
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now + .seconds(2)
+    while store.storeWorkRegistryStatus != expected {
+        guard clock.now < deadline else {
+            throw CancellationError()
+        }
+        await Task.yield()
+    }
+}
+
+@MainActor
+private func waitForReviewWorkerCancellation(
+    jobID: String,
+    store: CodexReviewStore
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now + .seconds(2)
+    while store.reviewWorkerTasks[jobID]?.isCancelled != true {
+        guard clock.now < deadline else {
+            throw CancellationError()
+        }
+        await Task.yield()
+    }
+}
+
+@MainActor
+private func waitForReviewWaiterCount(
+    _ count: Int,
+    jobID: String,
+    store: CodexReviewStore
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now + .seconds(2)
+    while store.reviewTerminalWaiters[jobID]?.count != count {
         guard clock.now < deadline else {
             throw CancellationError()
         }

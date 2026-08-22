@@ -223,10 +223,21 @@ private struct CodexReviewStoreRateLimitAutoRefreshAccountState {
 @MainActor
 extension CodexReviewStore {
     package func startAccountRateLimitAutoRefresh() {
+        guard storeWorkRegistry.acceptsNewWork else {
+            return
+        }
         if accountRateLimitAutoRefreshDriver == nil {
             accountRateLimitAutoRefreshDriver = CodexReviewStoreRateLimitAutoRefreshDriver(store: self)
         }
         accountRateLimitAutoRefreshDriver?.start()
+    }
+
+    package func cancelAccountRateLimitAutoRefreshAndWait() async {
+        guard let driver = accountRateLimitAutoRefreshDriver else {
+            return
+        }
+        accountRateLimitAutoRefreshDriver = nil
+        await driver.cancelAndWait()
     }
 
     package func accountRateLimitAutoRefreshTargets(now: Date) -> [CodexReviewStoreRateLimitAutoRefreshTarget] {
@@ -240,6 +251,9 @@ extension CodexReviewStore {
     }
 
     package func refreshDueAccountRateLimits(now: Date) {
+        guard storeWorkRegistry.acceptsNewWork else {
+            return
+        }
         startAccountRateLimitAutoRefresh()
         accountRateLimitAutoRefreshDriver?.refreshDueAccounts(now: now)
     }
@@ -259,6 +273,7 @@ package final class CodexReviewStoreRateLimitAutoRefreshDriver {
     }
 
     private weak var store: CodexReviewStore?
+    private var admissionIsOpen = true
     private var observation: PortableObservationTracking.Token?
     private var scheduledWakeUp: ScheduledWakeUp?
     private var accountStates: [String: CodexReviewStoreRateLimitAutoRefreshAccountState] = [:]
@@ -291,6 +306,9 @@ package final class CodexReviewStoreRateLimitAutoRefreshDriver {
     }
 
     func start() {
+        guard admissionIsOpen else {
+            return
+        }
         guard observation == nil else {
             syncLatestTargets()
             return
@@ -306,6 +324,7 @@ package final class CodexReviewStoreRateLimitAutoRefreshDriver {
     }
 
     func cancel() {
+        admissionIsOpen = false
         observation?.cancel()
         observation = nil
         scheduledWakeUp?.task.cancel()
@@ -316,15 +335,39 @@ package final class CodexReviewStoreRateLimitAutoRefreshDriver {
         accountStates.removeAll(keepingCapacity: false)
     }
 
+    func closeAdmission() {
+        admissionIsOpen = false
+    }
+
+    func cancelAndWait() async {
+        admissionIsOpen = false
+        observation?.cancel()
+        observation = nil
+        let wakeUpTask = scheduledWakeUp?.task
+        scheduledWakeUp = nil
+        let refreshTasks = accountStates.keys.sorted().compactMap {
+            accountStates[$0]?.refreshTask
+        }
+        wakeUpTask?.cancel()
+        for task in refreshTasks {
+            task.cancel()
+        }
+        await wakeUpTask?.value
+        for task in refreshTasks {
+            await task.value
+        }
+        accountStates.removeAll(keepingCapacity: false)
+    }
+
     func refreshDueAccounts(now: Date) {
-        guard let store else {
+        guard admissionIsOpen, let store else {
             return
         }
         syncTargets(store.accountRateLimitAutoRefreshTargets(now: now), now: now)
     }
 
     private func syncLatestTargets() {
-        guard let store else {
+        guard admissionIsOpen, let store else {
             return
         }
         let now = store.clock.now()
@@ -338,6 +381,9 @@ package final class CodexReviewStoreRateLimitAutoRefreshDriver {
         _ targets: [CodexReviewStoreRateLimitAutoRefreshTarget],
         now: Date
     ) {
+        guard admissionIsOpen else {
+            return
+        }
         let targets = scheduledTargets(from: targets, now: now)
         for target in targets {
             guard accountStates[target.accountKey]?.isRefreshing != true else {
@@ -404,48 +450,64 @@ package final class CodexReviewStoreRateLimitAutoRefreshDriver {
         }
         scheduledWakeUp?.task.cancel()
         let delay = max(0, dueAt.timeIntervalSince(now))
+        guard let store,
+              let task = store.startRegisteredStoreWork(
+                  kind: .rateLimitWakeUp,
+                  operation: { @MainActor [weak self] _ in
+                      if delay > 0 {
+                          try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                      }
+                      guard Task.isCancelled == false else {
+                          return
+                      }
+                      self?.scheduledWakeUp = nil
+                      self?.syncLatestTargets()
+                  }
+              )
+        else {
+            scheduledWakeUp = nil
+            return
+        }
         scheduledWakeUp = .init(
             dueAt: dueAt,
-            task: Task { @MainActor [weak self] in
-                if delay > 0 {
-                    try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-                }
-                guard Task.isCancelled == false else {
-                    return
-                }
-                self?.scheduledWakeUp = nil
-                self?.syncLatestTargets()
-            }
+            task: task
         )
     }
 
     private func startRefresh(accountKey: String) {
-        guard accountStates[accountKey]?.isRefreshing != true else {
+        guard admissionIsOpen,
+              accountStates[accountKey]?.isRefreshing != true,
+              let store,
+              let task = store.startRegisteredStoreWork(
+                  kind: .rateLimitRefresh(accountKey: accountKey),
+                  operation: { @MainActor [weak self] store in
+                      guard let self else {
+                          return
+                      }
+                      let lastFetchAtBeforeRefresh = store.auth.accounts
+                          .first(where: { $0.accountKey == accountKey })?
+                          .lastRateLimitFetchAt
+                      await store.refreshAccountRateLimits(accountKey: accountKey)
+                      guard Task.isCancelled == false else {
+                          return
+                      }
+                      let lastFetchAtAfterRefresh = store.auth.accounts
+                          .first(where: { $0.accountKey == accountKey })?
+                          .lastRateLimitFetchAt
+                      var state = self.accountStates[accountKey] ?? .init()
+                      state.recordRefreshCompletion(
+                          lastFetchAtBeforeRefresh: lastFetchAtBeforeRefresh,
+                          lastFetchAtAfterRefresh: lastFetchAtAfterRefresh,
+                          now: store.clock.now(),
+                          retryDelay: Self.policy.noProgressRefreshRetryDelay
+                      )
+                      self.accountStates[accountKey] = state
+                      self.syncLatestTargets()
+                  }
+              )
+        else {
             return
         }
-        accountStates[accountKey, default: .init()].refreshTask = Task { @MainActor [weak self, weak store] in
-            guard let self, let store else {
-                return
-            }
-            let lastFetchAtBeforeRefresh = store.auth.accounts
-                .first(where: { $0.accountKey == accountKey })?
-                .lastRateLimitFetchAt
-            await store.refreshAccountRateLimits(accountKey: accountKey)
-            guard Task.isCancelled == false else {
-                return
-            }
-            let lastFetchAtAfterRefresh = store.auth.accounts
-                .first(where: { $0.accountKey == accountKey })?
-                .lastRateLimitFetchAt
-            var state = self.accountStates[accountKey] ?? .init()
-            state.recordRefreshCompletion(
-                lastFetchAtBeforeRefresh: lastFetchAtBeforeRefresh,
-                lastFetchAtAfterRefresh: lastFetchAtAfterRefresh,
-                now: store.clock.now(),
-                retryDelay: Self.policy.noProgressRefreshRetryDelay
-            )
-            self.accountStates[accountKey] = state
-            self.syncLatestTargets()
-        }
+        accountStates[accountKey, default: .init()].refreshTask = task
     }
 }

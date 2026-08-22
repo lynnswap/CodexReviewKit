@@ -42,10 +42,11 @@ public final class CodexReviewStore {
     @ObservationIgnored package var startingJobIDs: Set<String> = []
     @ObservationIgnored package var startupCancellations: [String: ReviewCancellation] = [:]
     @ObservationIgnored package var reviewWorkerTasks: [String: Task<Void, Never>] = [:]
-    @ObservationIgnored package var runtimeStopDetachedReviewWorkerTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored package var reviewWorkerCleanupJobIDs: Set<String> = []
     @ObservationIgnored package var reviewTerminalWaiters: [String: [ReviewTerminalWaiter]] = [:]
     @ObservationIgnored package var closedSessions: Set<String> = []
     @ObservationIgnored package var accountRateLimitAutoRefreshDriver: CodexReviewStoreRateLimitAutoRefreshDriver?
+    @ObservationIgnored package let storeWorkRegistry = ReviewStoreWorkRegistry()
     @ObservationIgnored package var runtimeState: ReviewStoreRuntimeState = .stopped(
         .init(rawValue: 0)
     )
@@ -90,6 +91,7 @@ public final class CodexReviewStore {
 
     isolated deinit {
         accountRateLimitAutoRefreshDriver?.cancel()
+        storeWorkRegistry.cancelWithoutWaiting()
         switch runtimeState {
         case .acquiring(_, _, let task),
              .replacing(_, _, _, let task),
@@ -99,9 +101,6 @@ public final class CodexReviewStore {
             break
         }
         for task in reviewWorkerTasks.values {
-            task.cancel()
-        }
-        for task in runtimeStopDetachedReviewWorkerTasks.values {
             task.cancel()
         }
         for waiters in reviewTerminalWaiters.values {
@@ -407,6 +406,97 @@ public final class CodexReviewStore {
             await task.value
         }
         await backend.waitUntilStopped()
+    }
+
+    package var storeWorkRegistryStatus: ReviewStoreWorkRegistryStatus {
+        storeWorkRegistry.status
+    }
+
+    package func closeRegisteredStoreWork(
+        reason: ReviewCancellation
+    ) async -> ReviewStoreWorkDrainResult {
+        let operation = storeWorkRegistry.beginClosing { [self] in
+            recordActiveReviewCancellationRequestsForRuntimeStop(reason: reason)
+            accountRateLimitAutoRefreshDriver?.closeAdmission()
+        }
+        let result = await operation.task.value
+        await cancelAccountRateLimitAutoRefreshAndWait()
+        storeWorkRegistry.completeClosing(operation, result: result)
+        return result
+    }
+
+    package func startRegisteredStoreWork(
+        kind: ReviewStoreWorkKind,
+        cancelledBeforeEntry: ReviewStoreWorkCancelledBeforeEntryPolicy = .skip,
+        operation: @escaping @MainActor @Sendable (CodexReviewStore) async -> Void
+    ) -> Task<Void, Never>? {
+        guard let admission = storeWorkRegistry.register(kind) else {
+            return nil
+        }
+        let task = Task<Void, Never> { @MainActor [weak self] in
+            defer {
+                self?.storeWorkRegistry.finish(admission)
+            }
+            guard let self else {
+                return
+            }
+            if storeWorkRegistry.acceptsNewWork == false {
+                switch cancelledBeforeEntry {
+                case .skip:
+                    return
+                case .runFinalizer(let finalizer):
+                    finalizer(self)
+                    return
+                }
+            }
+            await operation(self)
+        }
+        storeWorkRegistry.install(task, for: admission)
+        return task
+    }
+
+    package func performRegisteredStoreWork(
+        kind: ReviewStoreWorkKind,
+        operation: @escaping @MainActor @Sendable (CodexReviewStore) async -> Void
+    ) async {
+        guard let task = startRegisteredStoreWork(
+            kind: kind,
+            operation: operation
+        ) else {
+            return
+        }
+        await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    package func performThrowingRegisteredStoreWork<Value: Sendable>(
+        kind: ReviewStoreWorkKind,
+        operation: @escaping @MainActor @Sendable (CodexReviewStore) async throws -> Value
+    ) async throws -> Value {
+        guard let admission = storeWorkRegistry.register(kind) else {
+            throw CodexReviewAPI.Error.io("Review Store work admission is closed.")
+        }
+        let task = Task<Value, any Error> { @MainActor [weak self] in
+            guard let self else {
+                throw CancellationError()
+            }
+            if self.storeWorkRegistry.acceptsNewWork == false {
+                throw CancellationError()
+            }
+            return try await operation(self)
+        }
+        storeWorkRegistry.install(task, for: admission)
+        defer {
+            storeWorkRegistry.finish(admission)
+        }
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
     }
 
     private func beginRuntimeAcquisition(
@@ -736,7 +826,7 @@ public final class CodexReviewStore {
             reason: intent.reviewCancellation,
             cancelWorkers: false
         )
-        cancelAndDetachReviewWorkersForRuntimeStop(
+        await cancelAndAwaitReviewWorkersForRuntimeStop(
             jobIDs: Array(Set(locallyCancelledJobIDs + remainingLocallyCancelledJobIDs))
         )
     }
@@ -895,6 +985,9 @@ public final class CodexReviewStore {
     }
 
     package func requestSwitchAccount(_ account: CodexAccount, requiresConfirmation: Bool) {
+        guard storeWorkRegistry.acceptsNewWork else {
+            return
+        }
         auth.requestSwitchAccount(account, requiresConfirmation: requiresConfirmation)
         guard requiresConfirmation == false else {
             return
@@ -903,6 +996,9 @@ public final class CodexReviewStore {
     }
 
     package func requestSwitchAccountFromUserAction(_ account: CodexAccount) {
+        guard storeWorkRegistry.acceptsNewWork else {
+            return
+        }
         requestSwitchAccount(
             account,
             requiresConfirmation: hasRunningJobs
@@ -911,6 +1007,9 @@ public final class CodexReviewStore {
     }
 
     package func requestSignOutActiveAccount(requiresConfirmation: Bool) {
+        guard storeWorkRegistry.acceptsNewWork else {
+            return
+        }
         auth.requestSignOutActiveAccount(requiresConfirmation: requiresConfirmation)
         guard requiresConfirmation == false else {
             return
@@ -919,6 +1018,9 @@ public final class CodexReviewStore {
     }
 
     package func requestRemoveAccount(_ account: CodexAccount, requiresConfirmation: Bool) {
+        guard storeWorkRegistry.acceptsNewWork else {
+            return
+        }
         auth.requestRemoveAccount(account, requiresConfirmation: requiresConfirmation)
         guard requiresConfirmation == false else {
             return
@@ -927,23 +1029,23 @@ public final class CodexReviewStore {
     }
 
     package func confirmPendingAccountAction() {
+        guard storeWorkRegistry.acceptsNewWork else {
+            return
+        }
         guard let action = auth.consumePendingAccountAction() else {
             return
         }
-        Task { @MainActor [weak self] in
-            guard let self else {
-                return
-            }
+        _ = startRegisteredStoreWork(kind: .accountAction) { @MainActor store in
             do {
-                try await self.executePendingAccountAction(action)
-                if let warningMessage = self.auth.warningMessage {
-                    self.auth.presentAccountActionAlert(
+                try await store.executePendingAccountAction(action)
+                if let warningMessage = store.auth.warningMessage {
+                    store.auth.presentAccountActionAlert(
                         title: "Account Updated With Warning",
                         message: warningMessage
                     )
                 }
             } catch {
-                self.auth.presentAccountActionAlert(
+                store.auth.presentAccountActionAlert(
                     title: action.failureTitle,
                     message: error.localizedDescription
                 )
@@ -952,10 +1054,16 @@ public final class CodexReviewStore {
     }
 
     package func cancelPendingAccountAction() {
+        guard storeWorkRegistry.acceptsNewWork else {
+            return
+        }
         auth.cancelPendingAccountAction()
     }
 
     package func dismissAccountActionAlert() {
+        guard storeWorkRegistry.acceptsNewWork else {
+            return
+        }
         auth.dismissAccountActionAlert()
     }
 

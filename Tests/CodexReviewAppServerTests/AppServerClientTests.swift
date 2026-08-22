@@ -6808,7 +6808,56 @@ struct AppServerClientTests {
     }
 
     @Test @MainActor
-    func storeRuntimeStopDetachmentFinalizesResultWithoutWaitingForDetachedWorker() async throws {
+    func runtimeStopInitialWorkerSnapshotJoinsTerminalCleanup() async throws {
+        let backend = FakeCodexReviewBackend()
+        let cleanupGate = AsyncGate()
+        await backend.holdCleanupReview(with: cleanupGate)
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        let initial = try await store.startReview(
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+            waitTimeout: .zero
+        )
+        #expect(initial.core.lifecycle.status == .running)
+        let admittedJobIDs = store.recordActiveReviewCancellationRequestsForRuntimeStop(
+            reason: .system(message: "Review runtime stopped.")
+        )
+        await backend.yield(.failed("terminal before cleanup"))
+        let cleanupStarted = await waitUntilOnMainActor {
+            await backend.recordedCommands().contains(.cleanupReview(.init(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                reviewThreadID: "review-thread-1"
+            )))
+        }
+        #expect(cleanupStarted)
+        #expect(try store.readReview(jobID: "job-1").core.lifecycle.status == .failed)
+
+        let completion = CompletionProbe()
+        let join = Task { @MainActor in
+            await store.cancelAndAwaitReviewWorkersForRuntimeStop(
+                jobIDs: admittedJobIDs
+            )
+            await completion.recordCompletion()
+        }
+        await Task.yield()
+
+        #expect(await completion.hasCompleted() == false)
+        #expect(store.reviewWorkerTasks["job-1"] != nil)
+        await cleanupGate.open()
+        await join.value
+
+        #expect(await completion.hasCompleted())
+        #expect(store.reviewWorkerTasks["job-1"] == nil)
+        await backend.finishEventMailboxes()
+        await store.cancelAndDrainReviewWorkersForTesting()
+    }
+
+    @Test @MainActor
+    func storeRuntimeStopJoinsHeldWorkerBeforeFinalizingResult() async throws {
         let backend = FakeCodexReviewBackend()
         let startGate = AsyncGate()
         await backend.holdStartReviewIgnoringCancellation(with: startGate)
@@ -6833,14 +6882,22 @@ struct AppServerClientTests {
             cancelWorkers: false
         )
         #expect(store.reviewTerminalWaiters["job-1"]?.count == 1)
-        store.cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: jobIDs)
+        let join = Task { @MainActor in
+            await store.cancelAndAwaitReviewWorkersForRuntimeStop(jobIDs: jobIDs)
+        }
+        let workerCancellationStarted = await waitUntilOnMainActor {
+            store.reviewWorkerTasks["job-1"]?.isCancelled == true
+        }
 
-        #expect(store.reviewTerminalWaiters["job-1"] == nil)
-        #expect(store.runtimeStopDetachedReviewWorkerTasks["job-1"] != nil)
-        #expect(try await result.value.core.lifecycle.status == .cancelled)
+        #expect(workerCancellationStarted)
+        #expect(store.reviewTerminalWaiters["job-1"]?.count == 1)
+        #expect(store.reviewWorkerTasks["job-1"] != nil)
 
         await startGate.open()
-        #expect(await store.drainRuntimeStopDetachedReviewWorkers(timeout: .seconds(2)))
+        await join.value
+        #expect(store.reviewTerminalWaiters["job-1"] == nil)
+        #expect(store.reviewWorkerTasks["job-1"] == nil)
+        #expect(try await result.value.core.lifecycle.status == .cancelled)
         await backend.finishEventMailboxes()
         await store.cancelAndDrainReviewWorkersForTesting()
     }
