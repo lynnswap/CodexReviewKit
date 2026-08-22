@@ -106,6 +106,35 @@ struct MCPHTTPNetworkResourceOwnerTests {
         await closing.waitUntilClosed()
     }
 
+    @Test func finalRequestAdmissionAtomicallyClosesFutureAdmission() async throws {
+        let owner = MCPHTTPNetworkResourceOwner(generationID: 9)
+        let resource = TestingConnectionResource()
+        let connection = try #require(owner.admitConnection(resource))
+
+        let admitted = try #require(connection.admitRequest(finalForConnection: true))
+
+        let snapshot = try #require(owner.snapshot().connections.first)
+        #expect(snapshot.phase == .admissionClosed)
+        #expect(snapshot.requests.map(\.id) == [admitted.operation.id])
+        #expect(connection.admitRequest(finalForConnection: false) == nil)
+
+        let task = Task {
+            defer {
+                admitted.lease.acknowledgeCompletion()
+            }
+            guard await admitted.lease.waitUntilStartIsAllowed() else {
+                return
+            }
+        }
+        admitted.lease.install(task)
+        await task.value
+
+        let closing = owner.beginClosing(.serverStop)
+        await resource.waitUntilCloseIsSignalled()
+        resource.acknowledgeClose()
+        await closing.waitUntilClosed()
+    }
+
     @Test func transportFailureWinsPeerCloseAndDrainsItsRequest() async throws {
         let owner = MCPHTTPNetworkResourceOwner(generationID: 4)
         let resource = TestingConnectionResource()

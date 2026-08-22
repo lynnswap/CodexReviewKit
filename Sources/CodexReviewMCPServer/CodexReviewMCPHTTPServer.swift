@@ -84,13 +84,15 @@ package extension CodexReviewMCPHTTPServer {
         package var retryInterval: Int?
         package var streamHeartbeatInterval: Duration?
         package var boundedReviewWaitDuration: Duration
+        package var maximumRequestBodyBytes: Int
 
         package init(
             host: String = "localhost",
             port: Int = 9417,
             endpoint: String = "/mcp",
             sessionTimeout: TimeInterval = 3600,
-            retryInterval: Int? = 1000
+            retryInterval: Int? = 1000,
+            maximumRequestBodyBytes: Int = 1_048_576
         ) {
             self.init(
                 host: host,
@@ -99,7 +101,8 @@ package extension CodexReviewMCPHTTPServer {
                 sessionTimeout: sessionTimeout,
                 retryInterval: retryInterval,
                 streamHeartbeatInterval: .seconds(30),
-                boundedReviewWaitDuration: .seconds(540)
+                boundedReviewWaitDuration: .seconds(540),
+                maximumRequestBodyBytes: maximumRequestBodyBytes
             )
         }
 
@@ -110,8 +113,13 @@ package extension CodexReviewMCPHTTPServer {
             sessionTimeout: TimeInterval = 3600,
             retryInterval: Int? = 1000,
             streamHeartbeatInterval: Duration?,
-            boundedReviewWaitDuration: Duration = .seconds(540)
+            boundedReviewWaitDuration: Duration = .seconds(540),
+            maximumRequestBodyBytes: Int = 1_048_576
         ) {
+            precondition(
+                maximumRequestBodyBytes >= 0,
+                "MCP HTTP Configuration owns a nonnegative request-body byte limit."
+            )
             self.host = host
             self.port = port
             self.endpoint = endpoint.hasPrefix("/") ? endpoint : "/\(endpoint)"
@@ -119,6 +127,7 @@ package extension CodexReviewMCPHTTPServer {
             self.retryInterval = retryInterval
             self.streamHeartbeatInterval = streamHeartbeatInterval
             self.boundedReviewWaitDuration = boundedReviewWaitDuration
+            self.maximumRequestBodyBytes = maximumRequestBodyBytes
         }
 
         package func url(boundPort: Int? = nil) -> URL {
@@ -400,6 +409,7 @@ package actor CodexReviewMCPHTTPServer {
         networkResources: MCPHTTPNetworkResourceOwner
     ) async -> StartingGenerationResult {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let maximumRequestBodyBytes = configuration.maximumRequestBodyBytes
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 128)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
@@ -410,7 +420,8 @@ package actor CodexReviewMCPHTTPServer {
                 return channel.pipeline.configureHTTPServerPipeline().flatMap {
                     channel.pipeline.addHandler(CodexReviewMCPHTTPHandler(
                         server: self,
-                        connection: connection
+                        connection: connection,
+                        maximumRequestBodyBytes: maximumRequestBodyBytes
                     ))
                 }
             }
@@ -864,6 +875,19 @@ package actor CodexReviewMCPHTTPServer {
         }
     }
 
+    package func networkResourceSnapshotForTesting() -> MCPHTTPNetworkResourceOwner.Snapshot? {
+        switch lifecycleState {
+        case .starting(let operation):
+            operation.networkResources.snapshot()
+        case .running(let resources):
+            resources.networkResources.snapshot()
+        case .stopping(_, let resources?, _):
+            resources.networkResources.snapshot()
+        case .stopping, .stopped:
+            nil
+        }
+    }
+
     package func eventLoopGroupShutdownCountForTesting() -> Int {
         eventLoopGroupShutdownCount
     }
@@ -1185,6 +1209,103 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
 
+    private enum RequestBodyResult: Sendable {
+        case body(Data?)
+        case payloadTooLarge
+        case expectationFailed
+        case cancelled
+    }
+
+    private final class RequestBodyReceipt: @unchecked Sendable {
+        private let maximumByteCount: Int
+        private let lock = NSLock()
+        private var body = Data()
+        private var result: RequestBodyResult?
+        private var waiter: CheckedContinuation<RequestBodyResult, Never>?
+
+        init(maximumByteCount: Int) {
+            self.maximumByteCount = maximumByteCount
+        }
+
+        func receive(_ buffer: ByteBuffer) -> Bool {
+            let readableByteCount = buffer.readableBytes
+            guard readableByteCount > 0 else {
+                return false
+            }
+
+            lock.lock()
+            guard result == nil else {
+                lock.unlock()
+                return false
+            }
+            guard readableByteCount <= maximumByteCount - body.count else {
+                lock.unlock()
+                return true
+            }
+            body.append(contentsOf: buffer.readableBytesView)
+            lock.unlock()
+            return false
+        }
+
+        func finish() {
+            let outcome: RequestBodyResult
+            lock.lock()
+            guard result == nil else {
+                lock.unlock()
+                return
+            }
+            outcome = .body(body.isEmpty ? nil : body)
+            result = outcome
+            body.removeAll(keepingCapacity: false)
+            let continuation = waiter
+            waiter = nil
+            lock.unlock()
+            continuation?.resume(returning: outcome)
+        }
+
+        func reject(_ outcome: RequestBodyResult) {
+            let continuation: CheckedContinuation<RequestBodyResult, Never>?
+            lock.lock()
+            guard result == nil else {
+                lock.unlock()
+                return
+            }
+            result = outcome
+            body.removeAll(keepingCapacity: false)
+            continuation = waiter
+            waiter = nil
+            lock.unlock()
+            continuation?.resume(returning: outcome)
+        }
+
+        func waitForResult() async -> RequestBodyResult {
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    lock.lock()
+                    if let result {
+                        lock.unlock()
+                        continuation.resume(returning: result)
+                    } else {
+                        precondition(
+                            waiter == nil,
+                            "One request operation owns the body receipt waiter."
+                        )
+                        waiter = continuation
+                        lock.unlock()
+                    }
+                }
+            } onCancel: {
+                self.reject(.cancelled)
+            }
+        }
+    }
+
+    private enum RequestExpectation: Equatable {
+        case none
+        case continueRequest
+        case unsupported
+    }
+
     private struct ResponsePartWriter: @unchecked Sendable {
         let handler: CodexReviewMCPHTTPHandler
         let context: ChannelHandlerContext
@@ -1207,12 +1328,12 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
     }
 
     private struct RequestState {
-        var head: HTTPRequestHead
-        var bodyBuffer: ByteBuffer
+        var bodyReceipt: RequestBodyReceipt
     }
 
     private let server: CodexReviewMCPHTTPServer
     private let connection: MCPHTTPNetworkResourceOwner.Connection
+    private let maximumRequestBodyBytes: Int
     private var requestState: RequestState?
     private var activeStreamTask: Task<Void, Never>?
     private var activeStreamID: UUID?
@@ -1220,43 +1341,132 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
 
     init(
         server: CodexReviewMCPHTTPServer,
-        connection: MCPHTTPNetworkResourceOwner.Connection
+        connection: MCPHTTPNetworkResourceOwner.Connection,
+        maximumRequestBodyBytes: Int
     ) {
         self.server = server
         self.connection = connection
+        self.maximumRequestBodyBytes = maximumRequestBodyBytes
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let part = unwrapInboundIn(data)
         switch part {
         case .head(let head):
-            requestState = RequestState(
-                head: head,
-                bodyBuffer: context.channel.allocator.buffer(capacity: 0)
-            )
-        case .body(var buffer):
-            requestState?.bodyBuffer.writeBuffer(&buffer)
+            receiveRequestHead(head, context: context)
+        case .body(let buffer):
+            if requestState?.bodyReceipt.receive(buffer) == true {
+                connection.closeAdmission()
+                requestState?.bodyReceipt.reject(.payloadTooLarge)
+            }
         case .end:
-            guard let state = requestState else {
-                return
-            }
+            let receipt = requestState?.bodyReceipt
             requestState = nil
-            guard let admittedRequest = connection.admitRequest() else {
-                context.close(promise: nil)
+            receipt?.finish()
+        }
+    }
+
+    private func receiveRequestHead(
+        _ head: HTTPRequestHead,
+        context: ChannelHandlerContext
+    ) {
+        let expectation = requestExpectation(for: head)
+        let contentLengthExceedsLimit = contentLengthExceedsLimit(head)
+        let rejection: RequestBodyResult?
+        if contentLengthExceedsLimit {
+            rejection = .payloadTooLarge
+        } else if expectation == .unsupported {
+            rejection = .expectationFailed
+        } else {
+            rejection = nil
+        }
+        let shouldSendContinue = expectation == .continueRequest && rejection == nil
+        let finalForConnection = head.isKeepAlive == false || rejection != nil
+        guard let admittedRequest = connection.admitRequest(
+            finalForConnection: finalForConnection
+        ) else {
+            context.close(promise: nil)
+            return
+        }
+
+        let bodyReceipt = RequestBodyReceipt(maximumByteCount: maximumRequestBodyBytes)
+        requestState = .init(bodyReceipt: bodyReceipt)
+        nonisolated(unsafe) let context = context
+        let task = Task { [self] in
+            defer {
+                bodyReceipt.reject(.cancelled)
+                admittedRequest.lease.acknowledgeCompletion()
+            }
+            guard await admittedRequest.lease.waitUntilStartIsAllowed() else {
                 return
             }
-            nonisolated(unsafe) let context = context
-            let task = Task { [self] in
-                defer {
-                    admittedRequest.lease.acknowledgeCompletion()
-                }
-                guard await admittedRequest.lease.waitUntilStartIsAllowed() else {
+            if shouldSendContinue {
+                do {
+                    let responseHead = HTTPResponseHead(version: head.version, status: .continue)
+                    try await writeResponsePart(
+                        .head(responseHead),
+                        context: context,
+                        eventLoop: context.eventLoop
+                    )
+                } catch {
+                    connection.transportFailed(error.localizedDescription)
                     return
                 }
-                await handleRequest(state: state, context: context)
             }
-            admittedRequest.lease.install(task)
+            let bodyResult = await bodyReceipt.waitForResult()
+            guard Task.isCancelled == false else {
+                return
+            }
+            switch bodyResult {
+            case .body(let body):
+                await handleRequest(head: head, body: body, context: context)
+            case .payloadTooLarge:
+                await writeRequestRejection(
+                    status: .payloadTooLarge,
+                    version: head.version,
+                    context: context
+                )
+            case .expectationFailed:
+                await writeRequestRejection(
+                    status: .expectationFailed,
+                    version: head.version,
+                    context: context
+                )
+            case .cancelled:
+                return
+            }
         }
+        admittedRequest.lease.install(task)
+
+        if let rejection {
+            bodyReceipt.reject(rejection)
+        }
+    }
+
+    private func contentLengthExceedsLimit(_ head: HTTPRequestHead) -> Bool {
+        guard let rawValue = head.headers.first(name: "content-length") else {
+            return false
+        }
+        guard let contentLength = UInt64(rawValue) else {
+            return true
+        }
+        return contentLength > UInt64(maximumRequestBodyBytes)
+    }
+
+    private func requestExpectation(for head: HTTPRequestHead) -> RequestExpectation {
+        guard head.version.major == 1, head.version.minor >= 1 else {
+            return .none
+        }
+        let values = head.headers[canonicalForm: "expect"]
+        guard values.isEmpty == false else {
+            return .none
+        }
+        guard values.count == 1,
+              String(values[0]).caseInsensitiveCompare("100-continue") == .orderedSame
+        else {
+            return .unsupported
+        }
+        return .continueRequest
     }
 
     func channelReadComplete(context: ChannelHandlerContext) {
@@ -1265,6 +1475,8 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
     }
 
     func channelInactive(context: ChannelHandlerContext) {
+        requestState?.bodyReceipt.reject(.cancelled)
+        requestState = nil
         connection.peerClosed()
         finishActiveStream()
         context.fireChannelInactive()
@@ -1272,6 +1484,8 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
 
     func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
         if case ChannelEvent.inputClosed = event {
+            requestState?.bodyReceipt.reject(.cancelled)
+            requestState = nil
             connection.peerClosed()
             finishActiveStream()
             context.close(promise: nil)
@@ -1281,6 +1495,8 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
     }
 
     func errorCaught(context: ChannelHandlerContext, error: any Error) {
+        requestState?.bodyReceipt.reject(.cancelled)
+        requestState = nil
         connection.transportFailed(error.localizedDescription)
         finishActiveStream()
         context.close(promise: nil)
@@ -1295,10 +1511,10 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
     }
 
     private func handleRequest(
-        state: RequestState,
+        head: HTTPRequestHead,
+        body: Data?,
         context: ChannelHandlerContext
     ) async {
-        let head = state.head
         let path = head.uri.split(separator: "?").first.map(String.init) ?? head.uri
         let endpoint = await server.endpoint
         guard path == endpoint else {
@@ -1310,14 +1526,14 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
             return
         }
 
-        let request = makeHTTPRequest(from: state)
+        let request = makeHTTPRequest(head: head, body: body)
         let response = await server.handleTrackedHTTPRequest(request)
         await writeResponse(response, version: head.version, context: context)
     }
 
-    private func makeHTTPRequest(from state: RequestState) -> HTTPRequest {
+    private func makeHTTPRequest(head: HTTPRequestHead, body: Data?) -> HTTPRequest {
         var headers: [String: String] = [:]
-        for (name, value) in state.head.headers {
+        for (name, value) in head.headers {
             if let existing = headers[name] {
                 headers[name] = "\(existing), \(value)"
             } else {
@@ -1325,22 +1541,34 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
             }
         }
 
-        let body: Data?
-        if state.bodyBuffer.readableBytes > 0,
-           let bytes = state.bodyBuffer.getBytes(at: 0, length: state.bodyBuffer.readableBytes)
-        {
-            body = Data(bytes)
-        } else {
-            body = nil
-        }
-
-        let path = String(state.head.uri.split(separator: "?").first ?? Substring(state.head.uri))
+        let path = String(head.uri.split(separator: "?").first ?? Substring(head.uri))
         return HTTPRequest(
-            method: state.head.method.rawValue,
+            method: head.method.rawValue,
             headers: headers,
             body: body,
             path: path
         )
+    }
+
+    private func writeRequestRejection(
+        status: HTTPResponseStatus,
+        version: HTTPVersion,
+        context: ChannelHandlerContext
+    ) async {
+        nonisolated(unsafe) let context = context
+        let eventLoop = context.eventLoop
+        var head = HTTPResponseHead(version: version, status: status)
+        head.headers.add(name: "Content-Length", value: "0")
+        head.headers.add(name: "Connection", value: "close")
+        do {
+            try await writeResponsePart(.head(head), context: context, eventLoop: eventLoop)
+            try await writeResponsePart(.end(nil), context: context, eventLoop: eventLoop)
+        } catch {
+            logger.error("MCP request rejection write failed: \(error.localizedDescription, privacy: .public)")
+        }
+        eventLoop.execute {
+            context.close(promise: nil)
+        }
     }
 
     private func writeResponse(

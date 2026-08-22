@@ -389,6 +389,329 @@ struct CodexReviewMCPHTTPServerTests {
         try await server.stop()
     }
 
+    @Test func slowFirstPOSTKeepsPipelinedSecondMutationOutsideAdmission() async throws {
+        let backend = FakeCodexReviewBackend()
+        let startGate = AsyncGate()
+        await backend.holdStartReview(with: startGate)
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+
+        try await withHTTPServer(store: store) { server in
+            let endpoint = await server.url
+            let sessionID = try await initializeSession(endpoint: endpoint)
+            let connection = try await RawHTTPConnection.connect(to: endpoint)
+            defer { connection.close() }
+            let first = try makeReviewStartBody(id: 2)
+            let second = try makeReviewStartBody(id: 3)
+
+            try await connection.send(
+                rawHTTPRequest(endpoint: endpoint, sessionID: sessionID, body: first)
+                    + rawHTTPRequest(endpoint: endpoint, sessionID: sessionID, body: second)
+            )
+            try await backend.waitForStartReview(timeout: .seconds(2))
+
+            let snapshot = try #require(await server.networkResourceSnapshotForTesting())
+            #expect(snapshot.connections.flatMap(\.requests).count == 1)
+            #expect(await backend.recordedCommands().filter {
+                if case .startReview = $0 { true } else { false }
+            }.count == 1)
+
+            connection.close()
+            await startGate.open()
+        }
+    }
+
+    @Test func openGETKeepsSameConnectionPOSTOutsideAdmission() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+
+        try await withHTTPServer(store: store) { server in
+            let endpoint = await server.url
+            let sessionID = try await initializeSession(endpoint: endpoint)
+            let connection = try await RawHTTPConnection.connect(to: endpoint)
+            defer { connection.close() }
+            let get = try rawHTTPRequest(
+                endpoint: endpoint,
+                method: "GET",
+                sessionID: sessionID,
+                headers: [("Accept", "text/event-stream, application/json")]
+            )
+            let post = try rawHTTPRequest(
+                endpoint: endpoint,
+                sessionID: sessionID,
+                body: makeReviewStartBody(id: 2)
+            )
+
+            try await connection.send(get + post)
+            #expect(try await connection.readResponseHead().contains(" 200 "))
+
+            let snapshot = try #require(await server.networkResourceSnapshotForTesting())
+            #expect(snapshot.connections.flatMap(\.requests).count == 1)
+            #expect(await backend.recordedCommands().isEmpty)
+        }
+    }
+
+    @Test func sameSessionDifferentConnectionsRemainParallel() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+
+        try await withHTTPServer(store: store) { server in
+            let endpoint = await server.url
+            let sessionID = try await initializeSession(endpoint: endpoint)
+            let streamConnection = try await RawHTTPConnection.connect(to: endpoint)
+            defer { streamConnection.close() }
+            try await streamConnection.send(rawHTTPRequest(
+                endpoint: endpoint,
+                method: "GET",
+                sessionID: sessionID,
+                headers: [("Accept", "text/event-stream, application/json")]
+            ))
+            #expect(try await streamConnection.readResponseHead().contains(" 200 "))
+
+            async let response = postJSONRPCData(
+                endpoint: endpoint,
+                sessionID: sessionID,
+                bodyData: makeReviewStartBody(id: 2)
+            )
+            try await backend.waitForStartReview(timeout: .seconds(2))
+            await backend.yield(.completed(summary: "Done", result: "review text"))
+            _ = try await response
+
+            #expect(await backend.recordedCommands().contains {
+                if case .startReview = $0 { true } else { false }
+            })
+        }
+    }
+
+    @Test func nonKeepAliveRequestRejectsPipelinedMutationBeforeDomainAdmission() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+
+        try await withHTTPServer(store: store) { server in
+            let endpoint = await server.url
+            let sessionID = try await initializeSession(endpoint: endpoint)
+            let connection = try await RawHTTPConnection.connect(to: endpoint)
+            defer { connection.close() }
+            let first = try rawHTTPRequest(
+                endpoint: endpoint,
+                sessionID: sessionID,
+                headers: [("Connection", "close")],
+                body: makeToolsListBody(id: 2)
+            )
+            let mutation = try rawHTTPRequest(
+                endpoint: endpoint,
+                sessionID: sessionID,
+                body: makeReviewStartBody(id: 3)
+            )
+
+            try await connection.send(first + mutation)
+            #expect(try await connection.readResponseHead().contains(" 200 "))
+            _ = try await connection.readUntilEOF()
+
+            #expect(await backend.recordedCommands().isEmpty)
+        }
+    }
+
+    @Test func oneConnectionOwnsOnlyOneOfManyPipelinedRequests() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+
+        try await withHTTPServer(store: store) { server in
+            let endpoint = await server.url
+            let sessionID = try await initializeSession(endpoint: endpoint)
+            let connection = try await RawHTTPConnection.connect(to: endpoint)
+            defer { connection.close() }
+            var requests = try rawHTTPRequest(
+                endpoint: endpoint,
+                method: "GET",
+                sessionID: sessionID,
+                headers: [("Accept", "text/event-stream, application/json")]
+            )
+            for id in 2..<34 {
+                requests += try rawHTTPRequest(
+                    endpoint: endpoint,
+                    sessionID: sessionID,
+                    body: makeToolsListBody(id: id)
+                )
+            }
+
+            try await connection.send(requests)
+            #expect(try await connection.readResponseHead().contains(" 200 "))
+
+            let snapshot = try #require(await server.networkResourceSnapshotForTesting())
+            #expect(snapshot.connections.flatMap(\.requests).count == 1)
+        }
+    }
+
+    @Test func requestBodyLimitAcceptsNAndRejectsKnownAndChunkedNPlusOne() async throws {
+        let limit = 512
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+        let configuration = CodexReviewMCPHTTPServer.Configuration(
+            host: "127.0.0.1",
+            port: 0,
+            maximumRequestBodyBytes: limit
+        )
+
+        try await withHTTPServer(store: store, configuration: configuration) { server in
+            let endpoint = await server.url
+            let sessionID = try await initializeSession(endpoint: endpoint)
+            var exactBody = try makeToolsListBody(id: 2)
+            exactBody.append(Data(repeating: 0x20, count: limit - exactBody.count))
+
+            let exact = try await RawHTTPConnection.connect(to: endpoint)
+            try await exact.send(rawHTTPRequest(
+                endpoint: endpoint,
+                sessionID: sessionID,
+                body: exactBody
+            ))
+            #expect(try await exact.readResponseHead().contains(" 200 "))
+            exact.close()
+
+            let knownTooLarge = try await RawHTTPConnection.connect(to: endpoint)
+            try await knownTooLarge.send(rawHTTPRequest(
+                endpoint: endpoint,
+                sessionID: sessionID,
+                headers: [
+                    ("Content-Length", "\(limit + 1)"),
+                    ("Expect", "100-continue"),
+                ]
+            ))
+            let knownHead = try await knownTooLarge.readResponseHead()
+            #expect(knownHead.contains(" 413 "))
+            #expect(knownHead.lowercased().contains("connection: close"))
+            _ = try await knownTooLarge.readUntilEOF()
+            knownTooLarge.close()
+
+            let largerThanInt = try await RawHTTPConnection.connect(to: endpoint)
+            try await largerThanInt.send(rawHTTPRequest(
+                endpoint: endpoint,
+                sessionID: sessionID,
+                headers: [("Content-Length", "9223372036854775808")]
+            ))
+            #expect(try await largerThanInt.readResponseHead().contains(" 413 "))
+            _ = try await largerThanInt.readUntilEOF()
+            largerThanInt.close()
+
+            let chunked = try await RawHTTPConnection.connect(to: endpoint)
+            var chunkedBody = Data("\(String(limit, radix: 16))\r\n".utf8)
+            chunkedBody.append(Data(repeating: 0x61, count: limit))
+            chunkedBody.append(Data("\r\n1\r\nb\r\n".utf8))
+            try await chunked.send(rawHTTPRequest(
+                endpoint: endpoint,
+                sessionID: sessionID,
+                headers: [("Transfer-Encoding", "chunked")],
+                body: chunkedBody
+            ))
+            let chunkedHead = try await chunked.readResponseHead()
+            #expect(chunkedHead.contains(" 413 "))
+            #expect(chunkedHead.lowercased().contains("connection: close"))
+            _ = try await chunked.readUntilEOF()
+            chunked.close()
+        }
+    }
+
+    @Test func expectContinueUsesTheStandardPipelineBeforeReadingTheBody() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+
+        try await withHTTPServer(store: store) { server in
+            let endpoint = await server.url
+            let sessionID = try await initializeSession(endpoint: endpoint)
+            let body = try makeToolsListBody(id: 2)
+            let connection = try await RawHTTPConnection.connect(to: endpoint)
+            defer { connection.close() }
+            try await connection.send(rawHTTPRequest(
+                endpoint: endpoint,
+                sessionID: sessionID,
+                headers: [
+                    ("Content-Length", "\(body.count)"),
+                    ("Expect", "100-continue"),
+                ]
+            ))
+
+            #expect(try await connection.readResponseHead().contains(" 100 "))
+            try await connection.send(body)
+            #expect(try await connection.readResponseHead().contains(" 200 "))
+
+            let unsupported = try await RawHTTPConnection.connect(to: endpoint)
+            try await unsupported.send(rawHTTPRequest(
+                endpoint: endpoint,
+                sessionID: sessionID,
+                headers: [
+                    ("Content-Length", "\(body.count)"),
+                    ("Expect", "custom-expectation"),
+                ]
+            ))
+            #expect(try await unsupported.readResponseHead().contains(" 417 "))
+            _ = try await unsupported.readUntilEOF()
+            unsupported.close()
+
+            let http10 = try await RawHTTPConnection.connect(to: endpoint)
+            try await http10.send(rawHTTPRequest(
+                endpoint: endpoint,
+                version: "HTTP/1.0",
+                sessionID: sessionID,
+                headers: [
+                    ("Content-Length", "\(body.count)"),
+                    ("Expect", "100-continue"),
+                ],
+                body: body
+            ))
+            let http10Head = try await http10.readResponseHead()
+            #expect(http10Head.contains(" 200 "))
+            #expect(http10Head.contains(" 100 ") == false)
+            http10.close()
+        }
+    }
+
+    @Test func stopCancelsAHeadAdmittedBodyReceipt() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+
+        try await withHTTPServer(store: store) { server in
+            let endpoint = await server.url
+            let sessionID = try await initializeSession(endpoint: endpoint)
+            let body = try makeToolsListBody(id: 2)
+            let connection = try await RawHTTPConnection.connect(to: endpoint)
+            defer { connection.close() }
+            try await connection.send(rawHTTPRequest(
+                endpoint: endpoint,
+                sessionID: sessionID,
+                headers: [
+                    ("Content-Length", "\(body.count)"),
+                    ("Expect", "100-continue"),
+                ]
+            ))
+            #expect(try await connection.readResponseHead().contains(" 100 "))
+            #expect(try #require(await server.networkResourceSnapshotForTesting())
+                .connections.flatMap(\.requests).count == 1)
+
+            try await server.stop()
+
+            _ = try await connection.readUntilEOF()
+            #expect(await server.currentGenerationIDForTesting() == nil)
+        }
+    }
+
     @Test func streamableHTTPCallsReviewStartWithCustomTarget() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
@@ -1500,7 +1823,10 @@ struct CodexReviewMCPHTTPServerTests {
 
     private func withHTTPServer<T>(
         store: CodexReviewStore,
-        configuration: CodexReviewMCPHTTPServer.Configuration = .init(port: 0),
+        configuration: CodexReviewMCPHTTPServer.Configuration = .init(
+            host: "127.0.0.1",
+            port: 0
+        ),
         operation: (CodexReviewMCPHTTPServer) async throws -> T
     ) async throws -> T {
         let adapter = CodexReviewMCPServer(store: store)
@@ -1559,6 +1885,71 @@ struct CodexReviewMCPHTTPServerTests {
 
     private func makeJSONBody(_ body: [String: Any]) throws -> Data {
         try JSONSerialization.data(withJSONObject: body)
+    }
+
+    private func makeToolsListBody(id: Int) throws -> Data {
+        try makeJSONBody([
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/list",
+        ])
+    }
+
+    private func makeReviewStartBody(id: Int) throws -> Data {
+        try makeJSONBody([
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": [
+                "name": "review_start",
+                "arguments": [
+                    "cwd": "/tmp/project",
+                    "target": ["type": "uncommittedChanges"],
+                ],
+            ],
+        ])
+    }
+
+    private func rawHTTPRequest(
+        endpoint: URL,
+        method: String = "POST",
+        version: String = "HTTP/1.1",
+        sessionID: String?,
+        headers: [(String, String)] = [],
+        body: Data? = nil
+    ) throws -> Data {
+        let components = try #require(URLComponents(url: endpoint, resolvingAgainstBaseURL: false))
+        let host = try #require(components.host)
+        let port = try #require(components.port)
+        var requestHeaders: [(String, String)] = [
+            ("Host", "\(host):\(port)"),
+        ]
+        if method == "POST" {
+            requestHeaders.append(("Content-Type", "application/json"))
+            requestHeaders.append(("Accept", "text/event-stream, application/json"))
+        }
+        if let sessionID {
+            requestHeaders.append(("MCP-Session-Id", sessionID))
+        }
+        requestHeaders.append(contentsOf: headers)
+        let hasFramingHeader = requestHeaders.contains { name, _ in
+            name.caseInsensitiveCompare("Content-Length") == .orderedSame
+                || name.caseInsensitiveCompare("Transfer-Encoding") == .orderedSame
+        }
+        if let body, hasFramingHeader == false {
+            requestHeaders.append(("Content-Length", "\(body.count)"))
+        }
+
+        let serializedHeaders = requestHeaders
+            .map { "\($0.0): \($0.1)\r\n" }
+            .joined()
+        var request = Data(
+            "\(method) \(endpoint.path) \(version)\r\n\(serializedHeaders)\r\n".utf8
+        )
+        if let body {
+            request.append(body)
+        }
+        return request
     }
 
     private func canonicalJSON(_ value: Any) throws -> String {
@@ -1720,6 +2111,184 @@ struct CodexReviewMCPHTTPServerTests {
             try? await Task.sleep(for: .milliseconds(50))
         }
         return true
+    }
+}
+
+private final class RawHTTPConnection: @unchecked Sendable {
+    private let descriptor: Int32
+    private let lock = NSLock()
+    private var bufferedInput = Data()
+    private var isClosed = false
+
+    private init(descriptor: Int32) {
+        self.descriptor = descriptor
+    }
+
+    static func connect(to endpoint: URL) async throws -> RawHTTPConnection {
+        let components = try #require(URLComponents(url: endpoint, resolvingAgainstBaseURL: false))
+        let host = try #require(components.host)
+        let ipv4Host = host == "localhost" ? "127.0.0.1" : host
+        let port = try #require(components.port)
+        return try await Task.detached {
+            let descriptor = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+            guard descriptor >= 0 else {
+                throw currentPOSIXError()
+            }
+            do {
+                var noSignal = Int32(1)
+                _ = withUnsafePointer(to: &noSignal) {
+                    Darwin.setsockopt(
+                        descriptor,
+                        SOL_SOCKET,
+                        SO_NOSIGPIPE,
+                        $0,
+                        socklen_t(MemoryLayout<Int32>.size)
+                    )
+                }
+                var timeout = timeval(tv_sec: 5, tv_usec: 0)
+                _ = withUnsafePointer(to: &timeout) {
+                    Darwin.setsockopt(
+                        descriptor,
+                        SOL_SOCKET,
+                        SO_RCVTIMEO,
+                        $0,
+                        socklen_t(MemoryLayout<timeval>.size)
+                    )
+                }
+
+                var address = sockaddr_in()
+                address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+                address.sin_family = sa_family_t(AF_INET)
+                address.sin_port = in_port_t(port).bigEndian
+                guard inet_pton(AF_INET, ipv4Host, &address.sin_addr) == 1 else {
+                    throw testError("Unable to resolve IPv4 loopback host \(host)")
+                }
+                let connected = withUnsafePointer(to: &address) { pointer in
+                    pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                        Darwin.connect(
+                            descriptor,
+                            $0,
+                            socklen_t(MemoryLayout<sockaddr_in>.size)
+                        )
+                    }
+                }
+                guard connected == 0 else {
+                    throw currentPOSIXError()
+                }
+                return RawHTTPConnection(descriptor: descriptor)
+            } catch {
+                Darwin.close(descriptor)
+                throw error
+            }
+        }.value
+    }
+
+    func send(_ bytes: Data) async throws {
+        let descriptor = self.descriptor
+        try await Task.detached {
+            try bytes.withUnsafeBytes { rawBuffer in
+                guard let baseAddress = rawBuffer.baseAddress else {
+                    return
+                }
+                var sent = 0
+                while sent < rawBuffer.count {
+                    let count = Darwin.send(
+                        descriptor,
+                        baseAddress.advanced(by: sent),
+                        rawBuffer.count - sent,
+                        0
+                    )
+                    if count < 0, errno == EINTR {
+                        continue
+                    }
+                    guard count > 0 else {
+                        throw currentPOSIXError()
+                    }
+                    sent += count
+                }
+            }
+        }.value
+    }
+
+    func readResponseHead() async throws -> String {
+        let descriptor = self.descriptor
+        var bytes = lock.withLock {
+            defer { bufferedInput.removeAll(keepingCapacity: false) }
+            return bufferedInput
+        }
+        let terminator = Data("\r\n\r\n".utf8)
+        let result = try await Task.detached {
+            while let range = bytes.range(of: terminator) {
+                let head = Data(bytes[..<range.upperBound])
+                let remainder = Data(bytes[range.upperBound...])
+                return (head, remainder)
+            }
+            while true {
+                var buffer = [UInt8](repeating: 0, count: 4096)
+                let count = Darwin.recv(descriptor, &buffer, buffer.count, 0)
+                if count < 0, errno == EINTR {
+                    continue
+                }
+                guard count > 0 else {
+                    if count == 0 {
+                        throw testError("Connection closed before the response head completed")
+                    }
+                    throw currentPOSIXError()
+                }
+                bytes.append(contentsOf: buffer.prefix(count))
+                if let range = bytes.range(of: terminator) {
+                    let head = Data(bytes[..<range.upperBound])
+                    let remainder = Data(bytes[range.upperBound...])
+                    return (head, remainder)
+                }
+            }
+        }.value
+        lock.withLock {
+            bufferedInput = result.1 + bufferedInput
+        }
+        return String(decoding: result.0, as: UTF8.self)
+    }
+
+    func readUntilEOF() async throws -> Data {
+        let descriptor = self.descriptor
+        var bytes = lock.withLock {
+            defer { bufferedInput.removeAll(keepingCapacity: false) }
+            return bufferedInput
+        }
+        return try await Task.detached {
+            while true {
+                var buffer = [UInt8](repeating: 0, count: 4096)
+                let count = Darwin.recv(descriptor, &buffer, buffer.count, 0)
+                if count < 0, errno == EINTR {
+                    continue
+                }
+                if count == 0 {
+                    return bytes
+                }
+                guard count > 0 else {
+                    throw currentPOSIXError()
+                }
+                bytes.append(contentsOf: buffer.prefix(count))
+            }
+        }.value
+    }
+
+    func close() {
+        let shouldClose = lock.withLock {
+            guard isClosed == false else {
+                return false
+            }
+            isClosed = true
+            return true
+        }
+        if shouldClose {
+            Darwin.shutdown(descriptor, SHUT_RDWR)
+            Darwin.close(descriptor)
+        }
+    }
+
+    deinit {
+        close()
     }
 }
 

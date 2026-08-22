@@ -296,7 +296,7 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             }
         }
 
-        package func admitRequest() -> AdmittedRequest? {
+        package func admitRequest(finalForConnection: Bool = false) -> AdmittedRequest? {
             lock.lock()
             guard phase == .accepting else {
                 lock.unlock()
@@ -309,6 +309,9 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             )
             let lease = operation.makeLease()
             requests[operation.id] = operation
+            if finalForConnection {
+                phase = .admissionClosed
+            }
             lock.unlock()
             return .init(operation: operation, lease: lease)
         }
@@ -334,7 +337,7 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             }
         }
 
-        fileprivate func closeAdmission() {
+        package func closeAdmission() {
             lock.lock()
             if phase == .accepting {
                 phase = .admissionClosed
