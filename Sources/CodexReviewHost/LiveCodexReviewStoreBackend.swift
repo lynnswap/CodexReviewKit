@@ -640,9 +640,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         reason: ReviewCancellation,
         timeoutWarning: String
     ) async {
-        let admittedJobIDs = store.recordActiveReviewCancellationRequestsForRuntimeStop(
-            reason: reason
-        )
+        store.recordActiveReviewCancellationRequestsForRuntimeStop(reason: reason)
         let didInterrupt = await runRuntimeShutdownCleanup(timeout: shutdownCleanupTimeout) {
             await appServerBackend.interruptActiveReviewsForShutdown(reason: .init(message: reason.message))
         }
@@ -650,10 +648,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             reason: reason,
             cancelWorkers: false
         )
-        await store.cancelAndAwaitReviewWorkersForRuntimeStop(
-            jobIDs: admittedJobIDs + locallyCancelledJobIDs
+        store.cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
+        let didDrainReviewWorkers = await store.drainReviewWorkersForRuntimeStop(
+            timeout: shutdownCleanupTimeout
         )
-        if didInterrupt == false {
+        if didInterrupt == false || didDrainReviewWorkers == false {
             logger.warning("\(timeoutWarning, privacy: .public)")
         }
     }

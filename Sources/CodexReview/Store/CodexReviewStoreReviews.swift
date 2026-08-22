@@ -49,25 +49,22 @@ extension CodexReviewStore {
         waitTimeout: Duration?
     ) async throws -> CodexReviewAPI.Read.Result {
         let jobID = try beginReview(sessionID: sessionID, request: request)
-        let workerTask = reviewWorkerTasks[jobID]
         guard let waitTimeout else {
             return try await withTaskCancellationHandler {
                 _ = try await awaitReview(sessionID: sessionID, jobID: jobID)
-                await workerTask?.value
+                await reviewWorkerTasks[jobID]?.value
                 return try readReview(sessionID: sessionID, jobID: jobID)
             } onCancel: {
-                workerTask?.cancel()
+                Task { @MainActor [weak self] in
+                    self?.reviewWorkerTasks[jobID]?.cancel()
+                }
             }
         }
-        _ = try await awaitReview(
+        return try await awaitReview(
             sessionID: sessionID,
             jobID: jobID,
             timeout: waitTimeout
         )
-        if storeWorkRegistry.acceptsNewWork == false {
-            await workerTask?.value
-        }
-        return try readReview(sessionID: sessionID, jobID: jobID)
     }
 
     package func awaitReview(
@@ -246,10 +243,7 @@ extension CodexReviewStore {
             let startupCancellation = startupCancellations.removeValue(forKey: jobID)
             let cleanupFailure: ReviewRuntimeCloseFailure?
             if let cleanupRun = activeRuns[jobID] ?? run {
-                cleanupFailure = await cleanupReviewFailure(
-                    cleanupRun,
-                    jobID: jobID
-                )
+                cleanupFailure = await cleanupReviewFailure(cleanupRun)
             } else {
                 cleanupFailure = nil
             }
@@ -275,6 +269,7 @@ extension CodexReviewStore {
             }
         }
         reviewWorkerTasks.removeValue(forKey: jobID)
+        runtimeStopDetachedReviewWorkerTasks.removeValue(forKey: jobID)
         if job.isTerminal {
             resumeReviewWaiters(for: jobID)
         }
@@ -284,20 +279,9 @@ extension CodexReviewStore {
         _ run: CodexReviewBackendModel.Review.Run,
         for job: CodexReviewJob
     ) async {
-        if let failure = await cleanupReviewFailure(run, jobID: job.id) {
+        if let failure = await cleanupReviewFailure(run) {
             retainCleanupFailure(failure, for: job)
         }
-    }
-
-    private func cleanupReviewFailure(
-        _ run: CodexReviewBackendModel.Review.Run,
-        jobID: String
-    ) async -> ReviewRuntimeCloseFailure? {
-        reviewWorkerCleanupJobIDs.insert(jobID)
-        defer {
-            reviewWorkerCleanupJobIDs.remove(jobID)
-        }
-        return await cleanupReviewFailure(run)
     }
 
     private func cleanupReviewFailure(
@@ -539,16 +523,6 @@ extension CodexReviewStore {
                 cancellation: cancellation
             )
         }
-    }
-
-    package func cancelReviewForLifecycleTeardown(
-        jobID: String,
-        cancellation: ReviewCancellation
-    ) async throws -> CodexReviewAPI.Cancel.Outcome {
-        try await performCancelReview(
-            jobID: jobID,
-            cancellation: cancellation
-        )
     }
 
     private func performCancelReview(
@@ -812,9 +786,6 @@ extension CodexReviewStore {
                 job: job,
                 startRequest: startRequest
             )
-            if job.isTerminal {
-                reviewWorkerCleanupJobIDs.insert(job.id)
-            }
             await inputs.cancelAndWait()
             return result
         } catch {
@@ -1287,8 +1258,9 @@ extension CodexReviewStore {
         guard job.isTerminal else {
             return false
         }
-        // Terminal state is published before backend cleanup. The worker remains the result
-        // owner until cleanup and any secondary diagnostic are finalized.
+        // Terminal state is published before backend cleanup. The live worker remains the
+        // result owner until cleanup and any secondary diagnostic are finalized. Runtime-stop
+        // detachment is the explicit boundary that transfers only lifecycle cleanup ownership.
         return reviewWorkerTasks[jobID] == nil
     }
 

@@ -1,5 +1,32 @@
 import Foundation
 
+private actor RuntimeStopDetachedReviewWorkerDrainRace {
+    private var result: Bool?
+    private var continuation: CheckedContinuation<Bool, Never>?
+
+    func finish(_ value: Bool) {
+        guard result == nil else {
+            return
+        }
+        result = value
+        continuation?.resume(returning: value)
+        continuation = nil
+    }
+
+    func wait() async -> Bool {
+        if let result {
+            return result
+        }
+        return await withCheckedContinuation { continuation in
+            if let result {
+                continuation.resume(returning: result)
+            } else {
+                self.continuation = continuation
+            }
+        }
+    }
+}
+
 extension CodexReviewStore {
     package func recordCancellationRequest(
         _ cancellation: ReviewCancellation,
@@ -125,10 +152,7 @@ extension CodexReviewStore {
             .filter { $0.isTerminal == false }
             .map(\.id)
         for jobID in activeJobIDs {
-            _ = try? await cancelReviewForLifecycleTeardown(
-                jobID: jobID,
-                cancellation: reason
-            )
+            _ = try? await cancelReview(jobID: jobID, cancellation: reason)
         }
         return activeJobIDs
     }
@@ -160,33 +184,61 @@ extension CodexReviewStore {
         return activeJobIDs
     }
 
-    package func cancelAndAwaitReviewWorkersForRuntimeStop(
-        jobIDs: [String]
-    ) async {
-        var seenJobIDs: Set<String> = []
-        var orderedJobIDs: [String] = []
-        let tasks = jobIDs.compactMap { jobID -> (String, Task<Void, Never>)? in
-            guard seenJobIDs.insert(jobID).inserted else {
-                return nil
+    package func cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: [String]) {
+        for jobID in jobIDs {
+            if let task = reviewWorkerTasks.removeValue(forKey: jobID) {
+                task.cancel()
+                runtimeStopDetachedReviewWorkerTasks[jobID] = task
             }
-            orderedJobIDs.append(jobID)
-            return reviewWorkerTasks[jobID].map { (jobID, $0) }
-        }
-        for (jobID, task) in tasks
-            where reviewWorkerCleanupJobIDs.contains(jobID) == false
-        {
-            task.cancel()
-        }
-        for (_, task) in tasks {
-            await task.value
-        }
-        for jobID in orderedJobIDs {
             activeRuns.removeValue(forKey: jobID)
             reviewRecoveryWaitingJobIDs.remove(jobID)
             startingJobIDs.remove(jobID)
             startupCancellations.removeValue(forKey: jobID)
             resumeReviewWaiters(for: jobID)
         }
+    }
+
+    package func drainRuntimeStopDetachedReviewWorkers(timeout: Duration) async -> Bool {
+        let tasks = Array(runtimeStopDetachedReviewWorkerTasks.values)
+        return await drainReviewWorkerTasksForRuntimeStop(tasks, timeout: timeout)
+    }
+
+    package func drainReviewWorkersForRuntimeStop(timeout: Duration) async -> Bool {
+        let tasks = Array(reviewWorkerTasks.values) + Array(runtimeStopDetachedReviewWorkerTasks.values)
+        return await drainReviewWorkerTasksForRuntimeStop(tasks, timeout: timeout)
+    }
+
+    private func drainReviewWorkerTasksForRuntimeStop(
+        _ tasks: [Task<Void, Never>],
+        timeout: Duration
+    ) async -> Bool {
+        guard tasks.isEmpty == false else {
+            return true
+        }
+
+        let race = RuntimeStopDetachedReviewWorkerDrainRace()
+        let drainTask = Task {
+            for task in tasks {
+                await task.value
+            }
+            await race.finish(true)
+        }
+        let timeoutTask = Task {
+            do {
+                try await Task.sleep(for: timeout)
+            } catch {
+                return
+            }
+            await race.finish(false)
+        }
+
+        let didDrain = await race.wait()
+        if didDrain {
+            timeoutTask.cancel()
+        } else {
+            drainTask.cancel()
+        }
+        return didDrain
     }
 
     package func terminateAllRunningJobsLocally(
