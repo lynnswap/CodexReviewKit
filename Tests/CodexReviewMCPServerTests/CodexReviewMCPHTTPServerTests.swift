@@ -284,6 +284,41 @@ struct CodexReviewMCPHTTPServerTests {
         }
     }
 
+    @Test func concurrentStopsJoinTheSameListenerFailureResult() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+        let server = CodexReviewMCPHTTPServer(
+            adapter: CodexReviewMCPServer(store: store),
+            configuration: .init(host: "127.0.0.1", port: 0)
+        )
+        try await server.start()
+        await server.holdNextStopCompletionForTesting()
+        await server.injectNextListenerCloseFailureForTesting("joined listener failure")
+
+        let firstStop = Task {
+            await lifecycleError {
+                try await server.stop()
+            }
+        }
+        await server.waitUntilStopCompletionIsHeldForTesting()
+        let joinedStop = Task {
+            await lifecycleError {
+                try await server.stop()
+            }
+        }
+        await server.waitUntilStopJoinsStoppingGenerationForTesting()
+        await server.releaseStopCompletionForTesting()
+
+        let expected = CodexReviewMCPHTTPServer.LifecycleError(
+            first: .init(resource: .listener, message: "joined listener failure")
+        )
+        #expect(await firstStop.value == expected)
+        #expect(await joinedStop.value == expected)
+        #expect(await server.eventLoopGroupShutdownCountForTesting() == 1)
+    }
+
     @Test func runningGenerationAdmissionCloseIsRetainedByStop() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
