@@ -135,6 +135,70 @@ struct CodexReviewSettingsRuntimeCutoverTests {
         #expect(await backend.recordedCommands().filter(\.isSettingsWrite).count == 3)
     }
 
+    @Test func deferredOverridesBeforeModelComposeAgainstFinalModel() async throws {
+        try await expectDeferredSelection([
+            .reasoningEffort(.high), .serviceTier(.fast), .model("final-model"),
+        ])
+    }
+
+    @Test func deferredModelBeforeOverridesComposesIdentically() async throws {
+        try await expectDeferredSelection([
+            .model("final-model"), .reasoningEffort(.high), .serviceTier(.fast),
+        ])
+    }
+
+    @Test func latestDeferredIntentWinsForEverySelectionDimension() async throws {
+        try await expectDeferredSelection([
+            .reasoningEffort(.low), .reasoningEffort(.high),
+            .serviceTier(.flex), .serviceTier(.fast),
+            .model("discarded-model"), .model("final-model"),
+        ])
+    }
+
+    @Test func deferredOverridesSurviveFinalModelArrivingDuringReplay() async throws {
+        let initial = settingsSnapshot(
+            model: "intermediate-model",
+            models: [
+                model("intermediate-model", reasoning: [.high], tiers: [.fast]),
+                model("final-model", reasoning: [.high], tiers: [.fast]),
+            ]
+        )
+        let backend = FakeCodexReviewBackend(settings: backendSnapshot(initial))
+        let store = makeStore(initial: initial, backend: backend)
+        let token = try await store.settingsService.beginRuntimeCutover()
+        await store.updateSettingsReasoningEffort(.high)
+        await store.updateSettingsServiceTier(.fast)
+
+        let published = settingsSnapshot(
+            model: "intermediate-model",
+            reasoningEffort: .medium,
+            serviceTier: .flex,
+            models: [
+                model("intermediate-model", reasoning: [.medium], tiers: []),
+                model("final-model", reasoning: [.high], tiers: [.fast]),
+            ]
+        )
+        await backend.setSettingsSnapshot(backendSnapshot(published))
+        let replayGate = AsyncGate()
+        await backend.holdNextSettingsUpdate(with: replayGate)
+        let commit = Task { @MainActor in
+            try await store.settingsService.commitRuntimeSnapshot(token: token, snapshot: published)
+        }
+        await backend.waitForSettingsUpdate()
+        await store.updateSettingsModel("final-model")
+        await replayGate.open()
+        try await commit.value
+
+        let persisted = await backend.settingsSnapshot()
+        #expect(persisted.model == "final-model")
+        #expect(persisted.reasoningEffort == "high")
+        #expect(persisted.serviceTier == "fast")
+        #expect(store.settings.selectedModel == "final-model")
+        #expect(store.settings.selectedReasoningEffort == .high)
+        #expect(store.settings.selectedServiceTier == .fast)
+        #expect(await backend.recordedCommands().filter(\.isSettingsWrite).count == 3)
+    }
+
     @Test func tokenMisuseNeverMutatesState() async throws {
         let initial = settingsSnapshot(model: "initial-model")
         let backend = FakeCodexReviewBackend(settings: backendSnapshot(initial))
@@ -174,6 +238,72 @@ struct CodexReviewSettingsRuntimeCutoverTests {
             )
         }
     }
+}
+
+private enum DeferredSelectionEdit {
+    case model(String)
+    case reasoningEffort(CodexReviewSettings.ReasoningEffort?)
+    case serviceTier(CodexReviewSettings.ServiceTier?)
+
+    @MainActor
+    func apply(to store: CodexReviewStore) async {
+        switch self {
+        case .model(let model):
+            await store.updateSettingsModel(model)
+        case .reasoningEffort(let reasoningEffort):
+            await store.updateSettingsReasoningEffort(reasoningEffort)
+        case .serviceTier(let serviceTier):
+            await store.updateSettingsServiceTier(serviceTier)
+        }
+    }
+}
+
+@MainActor
+private func expectDeferredSelection(_ edits: [DeferredSelectionEdit]) async throws {
+    let initial = settingsSnapshot(
+        model: "intermediate-model",
+        models: [
+            model("intermediate-model", reasoning: [.high], tiers: [.fast]),
+            model("discarded-model", reasoning: [.low], tiers: [.flex]),
+            model("final-model", reasoning: [.high], tiers: [.fast]),
+        ]
+    )
+    let backend = FakeCodexReviewBackend(settings: backendSnapshot(initial))
+    let store = makeStore(initial: initial, backend: backend)
+    let token = try await store.settingsService.beginRuntimeCutover()
+    for edit in edits {
+        await edit.apply(to: store)
+    }
+
+    let published = settingsSnapshot(
+        model: "intermediate-model",
+        reasoningEffort: .medium,
+        serviceTier: .flex,
+        models: [
+            model("intermediate-model", reasoning: [.medium], tiers: []),
+            model("discarded-model", reasoning: [.low], tiers: [.flex]),
+            model("final-model", reasoning: [.high], tiers: [.fast]),
+        ]
+    )
+    await backend.setSettingsSnapshot(backendSnapshot(published))
+    try await store.settingsService.commitRuntimeSnapshot(token: token, snapshot: published)
+
+    let persisted = await backend.settingsSnapshot()
+    #expect(persisted.model == "final-model")
+    #expect(persisted.reasoningEffort == "high")
+    #expect(persisted.serviceTier == "fast")
+    #expect(store.settings.selectedModel == "final-model")
+    #expect(store.settings.selectedReasoningEffort == .high)
+    #expect(store.settings.selectedServiceTier == .fast)
+    let commands = await backend.recordedCommands()
+    #expect(commands.filter(\.isSettingsWrite).count == 1)
+    guard case .applySettings(let change) = try #require(commands.last) else {
+        Issue.record("Expected one composed settings write.")
+        return
+    }
+    #expect(change.updatesModel)
+    #expect(change.updatesReasoningEffort)
+    #expect(change.updatesServiceTier)
 }
 private extension FakeCodexReviewBackend.Command {
     var isSettingsRead: Bool {

@@ -315,6 +315,7 @@ package final class CodexReviewSettingsService {
             resumeEpochDrainWaiters(epoch)
         }
 
+        var retainedSelectionIntents: [QueuedIntent] = []
         while cutoverPhase.permitsDispatch(for: epoch) {
             if takeQueuedRefresh(for: epoch) {
                 if cutoverPhase.isDrainingSource(epoch) == false {
@@ -327,7 +328,10 @@ package final class CodexReviewSettingsService {
             guard selectionIntents.isEmpty == false else {
                 return
             }
-            await persistSelectionIntents(selectionIntents)
+            retainedSelectionIntents.append(contentsOf: selectionIntents)
+            if await persistSelectionIntents(retainedSelectionIntents) == false {
+                retainedSelectionIntents.removeAll(keepingCapacity: true)
+            }
         }
     }
 
@@ -347,23 +351,24 @@ package final class CodexReviewSettingsService {
         }
     }
 
-    private func persistSelectionIntents(_ intents: [QueuedIntent]) async {
+    private func persistSelectionIntents(_ intents: [QueuedIntent]) async -> Bool {
         guard let settingsStore else {
-            return
+            return false
         }
 
-        settingsStore.applyNormalizedSelection(lastPersistedSelection, catalog: settingsStore.models)
-        for intent in intents {
-            applySelectionIntent(intent.intent, to: settingsStore, clearIncompatibleOverrides: intent.requiresCatalogRevalidation)
-        }
-        let candidate = settingsStore.currentSelection()
         let previous = lastPersistedSelection
+        let candidate = composedSelection(
+            from: intents,
+            baseline: previous,
+            settingsStore: settingsStore
+        )
+        settingsStore.applyNormalizedSelection(candidate, catalog: settingsStore.models)
         let triggers = settingsStore.selectionTriggers(
             previous: previous,
             candidate: candidate
         )
         guard triggers.isEmpty == false else {
-            return
+            return true
         }
 
         var appliedSelection = previous
@@ -374,7 +379,7 @@ package final class CodexReviewSettingsService {
                 candidate: candidate
             )
             guard didPersist else {
-                return
+                return false
             }
             appliedSelection = settingsStore.selectionAfterPersisting(
                 trigger: trigger,
@@ -382,6 +387,7 @@ package final class CodexReviewSettingsService {
                 candidate: candidate
             )
         }
+        return true
     }
 
     private func persistSelectionChange(
@@ -417,8 +423,7 @@ package final class CodexReviewSettingsService {
 
     private func applySelectionIntent(
         _ intent: SettingsIntent,
-        to settingsStore: SettingsStore,
-        clearIncompatibleOverrides: Bool = false
+        to settingsStore: SettingsStore
     ) {
         let current = settingsStore.currentSelection()
         let normalized: SettingsStore.Selection
@@ -439,7 +444,7 @@ package final class CodexReviewSettingsService {
                 reasoningEffort: reasoningEffort,
                 serviceTier: current.serviceTier,
                 catalog: settingsStore.models,
-                clearIncompatibleOverrides: clearIncompatibleOverrides
+                clearIncompatibleOverrides: false
             )
         case .serviceTier(let serviceTier):
             normalized = settingsStore.normalizeSelection(
@@ -447,7 +452,7 @@ package final class CodexReviewSettingsService {
                 reasoningEffort: current.reasoningEffort,
                 serviceTier: serviceTier,
                 catalog: settingsStore.models,
-                clearIncompatibleOverrides: clearIncompatibleOverrides
+                clearIncompatibleOverrides: false
             )
         }
         settingsStore.applyNormalizedSelection(normalized, catalog: settingsStore.models)
@@ -457,12 +462,54 @@ package final class CodexReviewSettingsService {
         for epoch: UInt64,
         settingsStore: SettingsStore
     ) {
-        for queuedIntent in queuedIntents where queuedIntent.epoch == epoch {
-            guard queuedIntent.intent.isRefresh == false else {
-                continue
-            }
-            applySelectionIntent(queuedIntent.intent, to: settingsStore, clearIncompatibleOverrides: queuedIntent.requiresCatalogRevalidation)
+        let intents = queuedIntents.filter {
+            $0.epoch == epoch && $0.intent.isRefresh == false
         }
+        guard intents.isEmpty == false else {
+            return
+        }
+        let selection = composedSelection(
+            from: intents,
+            baseline: lastPersistedSelection,
+            settingsStore: settingsStore
+        )
+        settingsStore.applyNormalizedSelection(selection, catalog: settingsStore.models)
+    }
+
+    private func composedSelection(
+        from intents: [QueuedIntent],
+        baseline: SettingsStore.Selection,
+        settingsStore: SettingsStore
+    ) -> SettingsStore.Selection {
+        var model = baseline.model
+        var reasoningEffort = baseline.reasoningEffort
+        var serviceTier = baseline.serviceTier
+        var hasModelIntent = false
+        var requiresCatalogRevalidation = false
+
+        for queuedIntent in intents {
+            requiresCatalogRevalidation = requiresCatalogRevalidation
+                || queuedIntent.requiresCatalogRevalidation
+            switch queuedIntent.intent {
+            case .refresh:
+                break
+            case .model(let value):
+                model = value
+                hasModelIntent = true
+            case .reasoningEffort(let value):
+                reasoningEffort = value
+            case .serviceTier(let value):
+                serviceTier = value
+            }
+        }
+
+        return settingsStore.normalizeSelection(
+            model: model,
+            reasoningEffort: reasoningEffort,
+            serviceTier: serviceTier,
+            catalog: settingsStore.models,
+            clearIncompatibleOverrides: hasModelIntent || requiresCatalogRevalidation
+        )
     }
 
     private func takeQueuedRefresh(for epoch: UInt64) -> Bool {
