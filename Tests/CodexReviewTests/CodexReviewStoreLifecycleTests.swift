@@ -573,6 +573,51 @@ struct CodexReviewStoreLifecycleTests {
         await store.stop()
     }
 
+    @Test func registeredWorkCloseDoesNotReturnTimedStartBeforeWorkerFinalization() async throws {
+        let backend = FakeCodexReviewBackend()
+        let startGate = AsyncGate()
+        await backend.holdStartReviewIgnoringCancellation(with: startGate)
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        await store.start()
+        let reviewCompletion = StoreWorkCompletion()
+        let review = Task { @MainActor in
+            let result = try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .seconds(30)
+            )
+            await reviewCompletion.complete()
+            return result
+        }
+        try await backend.waitForStartReview(timeout: .seconds(2))
+        try await waitForReviewWaiterCount(1, jobID: "job-1", store: store)
+        let reason = ReviewCancellation.system(message: "Store work owner closed.")
+
+        let close = Task { @MainActor in
+            await store.closeRegisteredStoreWork(reason: reason)
+        }
+        try await waitForStoreWorkStatus(.closing, store: store)
+        try await waitForReviewWorkerCancellation(jobID: "job-1", store: store)
+        let returnedBeforeWorkerFinalization = await waitForStoreWorkCompletion(
+            reviewCompletion,
+            timeout: .milliseconds(500)
+        )
+
+        #expect(returnedBeforeWorkerFinalization == false)
+        await startGate.open()
+        #expect(await close.value == .success)
+        let result = try await review.value
+
+        #expect(result.core.lifecycle.status == .cancelled)
+        #expect(result.core.lifecycle.cancellation == reason)
+        #expect(store.reviewWorkerTasks["job-1"] == nil)
+        #expect(store.storeWorkRegistry.activeOrdinals.isEmpty)
+        await store.stop()
+    }
+
     @Test func registeredWorkCloseAppliesPreEntryCancellationPolicy() async throws {
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(
@@ -673,6 +718,22 @@ private actor StoreWorkCompletion {
     func isComplete() -> Bool {
         completed
     }
+}
+
+@MainActor
+private func waitForStoreWorkCompletion(
+    _ completion: StoreWorkCompletion,
+    timeout: Duration
+) async -> Bool {
+    let clock = ContinuousClock()
+    let deadline = clock.now + timeout
+    while await completion.isComplete() == false {
+        guard clock.now < deadline else {
+            return false
+        }
+        await Task.yield()
+    }
+    return true
 }
 
 @MainActor

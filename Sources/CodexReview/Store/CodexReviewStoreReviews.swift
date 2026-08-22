@@ -60,11 +60,16 @@ extension CodexReviewStore {
                 }
             }
         }
-        return try await awaitReview(
+        let workerTask = reviewWorkerTasks[jobID]
+        _ = try await awaitReview(
             sessionID: sessionID,
             jobID: jobID,
             timeout: waitTimeout
         )
+        if storeWorkRegistry.acceptsNewWork == false {
+            await workerTask?.value
+        }
+        return try readReview(sessionID: sessionID, jobID: jobID)
     }
 
     package func awaitReview(
