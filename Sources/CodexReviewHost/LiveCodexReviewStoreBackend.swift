@@ -397,13 +397,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     func start(store: CodexReviewStore, forceRestartIfNeeded: Bool) async {
         logger.info("Starting review runtime; forceRestartIfNeeded=\(forceRestartIfNeeded, privacy: .public)")
-        if appServerBackend != nil, forceRestartIfNeeded == false {
+        if appServerBackend != nil {
             logger.info("Review runtime already has an app-server backend")
             store.transitionToRunning(serverURL: await mcpHTTPServer?.url)
             return
-        }
-        if forceRestartIfNeeded {
-            await store.stop()
         }
 
         var startedClient: AppServerClient?
@@ -684,8 +681,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             return
         }
         await attachedStore.closeActiveReviewSessions(reason: .system(message: "Account switched."))
-        await attachedStore.stop()
-        await start(store: attachedStore, forceRestartIfNeeded: false)
+        await attachedStore.start(forceRestartIfNeeded: true)
     }
 
     func removeAccount(auth: CodexReviewAuthModel, accountKey: String) async throws {
@@ -721,8 +717,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 return
             }
             await attachedStore.closeActiveReviewSessions(reason: .system(message: "Account removed."))
-            await attachedStore.stop()
-            await start(store: attachedStore, forceRestartIfNeeded: false)
+            await attachedStore.start(forceRestartIfNeeded: true)
         }
     }
 
@@ -777,8 +772,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         auth.selectPersistedAccount(nil)
         auth.applyPersistedAccountStates(remaining.map(savedAccountPayload(from:)), activeAccountKey: nil)
         if shouldRecycleRuntime, let attachedStore {
-            await attachedStore.stop()
-            await start(store: attachedStore, forceRestartIfNeeded: false)
+            await attachedStore.start(forceRestartIfNeeded: true)
         }
     }
 
@@ -1181,7 +1175,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             } catch is CancellationError {
             } catch {
                 logger.error("Auth notification stream ended: \(error.localizedDescription, privacy: .public)")
-                await markRuntimeFailedAfterNotificationStreamError(error, store: store)
+                markRuntimeFailedAfterNotificationStreamError(error, store: store)
             }
         }
     }
@@ -1189,7 +1183,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     private func markRuntimeFailedAfterNotificationStreamError(
         _ error: any Error,
         store: CodexReviewStore
-    ) async {
+    ) {
         guard client != nil
                 || appServerBackend != nil
                 || mcpHTTPServer != nil
@@ -1200,7 +1194,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             return
         }
         authNotificationTask = nil
-        await store.stop(
+        store.requestRuntimeTeardown(
             intent: .unexpectedFailure(error.localizedDescription)
         )
     }

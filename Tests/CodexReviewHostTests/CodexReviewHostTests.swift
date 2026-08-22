@@ -79,6 +79,7 @@ struct CodexReviewHostTests {
         }
         try await backend.waitForInterruptReview(timeout: .seconds(2))
         let expected = "Review runtime stopped unexpectedly: Injected direct failure."
+        #expect(host.store.serverState == .failed(expected))
         let command = try #require(await backend.recordedCommands().last)
         guard case .interruptReview(_, let reason) = command else {
             Issue.record("Expected an interrupt request.")
@@ -1557,6 +1558,77 @@ struct CodexReviewHostTests {
         #expect(store.serverURL == nil)
     }
 
+    @Test func notificationFailurePublishesBeforeHeldTeardownAndExplicitStopCancelsWaitingStart() async throws {
+        let homeURL = try temporaryHome()
+        let stopGate = AsyncGate()
+        let firstTransport = FakeJSONRPCTransport()
+        let secondTransport = FakeJSONRPCTransport()
+        for transport in [firstTransport, secondTransport] {
+            try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+            try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
+            try await transport.enqueue(
+                AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+                for: "config/read"
+            )
+            try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        }
+        let firstServer = ControlledMCPHTTPServer(
+            endpoint: try #require(URL(string: "http://127.0.0.1:19435/mcp")),
+            stopGate: stopGate
+        )
+        let secondServer = ControlledMCPHTTPServer(
+            endpoint: try #require(URL(string: "http://127.0.0.1:19436/mcp"))
+        )
+        var transports = [firstTransport, secondTransport]
+        var servers = [firstServer, secondServer]
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            mcpHTTPServerFactory: { _, _ in servers.removeFirst() },
+            mcpHTTPServerBindChecker: { _ in },
+            transportFactory: { _ in transports.removeFirst() }
+        )
+
+        await store.start()
+        await firstTransport.waitForNotificationStreamCount(1)
+        await firstTransport.finishNotificationStreams(throwing: JSONRPC.Error.closed)
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            firstServer.stopCallCount == 1
+        })
+
+        let expected = "Review runtime stopped unexpectedly: \(JSONRPC.Error.closed.localizedDescription)"
+        #expect(store.serverState == .failed(expected))
+        #expect(store.serverURL == nil)
+
+        let generationBeforeStart = store.runtimeLifecycleAdmissionGeneration
+        let pendingStart = Task { @MainActor in
+            await store.start(forceRestartIfNeeded: true)
+        }
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            store.runtimeLifecycleAdmissionGeneration > generationBeforeStart
+        })
+        let waitingStartGeneration = store.runtimeLifecycleAdmissionGeneration
+        let explicitStop = Task { @MainActor in
+            await store.stop()
+        }
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            store.runtimeLifecycleAdmissionGeneration > waitingStartGeneration
+                && store.runtimeTeardownFinalState == .stopped
+        })
+        #expect(store.serverState == .failed(expected))
+
+        await stopGate.open()
+        await explicitStop.value
+        await pendingStart.value
+
+        #expect(store.serverState == .stopped)
+        #expect(store.serverURL == nil)
+        #expect(firstServer.stopCallCount == 1)
+        #expect(secondServer.startCallCount == 0)
+        #expect(servers.count == 1)
+        #expect(transports.count == 1)
+    }
+
     @Test func explicitStopJoinsLiveRuntimeFailureWithoutRewritingCleanupReason() async throws {
         let homeURL = try temporaryHome()
         let interruptGate = AsyncGate()
@@ -2215,17 +2287,20 @@ private final class ControlledMCPHTTPServer: CodexReviewMCPHTTPServing {
     let endpoint: URL
     private let startFailure: HostCloseFailure?
     private let stopFailure: HostCloseFailure?
+    private let stopGate: AsyncGate?
     private(set) var startCallCount = 0
     private(set) var stopCallCount = 0
 
     init(
         endpoint: URL,
         startFailure: HostCloseFailure? = nil,
-        stopFailure: HostCloseFailure? = nil
+        stopFailure: HostCloseFailure? = nil,
+        stopGate: AsyncGate? = nil
     ) {
         self.endpoint = endpoint
         self.startFailure = startFailure
         self.stopFailure = stopFailure
+        self.stopGate = stopGate
     }
 
     var url: URL {
@@ -2243,6 +2318,9 @@ private final class ControlledMCPHTTPServer: CodexReviewMCPHTTPServing {
 
     func stop() async throws {
         stopCallCount += 1
+        if let stopGate {
+            await stopGate.wait()
+        }
         if let stopFailure {
             throw stopFailure
         }

@@ -29,6 +29,9 @@ public final class CodexReviewStore {
     package var runtimeTeardownFinalState: ReviewRuntimeTeardownIntent.FinalState? {
         runtimeTeardownOperation?.finalIntent.finalState
     }
+    package var runtimeLifecycleAdmissionGeneration: UInt64 {
+        runtimeLifecycleGeneration
+    }
 
     @ObservationIgnored package let diagnosticsURL: URL?
     @ObservationIgnored package let settingsService: CodexReviewSettingsService
@@ -48,6 +51,7 @@ public final class CodexReviewStore {
     @ObservationIgnored package var closedSessions: Set<String> = []
     @ObservationIgnored package var accountRateLimitAutoRefreshDriver: CodexReviewStoreRateLimitAutoRefreshDriver?
     @ObservationIgnored private var runtimeTeardownOperation: RuntimeTeardownOperation?
+    @ObservationIgnored private var runtimeLifecycleGeneration: UInt64 = 0
 
     package init(
         backend: any CodexReviewStoreBackend = PreviewCodexReviewStoreBackend(),
@@ -138,18 +142,40 @@ public final class CodexReviewStore {
     }
 
     public func start(forceRestartIfNeeded: Bool = false) async {
+        let admissionGeneration = admitRuntimeLifecycleRequest()
+        await start(
+            forceRestartIfNeeded: forceRestartIfNeeded,
+            admissionGeneration: admissionGeneration
+        )
+    }
+
+    private func start(
+        forceRestartIfNeeded: Bool,
+        admissionGeneration: UInt64
+    ) async {
         if let teardownTask = runtimeTeardownOperation?.task {
             await teardownTask.value
+            guard admissionGeneration == runtimeLifecycleGeneration else {
+                return
+            }
         }
+        let shouldRestartRunningRuntime: Bool
         switch serverState {
         case .stopped, .failed:
-            break
+            shouldRestartRunningRuntime = false
         case .starting:
             return
         case .running where forceRestartIfNeeded == false:
             return
         case .running:
-            break
+            shouldRestartRunningRuntime = true
+        }
+        if shouldRestartRunningRuntime {
+            let teardownTask = admitRuntimeTeardown(intent: .explicitStop)
+            await teardownTask.value
+            guard admissionGeneration == runtimeLifecycleGeneration else {
+                return
+            }
         }
         serverState = .starting
         serverURL = nil
@@ -164,6 +190,7 @@ public final class CodexReviewStore {
     }
 
     package func stop(intent: ReviewRuntimeTeardownIntent) async {
+        _ = admitRuntimeLifecycleRequest()
         let task = admitRuntimeTeardown(intent: intent)
         await task.value
     }
@@ -171,7 +198,13 @@ public final class CodexReviewStore {
     package func requestRuntimeTeardown(
         intent: ReviewRuntimeTeardownIntent
     ) {
+        _ = admitRuntimeLifecycleRequest()
         _ = admitRuntimeTeardown(intent: intent)
+    }
+
+    private func admitRuntimeLifecycleRequest() -> UInt64 {
+        runtimeLifecycleGeneration += 1
+        return runtimeLifecycleGeneration
     }
 
     private func admitRuntimeTeardown(
@@ -186,6 +219,9 @@ public final class CodexReviewStore {
         }
 
         let operationID = UUID()
+        if case .failed(let message) = intent.finalState {
+            transitionToFailed(message)
+        }
         let task = Task<Void, Never> { @MainActor [weak self] in
             guard let self else {
                 return
@@ -239,8 +275,16 @@ public final class CodexReviewStore {
     }
 
     public func restart() async {
-        await stop()
-        await start(forceRestartIfNeeded: true)
+        let admissionGeneration = admitRuntimeLifecycleRequest()
+        let teardownTask = admitRuntimeTeardown(intent: .explicitStop)
+        await teardownTask.value
+        guard admissionGeneration == runtimeLifecycleGeneration else {
+            return
+        }
+        await start(
+            forceRestartIfNeeded: true,
+            admissionGeneration: admissionGeneration
+        )
     }
 
     public func waitUntilStopped() async {
