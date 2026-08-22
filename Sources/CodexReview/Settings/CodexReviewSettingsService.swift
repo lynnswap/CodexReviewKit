@@ -68,7 +68,10 @@ package final class CodexReviewSettingsService {
     private enum RuntimeCutoverPhase {
         case active(epoch: UInt64, lastConsumedTokenID: UUID?)
         case draining(RuntimeCutoverToken)
-        case awaitingCommit(RuntimeCutoverToken)
+        case awaitingCommit(
+            RuntimeCutoverToken,
+            priorErrorMessage: String?
+        )
         case awaitingRecovery(
             committedEpoch: UInt64,
             deferredEpoch: UInt64,
@@ -92,7 +95,7 @@ package final class CodexReviewSettingsService {
             switch self {
             case .active(let epoch, _):
                 epoch
-            case .draining(let token), .awaitingCommit(let token):
+            case .draining(let token), .awaitingCommit(let token, _):
                 token.targetEpoch
             case .awaitingRecovery(_, let deferredEpoch, _):
                 deferredEpoch
@@ -192,7 +195,10 @@ package final class CodexReviewSettingsService {
             guard case .draining(token) = cutoverPhase else {
                 throw RuntimeCutoverError.staleToken
             }
-            cutoverPhase = .awaitingCommit(token)
+            cutoverPhase = .awaitingCommit(
+                token,
+                priorErrorMessage: settingsStore.lastErrorMessage
+            )
 
         case .awaitingRecovery(let committedEpoch, let deferredEpoch, _):
             token = .init(
@@ -201,7 +207,10 @@ package final class CodexReviewSettingsService {
                 sourceEpoch: committedEpoch,
                 targetEpoch: deferredEpoch
             )
-            cutoverPhase = .awaitingCommit(token)
+            cutoverPhase = .awaitingCommit(
+                token,
+                priorErrorMessage: settingsStore.lastErrorMessage
+            )
 
         case .draining, .awaitingCommit:
             throw RuntimeCutoverError.cutoverAlreadyInProgress
@@ -215,7 +224,7 @@ package final class CodexReviewSettingsService {
         token: RuntimeCutoverToken,
         snapshot: CodexReviewSettings.Snapshot
     ) async throws {
-        try requireCurrentCutoverToken(token)
+        _ = try requireCurrentCutoverToken(token)
         guard let settingsStore else {
             throw RuntimeCutoverError.settingsStoreUnavailable
         }
@@ -238,7 +247,7 @@ package final class CodexReviewSettingsService {
         token: RuntimeCutoverToken,
         message: String
     ) throws {
-        try requireCurrentCutoverToken(token)
+        _ = try requireCurrentCutoverToken(token)
         guard let settingsStore else {
             throw RuntimeCutoverError.settingsStoreUnavailable
         }
@@ -255,6 +264,37 @@ package final class CodexReviewSettingsService {
                 ? "Runtime settings publication failed."
                 : normalizedMessage
         )
+    }
+
+    package func cancelRuntimeCutover(
+        token: RuntimeCutoverToken
+    ) throws {
+        let priorErrorMessage = try requireCurrentCutoverToken(token)
+        guard let settingsStore else {
+            throw RuntimeCutoverError.settingsStoreUnavailable
+        }
+        guard token.targetEpoch < UInt64.max else {
+            throw RuntimeCutoverError.epochExhausted
+        }
+
+        let deferredEpoch = token.targetEpoch + 1
+        queuedIntents = queuedIntents.map { queuedIntent in
+            guard queuedIntent.epoch == token.targetEpoch else {
+                return queuedIntent
+            }
+            return .init(
+                epoch: deferredEpoch,
+                intent: queuedIntent.intent,
+                requiresCatalogRevalidation: queuedIntent.requiresCatalogRevalidation
+            )
+        }
+        cutoverPhase = .awaitingRecovery(
+            committedEpoch: token.sourceEpoch,
+            deferredEpoch: deferredEpoch,
+            lastConsumedTokenID: token.id
+        )
+        replayQueuedSelectionIntents(for: deferredEpoch, settingsStore: settingsStore)
+        settingsStore.finishLoading(errorMessage: priorErrorMessage)
     }
 
     package func refreshIfRunning(serverState: CodexReviewServerState) async {
@@ -557,18 +597,19 @@ package final class CodexReviewSettingsService {
 
     private func requireCurrentCutoverToken(
         _ token: RuntimeCutoverToken
-    ) throws {
+    ) throws -> String? {
         guard token.ownerID == cutoverOwnerID else {
             throw RuntimeCutoverError.foreignToken
         }
         if cutoverPhase.consumedTokenID() == token.id {
             throw RuntimeCutoverError.tokenAlreadyConsumed
         }
-        guard case .awaitingCommit(let currentToken) = cutoverPhase,
+        guard case .awaitingCommit(let currentToken, let priorErrorMessage) = cutoverPhase,
               currentToken == token
         else {
             throw RuntimeCutoverError.staleToken
         }
+        return priorErrorMessage
     }
 
     private func persistSelection(

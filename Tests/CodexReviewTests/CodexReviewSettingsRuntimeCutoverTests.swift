@@ -90,6 +90,104 @@ struct CodexReviewSettingsRuntimeCutoverTests {
         #expect(store.settings.lastErrorMessage == "Rejected after publication.")
     }
 
+    @Test func intentionalCancellationDuringPreparedCutoverDoesNotSurfaceAnError() async throws {
+        let initial = settingsSnapshot(model: "initial-model")
+        let backend = FakeCodexReviewBackend(settings: backendSnapshot(initial))
+        let store = makeStore(initial: initial, backend: backend)
+        let updateGate = AsyncGate()
+        await backend.holdNextSettingsUpdate(with: updateGate)
+
+        let admittedWrite = Task { @MainActor in
+            await store.updateSettingsModel("before-cutover")
+        }
+        await backend.waitForSettingsUpdate()
+        let cutover = Task { @MainActor in
+            try await store.settingsService.beginRuntimeCutover()
+        }
+        try await waitForCutoverStatus(.draining, service: store.settingsService)
+
+        await updateGate.open()
+        let token = try await cutover.value
+        await admittedWrite.value
+        try store.settingsService.cancelRuntimeCutover(token: token)
+
+        #expect(store.settingsService.runtimeCutoverStatus == .awaitingRecovery)
+        #expect(store.settings.isLoading == false)
+        #expect(store.settings.lastErrorMessage == nil)
+        #expect(await backend.settingsSnapshot().model == "before-cutover")
+    }
+
+    @Test func intentionalCancellationPreservesAnUnrelatedSettingsError() async throws {
+        let initial = settingsSnapshot(model: "initial-model")
+        let backend = FakeCodexReviewBackend(settings: backendSnapshot(initial))
+        let store = makeStore(initial: initial, backend: backend)
+        await backend.failNextSettingsUpdate(message: "Existing settings failure.")
+        await store.updateSettingsModel("rejected-model")
+        #expect(store.settings.lastErrorMessage == "Existing settings failure.")
+
+        let token = try await store.settingsService.beginRuntimeCutover()
+        try store.settingsService.cancelRuntimeCutover(token: token)
+
+        #expect(store.settings.isLoading == false)
+        #expect(store.settings.lastErrorMessage == "Existing settings failure.")
+    }
+
+    @Test func canceledCutoverReplaysDeferredRawIntentsOnceAfterNextCommit() async throws {
+        let initial = settingsSnapshot(model: "initial-model")
+        let backend = FakeCodexReviewBackend(settings: backendSnapshot(initial))
+        let store = makeStore(initial: initial, backend: backend)
+        let canceledToken = try await store.settingsService.beginRuntimeCutover()
+
+        await store.updateSettingsModel("deferred-model")
+        await store.refreshSettings()
+        try store.settingsService.cancelRuntimeCutover(token: canceledToken)
+        #expect(await backend.recordedCommands().isEmpty)
+
+        let replacementToken = try await store.settingsService.beginRuntimeCutover()
+        #expect(await backend.recordedCommands().isEmpty)
+        try await store.settingsService.commitRuntimeSnapshot(
+            token: replacementToken,
+            snapshot: initial
+        )
+
+        let commands = await backend.recordedCommands()
+        #expect(commands.filter(\.isSettingsWrite).count == 1)
+        #expect(commands.filter(\.isSettingsRead).count == 1)
+        #expect(await backend.settingsSnapshot().model == "deferred-model")
+        #expect(store.settings.selectedModel == "deferred-model")
+    }
+
+    @Test func cancellationTokenMisuseIsTypedAndNeverMutatesState() async throws {
+        let initial = settingsSnapshot(model: "initial-model")
+        let backend = FakeCodexReviewBackend(settings: backendSnapshot(initial))
+        let store = makeStore(initial: initial, backend: backend)
+        let otherStore = makeStore(
+            initial: initial,
+            backend: FakeCodexReviewBackend(settings: backendSnapshot(initial))
+        )
+        let token = try await store.settingsService.beginRuntimeCutover()
+        let tokenCopy = token
+
+        #expect(throws: CodexReviewSettingsService.RuntimeCutoverError.foreignToken) {
+            try otherStore.settingsService.cancelRuntimeCutover(token: token)
+        }
+        #expect(otherStore.settingsService.runtimeCutoverStatus == .active)
+
+        try store.settingsService.cancelRuntimeCutover(token: tokenCopy)
+        #expect(throws: CodexReviewSettingsService.RuntimeCutoverError.tokenAlreadyConsumed) {
+            try store.settingsService.cancelRuntimeCutover(token: token)
+        }
+        #expect(store.settingsService.runtimeCutoverStatus == .awaitingRecovery)
+
+        let nextToken = try await store.settingsService.beginRuntimeCutover()
+        #expect(throws: CodexReviewSettingsService.RuntimeCutoverError.staleToken) {
+            try store.settingsService.cancelRuntimeCutover(token: tokenCopy)
+        }
+        #expect(store.settingsService.runtimeCutoverStatus == .awaitingCommit)
+        #expect(await backend.recordedCommands().isEmpty)
+        try store.settingsService.cancelRuntimeCutover(token: nextToken)
+    }
+
     @Test func deferredSelectionIsRenormalizedAndSerializedBeforeNewEdit() async throws {
         let initial = settingsSnapshot(
             model: "initial-model",
