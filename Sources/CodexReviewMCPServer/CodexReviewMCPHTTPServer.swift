@@ -8,9 +8,20 @@ import OSLog
 
 private let logger = Logger(subsystem: "CodexReviewKit", category: "mcp-http")
 
+private enum MCPHTTPResponseSourceKind: Sendable {
+    case finite
+    case open
+}
+
 private struct TrackedHTTPResponse {
+    struct StreamLifecycle: Sendable {
+        let source: AsyncThrowingStream<Data, Swift.Error>
+        let completion: ActiveRequestCompletion
+        let kind: MCPHTTPResponseSourceKind
+    }
+
     var response: HTTPResponse
-    var streamCompletion: ActiveRequestCompletion? = nil
+    var streamLifecycle: StreamLifecycle? = nil
 }
 
 package extension CodexReviewMCPHTTPServer {
@@ -294,6 +305,11 @@ package actor CodexReviewMCPHTTPServer {
     private let startCompletionGate = MCPHTTPLifecycleCompletionGate()
     private let joinedStartCompletionGate = MCPHTTPLifecycleCompletionGate()
     private let stopCompletionGate = MCPHTTPLifecycleCompletionGate()
+    private let finiteSourceCompletionGate = MCPHTTPLifecycleCompletionGate()
+    private let writerCompletionGate = MCPHTTPLifecycleCompletionGate()
+    private let responseEndAcknowledgementGate = MCPHTTPLifecycleCompletionGate()
+    private let responseEndWriteGate = MCPHTTPLifecycleCompletionGate()
+    private let responseBackpressureProbe = MCPHTTPResponseBackpressureProbe()
     private var eventLoopGroupShutdownCount = 0
     private var nextListenerCloseFailureForTesting: LifecycleError.Failure?
     private var nextEventLoopGroupShutdownFailureForTesting: LifecycleError.Failure?
@@ -410,6 +426,7 @@ package actor CodexReviewMCPHTTPServer {
     ) async -> StartingGenerationResult {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let maximumRequestBodyBytes = configuration.maximumRequestBodyBytes
+        let responseBackpressureProbe = responseBackpressureProbe
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 128)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
@@ -421,7 +438,8 @@ package actor CodexReviewMCPHTTPServer {
                     channel.pipeline.addHandler(CodexReviewMCPHTTPHandler(
                         server: self,
                         connection: connection,
-                        maximumRequestBodyBytes: maximumRequestBodyBytes
+                        maximumRequestBodyBytes: maximumRequestBodyBytes,
+                        responseBackpressureProbe: responseBackpressureProbe
                     ))
                 }
             }
@@ -888,12 +906,128 @@ package actor CodexReviewMCPHTTPServer {
         }
     }
 
+    package func holdNextFiniteSourceCompletionForTesting() async {
+        await finiteSourceCompletionGate.holdNextCompletion()
+    }
+
+    package func waitUntilFiniteSourceCompletionIsHeldForTesting() async {
+        await finiteSourceCompletionGate.waitUntilHolding()
+    }
+
+    package func releaseFiniteSourceCompletionForTesting() async {
+        await finiteSourceCompletionGate.release()
+    }
+
+    package func holdNextWriterCompletionForTesting() async {
+        await writerCompletionGate.holdNextCompletion()
+    }
+
+    package func waitUntilWriterCompletionIsHeldForTesting() async {
+        await writerCompletionGate.waitUntilHolding()
+    }
+
+    package func releaseWriterCompletionForTesting() async {
+        await writerCompletionGate.release()
+    }
+
+    package func holdNextResponseEndAcknowledgementForTesting() async {
+        await responseEndAcknowledgementGate.holdNextCompletion()
+    }
+
+    package func waitUntilResponseEndAcknowledgementIsHeldForTesting() async {
+        await responseEndAcknowledgementGate.waitUntilHolding()
+    }
+
+    package func releaseResponseEndAcknowledgementForTesting() async {
+        await responseEndAcknowledgementGate.release()
+    }
+
+    package func holdNextResponseEndWriteForTesting() async {
+        await responseEndWriteGate.holdNextCompletion()
+    }
+
+    package func waitUntilResponseEndWriteIsHeldForTesting() async {
+        await responseEndWriteGate.waitUntilHolding()
+    }
+
+    package func releaseResponseEndWriteForTesting() async {
+        await responseEndWriteGate.release()
+    }
+
+    package func holdNextResponseBodyWriteForTesting() {
+        responseBackpressureProbe.holdNextBodyWriteForTesting()
+    }
+
+    package func waitUntilResponseBodyWriteIsHeldForTesting() async {
+        await responseBackpressureProbe.waitUntilBodyWriteIsHeldForTesting()
+    }
+
+    package func releaseResponseBodyWriteForTesting() {
+        responseBackpressureProbe.releaseBodyWriteForTesting()
+    }
+
+    package func responseSourceReadCountForTesting() -> Int {
+        responseBackpressureProbe.sourceReadCountForTesting()
+    }
+
+    package static func responseRendezvousPrioritizesBodyForTesting() async -> Bool {
+        let events = MCPHTTPResponseEventChannel()
+        let body = Data("body".utf8)
+        let sender = Task { await events.sendBody(body) }
+        await events.waitUntilBodyIsPendingForTesting()
+        for _ in 0..<3 { events.offerHeartbeat() }
+        guard case .body(let id, let received) = await events.receive() else {
+            events.close()
+            return false
+        }
+        events.acknowledgeBody(id: id, wasWritten: true)
+        let wasAcknowledged = await sender.value
+        guard case .heartbeat = await events.receive() else {
+            events.close()
+            return false
+        }
+        events.finishSource(.sourceFinished)
+        guard case .sourceFinished = await events.receive() else {
+            events.close()
+            return false
+        }
+        events.close()
+        return received == body && wasAcknowledged
+    }
+
+    fileprivate var responseHeartbeatInterval: Duration? {
+        configuration.streamHeartbeatInterval
+    }
+
+    fileprivate func waitAfterFiniteSourceCompletionForTesting() async {
+        await finiteSourceCompletionGate.waitIfNeeded()
+    }
+
+    fileprivate func waitAfterWriterCompletionForTesting() async {
+        await writerCompletionGate.waitIfNeeded()
+    }
+
+    fileprivate func waitAfterResponseEndAcknowledgementForTesting() async {
+        await responseEndAcknowledgementGate.waitIfNeeded()
+    }
+
+    fileprivate func waitBeforeResponseEndWriteForTesting() async {
+        await responseEndWriteGate.waitIfNeeded()
+    }
+
     package func eventLoopGroupShutdownCountForTesting() -> Int {
         eventLoopGroupShutdownCount
     }
 
-    package func handleHTTPRequest(_ request: HTTPRequest) async -> HTTPResponse {
-        await handleTrackedHTTPRequest(request).response
+    package func validationResponseForTesting(_ request: HTTPRequest) -> HTTPResponse? {
+        makeValidationPipeline().validate(
+            request,
+            context: .init(
+                httpMethod: request.method,
+                sessionID: request.header(HTTPHeaderName.sessionID),
+                isInitializationRequest: request.body.map(Self.isInitializeRequest) ?? false
+            )
+        )
     }
 
     fileprivate func handleTrackedHTTPRequest(_ request: HTTPRequest) async -> TrackedHTTPResponse {
@@ -904,7 +1038,11 @@ package actor CodexReviewMCPHTTPServer {
             session.activeRequestCount += 1
             sessions[sessionID] = session
             let response = await session.transport.handleRequest(request)
-            let (trackedResponse, didFinishRequest) = trackActiveRequest(response, sessionID: sessionID)
+            let (trackedResponse, didFinishRequest) = trackActiveRequest(
+                response,
+                sessionID: sessionID,
+                responseSourceKind: Self.responseSourceKind(for: request)
+            )
             if didFinishRequest, request.method.uppercased() == "DELETE", trackedResponse.response.statusCode == 200 {
                 await closeSession(sessionID)
             }
@@ -957,7 +1095,11 @@ package actor CodexReviewMCPHTTPServer {
             )
 
             let response = await transport.handleRequest(request)
-            let (trackedResponse, didFinishRequest) = trackActiveRequest(response, sessionID: sessionID)
+            let (trackedResponse, didFinishRequest) = trackActiveRequest(
+                response,
+                sessionID: sessionID,
+                responseSourceKind: Self.responseSourceKind(for: request)
+            )
             if didFinishRequest, case .error = trackedResponse.response {
                 sessions.removeValue(forKey: sessionID)
                 await transport.disconnect()
@@ -985,39 +1127,23 @@ package actor CodexReviewMCPHTTPServer {
 
     private func trackActiveRequest(
         _ response: HTTPResponse,
-        sessionID: String
+        sessionID: String,
+        responseSourceKind: MCPHTTPResponseSourceKind
     ) -> (response: TrackedHTTPResponse, didFinishRequest: Bool) {
         switch response {
-        case .stream(let stream, let headers):
-            let completion = ActiveRequestCompletion {
-                Task {
-                    await self.finishActiveRequest(sessionID: sessionID)
-                }
-            }
-            let trackedStream = AsyncThrowingStream<Data, Swift.Error>(bufferingPolicy: .unbounded) { continuation in
-                let heartbeatTask = makeStreamHeartbeatTask(continuation: continuation)
-                let task = Task {
-                    defer {
-                        heartbeatTask?.cancel()
-                        completion.finish()
-                    }
-                    do {
-                        for try await chunk in stream {
-                            continuation.yield(chunk)
-                        }
-                        continuation.finish()
-                    } catch {
-                        continuation.finish(throwing: error)
-                    }
-                }
-                continuation.onTermination = { _ in
-                    heartbeatTask?.cancel()
-                    task.cancel()
-                    completion.finish()
-                }
+        case .stream(let source, _):
+            let completion = ActiveRequestCompletion { [weak self] in
+                await self?.finishActiveRequest(sessionID: sessionID)
             }
             return (
-                .init(response: .stream(trackedStream, headers: headers), streamCompletion: completion),
+                .init(
+                    response: response,
+                    streamLifecycle: .init(
+                        source: source,
+                        completion: completion,
+                        kind: responseSourceKind
+                    )
+                ),
                 false
             )
 
@@ -1032,27 +1158,6 @@ package actor CodexReviewMCPHTTPServer {
             session.lastAccessedAt = Date()
             session.activeRequestCount = max(0, session.activeRequestCount - 1)
             sessions[sessionID] = session
-        }
-    }
-
-    private func makeStreamHeartbeatTask(
-        continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
-    ) -> Task<Void, Never>? {
-        guard let interval = configuration.streamHeartbeatInterval else {
-            return nil
-        }
-        return Task {
-            while Task.isCancelled == false {
-                do {
-                    try await Task.sleep(for: interval)
-                } catch {
-                    return
-                }
-                guard Task.isCancelled == false else {
-                    return
-                }
-                continuation.yield(Data(": keep-alive\n\n".utf8))
-            }
         }
     }
 
@@ -1113,6 +1218,17 @@ package actor CodexReviewMCPHTTPServer {
             return false
         }
         return json["method"] as? String == "initialize" && json["id"] != nil
+    }
+
+    private static func responseSourceKind(for request: HTTPRequest) -> MCPHTTPResponseSourceKind {
+        guard let body = request.body,
+              let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              json["method"] is String,
+              json["id"] != nil,
+              (json["id"] is NSNull) == false else {
+            return .open
+        }
+        return .finite
     }
 
     private func makeValidationPipeline() -> any HTTPRequestValidationPipeline {
@@ -1186,22 +1302,282 @@ package actor CodexReviewMCPHTTPServer {
 
 private final class ActiveRequestCompletion: @unchecked Sendable {
     private let lock = NSLock()
-    private let onFinish: @Sendable () -> Void
+    private let onFinish: @Sendable () async -> Void
     private var didFinish = false
 
-    init(onFinish: @escaping @Sendable () -> Void) {
+    init(onFinish: @escaping @Sendable () async -> Void) {
         self.onFinish = onFinish
     }
 
-    func finish() {
+    func finishAndWait() async {
+        let shouldFinish = lock.withLock {
+            guard didFinish == false else {
+                return false
+            }
+            didFinish = true
+            return true
+        }
+        guard shouldFinish else { return }
+        await onFinish()
+    }
+}
+
+private final class MCPHTTPResponseEventChannel: @unchecked Sendable {
+    enum Event: Sendable {
+        case body(id: UUID, data: Data)
+        case heartbeat
+        case sourceFinished
+        case sourceFailed(String)
+        case cancelled
+    }
+
+    private struct PendingBody {
+        let id: UUID
+        let data: Data
+        let acknowledgement: CheckedContinuation<Bool, Never>
+    }
+
+    private let lock = NSLock()
+    private var pendingBody: PendingBody?
+    private var inFlightBody: PendingBody?
+    private var heartbeatPending = false
+    private var terminal: Event?
+    private var receiver: CheckedContinuation<Event, Never>?
+    private var pendingBodyWaiters: [CheckedContinuation<Void, Never>] = []
+    private var isClosed = false
+
+    func sendBody(_ data: Data) async -> Bool {
+        let id = UUID()
+        return await withCheckedContinuation { acknowledgement in
+            let receiver: CheckedContinuation<Event, Never>?
+            let waiters: [CheckedContinuation<Void, Never>]
+            lock.lock()
+            if isClosed || terminal != nil {
+                lock.unlock()
+                acknowledgement.resume(returning: false)
+                return
+            }
+            precondition(
+                pendingBody == nil && inFlightBody == nil,
+                "The response source waits for each physical body-write acknowledgement."
+            )
+            let body = PendingBody(id: id, data: data, acknowledgement: acknowledgement)
+            if let waitingReceiver = self.receiver {
+                self.receiver = nil
+                inFlightBody = body
+                receiver = waitingReceiver
+            } else {
+                pendingBody = body
+                receiver = nil
+            }
+            waiters = pendingBodyWaiters
+            pendingBodyWaiters.removeAll(keepingCapacity: false)
+            lock.unlock()
+            for waiter in waiters { waiter.resume() }
+            receiver?.resume(returning: .body(id: id, data: data))
+        }
+    }
+
+    func receive() async -> Event {
+        await withCheckedContinuation { continuation in
+            let immediate: Event?
+            lock.lock()
+            if isClosed {
+                immediate = .cancelled
+            } else if let pendingBody {
+                self.pendingBody = nil
+                inFlightBody = pendingBody
+                immediate = .body(id: pendingBody.id, data: pendingBody.data)
+            } else if let terminal {
+                immediate = terminal
+            } else if heartbeatPending {
+                heartbeatPending = false
+                immediate = .heartbeat
+            } else {
+                precondition(receiver == nil, "One response writer owns the channel receiver.")
+                receiver = continuation
+                immediate = nil
+            }
+            lock.unlock()
+            if let immediate { continuation.resume(returning: immediate) }
+        }
+    }
+
+    func acknowledgeBody(id: UUID, wasWritten: Bool) {
+        let acknowledgement: CheckedContinuation<Bool, Never>?
         lock.lock()
-        if didFinish {
+        if let inFlightBody, inFlightBody.id == id {
+            self.inFlightBody = nil
+            acknowledgement = inFlightBody.acknowledgement
+        } else {
+            acknowledgement = nil
+        }
+        lock.unlock()
+        acknowledgement?.resume(returning: wasWritten)
+    }
+
+    func offerHeartbeat() {
+        let receiver: CheckedContinuation<Event, Never>?
+        lock.lock()
+        guard isClosed == false, terminal == nil else {
             lock.unlock()
             return
         }
-        didFinish = true
+        if pendingBody == nil, inFlightBody == nil, let waitingReceiver = self.receiver {
+            self.receiver = nil
+            receiver = waitingReceiver
+        } else {
+            heartbeatPending = true
+            receiver = nil
+        }
         lock.unlock()
-        onFinish()
+        receiver?.resume(returning: .heartbeat)
+    }
+
+    func finishSource(_ result: Event) {
+        let receiver: CheckedContinuation<Event, Never>?
+        lock.lock()
+        guard isClosed == false, terminal == nil else {
+            lock.unlock()
+            return
+        }
+        terminal = result
+        heartbeatPending = false
+        if pendingBody == nil, inFlightBody == nil {
+            receiver = self.receiver
+            self.receiver = nil
+        } else {
+            receiver = nil
+        }
+        lock.unlock()
+        receiver?.resume(returning: result)
+    }
+
+    func close() {
+        let acknowledgements: [CheckedContinuation<Bool, Never>]
+        let receiver: CheckedContinuation<Event, Never>?
+        lock.lock()
+        guard isClosed == false else {
+            lock.unlock()
+            return
+        }
+        isClosed = true
+        acknowledgements = [pendingBody?.acknowledgement, inFlightBody?.acknowledgement]
+            .compactMap { $0 }
+        pendingBody = nil
+        inFlightBody = nil
+        receiver = self.receiver
+        self.receiver = nil
+        lock.unlock()
+        for acknowledgement in acknowledgements {
+            acknowledgement.resume(returning: false)
+        }
+        receiver?.resume(returning: .cancelled)
+    }
+
+    func waitUntilBodyIsPendingForTesting() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if pendingBody != nil || inFlightBody != nil {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                pendingBodyWaiters.append(continuation)
+                lock.unlock()
+            }
+        }
+    }
+}
+
+private final class MCPHTTPResponseBackpressureProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var sourceReadCount = 0
+    private var holdNextBodyWrite = false
+    private var releaseWasRequested = false
+    private var bodyWriteContinuation: CheckedContinuation<Void, Never>?
+    private var bodyWriteWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func holdNextBodyWriteForTesting() {
+        lock.lock()
+        precondition(holdNextBodyWrite == false && bodyWriteContinuation == nil)
+        sourceReadCount = 0
+        holdNextBodyWrite = true
+        releaseWasRequested = false
+        lock.unlock()
+    }
+
+    func recordSourceRead() {
+        lock.lock()
+        sourceReadCount += 1
+        lock.unlock()
+    }
+
+    func waitBeforeBodyWriteIfNeeded() async {
+        await withCheckedContinuation { continuation in
+            let waiters: [CheckedContinuation<Void, Never>]
+            lock.lock()
+            guard holdNextBodyWrite else {
+                lock.unlock()
+                continuation.resume()
+                return
+            }
+            waiters = bodyWriteWaiters
+            bodyWriteWaiters.removeAll(keepingCapacity: false)
+            if releaseWasRequested {
+                resetLocked()
+                lock.unlock()
+                for waiter in waiters { waiter.resume() }
+                continuation.resume()
+                return
+            }
+            bodyWriteContinuation = continuation
+            lock.unlock()
+            for waiter in waiters { waiter.resume() }
+        }
+    }
+
+    func waitUntilBodyWriteIsHeldForTesting() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if bodyWriteContinuation != nil {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                bodyWriteWaiters.append(continuation)
+                lock.unlock()
+            }
+        }
+    }
+
+    func releaseBodyWriteForTesting() {
+        let continuation: CheckedContinuation<Void, Never>?
+        lock.lock()
+        guard holdNextBodyWrite else {
+            lock.unlock()
+            return
+        }
+        if let held = bodyWriteContinuation {
+            bodyWriteContinuation = nil
+            continuation = held
+            resetLocked()
+        } else {
+            releaseWasRequested = true
+            continuation = nil
+        }
+        lock.unlock()
+        continuation?.resume()
+    }
+
+    func sourceReadCountForTesting() -> Int {
+        lock.lock()
+        let count = sourceReadCount
+        lock.unlock()
+        return count
+    }
+
+    private func resetLocked() {
+        holdNextBodyWrite = false
+        releaseWasRequested = false
     }
 }
 
@@ -1334,19 +1710,19 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
     private let server: CodexReviewMCPHTTPServer
     private let connection: MCPHTTPNetworkResourceOwner.Connection
     private let maximumRequestBodyBytes: Int
+    private let responseBackpressureProbe: MCPHTTPResponseBackpressureProbe
     private var requestState: RequestState?
-    private var activeStreamTask: Task<Void, Never>?
-    private var activeStreamID: UUID?
-    private var activeStreamCompletion: ActiveRequestCompletion?
 
     init(
         server: CodexReviewMCPHTTPServer,
         connection: MCPHTTPNetworkResourceOwner.Connection,
-        maximumRequestBodyBytes: Int
+        maximumRequestBodyBytes: Int,
+        responseBackpressureProbe: MCPHTTPResponseBackpressureProbe
     ) {
         self.server = server
         self.connection = connection
         self.maximumRequestBodyBytes = maximumRequestBodyBytes
+        self.responseBackpressureProbe = responseBackpressureProbe
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -1400,6 +1776,9 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
             guard await admittedRequest.lease.waitUntilStartIsAllowed() else {
                 return
             }
+            guard admittedRequest.operation.beginResponse() else {
+                return
+            }
             if shouldSendContinue {
                 do {
                     let responseHead = HTTPResponseHead(version: head.version, status: .continue)
@@ -1419,17 +1798,24 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
             }
             switch bodyResult {
             case .body(let body):
-                await handleRequest(head: head, body: body, context: context)
+                await handleRequest(
+                    head: head,
+                    body: body,
+                    operation: admittedRequest.operation,
+                    context: context
+                )
             case .payloadTooLarge:
                 await writeRequestRejection(
                     status: .payloadTooLarge,
                     version: head.version,
+                    operation: admittedRequest.operation,
                     context: context
                 )
             case .expectationFailed:
                 await writeRequestRejection(
                     status: .expectationFailed,
                     version: head.version,
+                    operation: admittedRequest.operation,
                     context: context
                 )
             case .cancelled:
@@ -1478,7 +1864,6 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
         requestState?.bodyReceipt.reject(.cancelled)
         requestState = nil
         connection.peerClosed()
-        finishActiveStream()
         context.fireChannelInactive()
     }
 
@@ -1487,7 +1872,6 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
             requestState?.bodyReceipt.reject(.cancelled)
             requestState = nil
             connection.peerClosed()
-            finishActiveStream()
             context.close(promise: nil)
             return
         }
@@ -1498,21 +1882,13 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
         requestState?.bodyReceipt.reject(.cancelled)
         requestState = nil
         connection.transportFailed(error.localizedDescription)
-        finishActiveStream()
         context.close(promise: nil)
-    }
-
-    private func finishActiveStream() {
-        activeStreamTask?.cancel()
-        activeStreamCompletion?.finish()
-        activeStreamTask = nil
-        activeStreamID = nil
-        activeStreamCompletion = nil
     }
 
     private func handleRequest(
         head: HTTPRequestHead,
         body: Data?,
+        operation: MCPHTTPNetworkResourceOwner.RequestOperation,
         context: ChannelHandlerContext
     ) async {
         let path = head.uri.split(separator: "?").first.map(String.init) ?? head.uri
@@ -1521,6 +1897,8 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
             await writeResponse(
                 .init(response: .error(statusCode: 404, .invalidRequest("Not Found"))),
                 version: head.version,
+                operation: operation,
+                closeAfterResponse: head.isKeepAlive == false,
                 context: context
             )
             return
@@ -1528,7 +1906,13 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
 
         let request = makeHTTPRequest(head: head, body: body)
         let response = await server.handleTrackedHTTPRequest(request)
-        await writeResponse(response, version: head.version, context: context)
+        await writeResponse(
+            response,
+            version: head.version,
+            operation: operation,
+            closeAfterResponse: head.isKeepAlive == false,
+            context: context
+        )
     }
 
     private func makeHTTPRequest(head: HTTPRequestHead, body: Data?) -> HTTPRequest {
@@ -1553,6 +1937,7 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
     private func writeRequestRejection(
         status: HTTPResponseStatus,
         version: HTTPVersion,
+        operation: MCPHTTPNetworkResourceOwner.RequestOperation,
         context: ChannelHandlerContext
     ) async {
         nonisolated(unsafe) let context = context
@@ -1563,17 +1948,19 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
         do {
             try await writeResponsePart(.head(head), context: context, eventLoop: eventLoop)
             try await writeResponsePart(.end(nil), context: context, eventLoop: eventLoop)
+            operation.acknowledgeResponseEnd()
+            await connection.closeAfterResponse()
         } catch {
             logger.error("MCP request rejection write failed: \(error.localizedDescription, privacy: .public)")
-        }
-        eventLoop.execute {
-            context.close(promise: nil)
+            connection.transportFailed(error.localizedDescription)
         }
     }
 
     private func writeResponse(
         _ trackedResponse: TrackedHTTPResponse,
         version: HTTPVersion,
+        operation: MCPHTTPNetworkResourceOwner.RequestOperation,
+        closeAfterResponse: Bool,
         context: ChannelHandlerContext
     ) async {
         nonisolated(unsafe) let context = context
@@ -1581,81 +1968,215 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
         let response = trackedResponse.response
         let status = HTTPResponseStatus(statusCode: response.statusCode)
         let headers = response.headers
+        var head = HTTPResponseHead(version: version, status: status)
+        for (name, value) in headers {
+            head.headers.add(name: name, value: value)
+        }
+        if closeAfterResponse {
+            head.headers.replaceOrAdd(name: "Connection", value: "close")
+        }
 
+        let result: WriterCompletion
         switch response {
-        case .stream(let stream, _):
-            let streamID = UUID()
-            let streamTask = Task {
-                var head = HTTPResponseHead(version: version, status: status)
-                for (name, value) in headers {
-                    head.headers.add(name: name, value: value)
-                }
-
-                var iterator = stream.makeAsyncIterator()
-                do {
-                    try Task.checkCancellation()
-                    try await writeResponsePart(.head(head), context: context, eventLoop: eventLoop)
-                    while let chunk = try await iterator.next() {
-                        try Task.checkCancellation()
-                        try await writeResponseBody(chunk, context: context, eventLoop: eventLoop)
-                    }
-                } catch is CancellationError {
-                    trackedResponse.streamCompletion?.finish()
-                    return
-                } catch {
-                    trackedResponse.streamCompletion?.finish()
-                    logger.error("MCP SSE stream failed: \(error.localizedDescription, privacy: .public)")
-                }
-
-                guard Task.isCancelled == false else {
-                    return
-                }
-                try? await writeResponsePart(.end(nil), context: context, eventLoop: eventLoop)
-            }
-            eventLoop.execute {
-                context.channel.closeFuture.whenComplete { _ in
-                    trackedResponse.streamCompletion?.finish()
-                    streamTask.cancel()
-                }
-                guard context.channel.isActive else {
-                    trackedResponse.streamCompletion?.finish()
-                    streamTask.cancel()
-                    return
-                }
-                self.activeStreamTask?.cancel()
-                self.activeStreamCompletion?.finish()
-                self.activeStreamTask = streamTask
-                self.activeStreamID = streamID
-                self.activeStreamCompletion = trackedResponse.streamCompletion
-                context.read()
-            }
-            await streamTask.value
-            eventLoop.execute {
-                if self.activeStreamID == streamID {
-                    self.activeStreamTask = nil
-                    self.activeStreamID = nil
-                    self.activeStreamCompletion = nil
-                }
+        case .stream:
+            if let lifecycle = trackedResponse.streamLifecycle {
+                result = await writeStreamingResponse(
+                    lifecycle,
+                    head: head,
+                    context: context,
+                    eventLoop: eventLoop
+                )
+            } else {
+                result = .transportFailed("Streaming response has no source lifecycle.")
             }
 
         default:
-            let body = response.bodyData
-            eventLoop.execute {
-                var head = HTTPResponseHead(version: version, status: status)
-                for (name, value) in headers {
-                    head.headers.add(name: name, value: value)
-                }
-                if let body {
-                    head.headers.add(name: "Content-Length", value: "\(body.count)")
-                }
-                context.write(self.wrapOutboundOut(.head(head)), promise: nil)
-                if let body {
-                    var buffer = context.channel.allocator.buffer(capacity: body.count)
-                    buffer.writeBytes(body)
-                    context.write(self.wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
-                }
-                context.writeAndFlush(self.wrapOutboundOut(.end(nil)), promise: nil)
+            result = await writeNonStreamingResponse(
+                response,
+                head: head,
+                context: context,
+                eventLoop: eventLoop
+            )
+        }
+
+        switch result {
+        case .responded:
+            operation.acknowledgeResponseEnd()
+            if closeAfterResponse {
+                await connection.closeAfterResponse()
             }
+            await server.waitAfterResponseEndAcknowledgementForTesting()
+        case .cancelled:
+            break
+        case .sourceFailed(let message):
+            logger.error("MCP SSE source failed: \(message, privacy: .public)")
+            connection.transportFailed(message)
+        case .transportFailed(let message):
+            logger.error("MCP HTTP response failed: \(message, privacy: .public)")
+            connection.transportFailed(message)
+        }
+        await server.waitAfterWriterCompletionForTesting()
+    }
+
+    private enum WriterCompletion: Sendable {
+        case responded
+        case cancelled
+        case sourceFailed(String)
+        case transportFailed(String)
+    }
+
+    private enum ResponseChildCompletion: Sendable {
+        case source
+        case heartbeat
+        case writer(WriterCompletion)
+    }
+
+    private func writeStreamingResponse(
+        _ lifecycle: TrackedHTTPResponse.StreamLifecycle,
+        head: HTTPResponseHead,
+        context: ChannelHandlerContext,
+        eventLoop: any EventLoop
+    ) async -> WriterCompletion {
+        nonisolated(unsafe) let context = context
+        let events = MCPHTTPResponseEventChannel()
+        let heartbeatInterval = await server.responseHeartbeatInterval
+        return await withTaskCancellationHandler {
+            await withTaskGroup(of: ResponseChildCompletion.self) { group in
+                group.addTask { [self] in
+                    do {
+                        for try await chunk in lifecycle.source {
+                            try Task.checkCancellation()
+#if DEBUG
+                            responseBackpressureProbe.recordSourceRead()
+#endif
+                            guard await events.sendBody(chunk) else { break }
+                        }
+                        if lifecycle.kind == .finite {
+                            await server.waitAfterFiniteSourceCompletionForTesting()
+                        }
+                        events.finishSource(Task.isCancelled ? .cancelled : .sourceFinished)
+                    } catch let error as CancellationError {
+                        if Task.isCancelled {
+                            events.finishSource(.cancelled)
+                        } else {
+                            events.finishSource(.sourceFailed(error.localizedDescription))
+                        }
+                    } catch {
+                        events.finishSource(.sourceFailed(error.localizedDescription))
+                    }
+                    await lifecycle.completion.finishAndWait()
+                    return .source
+                }
+                if let heartbeatInterval {
+                    group.addTask {
+                        while Task.isCancelled == false {
+                            do {
+                                try await Task.sleep(for: heartbeatInterval)
+                            } catch {
+                                return .heartbeat
+                            }
+                            events.offerHeartbeat()
+                        }
+                        return .heartbeat
+                    }
+                }
+                group.addTask { [self] in
+                    .writer(await consumeResponseEvents(
+                        events,
+                        head: head,
+                        context: context,
+                        eventLoop: eventLoop
+                    ))
+                }
+
+                var result = WriterCompletion.cancelled
+                while let completion = await group.next() {
+                    if case .writer(let writerResult) = completion {
+                        result = writerResult
+                        events.close()
+                        group.cancelAll()
+                        break
+                    }
+                }
+                await group.waitForAll()
+                return result
+            }
+        } onCancel: {
+            events.close()
+        }
+    }
+
+    private func consumeResponseEvents(
+        _ events: MCPHTTPResponseEventChannel,
+        head: HTTPResponseHead,
+        context: ChannelHandlerContext,
+        eventLoop: any EventLoop
+    ) async -> WriterCompletion {
+        do {
+            try Task.checkCancellation()
+            try await writeResponsePart(.head(head), context: context, eventLoop: eventLoop)
+            while true {
+                switch await events.receive() {
+                case .body(let id, let data):
+                    do {
+#if DEBUG
+                        await responseBackpressureProbe.waitBeforeBodyWriteIfNeeded()
+#endif
+                        try await writeResponseBody(data, context: context, eventLoop: eventLoop)
+                        events.acknowledgeBody(id: id, wasWritten: true)
+                    } catch {
+                        events.acknowledgeBody(id: id, wasWritten: false)
+                        return .transportFailed(error.localizedDescription)
+                    }
+                case .heartbeat:
+                    try await writeResponseBody(
+                        Data(": keep-alive\n\n".utf8),
+                        context: context,
+                        eventLoop: eventLoop
+                    )
+                case .sourceFinished:
+                    await server.waitBeforeResponseEndWriteForTesting()
+                    try Task.checkCancellation()
+                    try await writeResponsePart(.end(nil), context: context, eventLoop: eventLoop)
+                    return .responded
+                case .sourceFailed(let message):
+                    return .sourceFailed(message)
+                case .cancelled:
+                    return .cancelled
+                }
+            }
+        } catch is CancellationError {
+            return .cancelled
+        } catch {
+            return .transportFailed(error.localizedDescription)
+        }
+    }
+
+    private func writeNonStreamingResponse(
+        _ response: HTTPResponse,
+        head: HTTPResponseHead,
+        context: ChannelHandlerContext,
+        eventLoop: any EventLoop
+    ) async -> WriterCompletion {
+        var head = head
+        let body = response.bodyData
+        if let body {
+            head.headers.add(name: "Content-Length", value: "\(body.count)")
+        }
+        do {
+            try Task.checkCancellation()
+            try await writeResponsePart(.head(head), context: context, eventLoop: eventLoop)
+            if let body {
+                try await writeResponseBody(body, context: context, eventLoop: eventLoop)
+            }
+            await server.waitBeforeResponseEndWriteForTesting()
+            try Task.checkCancellation()
+            try await writeResponsePart(.end(nil), context: context, eventLoop: eventLoop)
+            return .responded
+        } catch is CancellationError {
+            return .cancelled
+        } catch {
+            return .transportFailed(error.localizedDescription)
         }
     }
 

@@ -117,7 +117,7 @@ struct CodexReviewMCPHTTPServerTests {
                 ],
             ],
         ])
-        let response = await server.handleHTTPRequest(HTTPRequest(
+        let response = await server.validationResponseForTesting(HTTPRequest(
             method: "POST",
             headers: [
                 HTTPHeaderName.host: "review.local:9417",
@@ -127,7 +127,7 @@ struct CodexReviewMCPHTTPServerTests {
             body: initializeBody,
             path: "/mcp"
         ))
-        let denied = await server.handleHTTPRequest(HTTPRequest(
+        let denied = await server.validationResponseForTesting(HTTPRequest(
             method: "POST",
             headers: [
                 HTTPHeaderName.host: "other.local:9417",
@@ -138,10 +138,8 @@ struct CodexReviewMCPHTTPServerTests {
             path: "/mcp"
         ))
 
-        #expect(response.statusCode == 200)
-        #expect(response.headers[HTTPHeaderName.sessionID]?.isEmpty == false)
-        #expect(denied.statusCode == 421)
-        try await server.stop()
+        #expect(response == nil)
+        #expect(denied?.statusCode == 421)
     }
 
     @Test func streamableHTTPClassifiesAddressInUseBindError() {
@@ -710,6 +708,273 @@ struct CodexReviewMCPHTTPServerTests {
             _ = try await connection.readUntilEOF()
             #expect(await server.currentGenerationIDForTesting() == nil)
         }
+    }
+
+    @Test func networkFiniteStreamExhaustionFinishesItsActiveRequest() async throws {
+        try await withHTTPServer(store: CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        )) { server in
+            let endpoint = await server.url
+            let sessionID = try await initializeSession(endpoint: endpoint)
+            _ = try await postJSONRPCData(
+                endpoint: endpoint,
+                sessionID: sessionID,
+                bodyData: makeToolsListBody(id: 29)
+            )
+            #expect(await server.sessionActiveRequestCountForTesting(sessionID: sessionID) == 0)
+        }
+    }
+
+    @Test func networkOpenStreamDisconnectFinishesItsActiveRequest() async throws {
+        let server = makeHTTPServer(configuration: .init(
+            host: "127.0.0.1",
+            port: 0,
+            streamHeartbeatInterval: .milliseconds(10)
+        ))
+        try await server.start()
+        let endpoint = await server.url
+        let sessionID = try await initializeSession(endpoint: endpoint)
+        let connection = try await RawHTTPConnection.connect(to: endpoint)
+        try await connection.send(rawHTTPRequest(
+            endpoint: endpoint,
+            method: "GET",
+            sessionID: sessionID,
+            headers: [("Accept", "text/event-stream, application/json")]
+        ))
+        _ = try await connection.readResponseHead()
+        #expect(await server.sessionActiveRequestCountForTesting(sessionID: sessionID) == 1)
+        connection.reset()
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            await server.sessionActiveRequestCountForTesting(sessionID: sessionID) == 0
+        })
+        try await server.stop()
+    }
+
+    @Test func stopJoinsHeldFiniteResponseSource() async throws {
+        let server = makeHTTPServer()
+        try await server.start()
+        let endpoint = await server.url
+        let sessionID = try await initializeSession(endpoint: endpoint)
+        await server.holdNextFiniteSourceCompletionForTesting()
+        let response = Task {
+            try await postJSONRPCData(
+                endpoint: endpoint,
+                sessionID: sessionID,
+                bodyData: makeToolsListBody(id: 30)
+            )
+        }
+        await server.waitUntilFiniteSourceCompletionIsHeldForTesting()
+        #expect(try #require(await server.networkResourceSnapshotForTesting())
+            .connections.flatMap(\.requests).count == 1)
+
+        let stop = Task { try await server.stop() }
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            await server.networkResourceSnapshotForTesting()?.phase == .closing(.serverStop)
+        })
+        #expect(await server.eventLoopGroupShutdownCountForTesting() == 0)
+        await server.releaseFiniteSourceCompletionForTesting()
+        _ = try? await response.value
+        try await stop.value
+        #expect(await server.eventLoopGroupShutdownCountForTesting() == 1)
+    }
+
+    @Test func heldPhysicalBodyWriteAllowsOneSourceRead() async throws {
+        let server = makeHTTPServer()
+        try await server.start()
+        let endpoint = await server.url
+        let sessionID = try await initializeSession(endpoint: endpoint)
+        await server.holdNextResponseBodyWriteForTesting()
+        let response = Task {
+            try await postJSONRPCData(
+                endpoint: endpoint,
+                sessionID: sessionID,
+                bodyData: makeToolsListBody(id: 31)
+            )
+        }
+        await server.waitUntilResponseBodyWriteIsHeldForTesting()
+        #expect(await server.responseSourceReadCountForTesting() == 1)
+        await server.releaseResponseBodyWriteForTesting()
+        _ = try await response.value
+        #expect(await server.responseSourceReadCountForTesting() >= 2)
+        try await server.stop()
+    }
+
+    @Test func repeatedHeartbeatsCannotOvertakePendingBody() async {
+        #expect(await CodexReviewMCPHTTPServer.responseRendezvousPrioritizesBodyForTesting())
+    }
+
+    @Test func stopJoinsWriterBeforeEventLoopShutdown() async throws {
+        let server = makeHTTPServer()
+        try await server.start()
+        let endpoint = await server.url
+        let sessionID = try await initializeSession(endpoint: endpoint)
+        await server.holdNextWriterCompletionForTesting()
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "GET"
+        request.setValue("text/event-stream, application/json", forHTTPHeaderField: "Accept")
+        request.setValue(sessionID, forHTTPHeaderField: "MCP-Session-Id")
+        let (bytes, _) = try await URLSession.shared.bytes(for: request)
+
+        let stop = Task { try await server.stop() }
+        await server.waitUntilWriterCompletionIsHeldForTesting()
+        #expect(await server.eventLoopGroupShutdownCountForTesting() == 0)
+        await server.releaseWriterCompletionForTesting()
+        try await stop.value
+        withExtendedLifetime(bytes) {}
+        #expect(await server.eventLoopGroupShutdownCountForTesting() == 1)
+    }
+
+    @Test func loneNonPersistentRequestsSendCompleteResponseThenEOF() async throws {
+        let server = makeHTTPServer()
+        try await server.start()
+        let endpoint = await server.url
+        let sessionID = try await initializeSession(endpoint: endpoint)
+        for (version, connectionHeader, id) in [
+            ("HTTP/1.0", Optional<String>.none, 32),
+            ("HTTP/1.1", Optional("close"), 33),
+        ] {
+            let connection = try await RawHTTPConnection.connect(to: endpoint)
+            try await connection.send(rawHTTPRequest(
+                endpoint: endpoint,
+                version: version,
+                sessionID: sessionID,
+                headers: connectionHeader.map { [("Connection", $0)] } ?? [],
+                body: makeToolsListBody(id: id)
+            ))
+            let head = try await connection.readResponseHead()
+            let body = try await connection.readUntilEOF()
+            connection.close()
+            #expect(head.contains(" 200 "))
+            #expect(try decodeSSEJSON(from: body)["id"] as? Int == id)
+            if version == "HTTP/1.1" {
+                #expect(body.suffix(5) == Data("0\r\n\r\n".utf8))
+            }
+        }
+        try await server.stop()
+    }
+
+    @Test func channelCloseCancelsOpenSSEWithoutLateEventLoopWork() async throws {
+        let server = makeHTTPServer(configuration: .init(
+            host: "127.0.0.1",
+            port: 0,
+            streamHeartbeatInterval: .milliseconds(10)
+        ))
+        try await server.start()
+        let sessionID = try await initializeSession(endpoint: await server.url)
+        try await openAndCloseRawEventStream(endpoint: await server.url, sessionID: sessionID)
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            await server.networkResourceSnapshotForTesting()?.connections
+                .flatMap(\.requests).isEmpty == true
+        })
+        try await server.stop()
+        #expect(await server.eventLoopGroupShutdownCountForTesting() == 1)
+    }
+
+    @Test func acknowledgedResponseEndWinsConcurrentStop() async throws {
+        let server = makeHTTPServer()
+        try await server.start()
+        let endpoint = await server.url
+        let sessionID = try await initializeSession(endpoint: endpoint)
+        await server.holdNextResponseEndAcknowledgementForTesting()
+        let response = Task {
+            try await postJSONRPCData(
+                endpoint: endpoint,
+                sessionID: sessionID,
+                bodyData: makeToolsListBody(id: 34)
+            )
+        }
+        await server.waitUntilResponseEndAcknowledgementIsHeldForTesting()
+        let before = try #require(await server.networkResourceSnapshotForTesting()?
+            .connections.flatMap(\.requests).first)
+        #expect(before.responseEnd == .acknowledged)
+        #expect(before.terminalCause == nil)
+
+        let stop = Task { try await server.stop() }
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            await server.networkResourceSnapshotForTesting()?.phase == .closing(.serverStop)
+        })
+        let after = try #require(await server.networkResourceSnapshotForTesting()?
+            .connections.flatMap(\.requests).first)
+        #expect(after.responseEnd == .acknowledged)
+        #expect(after.terminalCause == nil)
+        await server.releaseResponseEndAcknowledgementForTesting()
+        _ = try? await response.value
+        try await stop.value
+    }
+
+    @Test func clientDisconnectDrainsOwnedFiniteSource() async throws {
+        let server = makeHTTPServer()
+        try await server.start()
+        let endpoint = await server.url
+        let sessionID = try await initializeSession(endpoint: endpoint)
+        await server.holdNextFiniteSourceCompletionForTesting()
+        await server.holdNextWriterCompletionForTesting()
+        let connection = try await RawHTTPConnection.connect(to: endpoint)
+        try await connection.send(rawHTTPRequest(
+            endpoint: endpoint,
+            sessionID: sessionID,
+            body: makeToolsListBody(id: 35)
+        ))
+        await server.waitUntilFiniteSourceCompletionIsHeldForTesting()
+        _ = try await connection.readResponseHead()
+        connection.reset()
+        #expect(try #require(await server.networkResourceSnapshotForTesting())
+            .connections.flatMap(\.requests).count == 1)
+        await server.releaseFiniteSourceCompletionForTesting()
+        await server.waitUntilWriterCompletionIsHeldForTesting()
+        let closing = try #require(await server.networkResourceSnapshotForTesting()?
+            .connections.flatMap(\.requests).first)
+        #expect(closing.responseEnd == .closed)
+        #expect(closing.terminalCause == .peerClosed || closing.terminalCause.map {
+            if case .transportFailure = $0 { true } else { false }
+        } == true)
+        await server.releaseWriterCompletionForTesting()
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            await server.networkResourceSnapshotForTesting()?.connections
+                .flatMap(\.requests).isEmpty == true
+        })
+        try await server.stop()
+    }
+
+    @Test func nonStreamRequestRemainsOwnedUntilFinalEndWrite() async throws {
+        let server = makeHTTPServer()
+        try await server.start()
+        let endpoint = await server.url
+        await server.holdNextResponseEndWriteForTesting()
+        let connection = try await RawHTTPConnection.connect(to: endpoint)
+        try await connection.send(rawHTTPRequest(
+            endpoint: endpoint,
+            sessionID: nil,
+            body: makeToolsListBody(id: 36)
+        ))
+        await server.waitUntilResponseEndWriteIsHeldForTesting()
+        let pending = try #require(await server.networkResourceSnapshotForTesting()?
+            .connections.flatMap(\.requests).first)
+        #expect(pending.responseEnd == .pending)
+        await server.releaseResponseEndWriteForTesting()
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            await server.networkResourceSnapshotForTesting()?.connections
+                .flatMap(\.requests).isEmpty == true
+        })
+        #expect(try await connection.readResponseHead().contains(" 400 "))
+        connection.close()
+        try await server.stop()
+    }
+
+    @Test func acceptedChildCloseAcknowledgementPrecedesEventLoopShutdown() async throws {
+        let server = makeHTTPServer()
+        try await server.start()
+        let connection = try await RawHTTPConnection.connect(to: await server.url)
+        await server.holdNextStopCompletionForTesting()
+        let stop = Task { try await server.stop() }
+        await server.waitUntilStopCompletionIsHeldForTesting()
+        _ = try await connection.readUntilEOF()
+        #expect(await server.networkResourceSnapshotForTesting()?.isClosed == true)
+        #expect(await server.eventLoopGroupShutdownCountForTesting() == 0)
+        await server.releaseStopCompletionForTesting()
+        try await stop.value
+        connection.close()
+        #expect(await server.eventLoopGroupShutdownCountForTesting() == 1)
     }
 
     @Test func streamableHTTPCallsReviewStartWithCustomTarget() async throws {
@@ -1821,6 +2086,21 @@ struct CodexReviewMCPHTTPServerTests {
         }
     }
 
+    private func makeHTTPServer(
+        configuration: CodexReviewMCPHTTPServer.Configuration = .init(
+            host: "127.0.0.1",
+            port: 0
+        )
+    ) -> CodexReviewMCPHTTPServer {
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        )
+        return CodexReviewMCPHTTPServer(
+            adapter: CodexReviewMCPServer(store: store),
+            configuration: configuration
+        )
+    }
+
     private func withHTTPServer<T>(
         store: CodexReviewStore,
         configuration: CodexReviewMCPHTTPServer.Configuration = .init(
@@ -2283,6 +2563,27 @@ private final class RawHTTPConnection: @unchecked Sendable {
         }
         if shouldClose {
             Darwin.shutdown(descriptor, SHUT_RDWR)
+            Darwin.close(descriptor)
+        }
+    }
+
+    func reset() {
+        let shouldClose = lock.withLock {
+            guard isClosed == false else { return false }
+            isClosed = true
+            return true
+        }
+        if shouldClose {
+            var option = linger(l_onoff: 1, l_linger: 0)
+            _ = withUnsafePointer(to: &option) {
+                Darwin.setsockopt(
+                    descriptor,
+                    SOL_SOCKET,
+                    SO_LINGER,
+                    $0,
+                    socklen_t(MemoryLayout<linger>.size)
+                )
+            }
             Darwin.close(descriptor)
         }
     }
