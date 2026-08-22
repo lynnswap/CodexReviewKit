@@ -289,6 +289,7 @@ package actor CodexReviewMCPHTTPServer {
     private let finiteSourceCompletionGate = MCPHTTPLifecycleCompletionGate()
     private let writerCompletionGate = MCPHTTPLifecycleCompletionGate()
     private let responseEndAcknowledgementGate = MCPHTTPLifecycleCompletionGate()
+    private let responseBackpressureProbe = MCPHTTPResponseBackpressureProbe()
     private var eventLoopGroupShutdownCount = 0
     private var nextListenerCloseFailureForTesting: LifecycleError.Failure?
     private var nextEventLoopGroupShutdownFailureForTesting: LifecycleError.Failure?
@@ -403,6 +404,7 @@ package actor CodexReviewMCPHTTPServer {
         id: UInt64,
         networkResources: MCPHTTPNetworkResourceOwner
     ) async -> StartingGenerationResult {
+        let responseBackpressureProbe = responseBackpressureProbe
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 128)
@@ -416,6 +418,7 @@ package actor CodexReviewMCPHTTPServer {
                 ).flatMap {
                     channel.pipeline.addHandler(CodexReviewMCPHTTPHandler(
                         server: self,
+                        responseBackpressureProbe: responseBackpressureProbe,
                         connection: connection
                     ))
                 }
@@ -931,6 +934,22 @@ package actor CodexReviewMCPHTTPServer {
         await responseEndAcknowledgementGate.release()
     }
 
+    package func holdNextResponseBodyWriteForTesting() {
+        responseBackpressureProbe.holdNextBodyWriteForTesting()
+    }
+
+    package func waitUntilResponseBodyWriteIsHeldForTesting() async {
+        await responseBackpressureProbe.waitUntilBodyWriteIsHeldForTesting()
+    }
+
+    package func releaseResponseBodyWriteForTesting() {
+        responseBackpressureProbe.releaseBodyWriteForTesting()
+    }
+
+    package func responseSourceReadCountForTesting() -> Int {
+        responseBackpressureProbe.sourceReadCountForTesting()
+    }
+
     fileprivate var responseHeartbeatInterval: Duration? {
         configuration.streamHeartbeatInterval
     }
@@ -1320,6 +1339,314 @@ private final class ActiveRequestCompletion: @unchecked Sendable {
     }
 }
 
+private final class MCPHTTPResponseEventChannel: @unchecked Sendable {
+    enum Event: Sendable {
+        case body(id: UUID, data: Data)
+        case heartbeat
+        case sourceFinished
+        case sourceFailed(String)
+        case cancelled
+    }
+
+    private struct PendingBody {
+        let id: UUID
+        let data: Data
+        let acknowledgement: CheckedContinuation<Bool, Never>
+    }
+
+    private let lock = NSLock()
+    private var pendingBody: PendingBody?
+    private var inFlightBody: PendingBody?
+    private var heartbeatPending = false
+    private var terminal: Event?
+    private var receiver: CheckedContinuation<Event, Never>?
+    private var isClosed = false
+
+    func sendBody(_ data: Data) async -> Bool {
+        let id = UUID()
+        return await withCheckedContinuation { acknowledgement in
+            var receiver: CheckedContinuation<Event, Never>?
+            lock.lock()
+            if isClosed || terminal != nil {
+                lock.unlock()
+                acknowledgement.resume(returning: false)
+                return
+            }
+            precondition(
+                pendingBody == nil && inFlightBody == nil,
+                "The response source waits for each physical body-write acknowledgement."
+            )
+            let body = PendingBody(
+                id: id,
+                data: data,
+                acknowledgement: acknowledgement
+            )
+            if let waitingReceiver = self.receiver {
+                self.receiver = nil
+                inFlightBody = body
+                receiver = waitingReceiver
+            } else {
+                pendingBody = body
+            }
+            lock.unlock()
+            receiver?.resume(returning: .body(id: id, data: data))
+        }
+    }
+
+    func receive() async -> Event {
+        await withCheckedContinuation { continuation in
+            let immediate: Event?
+            lock.lock()
+            if isClosed {
+                immediate = .cancelled
+            } else if let terminal {
+                immediate = terminal
+            } else if heartbeatPending {
+                heartbeatPending = false
+                immediate = .heartbeat
+            } else if let pendingBody {
+                self.pendingBody = nil
+                inFlightBody = pendingBody
+                immediate = .body(id: pendingBody.id, data: pendingBody.data)
+            } else {
+                precondition(receiver == nil, "One response writer owns the channel receiver.")
+                receiver = continuation
+                immediate = nil
+            }
+            lock.unlock()
+            if let immediate {
+                continuation.resume(returning: immediate)
+            }
+        }
+    }
+
+    func acknowledgeBody(id: UUID, wasWritten: Bool) {
+        let acknowledgement: CheckedContinuation<Bool, Never>?
+        lock.lock()
+        if let inFlightBody, inFlightBody.id == id {
+            self.inFlightBody = nil
+            acknowledgement = inFlightBody.acknowledgement
+        } else {
+            acknowledgement = nil
+        }
+        lock.unlock()
+        acknowledgement?.resume(returning: wasWritten)
+    }
+
+    func offerHeartbeat() {
+        var receiver: CheckedContinuation<Event, Never>?
+        lock.lock()
+        guard isClosed == false, terminal == nil else {
+            lock.unlock()
+            return
+        }
+        if pendingBody == nil, inFlightBody == nil, let waitingReceiver = self.receiver {
+            self.receiver = nil
+            receiver = waitingReceiver
+        } else {
+            heartbeatPending = true
+        }
+        lock.unlock()
+        receiver?.resume(returning: .heartbeat)
+    }
+
+    func finishSource(_ result: Event) {
+        precondition({
+            switch result {
+            case .sourceFinished, .sourceFailed, .cancelled:
+                true
+            case .body, .heartbeat:
+                false
+            }
+        }())
+        var receiver: CheckedContinuation<Event, Never>?
+        lock.lock()
+        guard isClosed == false, terminal == nil else {
+            lock.unlock()
+            return
+        }
+        terminal = result
+        heartbeatPending = false
+        if pendingBody == nil, inFlightBody == nil {
+            receiver = self.receiver
+            self.receiver = nil
+        }
+        lock.unlock()
+        receiver?.resume(returning: result)
+    }
+
+    func close() {
+        let acknowledgements: [CheckedContinuation<Bool, Never>]
+        let receiver: CheckedContinuation<Event, Never>?
+        lock.lock()
+        guard isClosed == false else {
+            lock.unlock()
+            return
+        }
+        isClosed = true
+        acknowledgements = [pendingBody?.acknowledgement, inFlightBody?.acknowledgement]
+            .compactMap { $0 }
+        pendingBody = nil
+        inFlightBody = nil
+        receiver = self.receiver
+        self.receiver = nil
+        lock.unlock()
+        for acknowledgement in acknowledgements {
+            acknowledgement.resume(returning: false)
+        }
+        receiver?.resume(returning: .cancelled)
+    }
+}
+
+private final class MCPHTTPResponseBackpressureProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var sourceReadCount = 0
+    private var holdNextBodyWrite = false
+    private var releaseWasRequested = false
+    private var bodyWriteContinuation: CheckedContinuation<Void, Never>?
+    private var bodyWriteWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func holdNextBodyWriteForTesting() {
+        lock.lock()
+        precondition(holdNextBodyWrite == false && bodyWriteContinuation == nil)
+        sourceReadCount = 0
+        holdNextBodyWrite = true
+        releaseWasRequested = false
+        lock.unlock()
+    }
+
+    func recordSourceRead() {
+        lock.lock()
+        sourceReadCount += 1
+        lock.unlock()
+    }
+
+    func waitBeforeBodyWriteIfNeeded() async {
+        await withCheckedContinuation { continuation in
+            let waiters: [CheckedContinuation<Void, Never>]
+            lock.lock()
+            guard holdNextBodyWrite else {
+                lock.unlock()
+                continuation.resume()
+                return
+            }
+            waiters = bodyWriteWaiters
+            bodyWriteWaiters.removeAll(keepingCapacity: false)
+            if releaseWasRequested {
+                resetLocked()
+                lock.unlock()
+                for waiter in waiters { waiter.resume() }
+                continuation.resume()
+                return
+            }
+            bodyWriteContinuation = continuation
+            lock.unlock()
+            for waiter in waiters { waiter.resume() }
+        }
+    }
+
+    func waitUntilBodyWriteIsHeldForTesting() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if bodyWriteContinuation != nil {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                bodyWriteWaiters.append(continuation)
+                lock.unlock()
+            }
+        }
+    }
+
+    func releaseBodyWriteForTesting() {
+        let continuation: CheckedContinuation<Void, Never>?
+        lock.lock()
+        guard holdNextBodyWrite else {
+            lock.unlock()
+            return
+        }
+        if let held = bodyWriteContinuation {
+            bodyWriteContinuation = nil
+            continuation = held
+            resetLocked()
+        } else {
+            releaseWasRequested = true
+            continuation = nil
+        }
+        lock.unlock()
+        continuation?.resume()
+    }
+
+    func sourceReadCountForTesting() -> Int {
+        lock.lock()
+        let count = sourceReadCount
+        lock.unlock()
+        return count
+    }
+
+    private func resetLocked() {
+        holdNextBodyWrite = false
+        releaseWasRequested = false
+    }
+}
+
+private final class MCPHTTPRequestBodyReceipt<Value: Sendable>: @unchecked Sendable {
+    private enum State {
+        case waiting
+        case suspended(CheckedContinuation<Value?, Never>)
+        case completed(Value?)
+    }
+
+    private let lock = NSLock()
+    private var state: State = .waiting
+
+    func wait() async -> Value? {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                lock.lock()
+                switch state {
+                case .waiting:
+                    state = .suspended(continuation)
+                    lock.unlock()
+                case .completed(let value):
+                    lock.unlock()
+                    continuation.resume(returning: value)
+                case .suspended:
+                    lock.unlock()
+                    preconditionFailure("One request handler owns the body receipt.")
+                }
+            }
+        } onCancel: {
+            self.cancel()
+        }
+    }
+
+    func complete(_ value: Value) {
+        finish(value)
+    }
+
+    func cancel() {
+        finish(nil)
+    }
+
+    private func finish(_ value: Value?) {
+        let continuation: CheckedContinuation<Value?, Never>?
+        lock.lock()
+        switch state {
+        case .waiting:
+            state = .completed(value)
+            continuation = nil
+        case .suspended(let suspended):
+            state = .completed(value)
+            continuation = suspended
+        case .completed:
+            continuation = nil
+        }
+        lock.unlock()
+        continuation?.resume(returning: value)
+    }
+}
+
 private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
@@ -1345,27 +1672,29 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
         }
     }
 
-    private struct RequestState {
+    private struct CompletedRequestState: @unchecked Sendable {
         var head: HTTPRequestHead
         var bodyBuffer: ByteBuffer
     }
 
-    private enum WriterEvent: Sendable {
-        case body(Data)
-        case heartbeat
-        case sourceFinished
-        case sourceFailed(String)
+    private struct RequestState {
+        var head: HTTPRequestHead
+        var bodyBuffer: ByteBuffer
+        let bodyReceipt: MCPHTTPRequestBodyReceipt<CompletedRequestState>
     }
 
     private let server: CodexReviewMCPHTTPServer
+    private let responseBackpressureProbe: MCPHTTPResponseBackpressureProbe
     private let connection: MCPHTTPNetworkResourceOwner.Connection
     private var requestState: RequestState?
 
     init(
         server: CodexReviewMCPHTTPServer,
+        responseBackpressureProbe: MCPHTTPResponseBackpressureProbe,
         connection: MCPHTTPNetworkResourceOwner.Connection
     ) {
         self.server = server
+        self.responseBackpressureProbe = responseBackpressureProbe
         self.connection = connection
     }
 
@@ -1373,9 +1702,50 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
         let part = unwrapInboundIn(data)
         switch part {
         case .head(let head):
+            precondition(requestState == nil, "HTTP decoding serializes request bodies on one connection.")
+            let sendsContinue: Bool
+            if let expectation = head.headers.first(name: "Expect") {
+                let isContinue = expectation.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .caseInsensitiveCompare("100-continue") == .orderedSame
+                guard isContinue else {
+                    admitUnsupportedExpectation(
+                        expectation,
+                        version: head.version,
+                        context: context
+                    )
+                    return
+                }
+                if head.version.major == 1, head.version.minor == 0 {
+                    sendsContinue = false
+                } else if head.version.major == 1, head.version.minor >= 1 {
+                    sendsContinue = true
+                } else {
+                    admitUnsupportedExpectation(
+                        expectation,
+                        version: head.version,
+                        context: context
+                    )
+                    return
+                }
+            } else {
+                sendsContinue = false
+            }
+            guard let admittedRequest = connection.admitRequest() else {
+                context.close(promise: nil)
+                return
+            }
+            let bodyReceipt = MCPHTTPRequestBodyReceipt<CompletedRequestState>()
             requestState = RequestState(
                 head: head,
-                bodyBuffer: context.channel.allocator.buffer(capacity: 0)
+                bodyBuffer: context.channel.allocator.buffer(capacity: 0),
+                bodyReceipt: bodyReceipt
+            )
+            startRequestHandler(
+                admittedRequest,
+                bodyReceipt: bodyReceipt,
+                sendsContinue: sendsContinue,
+                version: head.version,
+                context: context
             )
         case .body(var buffer):
             requestState?.bodyBuffer.writeBuffer(&buffer)
@@ -1384,26 +1754,88 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
                 return
             }
             requestState = nil
-            guard let admittedRequest = connection.admitRequest() else {
-                context.close(promise: nil)
+            state.bodyReceipt.complete(.init(
+                head: state.head,
+                bodyBuffer: state.bodyBuffer
+            ))
+        }
+    }
+
+    private func startRequestHandler(
+        _ admittedRequest: MCPHTTPNetworkResourceOwner.Connection.AdmittedRequest,
+        bodyReceipt: MCPHTTPRequestBodyReceipt<CompletedRequestState>,
+        sendsContinue: Bool,
+        version: HTTPVersion,
+        context: ChannelHandlerContext
+    ) {
+        nonisolated(unsafe) let context = context
+        let task = Task { [self] in
+            defer { admittedRequest.lease.acknowledgeCompletion() }
+            guard await admittedRequest.lease.waitUntilStartIsAllowed() else {
+                bodyReceipt.cancel()
                 return
             }
-            nonisolated(unsafe) let context = context
-            let task = Task { [self] in
-                defer {
-                    admittedRequest.lease.acknowledgeCompletion()
-                }
-                guard await admittedRequest.lease.waitUntilStartIsAllowed() else {
+            if sendsContinue {
+                guard await connection.supplyExpectation(for: admittedRequest.operation),
+                      await writeContinue(version: version, context: context) else {
+                    bodyReceipt.cancel()
                     return
                 }
-                await handleRequest(
-                    state: state,
-                    operation: admittedRequest.operation,
-                    context: context
-                )
             }
-            admittedRequest.lease.install(task)
+            guard let state = await bodyReceipt.wait(), Task.isCancelled == false else {
+                return
+            }
+            await handleRequest(
+                state: state,
+                operation: admittedRequest.operation,
+                context: context
+            )
         }
+        admittedRequest.lease.install(task)
+    }
+
+    private func writeContinue(
+        version: HTTPVersion,
+        context: ChannelHandlerContext
+    ) async -> Bool {
+        do {
+            try await writeResponsePart(
+                .head(.init(version: version, status: .continue)),
+                context: context,
+                eventLoop: context.eventLoop
+            )
+            return true
+        } catch {
+            connection.transportFailed(error.localizedDescription)
+            return false
+        }
+    }
+
+    private func admitUnsupportedExpectation(
+        _ expectation: String,
+        version: HTTPVersion,
+        context: ChannelHandlerContext
+    ) {
+        guard let admittedRequest = connection.admitRequest() else {
+            context.close(promise: nil)
+            return
+        }
+        nonisolated(unsafe) let context = context
+        let task = Task { [self] in
+            defer { admittedRequest.lease.acknowledgeCompletion() }
+            guard await admittedRequest.lease.waitUntilStartIsAllowed() else { return }
+            await prepareAndQueueResponse(
+                .init(response: .error(
+                    statusCode: Int(HTTPResponseStatus.expectationFailed.code),
+                    .invalidRequest("Unsupported HTTP expectation: \(expectation)")
+                )),
+                operation: admittedRequest.operation,
+                version: version,
+                closeAfterResponse: true,
+                context: context
+            )
+        }
+        admittedRequest.lease.install(task)
     }
 
     func channelReadComplete(context: ChannelHandlerContext) {
@@ -1412,12 +1844,16 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
     }
 
     func channelInactive(context: ChannelHandlerContext) {
+        requestState?.bodyReceipt.cancel()
+        requestState = nil
         connection.peerClosed()
         context.fireChannelInactive()
     }
 
     func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
         if case ChannelEvent.inputClosed = event {
+            requestState?.bodyReceipt.cancel()
+            requestState = nil
             connection.peerClosed()
             context.close(promise: nil)
             return
@@ -1426,12 +1862,14 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
     }
 
     func errorCaught(context: ChannelHandlerContext, error: any Error) {
+        requestState?.bodyReceipt.cancel()
+        requestState = nil
         connection.transportFailed(error.localizedDescription)
         context.close(promise: nil)
     }
 
     private func handleRequest(
-        state: RequestState,
+        state: CompletedRequestState,
         operation: MCPHTTPNetworkResourceOwner.RequestOperation,
         context: ChannelHandlerContext
     ) async {
@@ -1460,7 +1898,7 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
         )
     }
 
-    private func makeHTTPRequest(from state: RequestState) -> HTTPRequest {
+    private func makeHTTPRequest(from state: CompletedRequestState) -> HTTPRequest {
         var headers: [String: String] = [:]
         for (name, value) in state.head.headers {
             if let existing = headers[name] {
@@ -1525,63 +1963,77 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
         }
 
         let preparedResponse: HTTPResponse
+        let responseEvents: MCPHTTPResponseEventChannel?
         var admittedSource: (lease: MCPHTTPNetworkResourceOwner.WorkLease, task: Task<Void, Never>)?
         switch response {
-        case .stream(let source, let headers):
+        case .stream(let source, _):
             guard let kind = trackedResponse.responseSourceKind,
                   let sourceLease = operation.reserveResponseSource() else {
                 await trackedResponse.streamCompletion?.finishAndWait()
                 writerLease.acknowledgeCompletion()
                 return
             }
-            let bridge = AsyncThrowingStream<Data, Swift.Error>.makeStream(
-                bufferingPolicy: .unbounded
-            )
+            let events = MCPHTTPResponseEventChannel()
             let sourceTask = Task {
                 let started = await sourceLease.waitUntilStartIsAllowed()
                 if started {
                     do {
                         for try await chunk in source {
                             try Task.checkCancellation()
-                            bridge.continuation.yield(chunk)
+#if DEBUG
+                            self.responseBackpressureProbe.recordSourceRead()
+#endif
+                            guard await events.sendBody(chunk) else {
+                                break
+                            }
                         }
                         if kind == .finite {
                             await self.server.waitAfterFiniteSourceCompletionForTesting()
                         }
-                        bridge.continuation.finish()
+                        events.finishSource(.sourceFinished)
                     } catch is CancellationError {
-                        bridge.continuation.finish()
+                        events.finishSource(.cancelled)
                     } catch {
-                        bridge.continuation.finish(throwing: error)
+                        events.finishSource(.sourceFailed(error.localizedDescription))
                         self.connection.transportFailed(error.localizedDescription)
                     }
                 } else {
-                    bridge.continuation.finish()
+                    events.finishSource(.cancelled)
                 }
                 await trackedResponse.streamCompletion?.finishAndWait()
                 sourceLease.acknowledgeCompletion()
             }
             admittedSource = (sourceLease, sourceTask)
-            preparedResponse = .stream(bridge.stream, headers: headers)
+            preparedResponse = response
+            responseEvents = events
 
         default:
             admittedSource = nil
             preparedResponse = response
+            responseEvents = nil
         }
 
         nonisolated(unsafe) let context = context
         let heartbeatInterval = await server.responseHeartbeatInterval
         let writerTask = Task {
-            guard await writerLease.waitUntilStartIsAllowed() else {
+            let result: WriterCompletion? = await withTaskCancellationHandler {
+                guard await writerLease.waitUntilStartIsAllowed() else {
+                    return nil
+                }
+                return await self.writeResponse(
+                    preparedResponse,
+                    responseEvents: responseEvents,
+                    version: version,
+                    context: context,
+                    heartbeatInterval: heartbeatInterval
+                )
+            } onCancel: {
+                responseEvents?.close()
+            }
+            guard let result else {
                 writerLease.acknowledgeCompletion()
                 return
             }
-            let result = await self.writeResponse(
-                preparedResponse,
-                version: version,
-                context: context,
-                heartbeatInterval: heartbeatInterval
-            )
             switch result {
             case .responded:
                 operation.acknowledgeResponseEnd()
@@ -1616,6 +2068,7 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
 
     private func writeResponse(
         _ response: HTTPResponse,
+        responseEvents: MCPHTTPResponseEventChannel?,
         version: HTTPVersion,
         context: ChannelHandlerContext,
         heartbeatInterval: Duration?
@@ -1629,28 +2082,18 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
         }
 
         switch response {
-        case .stream(let stream, _):
+        case .stream:
+            guard let responseEvents else {
+                return .transportFailed("Streaming response has no bounded event channel.")
+            }
+            defer { responseEvents.close() }
             do {
                 try Task.checkCancellation()
                 try await writeResponsePart(.head(head), context: context, eventLoop: eventLoop)
-                let events = AsyncStream<WriterEvent>.makeStream(bufferingPolicy: .unbounded)
                 let sourceResult = await withTaskGroup(
                     of: Void.self,
                     returning: WriterCompletion.self
                 ) { group in
-                    group.addTask {
-                        do {
-                            for try await chunk in stream {
-                                try Task.checkCancellation()
-                                events.continuation.yield(.body(chunk))
-                            }
-                            events.continuation.yield(.sourceFinished)
-                        } catch is CancellationError {
-                            events.continuation.yield(.sourceFinished)
-                        } catch {
-                            events.continuation.yield(.sourceFailed(error.localizedDescription))
-                        }
-                    }
                     if let heartbeatInterval {
                         group.addTask {
                             while Task.isCancelled == false {
@@ -1662,26 +2105,29 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
                                 guard Task.isCancelled == false else {
                                     return
                                 }
-                                events.continuation.yield(.heartbeat)
+                                responseEvents.offerHeartbeat()
                             }
                         }
                     }
 
                     var result: WriterCompletion = .cancelled
-                    eventLoopLoop: for await event in events.stream {
+                    eventLoopLoop: while true {
+                        let event = await responseEvents.receive()
                         if Task.isCancelled {
                             result = .cancelled
                             break eventLoopLoop
                         }
                         switch event {
-                        case .body(let data):
+                        case .body(let id, let data):
                             do {
                                 try await writeResponseBody(
                                     data,
                                     context: context,
                                     eventLoop: eventLoop
                                 )
+                                responseEvents.acknowledgeBody(id: id, wasWritten: true)
                             } catch {
+                                responseEvents.acknowledgeBody(id: id, wasWritten: false)
                                 result = .transportFailed(error.localizedDescription)
                                 break eventLoopLoop
                             }
@@ -1702,10 +2148,12 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
                         case .sourceFailed(let message):
                             result = .sourceFailed(message)
                             break eventLoopLoop
+                        case .cancelled:
+                            result = .cancelled
+                            break eventLoopLoop
                         }
                     }
                     group.cancelAll()
-                    events.continuation.finish()
                     return result
                 }
                 switch sourceResult {
@@ -1762,6 +2210,9 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
         context: ChannelHandlerContext,
         eventLoop: any EventLoop
     ) async throws {
+#if DEBUG
+        await responseBackpressureProbe.waitBeforeBodyWriteIfNeeded()
+#endif
         let writer = ResponsePartWriter(handler: self, context: context)
         let promise = eventLoop.makePromise(of: Void.self)
         eventLoop.execute {

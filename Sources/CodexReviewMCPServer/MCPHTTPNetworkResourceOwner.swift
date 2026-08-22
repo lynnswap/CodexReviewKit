@@ -362,7 +362,28 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         fileprivate func markResponseReady() -> Bool {
             lock.lock()
             guard case .open = outcome,
-                  responseEnd == .pending,
+                  responseEnd == .pending else {
+                lock.unlock()
+                return false
+            }
+            switch responseQueueState {
+            case .handling:
+                responseQueueState = .ready(nil)
+            case .turnGranted:
+                break
+            case .ready:
+                lock.unlock()
+                return false
+            }
+            lock.unlock()
+            notifyChanged()
+            return true
+        }
+
+        fileprivate func markExpectationReady() -> Bool {
+            lock.lock()
+            guard case .open = outcome,
+                  responseEnd == .notExpected,
                   case .handling = responseQueueState else {
                 lock.unlock()
                 return false
@@ -640,6 +661,14 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
 
         package func supplyResponse(for operation: RequestOperation) async -> Bool {
             guard operation.markResponseReady() else {
+                return false
+            }
+            pumpWriterQueue()
+            return await operation.waitForWriterTurn()
+        }
+
+        package func supplyExpectation(for operation: RequestOperation) async -> Bool {
+            guard operation.markExpectationReady() else {
                 return false
             }
             pumpWriterQueue()

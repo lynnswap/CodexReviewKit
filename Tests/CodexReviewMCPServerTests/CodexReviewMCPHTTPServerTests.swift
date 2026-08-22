@@ -654,6 +654,38 @@ struct CodexReviewMCPHTTPServerTests {
         try await server.stop()
     }
 
+    @Test func activeWriterAcknowledgesEachBodyBeforeReadingTheNextSourceChunk() async throws {
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        )
+        let server = CodexReviewMCPHTTPServer(
+            adapter: CodexReviewMCPServer(store: store),
+            configuration: .init(host: "127.0.0.1", port: 0)
+        )
+        try await server.start()
+        let endpoint = await server.url
+        let sessionID = try await initializeSession(endpoint: endpoint)
+        await server.holdNextResponseBodyWriteForTesting()
+        let responseTask = Task {
+            try await postJSONRPCData(
+                endpoint: endpoint,
+                sessionID: sessionID,
+                bodyData: makeJSONBody([
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/list",
+                ])
+            )
+        }
+        await server.waitUntilResponseBodyWriteIsHeldForTesting()
+
+        #expect(await server.responseSourceReadCountForTesting() == 1)
+        await server.releaseResponseBodyWriteForTesting()
+        _ = try decodeSSEJSON(from: try await responseTask.value)
+        #expect(await server.responseSourceReadCountForTesting() >= 2)
+        try await server.stop()
+    }
+
     @Test func stopAwaitsSSEWriterCompletionBeforeEventLoopShutdown() async throws {
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
@@ -759,6 +791,87 @@ struct CodexReviewMCPHTTPServerTests {
                 snapshot.connections.contains { $0.id == closing.id } == false
             }
         }
+        try await server.stop()
+    }
+
+    @Test func expectContinueIsAcknowledgedBeforeTheRequestBody() async throws {
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        )
+        let server = CodexReviewMCPHTTPServer(
+            adapter: CodexReviewMCPServer(store: store),
+            configuration: .init(host: "127.0.0.1", port: 0)
+        )
+        try await server.start()
+        let endpoint = await server.url
+        let sessionID = try await initializeSession(endpoint: endpoint)
+        let body = try makeJSONBody([
+            "jsonrpc": "2.0",
+            "id": 20,
+            "method": "tools/list",
+        ])
+        let descriptor = try await openRawTCPConnection(endpoint: endpoint)
+        defer { Darwin.close(descriptor) }
+        try await sendRawExpectHeaders(
+            descriptor: descriptor,
+            endpoint: endpoint,
+            sessionID: sessionID,
+            expectation: "100-continue",
+            contentLength: body.count
+        )
+        let interim = String(
+            decoding: try await readRawHTTPHeadersData(descriptor: descriptor),
+            as: UTF8.self
+        )
+        #expect(interim.hasPrefix("HTTP/1.1 100 Continue"))
+
+        try await sendRawBytes(descriptor: descriptor, bytes: body)
+        let final = String(
+            decoding: try await readOneRawHTTPResponse(descriptor: descriptor),
+            as: UTF8.self
+        )
+        #expect(final.contains("HTTP/1.1 200"))
+        #expect(final.contains("\"id\":20"))
+
+        let legacyBody = try makeJSONBody([
+            "jsonrpc": "2.0",
+            "id": 21,
+            "method": "tools/list",
+        ])
+        let legacy = try await openRawTCPConnection(endpoint: endpoint)
+        try await sendRawExpectHeaders(
+            descriptor: legacy,
+            endpoint: endpoint,
+            sessionID: sessionID,
+            version: "HTTP/1.0",
+            connection: nil,
+            expectation: "100-continue",
+            contentLength: legacyBody.count
+        )
+        try await sendRawBytes(descriptor: legacy, bytes: legacyBody)
+        let legacyResponse = String(
+            decoding: try await readRawResponseUntilEOF(descriptor: legacy),
+            as: UTF8.self
+        )
+        Darwin.close(legacy)
+        #expect(legacyResponse.contains("100 Continue") == false)
+        #expect(legacyResponse.contains("HTTP/1.0 200"))
+        #expect(legacyResponse.contains("\"id\":21"))
+
+        let unsupported = try await openRawTCPConnection(endpoint: endpoint)
+        try await sendRawExpectHeaders(
+            descriptor: unsupported,
+            endpoint: endpoint,
+            sessionID: sessionID,
+            expectation: "unsupported",
+            contentLength: body.count
+        )
+        let rejected = String(
+            decoding: try await readRawResponseUntilEOF(descriptor: unsupported),
+            as: UTF8.self
+        )
+        Darwin.close(unsupported)
+        #expect(rejected.hasPrefix("HTTP/1.1 417 Expectation Failed"))
         try await server.stop()
     }
 
@@ -2214,6 +2327,51 @@ struct CodexReviewMCPHTTPServerTests {
         }.value
     }
 
+    private nonisolated func sendRawExpectHeaders(
+        descriptor: Int32,
+        endpoint: URL,
+        sessionID: String,
+        version: String = "HTTP/1.1",
+        connection: String? = "keep-alive",
+        expectation: String,
+        contentLength: Int
+    ) async throws {
+        let components = try #require(URLComponents(url: endpoint, resolvingAgainstBaseURL: false))
+        let host = try #require(components.host)
+        let port = try #require(components.port)
+        var headerLines = [
+            "POST \(endpoint.path) \(version)",
+            "Host: \(host):\(port)",
+            "Accept: text/event-stream, application/json",
+            "Content-Type: application/json",
+            "MCP-Session-Id: \(sessionID)",
+            "MCP-Protocol-Version: 2025-11-25",
+            "Expect: \(expectation)",
+            "Content-Length: \(contentLength)",
+        ]
+        if let connection { headerLines.append("Connection: \(connection)") }
+        headerLines.append(contentsOf: ["", ""])
+        let headers = Data(headerLines.joined(separator: "\r\n").utf8)
+        try await sendRawBytes(descriptor: descriptor, bytes: headers)
+    }
+
+    private nonisolated func sendRawBytes(
+        descriptor: Int32,
+        bytes: Data
+    ) async throws {
+        try await Task.detached {
+            try bytes.withUnsafeBytes { buffer in
+                guard let base = buffer.baseAddress else { throw testError("Empty socket write") }
+                var sent = 0
+                while sent < buffer.count {
+                    let count = Darwin.send(descriptor, base.advanced(by: sent), buffer.count - sent, 0)
+                    guard count > 0 else { throw currentPOSIXError() }
+                    sent += count
+                }
+            }
+        }.value
+    }
+
     private nonisolated func readTwoRawHTTPResponses(descriptor: Int32) async throws -> Data {
         try await Task.detached {
             var response = Data()
@@ -2234,7 +2392,30 @@ struct CodexReviewMCPHTTPServerTests {
         }.value
     }
 
+    private nonisolated func readOneRawHTTPResponse(descriptor: Int32) async throws -> Data {
+        try await Task.detached {
+            var response = Data()
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while true {
+                let text = String(decoding: response, as: UTF8.self)
+                if text.contains("HTTP/1.1 200"), text.contains("\r\n0\r\n\r\n") {
+                    return response
+                }
+                let count = Darwin.recv(descriptor, &buffer, buffer.count, 0)
+                guard count > 0 else { throw testError("Connection closed before the response ended") }
+                response.append(contentsOf: buffer.prefix(count))
+                guard response.count <= 2 * 1024 * 1024 else {
+                    throw testError("HTTP response exceeded the test bound")
+                }
+            }
+        }.value
+    }
+
     private nonisolated func readRawHTTPHeaders(descriptor: Int32) async throws {
+        _ = try await readRawHTTPHeadersData(descriptor: descriptor)
+    }
+
+    private nonisolated func readRawHTTPHeadersData(descriptor: Int32) async throws -> Data {
         try await Task.detached {
             var response = Data()
             var buffer = [UInt8](repeating: 0, count: 1024)
@@ -2244,6 +2425,7 @@ struct CodexReviewMCPHTTPServerTests {
                 response.append(contentsOf: buffer.prefix(count))
                 guard response.count < 8192 else { throw testError("Response headers exceeded test bound") }
             }
+            return response
         }.value
     }
 
