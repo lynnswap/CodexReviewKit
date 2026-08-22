@@ -213,6 +213,89 @@ struct CodexReviewSettingsRuntimeCutoverTests {
         #expect(store.settings.lastErrorMessage == "Rejected after commit.")
     }
 
+    @Test func queuedSubmissionCannotTakeCommitOwnedDrain() async throws {
+        let initial = settingsSnapshot(model: "initial-model")
+        let backend = FakeCodexReviewBackend(settings: backendSnapshot(initial))
+        let store = makeStore(initial: initial, backend: backend)
+        let token = try await store.settingsService.beginRuntimeCutover()
+        let replayGate = AsyncGate()
+        await backend.holdNextSettingsUpdateCheckingCancellationAfterGate(with: replayGate)
+
+        let submittedEdit = Task { @MainActor in
+            await store.updateSettingsModel("deferred-model")
+            await store.refreshSettings()
+        }
+        let releaseReplay = Task {
+            await backend.waitForSettingsUpdate()
+            submittedEdit.cancel()
+            await replayGate.open()
+        }
+
+        try await store.settingsService.commitRuntimeSnapshot(token: token, snapshot: initial)
+        await submittedEdit.value
+        await releaseReplay.value
+
+        #expect(store.settingsService.runtimeCutoverStatus == .active)
+        #expect(await backend.settingsSnapshot().model == "deferred-model")
+        #expect(store.settings.selectedModel == "deferred-model")
+        #expect(store.settings.lastErrorMessage == nil)
+        #expect(await backend.recordedCommands().filter(\.isSettingsWrite).count == 1)
+        #expect(await backend.recordedCommands().filter(\.isSettingsRead).count == 1)
+    }
+
+    @Test func completedCommitCannotOverwriteSuccessorOperation() async throws {
+        let initial = settingsSnapshot(model: "initial-model")
+        let secondPublished = settingsSnapshot(model: "first-model")
+        let backend = FakeCodexReviewBackend(settings: backendSnapshot(initial))
+        let store = makeStore(initial: initial, backend: backend)
+        let firstToken = try await store.settingsService.beginRuntimeCutover()
+        await store.updateSettingsModel("first-model")
+        let firstReplayGate = AsyncGate()
+        await backend.holdNextSettingsUpdate(with: firstReplayGate)
+
+        let firstCommit = Task { @MainActor in
+            try await store.settingsService.commitRuntimeSnapshot(
+                token: firstToken,
+                snapshot: initial
+            )
+        }
+        await backend.waitForSettingsUpdate()
+
+        let successor = Task { @MainActor in
+            try await waitForCutoverStatus(.active, service: store.settingsService)
+            let token = try await store.settingsService.beginRuntimeCutover()
+            await store.updateSettingsModel("second-model")
+            let secondReplayGate = AsyncGate()
+            await backend.holdNextSettingsUpdate(with: secondReplayGate)
+            let commit = Task { @MainActor in
+                try await store.settingsService.commitRuntimeSnapshot(
+                    token: token,
+                    snapshot: secondPublished
+                )
+            }
+            await backend.waitForSettingsUpdate()
+            let joinedCommit = Task { @MainActor in
+                try await store.settingsService.commitRuntimeSnapshot(
+                    token: token,
+                    snapshot: secondPublished
+                )
+            }
+            await Task.yield()
+            await secondReplayGate.open()
+            try await commit.value
+            try await joinedCommit.value
+        }
+
+        await firstReplayGate.open()
+        try await firstCommit.value
+        try await successor.value
+
+        #expect(store.settingsService.runtimeCutoverStatus == .active)
+        #expect(await backend.settingsSnapshot().model == "second-model")
+        #expect(store.settings.selectedModel == "second-model")
+        #expect(store.settings.lastErrorMessage == nil)
+    }
+
     @Test func genuineCommitReplayFailureRequeuesAndReprojectsRawIntent() async throws {
         let initial = settingsSnapshot(model: "initial-model")
         let backend = FakeCodexReviewBackend(settings: backendSnapshot(initial))

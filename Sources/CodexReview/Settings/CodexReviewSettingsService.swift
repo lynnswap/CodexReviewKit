@@ -117,6 +117,13 @@ package final class CodexReviewSettingsService {
             }
         }
 
+        func permitsSubmittedIntentDrain(for epoch: UInt64) -> Bool {
+            guard case .active(let activeEpoch, _) = self else {
+                return false
+            }
+            return activeEpoch == epoch
+        }
+
         func isDrainingSource(_ epoch: UInt64) -> Bool {
             guard case .draining(let token) = self else {
                 return false
@@ -140,28 +147,43 @@ package final class CodexReviewSettingsService {
 
     private typealias RuntimeCommitResult = Result<Void, any Error>
 
+    private enum RuntimeCommitPublication {
+        case published
+        case replayPending
+        case superseded
+    }
+
     private enum RuntimeCommitOperation {
         case running(
-            RuntimeCutoverToken,
-            CodexReviewSettings.Snapshot,
-            Task<RuntimeCommitResult, Never>
+            id: UUID,
+            token: RuntimeCutoverToken,
+            snapshot: CodexReviewSettings.Snapshot,
+            task: Task<RuntimeCommitResult, Never>
         )
         case completed(
-            RuntimeCutoverToken,
-            CodexReviewSettings.Snapshot,
-            RuntimeCommitResult
+            id: UUID,
+            token: RuntimeCutoverToken,
+            snapshot: CodexReviewSettings.Snapshot,
+            result: RuntimeCommitResult
         )
+
+        var id: UUID {
+            switch self {
+            case .running(let id, _, _, _), .completed(let id, _, _, _):
+                id
+            }
+        }
 
         var token: RuntimeCutoverToken {
             switch self {
-            case .running(let token, _, _), .completed(let token, _, _):
+            case .running(_, let token, _, _), .completed(_, let token, _, _):
                 token
             }
         }
 
         var snapshot: CodexReviewSettings.Snapshot {
             switch self {
-            case .running(_, let snapshot, _), .completed(_, let snapshot, _):
+            case .running(_, _, let snapshot, _), .completed(_, _, let snapshot, _):
                 snapshot
             }
         }
@@ -267,7 +289,7 @@ package final class CodexReviewSettingsService {
                 throw RuntimeCutoverError.conflictingCommitSnapshot
             }
             let result = await runtimeCommitResult(for: operation)
-            clearCompletedRuntimeCommit(token: token)
+            clearCompletedRuntimeCommit(id: operation.id)
             try result.get()
             return
         }
@@ -278,20 +300,22 @@ package final class CodexReviewSettingsService {
         }
 
         cutoverPhase = .committing(token)
+        let operationID = UUID()
         let task = Task { @MainActor [self] in
-            let result: RuntimeCommitResult
-            do {
-                try await performRuntimeCommit(token: token, snapshot: snapshot)
-                result = .success(())
-            } catch {
-                result = .failure(error)
-            }
-            runtimeCommitOperation = .completed(token, snapshot, result)
-            return result
+            await performRuntimeCommit(
+                id: operationID,
+                token: token,
+                snapshot: snapshot
+            )
         }
-        runtimeCommitOperation = .running(token, snapshot, task)
+        runtimeCommitOperation = .running(
+            id: operationID,
+            token: token,
+            snapshot: snapshot,
+            task: task
+        )
         let result = await task.value
-        clearCompletedRuntimeCommit(token: token)
+        clearCompletedRuntimeCommit(id: operationID)
         try result.get()
     }
 
@@ -299,16 +323,56 @@ package final class CodexReviewSettingsService {
         for operation: RuntimeCommitOperation
     ) async -> RuntimeCommitResult {
         switch operation {
-        case .running(_, _, let task):
+        case .running(_, _, _, let task):
             await task.value
-        case .completed(_, _, let result):
+        case .completed(_, _, _, let result):
             result
         }
     }
 
-    private func clearCompletedRuntimeCommit(token: RuntimeCutoverToken) {
-        guard case .completed(let completedToken, _, _) = runtimeCommitOperation,
-              completedToken == token
+    private func publishRuntimeCommitCompletion(
+        id: UUID,
+        token: RuntimeCutoverToken,
+        snapshot: CodexReviewSettings.Snapshot,
+        result: RuntimeCommitResult
+    ) -> RuntimeCommitPublication {
+        guard case .running(let runningID, let runningToken, _, _) = runtimeCommitOperation,
+              runningID == id,
+              runningToken == token
+        else {
+            return .superseded
+        }
+        if case .success = result,
+           processingEpoch != nil || queuedIntents.contains(where: { $0.epoch == token.targetEpoch })
+        {
+            return .replayPending
+        }
+
+        switch result {
+        case .success:
+            cutoverPhase = .active(
+                epoch: token.targetEpoch,
+                lastConsumedTokenID: token.id
+            )
+        case .failure:
+            cutoverPhase = .awaitingRecovery(
+                committedEpoch: token.targetEpoch,
+                deferredEpoch: token.targetEpoch,
+                lastConsumedTokenID: token.id
+            )
+        }
+        runtimeCommitOperation = .completed(
+            id: id,
+            token: token,
+            snapshot: snapshot,
+            result: result
+        )
+        return .published
+    }
+
+    private func clearCompletedRuntimeCommit(id: UUID) {
+        guard case .completed(let completedID, _, _, _) = runtimeCommitOperation,
+              completedID == id
         else {
             return
         }
@@ -316,9 +380,10 @@ package final class CodexReviewSettingsService {
     }
 
     private func performRuntimeCommit(
+        id: UUID,
         token: RuntimeCutoverToken,
         snapshot: CodexReviewSettings.Snapshot
-    ) async throws {
+    ) async -> RuntimeCommitResult {
         do {
             guard let settingsStore else {
                 throw RuntimeCutoverError.settingsStoreUnavailable
@@ -332,23 +397,27 @@ package final class CodexReviewSettingsService {
             )
             settingsStore.finishLoading(errorMessage: nil)
 
-            if let error = await drainIntents(
-                for: token.targetEpoch,
-                retainingFailedIntents: true
-            ) {
-                throw error
+            while true {
+                if let error = await drainIntents(
+                    for: token.targetEpoch,
+                    retainingFailedIntents: true
+                ) {
+                    throw error
+                }
+                let result: RuntimeCommitResult = .success(())
+                switch publishRuntimeCommitCompletion(
+                    id: id,
+                    token: token,
+                    snapshot: snapshot,
+                    result: result
+                ) {
+                case .published, .superseded:
+                    return result
+                case .replayPending:
+                    continue
+                }
             }
-
-            cutoverPhase = .active(
-                epoch: token.targetEpoch,
-                lastConsumedTokenID: token.id
-            )
         } catch {
-            cutoverPhase = .awaitingRecovery(
-                committedEpoch: token.targetEpoch,
-                deferredEpoch: token.targetEpoch,
-                lastConsumedTokenID: token.id
-            )
             if let settingsStore {
                 replayQueuedSelectionIntents(
                     for: token.targetEpoch,
@@ -356,7 +425,14 @@ package final class CodexReviewSettingsService {
                 )
                 settingsStore.finishLoading(errorMessage: error.localizedDescription)
             }
-            throw error
+            let result: RuntimeCommitResult = .failure(error)
+            _ = publishRuntimeCommitCompletion(
+                id: id,
+                token: token,
+                snapshot: snapshot,
+                result: result
+            )
+            return result
         }
     }
 
@@ -452,7 +528,7 @@ package final class CodexReviewSettingsService {
         }
         queuedIntents.append(.init(epoch: epoch, intent: intent, requiresCatalogRevalidation: cutoverPhase.status != .active))
 
-        guard cutoverPhase.permitsDispatch(for: epoch),
+        guard cutoverPhase.permitsSubmittedIntentDrain(for: epoch),
               processingEpoch == nil
         else {
             return
