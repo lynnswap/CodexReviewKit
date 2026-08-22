@@ -443,7 +443,7 @@ public final class CodexReviewStore {
             guard let self else {
                 return
             }
-            if storeWorkRegistry.acceptsNewWork == false {
+            if Task.isCancelled || storeWorkRegistry.acceptsNewWork == false {
                 switch cancelledBeforeEntry {
                 case .skip:
                     return
@@ -486,6 +486,7 @@ public final class CodexReviewStore {
             guard let self else {
                 throw CancellationError()
             }
+            try Task.checkCancellation()
             if self.storeWorkRegistry.acceptsNewWork == false {
                 throw CancellationError()
             }

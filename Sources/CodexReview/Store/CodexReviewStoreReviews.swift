@@ -194,21 +194,20 @@ extension CodexReviewStore {
                     reason: .init(message: startupCancellation.message)
                 )
                 if job.isTerminal == false {
-                    try completeCancellationLocally(
-                        jobID: job.id,
-                        sessionID: job.sessionID,
-                        cancellation: startupCancellation
+                    try completeCancellationAfterRegisteredWorkSuspension(
+                        for: job,
+                        requested: startupCancellation
                     )
                 }
             } else if job.cancellationRequested {
+                let cancellation = job.core.lifecycle.cancellation ?? .system()
                 try await backend.interruptReview(
                     backendRun,
-                    reason: .init(message: job.core.lifecycle.cancellation?.message ?? "Cancellation requested.")
+                    reason: .init(message: cancellation.message)
                 )
-                try completeCancellationLocally(
-                    jobID: job.id,
-                    sessionID: job.sessionID,
-                    cancellation: job.core.lifecycle.cancellation ?? .system()
+                try completeCancellationAfterRegisteredWorkSuspension(
+                    for: job,
+                    requested: cancellation
                 )
             }
 
@@ -234,10 +233,9 @@ extension CodexReviewStore {
                 await interruptReviewAfterTaskCancellation(cleanupRun, job: job)
                 await cleanupReviewAndRetainFailure(cleanupRun, for: job)
             } else if job.isTerminal == false || startupCancellation != nil {
-                try? completeCancellationLocally(
-                    jobID: job.id,
-                    sessionID: job.sessionID,
-                    cancellation: startupCancellation ?? job.core.lifecycle.cancellation ?? .system()
+                try? completeCancellationAfterRegisteredWorkSuspension(
+                    for: job,
+                    requested: startupCancellation ?? job.core.lifecycle.cancellation ?? .system()
                 )
             }
             activeRuns.removeValue(forKey: jobID)
@@ -255,10 +253,9 @@ extension CodexReviewStore {
             activeRuns.removeValue(forKey: jobID)
             reviewRecoveryWaitingJobIDs.remove(jobID)
             if job.isTerminal == false, let startupCancellation {
-                try? completeCancellationLocally(
-                    jobID: job.id,
-                    sessionID: job.sessionID,
-                    cancellation: startupCancellation
+                try? completeCancellationAfterRegisteredWorkSuspension(
+                    for: job,
+                    requested: startupCancellation
                 )
             } else if job.isTerminal == false,
                       let transportFailure = primaryError as? ReviewWorkerInputQueueError {
@@ -314,6 +311,45 @@ extension CodexReviewStore {
         writeDiagnosticsIfNeeded()
     }
 
+    private func authoritativeCancellation(
+        for job: CodexReviewJob,
+        requested: ReviewCancellation
+    ) -> ReviewCancellation {
+        guard storeWorkRegistry.acceptsNewWork == false else {
+            return requested
+        }
+        return job.core.lifecycle.cancellation ?? requested
+    }
+
+    private func completeCancellationAfterRegisteredWorkSuspension(
+        for job: CodexReviewJob,
+        requested: ReviewCancellation
+    ) throws {
+        try completeCancellationLocally(
+            jobID: job.id,
+            sessionID: job.sessionID,
+            cancellation: authoritativeCancellation(for: job, requested: requested)
+        )
+    }
+
+    private func recordCancellationFailureAfterRegisteredWorkSuspension(
+        for job: CodexReviewJob,
+        message: String
+    ) throws {
+        guard job.isTerminal == false else {
+            return
+        }
+        if storeWorkRegistry.acceptsNewWork {
+            try recordCancellationFailure(
+                jobID: job.id,
+                sessionID: job.sessionID,
+                message: message
+            )
+        } else {
+            markReviewFailed(job, message: message)
+        }
+    }
+
     private func interruptReviewAfterTaskCancellation(_ run: CodexReviewBackendModel.Review.Run, job: CodexReviewJob) async {
         guard job.isTerminal == false else {
             return
@@ -328,24 +364,15 @@ extension CodexReviewStore {
                 run,
                 reason: .init(message: cancellation.message)
             )
-            try completeCancellationLocally(
-                jobID: job.id,
-                sessionID: job.sessionID,
-                cancellation: cancellation
+            try completeCancellationAfterRegisteredWorkSuspension(
+                for: job,
+                requested: cancellation
             )
         } catch {
-            if storeWorkRegistry.acceptsNewWork {
-                try? recordCancellationFailure(
-                    jobID: job.id,
-                    sessionID: job.sessionID,
-                    message: error.localizedDescription
-                )
-            } else {
-                markReviewFailed(
-                    job,
-                    message: error.localizedDescription
-                )
-            }
+            try? recordCancellationFailureAfterRegisteredWorkSuspension(
+                for: job,
+                message: error.localizedDescription
+            )
         }
     }
 
@@ -530,7 +557,7 @@ extension CodexReviewStore {
         }
     }
 
-    private func performCancelReview(
+    func performCancelReview(
         jobID: String,
         cancellation: ReviewCancellation
     ) async throws -> CodexReviewAPI.Cancel.Outcome {
@@ -539,13 +566,17 @@ extension CodexReviewStore {
             return .init(jobID: job.id, cancelled: false, core: job.core)
         }
 
-        recordCancellationRequest(cancellation, for: job)
+        let requestedCancellation = authoritativeCancellation(
+            for: job,
+            requested: cancellation
+        )
+        recordCancellationRequest(requestedCancellation, for: job)
 
         if job.core.lifecycle.status == .queued {
             try completeCancellationLocally(
                 jobID: job.id,
                 sessionID: job.sessionID,
-                cancellation: cancellation
+                cancellation: requestedCancellation
             )
             return .init(jobID: job.id, cancelled: true, core: job.core)
         }
@@ -554,7 +585,7 @@ extension CodexReviewStore {
             try completeCancellationLocally(
                 jobID: job.id,
                 sessionID: job.sessionID,
-                cancellation: cancellation
+                cancellation: requestedCancellation
             )
             reviewWorkerTasks[jobID]?.cancel()
             return .init(jobID: job.id, cancelled: true, core: job.core)
@@ -564,13 +595,12 @@ extension CodexReviewStore {
             do {
                 try await backend.interruptReview(
                     run,
-                    reason: .init(message: cancellation.message)
+                    reason: .init(message: requestedCancellation.message)
                 )
                 if job.isTerminal == false {
-                    try completeCancellationLocally(
-                        jobID: job.id,
-                        sessionID: job.sessionID,
-                        cancellation: cancellation
+                    try completeCancellationAfterRegisteredWorkSuspension(
+                        for: job,
+                        requested: requestedCancellation
                     )
                     reviewWorkerTasks[jobID]?.cancel()
                 }
@@ -582,9 +612,8 @@ extension CodexReviewStore {
                         core: job.core
                     )
                 }
-                try recordCancellationFailure(
-                    jobID: job.id,
-                    sessionID: job.sessionID,
+                try recordCancellationFailureAfterRegisteredWorkSuspension(
+                    for: job,
                     message: error.localizedDescription
                 )
                 throw error
@@ -593,13 +622,12 @@ extension CodexReviewStore {
             do {
                 try await backend.interruptReview(
                     run,
-                    reason: .init(message: cancellation.message)
+                    reason: .init(message: requestedCancellation.message)
                 )
                 if job.isTerminal == false {
-                    try completeCancellationLocally(
-                        jobID: job.id,
-                        sessionID: job.sessionID,
-                        cancellation: cancellation
+                    try completeCancellationAfterRegisteredWorkSuspension(
+                        for: job,
+                        requested: requestedCancellation
                     )
                     reviewWorkerTasks[jobID]?.cancel()
                 }
@@ -611,26 +639,25 @@ extension CodexReviewStore {
                         core: job.core
                     )
                 }
-                try recordCancellationFailure(
-                    jobID: job.id,
-                    sessionID: job.sessionID,
+                try recordCancellationFailureAfterRegisteredWorkSuspension(
+                    for: job,
                     message: error.localizedDescription
                 )
                 throw error
             }
         } else if startingJobIDs.contains(jobID) {
-            startupCancellations[jobID] = cancellation
+            startupCancellations[jobID] = requestedCancellation
             try completeCancellationLocally(
                 jobID: job.id,
                 sessionID: job.sessionID,
-                cancellation: cancellation
+                cancellation: requestedCancellation
             )
             return .init(jobID: job.id, cancelled: true, core: job.core)
         } else {
             try completeCancellationLocally(
                 jobID: job.id,
                 sessionID: job.sessionID,
-                cancellation: cancellation
+                cancellation: requestedCancellation
             )
         }
         return .init(
@@ -1028,17 +1055,15 @@ extension CodexReviewStore {
         let cancellation = job.core.lifecycle.cancellation ?? .system()
         do {
             try await backend.interruptReview(recoveredRun, reason: .init(message: cancellation.message))
-            try completeCancellationLocally(
-                jobID: job.id,
-                sessionID: job.sessionID,
-                cancellation: cancellation
+            try completeCancellationAfterRegisteredWorkSuspension(
+                for: job,
+                requested: cancellation
             )
         } catch {
             let primaryError = error
             let cleanupFailure = await cleanupReviewFailure(recoveredRun)
-            try? recordCancellationFailure(
-                jobID: job.id,
-                sessionID: job.sessionID,
+            try? recordCancellationFailureAfterRegisteredWorkSuspension(
+                for: job,
                 message: primaryError.localizedDescription
             )
             if let cleanupFailure {

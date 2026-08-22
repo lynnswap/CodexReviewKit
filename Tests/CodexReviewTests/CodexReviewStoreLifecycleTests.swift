@@ -653,6 +653,58 @@ struct CodexReviewStoreLifecycleTests {
         #expect(store.storeWorkRegistry.activeOrdinals.isEmpty)
     }
 
+    @Test func individualCancellationAppliesRegisteredWorkPreEntryPolicy() async {
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(
+                reviewBackend: FakeCodexReviewBackend()
+            )
+        )
+        var skippedOperationRan = false
+        var finalizerRunCount = 0
+        var finalizedOperationRan = false
+        let skippedTask = store.startRegisteredStoreWork(
+            kind: .testing("individually cancelled skip")
+        ) { _ in
+            skippedOperationRan = true
+        }
+        let finalizedTask = store.startRegisteredStoreWork(
+            kind: .testing("individually cancelled finalizer"),
+            cancelledBeforeEntry: .runFinalizer { _ in
+                finalizerRunCount += 1
+            }
+        ) { _ in
+            finalizedOperationRan = true
+        }
+        skippedTask?.cancel()
+        finalizedTask?.cancel()
+
+        await skippedTask?.value
+        await finalizedTask?.value
+
+        #expect(skippedOperationRan == false)
+        #expect(finalizerRunCount == 1)
+        #expect(finalizedOperationRan == false)
+        #expect(store.storeWorkRegistryStatus == .open)
+        #expect(store.storeWorkRegistry.activeOrdinals.isEmpty)
+
+        var throwingOperationRan = false
+        let throwingTask = Task { @MainActor in
+            try await store.performThrowingRegisteredStoreWork(
+                kind: .testing("individually cancelled throwing work")
+            ) { _ in
+                throwingOperationRan = true
+            }
+        }
+        throwingTask.cancel()
+
+        await #expect(throws: CancellationError.self) {
+            try await throwingTask.value
+        }
+        #expect(throwingOperationRan == false)
+        #expect(store.storeWorkRegistryStatus == .open)
+        #expect(store.storeWorkRegistry.activeOrdinals.isEmpty)
+    }
+
     @Test func staleRuntimeFailureCannotTearDownFreshGeneration() async throws {
         let backend = TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
         let store = CodexReviewStore.makeTestingStore(backend: backend)
