@@ -264,6 +264,12 @@ struct CodexReviewSettingsRuntimeCutoverTests {
         let successor = Task { @MainActor in
             try await waitForCutoverStatus(.active, service: store.settingsService)
             let token = try await store.settingsService.beginRuntimeCutover()
+            await #expect(throws: CodexReviewSettingsService.RuntimeCutoverError.staleToken) {
+                try await store.settingsService.commitRuntimeSnapshot(
+                    token: firstToken,
+                    snapshot: initial
+                )
+            }
             await store.updateSettingsModel("second-model")
             let secondReplayGate = AsyncGate()
             await backend.holdNextSettingsUpdate(with: secondReplayGate)

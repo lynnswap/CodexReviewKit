@@ -124,6 +124,19 @@ package final class CodexReviewSettingsService {
             return activeEpoch == epoch
         }
 
+        func ownsCommitResult(for token: RuntimeCutoverToken) -> Bool {
+            switch self {
+            case .committing(let currentToken):
+                currentToken == token
+            case .active(let epoch, let lastConsumedTokenID):
+                epoch == token.targetEpoch && lastConsumedTokenID == token.id
+            case .awaitingRecovery(_, _, let lastConsumedTokenID):
+                lastConsumedTokenID == token.id
+            case .draining, .awaitingCommit:
+                false
+            }
+        }
+
         func isDrainingSource(_ epoch: UInt64) -> Bool {
             guard case .draining(let token) = self else {
                 return false
@@ -243,6 +256,7 @@ package final class CodexReviewSettingsService {
                 sourceEpoch: epoch,
                 targetEpoch: epoch + 1
             )
+            discardCompletedRuntimeCommitForSuccessor()
             cutoverPhase = .draining(token)
 
             if processingEpoch == nil {
@@ -265,6 +279,7 @@ package final class CodexReviewSettingsService {
                 sourceEpoch: committedEpoch,
                 targetEpoch: deferredEpoch
             )
+            discardCompletedRuntimeCommitForSuccessor()
             cutoverPhase = .awaitingCommit(
                 token,
                 priorErrorMessage: settingsStore.lastErrorMessage
@@ -283,7 +298,8 @@ package final class CodexReviewSettingsService {
         snapshot: CodexReviewSettings.Snapshot
     ) async throws {
         if let operation = runtimeCommitOperation,
-           operation.token == token
+           operation.token == token,
+           cutoverPhase.ownsCommitResult(for: token)
         {
             guard operation.snapshot == snapshot else {
                 throw RuntimeCutoverError.conflictingCommitSnapshot
@@ -374,6 +390,13 @@ package final class CodexReviewSettingsService {
         guard case .completed(let completedID, _, _, _) = runtimeCommitOperation,
               completedID == id
         else {
+            return
+        }
+        runtimeCommitOperation = nil
+    }
+
+    private func discardCompletedRuntimeCommitForSuccessor() {
+        guard case .completed = runtimeCommitOperation else {
             return
         }
         runtimeCommitOperation = nil
