@@ -38,6 +38,7 @@ package final class CodexReviewSettingsService {
         case foreignToken
         case tokenAlreadyConsumed
         case staleToken
+        case conflictingCommitSnapshot
         case epochExhausted
     }
 
@@ -72,6 +73,7 @@ package final class CodexReviewSettingsService {
             RuntimeCutoverToken,
             priorErrorMessage: String?
         )
+        case committing(RuntimeCutoverToken)
         case awaitingRecovery(
             committedEpoch: UInt64,
             deferredEpoch: UInt64,
@@ -84,7 +86,7 @@ package final class CodexReviewSettingsService {
                 .active
             case .draining:
                 .draining
-            case .awaitingCommit:
+            case .awaitingCommit, .committing:
                 .awaitingCommit
             case .awaitingRecovery:
                 .awaitingRecovery
@@ -95,7 +97,7 @@ package final class CodexReviewSettingsService {
             switch self {
             case .active(let epoch, _):
                 epoch
-            case .draining(let token), .awaitingCommit(let token, _):
+            case .draining(let token), .awaitingCommit(let token, _), .committing(let token):
                 token.targetEpoch
             case .awaitingRecovery(_, let deferredEpoch, _):
                 deferredEpoch
@@ -108,7 +110,29 @@ package final class CodexReviewSettingsService {
                 activeEpoch == epoch
             case .draining(let token):
                 token.sourceEpoch == epoch
+            case .committing(let token):
+                token.targetEpoch == epoch
             case .awaitingCommit, .awaitingRecovery:
+                false
+            }
+        }
+
+        func permitsSubmittedIntentDrain(for epoch: UInt64) -> Bool {
+            guard case .active(let activeEpoch, _) = self else {
+                return false
+            }
+            return activeEpoch == epoch
+        }
+
+        func ownsCommitResult(for token: RuntimeCutoverToken) -> Bool {
+            switch self {
+            case .committing(let currentToken):
+                currentToken == token
+            case .active(let epoch, let lastConsumedTokenID):
+                epoch == token.targetEpoch && lastConsumedTokenID == token.id
+            case .awaitingRecovery(_, _, let lastConsumedTokenID):
+                lastConsumedTokenID == token.id
+            case .draining, .awaitingCommit:
                 false
             }
         }
@@ -126,8 +150,54 @@ package final class CodexReviewSettingsService {
                 tokenID
             case .awaitingRecovery(_, _, let tokenID):
                 tokenID
+            case .committing(let token):
+                token.id
             case .draining, .awaitingCommit:
                 nil
+            }
+        }
+    }
+
+    private typealias RuntimeCommitResult = Result<Void, any Error>
+
+    private enum RuntimeCommitPublication {
+        case published
+        case replayPending
+        case superseded
+    }
+
+    private enum RuntimeCommitOperation {
+        case running(
+            id: UUID,
+            token: RuntimeCutoverToken,
+            snapshot: CodexReviewSettings.Snapshot,
+            task: Task<RuntimeCommitResult, Never>
+        )
+        case completed(
+            id: UUID,
+            token: RuntimeCutoverToken,
+            snapshot: CodexReviewSettings.Snapshot,
+            result: RuntimeCommitResult
+        )
+
+        var id: UUID {
+            switch self {
+            case .running(let id, _, _, _), .completed(let id, _, _, _):
+                id
+            }
+        }
+
+        var token: RuntimeCutoverToken {
+            switch self {
+            case .running(_, let token, _, _), .completed(_, let token, _, _):
+                token
+            }
+        }
+
+        var snapshot: CodexReviewSettings.Snapshot {
+            switch self {
+            case .running(_, _, let snapshot, _), .completed(_, _, let snapshot, _):
+                snapshot
             }
         }
     }
@@ -145,6 +215,7 @@ package final class CodexReviewSettingsService {
     private var queuedIntents: [QueuedIntent] = []
     private var processingEpoch: UInt64?
     private var epochDrainWaiters: [UInt64: [CheckedContinuation<Void, Never>]] = [:]
+    private var runtimeCommitOperation: RuntimeCommitOperation?
 
     package var runtimeCutoverStatus: RuntimeCutoverStatus {
         cutoverPhase.status
@@ -185,6 +256,7 @@ package final class CodexReviewSettingsService {
                 sourceEpoch: epoch,
                 targetEpoch: epoch + 1
             )
+            discardCompletedRuntimeCommitForSuccessor()
             cutoverPhase = .draining(token)
 
             if processingEpoch == nil {
@@ -207,12 +279,13 @@ package final class CodexReviewSettingsService {
                 sourceEpoch: committedEpoch,
                 targetEpoch: deferredEpoch
             )
+            discardCompletedRuntimeCommitForSuccessor()
             cutoverPhase = .awaitingCommit(
                 token,
                 priorErrorMessage: settingsStore.lastErrorMessage
             )
 
-        case .draining, .awaitingCommit:
+        case .draining, .awaitingCommit, .committing:
             throw RuntimeCutoverError.cutoverAlreadyInProgress
         }
 
@@ -224,23 +297,166 @@ package final class CodexReviewSettingsService {
         token: RuntimeCutoverToken,
         snapshot: CodexReviewSettings.Snapshot
     ) async throws {
+        if let operation = runtimeCommitOperation,
+           operation.token == token,
+           cutoverPhase.ownsCommitResult(for: token)
+        {
+            guard operation.snapshot == snapshot else {
+                throw RuntimeCutoverError.conflictingCommitSnapshot
+            }
+            let result = await runtimeCommitResult(for: operation)
+            clearCompletedRuntimeCommit(id: operation.id)
+            try result.get()
+            return
+        }
+
         _ = try requireCurrentCutoverToken(token)
-        guard let settingsStore else {
+        guard settingsStore != nil else {
             throw RuntimeCutoverError.settingsStoreUnavailable
         }
 
-        settingsStore.apply(snapshot: snapshot)
-        lastPersistedSelection = settingsStore.currentSelection()
-        cutoverPhase = .active(
-            epoch: token.targetEpoch,
-            lastConsumedTokenID: token.id
+        cutoverPhase = .committing(token)
+        let operationID = UUID()
+        let task = Task { @MainActor [self] in
+            await performRuntimeCommit(
+                id: operationID,
+                token: token,
+                snapshot: snapshot
+            )
+        }
+        runtimeCommitOperation = .running(
+            id: operationID,
+            token: token,
+            snapshot: snapshot,
+            task: task
         )
-        replayQueuedSelectionIntents(
-            for: token.targetEpoch,
-            settingsStore: settingsStore
+        let result = await task.value
+        clearCompletedRuntimeCommit(id: operationID)
+        try result.get()
+    }
+
+    private func runtimeCommitResult(
+        for operation: RuntimeCommitOperation
+    ) async -> RuntimeCommitResult {
+        switch operation {
+        case .running(_, _, _, let task):
+            await task.value
+        case .completed(_, _, _, let result):
+            result
+        }
+    }
+
+    private func publishRuntimeCommitCompletion(
+        id: UUID,
+        token: RuntimeCutoverToken,
+        snapshot: CodexReviewSettings.Snapshot,
+        result: RuntimeCommitResult
+    ) -> RuntimeCommitPublication {
+        guard case .running(let runningID, let runningToken, _, _) = runtimeCommitOperation,
+              runningID == id,
+              runningToken == token
+        else {
+            return .superseded
+        }
+        if case .success = result,
+           processingEpoch != nil || queuedIntents.contains(where: { $0.epoch == token.targetEpoch })
+        {
+            return .replayPending
+        }
+
+        switch result {
+        case .success:
+            cutoverPhase = .active(
+                epoch: token.targetEpoch,
+                lastConsumedTokenID: token.id
+            )
+        case .failure:
+            cutoverPhase = .awaitingRecovery(
+                committedEpoch: token.targetEpoch,
+                deferredEpoch: token.targetEpoch,
+                lastConsumedTokenID: token.id
+            )
+        }
+        runtimeCommitOperation = .completed(
+            id: id,
+            token: token,
+            snapshot: snapshot,
+            result: result
         )
-        settingsStore.finishLoading(errorMessage: nil)
-        await drainIntents(for: token.targetEpoch)
+        return .published
+    }
+
+    private func clearCompletedRuntimeCommit(id: UUID) {
+        guard case .completed(let completedID, _, _, _) = runtimeCommitOperation,
+              completedID == id
+        else {
+            return
+        }
+        runtimeCommitOperation = nil
+    }
+
+    private func discardCompletedRuntimeCommitForSuccessor() {
+        guard case .completed = runtimeCommitOperation else {
+            return
+        }
+        runtimeCommitOperation = nil
+    }
+
+    private func performRuntimeCommit(
+        id: UUID,
+        token: RuntimeCutoverToken,
+        snapshot: CodexReviewSettings.Snapshot
+    ) async -> RuntimeCommitResult {
+        do {
+            guard let settingsStore else {
+                throw RuntimeCutoverError.settingsStoreUnavailable
+            }
+
+            settingsStore.apply(snapshot: snapshot)
+            lastPersistedSelection = settingsStore.currentSelection()
+            replayQueuedSelectionIntents(
+                for: token.targetEpoch,
+                settingsStore: settingsStore
+            )
+            settingsStore.finishLoading(errorMessage: nil)
+
+            while true {
+                if let error = await drainIntents(
+                    for: token.targetEpoch,
+                    retainingFailedIntents: true
+                ) {
+                    throw error
+                }
+                let result: RuntimeCommitResult = .success(())
+                switch publishRuntimeCommitCompletion(
+                    id: id,
+                    token: token,
+                    snapshot: snapshot,
+                    result: result
+                ) {
+                case .published, .superseded:
+                    return result
+                case .replayPending:
+                    continue
+                }
+            }
+        } catch {
+            if let settingsStore {
+                replayQueuedSelectionIntents(
+                    for: token.targetEpoch,
+                    settingsStore: settingsStore
+                )
+                settingsStore.finishLoading(errorMessage: error.localizedDescription)
+            }
+            let result: RuntimeCommitResult = .failure(error)
+            _ = publishRuntimeCommitCompletion(
+                id: id,
+                token: token,
+                snapshot: snapshot,
+                result: result
+            )
+            return result
+        }
     }
 
     package func abortRuntimeCutover(
@@ -335,7 +551,7 @@ package final class CodexReviewSettingsService {
         }
         queuedIntents.append(.init(epoch: epoch, intent: intent, requiresCatalogRevalidation: cutoverPhase.status != .active))
 
-        guard cutoverPhase.permitsDispatch(for: epoch),
+        guard cutoverPhase.permitsSubmittedIntentDrain(for: epoch),
               processingEpoch == nil
         else {
             return
@@ -344,9 +560,16 @@ package final class CodexReviewSettingsService {
     }
 
     private func drainIntents(for epoch: UInt64) async {
+        _ = await drainIntents(for: epoch, retainingFailedIntents: false)
+    }
+
+    private func drainIntents(
+        for epoch: UInt64,
+        retainingFailedIntents: Bool
+    ) async -> (any Error)? {
         guard processingEpoch == nil else {
             await waitUntilEpochDrained(epoch)
-            return
+            return nil
         }
 
         processingEpoch = epoch
@@ -357,27 +580,40 @@ package final class CodexReviewSettingsService {
 
         var retainedSelectionIntents: [QueuedIntent] = []
         while cutoverPhase.permitsDispatch(for: epoch) {
-            if takeQueuedRefresh(for: epoch) {
+            let refreshIntents = takeQueuedRefreshIntents(for: epoch)
+            if refreshIntents.isEmpty == false {
                 if cutoverPhase.isDrainingSource(epoch) == false {
-                    await performRefresh()
+                    if let error = await performRefresh() {
+                        guard retainingFailedIntents else {
+                            continue
+                        }
+                        queuedIntents.insert(contentsOf: refreshIntents, at: 0)
+                        queuedIntents.insert(contentsOf: retainedSelectionIntents, at: 0)
+                        return error
+                    }
                 }
                 continue
             }
 
             let selectionIntents = takeQueuedSelectionIntents(for: epoch)
             guard selectionIntents.isEmpty == false else {
-                return
+                return nil
             }
             retainedSelectionIntents.append(contentsOf: selectionIntents)
-            if await persistSelectionIntents(retainedSelectionIntents) == false {
+            if let error = await persistSelectionIntents(retainedSelectionIntents) {
+                if retainingFailedIntents {
+                    queuedIntents.insert(contentsOf: retainedSelectionIntents, at: 0)
+                    return error
+                }
                 retainedSelectionIntents.removeAll(keepingCapacity: true)
             }
         }
+        return nil
     }
 
-    private func performRefresh() async {
+    private func performRefresh() async -> (any Error)? {
         guard let settingsStore else {
-            return
+            return RuntimeCutoverError.settingsStoreUnavailable
         }
 
         settingsStore.beginLoading()
@@ -386,14 +622,16 @@ package final class CodexReviewSettingsService {
             settingsStore.apply(snapshot: snapshot)
             lastPersistedSelection = settingsStore.currentSelection()
             settingsStore.finishLoading(errorMessage: nil)
+            return nil
         } catch {
             settingsStore.finishLoading(errorMessage: error.localizedDescription)
+            return error
         }
     }
 
-    private func persistSelectionIntents(_ intents: [QueuedIntent]) async -> Bool {
+    private func persistSelectionIntents(_ intents: [QueuedIntent]) async -> (any Error)? {
         guard let settingsStore else {
-            return false
+            return RuntimeCutoverError.settingsStoreUnavailable
         }
 
         let previous = lastPersistedSelection
@@ -408,18 +646,17 @@ package final class CodexReviewSettingsService {
             candidate: candidate
         )
         guard triggers.isEmpty == false else {
-            return true
+            return nil
         }
 
         var appliedSelection = previous
         for trigger in triggers {
-            let didPersist = await persistSelectionChange(
+            if let error = await persistSelectionChange(
                 trigger: trigger,
                 previous: appliedSelection,
                 candidate: candidate
-            )
-            guard didPersist else {
-                return false
+            ) {
+                return error
             }
             appliedSelection = settingsStore.selectionAfterPersisting(
                 trigger: trigger,
@@ -427,16 +664,16 @@ package final class CodexReviewSettingsService {
                 candidate: candidate
             )
         }
-        return true
+        return nil
     }
 
     private func persistSelectionChange(
         trigger: SettingsStore.SelectionTrigger,
         previous: SettingsStore.Selection,
         candidate: SettingsStore.Selection
-    ) async -> Bool {
+    ) async -> (any Error)? {
         guard let settingsStore else {
-            return false
+            return RuntimeCutoverError.settingsStoreUnavailable
         }
 
         settingsStore.beginLoading()
@@ -452,12 +689,12 @@ package final class CodexReviewSettingsService {
                 candidate: candidate
             )
             settingsStore.finishLoading(errorMessage: nil)
-            return true
+            return nil
         } catch {
             settingsStore.apply(snapshot: settingsStore.snapshot(selection: previous))
             lastPersistedSelection = previous
             settingsStore.finishLoading(errorMessage: error.localizedDescription)
-            return false
+            return error
         }
     }
 
@@ -552,17 +789,18 @@ package final class CodexReviewSettingsService {
         )
     }
 
-    private func takeQueuedRefresh(for epoch: UInt64) -> Bool {
-        let hasRefresh = queuedIntents.contains {
-            $0.epoch == epoch && $0.intent.isRefresh
+    private func takeQueuedRefreshIntents(for epoch: UInt64) -> [QueuedIntent] {
+        var intents: [QueuedIntent] = []
+        queuedIntents.removeAll { queuedIntent in
+            guard queuedIntent.epoch == epoch,
+                  queuedIntent.intent.isRefresh
+            else {
+                return false
+            }
+            intents.append(queuedIntent)
+            return true
         }
-        guard hasRefresh else {
-            return false
-        }
-        queuedIntents.removeAll {
-            $0.epoch == epoch && $0.intent.isRefresh
-        }
-        return true
+        return intents
     }
 
     private func takeQueuedSelectionIntents(for epoch: UInt64) -> [QueuedIntent] {

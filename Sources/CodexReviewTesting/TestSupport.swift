@@ -185,8 +185,10 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
 
     private var settings: CodexReviewBackendModel.Settings.Snapshot
     private var settingsUpdateFailureMessage: String?
+    private var settingsUpdateIsCancelled = false
     private var settingsUpdateGate: AsyncGate?
     private var settingsUpdateStartedGate = AsyncGate()
+    private var settingsUpdateChecksCancellationAfterGate = false
     private var auth: CodexReviewBackendModel.Auth.Snapshot
     private var commands: [Command] = []
     private var startAdmissionIdentities: [ObjectIdentifier] = []
@@ -262,9 +264,20 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         settingsUpdateFailureMessage = message
     }
 
+    package func cancelNextSettingsUpdate() {
+        settingsUpdateIsCancelled = true
+    }
+
     package func holdNextSettingsUpdate(with gate: AsyncGate) {
         settingsUpdateGate = gate
         settingsUpdateStartedGate = AsyncGate()
+        settingsUpdateChecksCancellationAfterGate = false
+    }
+
+    package func holdNextSettingsUpdateCheckingCancellationAfterGate(with gate: AsyncGate) {
+        settingsUpdateGate = gate
+        settingsUpdateStartedGate = AsyncGate()
+        settingsUpdateChecksCancellationAfterGate = true
     }
 
     package func waitForSettingsUpdate() async {
@@ -465,6 +478,15 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         await settingsUpdateStartedGate.open()
         await settingsUpdateGate?.waitIgnoringCancellation()
         settingsUpdateGate = nil
+        let checksCancellation = settingsUpdateChecksCancellationAfterGate
+        settingsUpdateChecksCancellationAfterGate = false
+        if checksCancellation {
+            try Task.checkCancellation()
+        }
+        if settingsUpdateIsCancelled {
+            settingsUpdateIsCancelled = false
+            throw CancellationError()
+        }
         if let settingsUpdateFailureMessage {
             self.settingsUpdateFailureMessage = nil
             throw FakeCodexReviewBackendError(message: settingsUpdateFailureMessage)
