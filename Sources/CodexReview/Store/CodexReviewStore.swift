@@ -4,6 +4,13 @@ import Observation
 @MainActor
 @Observable
 public final class CodexReviewStore {
+    private struct RuntimeTeardownOperation {
+        let id: UUID
+        let cleanupIntent: ReviewRuntimeTeardownIntent
+        var finalIntent: ReviewRuntimeTeardownIntent
+        let task: Task<Void, Never>
+    }
+
     package struct ReviewTerminalWaiter {
         package var id: UUID
         package var continuation: CheckedContinuation<Void, Never>
@@ -18,6 +25,12 @@ public final class CodexReviewStore {
     public package(set) var jobs: Set<CodexReviewJob> = []
     package var shouldAutoStartEmbeddedServer: Bool {
         backend.seed.shouldAutoStartEmbeddedServer
+    }
+    package var runtimeTeardownFinalState: ReviewRuntimeTeardownIntent.FinalState? {
+        runtimeTeardownOperation?.finalIntent.finalState
+    }
+    package var runtimeLifecycleAdmissionGeneration: UInt64 {
+        runtimeLifecycleGeneration
     }
 
     @ObservationIgnored package let diagnosticsURL: URL?
@@ -37,6 +50,8 @@ public final class CodexReviewStore {
     @ObservationIgnored package var reviewTerminalWaiters: [String: [ReviewTerminalWaiter]] = [:]
     @ObservationIgnored package var closedSessions: Set<String> = []
     @ObservationIgnored package var accountRateLimitAutoRefreshDriver: CodexReviewStoreRateLimitAutoRefreshDriver?
+    @ObservationIgnored private var runtimeTeardownOperation: RuntimeTeardownOperation?
+    @ObservationIgnored private var runtimeLifecycleGeneration: UInt64 = 0
 
     package init(
         backend: any CodexReviewStoreBackend = PreviewCodexReviewStoreBackend(),
@@ -78,6 +93,7 @@ public final class CodexReviewStore {
 
     isolated deinit {
         accountRateLimitAutoRefreshDriver?.cancel()
+        runtimeTeardownOperation?.task.cancel()
         for task in reviewWorkerTasks.values {
             task.cancel()
         }
@@ -126,6 +142,13 @@ public final class CodexReviewStore {
     }
 
     public func start(forceRestartIfNeeded: Bool = false) async {
+        let admissionGeneration = admitRuntimeLifecycleRequest()
+        if let teardownTask = runtimeTeardownOperation?.task {
+            await teardownTask.value
+            guard admissionGeneration == runtimeLifecycleGeneration else {
+                return
+            }
+        }
         switch serverState {
         case .stopped, .failed:
             break
@@ -145,18 +168,92 @@ public final class CodexReviewStore {
     }
 
     public func stop() async {
+        await stop(intent: .explicitStop)
+    }
+
+    package func stop(intent: ReviewRuntimeTeardownIntent) async {
+        _ = admitRuntimeLifecycleRequest()
+        let task = admitRuntimeTeardown(intent: intent)
+        await task.value
+    }
+
+    package func requestRuntimeTeardown(
+        intent: ReviewRuntimeTeardownIntent
+    ) {
+        _ = admitRuntimeLifecycleRequest()
+        _ = admitRuntimeTeardown(intent: intent)
+    }
+
+    private func admitRuntimeLifecycleRequest() -> UInt64 {
+        runtimeLifecycleGeneration += 1
+        return runtimeLifecycleGeneration
+    }
+
+    private func admitRuntimeTeardown(
+        intent: ReviewRuntimeTeardownIntent
+    ) -> Task<Void, Never> {
+        if var operation = runtimeTeardownOperation {
+            if intent.supersedesConcurrentFinalState {
+                operation.finalIntent = intent
+                runtimeTeardownOperation = operation
+            }
+            return operation.task
+        }
+
+        let operationID = UUID()
+        if case .failed(let message) = intent.finalState {
+            transitionToFailed(message)
+        }
+        let task = Task<Void, Never> { @MainActor [weak self] in
+            guard let self else {
+                return
+            }
+            await self.performRuntimeTeardown(intent: intent)
+            self.finishRuntimeTeardown(operationID: operationID)
+        }
+        runtimeTeardownOperation = .init(
+            id: operationID,
+            cleanupIntent: intent,
+            finalIntent: intent,
+            task: task
+        )
+        return task
+    }
+
+    private func performRuntimeTeardown(
+        intent: ReviewRuntimeTeardownIntent
+    ) async {
         let locallyCancelledJobIDs: [String]
         if backend.handlesActiveReviewStopCleanup {
             locallyCancelledJobIDs = []
         } else {
-            locallyCancelledJobIDs = await requestActiveReviewCancellationsForRuntimeStop()
+            locallyCancelledJobIDs = await requestActiveReviewCancellationsForRuntimeStop(
+                reason: intent.reviewCancellation
+            )
         }
-        await backend.stop(store: self)
-        let remainingLocallyCancelledJobIDs = cancelActiveReviewsLocallyForRuntimeStop(cancelWorkers: false)
+        await backend.stop(store: self, intent: intent)
+        let remainingLocallyCancelledJobIDs = cancelActiveReviewsLocallyForRuntimeStop(
+            reason: intent.reviewCancellation,
+            cancelWorkers: false
+        )
         cancelAndDetachReviewWorkersForRuntimeStop(
             jobIDs: Array(Set(locallyCancelledJobIDs + remainingLocallyCancelledJobIDs))
         )
-        transitionToStopped()
+    }
+
+    private func finishRuntimeTeardown(operationID: UUID) {
+        guard let operation = runtimeTeardownOperation,
+              operation.id == operationID
+        else {
+            return
+        }
+        runtimeTeardownOperation = nil
+        switch operation.finalIntent.finalState {
+        case .stopped:
+            transitionToStopped()
+        case .failed(let message):
+            transitionToFailed(message)
+        }
     }
 
     public func restart() async {

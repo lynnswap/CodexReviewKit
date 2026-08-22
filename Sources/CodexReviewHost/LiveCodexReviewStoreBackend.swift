@@ -502,6 +502,13 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     func stop(store: CodexReviewStore) async {
+        await stop(store: store, intent: .explicitStop)
+    }
+
+    func stop(
+        store: CodexReviewStore,
+        intent: ReviewRuntimeTeardownIntent
+    ) async {
         let client = client
         let appServerBackend = appServerBackend
         let mcpHTTPServer = mcpHTTPServer
@@ -510,29 +517,28 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         guard hasRuntimeState || loginCleanup.isEmpty == false else {
             return
         }
-        logger.info("Stopping review runtime")
+        logger.info("Stopping review runtime for \(intent.diagnosticContext, privacy: .public)")
         if let appServerBackend {
-            let reason = ReviewCancellation.system(message: "Review runtime stopped.")
             await cancelActiveReviewsForRuntimeTeardown(
                 store: store,
                 appServerBackend: appServerBackend,
-                reason: reason,
-                timeoutWarning: "Timed out cleaning active reviews before stopping runtime"
+                reason: intent.reviewCancellation,
+                timeoutWarning: intent.cleanupTimeoutWarning
             )
         }
         self.client = nil
         self.mcpHTTPServer = nil
         authNotificationTask?.cancel()
         authNotificationTask = nil
-        await stopMCPHTTPServer(mcpHTTPServer, context: "runtime stop")
+        await stopMCPHTTPServer(mcpHTTPServer, context: intent.diagnosticContext)
         self.appServerBackend = nil
         await cleanupLoginRuntime(loginCleanup)
         await closeAppServerRuntime(
             backend: appServerBackend,
             fallbackClient: client,
-            context: "runtime stop"
+            context: intent.diagnosticContext
         )
-        logger.info("Review runtime stopped")
+        logger.info("Review runtime stopped after \(intent.diagnosticContext, privacy: .public)")
     }
 
     func waitUntilStopped() async {}
@@ -1175,7 +1181,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             } catch is CancellationError {
             } catch {
                 logger.error("Auth notification stream ended: \(error.localizedDescription, privacy: .public)")
-                await markRuntimeFailedAfterNotificationStreamError(error, store: store)
+                markRuntimeFailedAfterNotificationStreamError(error, store: store)
             }
         }
     }
@@ -1183,38 +1189,19 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     private func markRuntimeFailedAfterNotificationStreamError(
         _ error: any Error,
         store: CodexReviewStore
-    ) async {
-        let loginCleanup = takeLoginRuntimeForCleanup()
-        guard client != nil || appServerBackend != nil || mcpHTTPServer != nil || loginCleanup.isEmpty == false else {
+    ) {
+        guard client != nil
+                || appServerBackend != nil
+                || mcpHTTPServer != nil
+                || loginClient != nil
+                || loginCodexHomeURL != nil
+                || activeAuthenticationSession != nil
+        else {
             return
         }
-        let message = "Review runtime stopped unexpectedly: \(error.localizedDescription)"
-        if let appServerBackend {
-            let reason = ReviewCancellation.system(message: message)
-            await cancelActiveReviewsForRuntimeTeardown(
-                store: store,
-                appServerBackend: appServerBackend,
-                reason: reason,
-                timeoutWarning: "Timed out cleaning active reviews after runtime failure"
-            )
-        }
-        let failedClient = client
-        let failedBackend = appServerBackend
-        let failedMCPHTTPServer = mcpHTTPServer
-        client = nil
-        appServerBackend = nil
-        mcpHTTPServer = nil
         authNotificationTask = nil
-        store.transitionToFailed(message)
-        await stopMCPHTTPServer(
-            failedMCPHTTPServer,
-            context: "failed runtime cleanup"
-        )
-        await cleanupLoginRuntime(loginCleanup)
-        await closeAppServerRuntime(
-            backend: failedBackend,
-            fallbackClient: failedClient,
-            context: "notification stream failure"
+        store.requestRuntimeTeardown(
+            intent: .unexpectedFailure(error.localizedDescription)
         )
     }
 

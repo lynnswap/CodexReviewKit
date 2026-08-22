@@ -32,6 +32,10 @@ package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend {
     func attachStore(_ store: CodexReviewStore)
     func start(store: CodexReviewStore, forceRestartIfNeeded: Bool) async
     func stop(store: CodexReviewStore) async
+    func stop(
+        store: CodexReviewStore,
+        intent: ReviewRuntimeTeardownIntent
+    ) async
     func waitUntilStopped() async
     func refreshAuth(auth: CodexReviewAuthModel) async
     func signIn(auth: CodexReviewAuthModel) async
@@ -63,6 +67,13 @@ package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend {
 extension CodexReviewStoreBackend {
     package var handlesActiveReviewStopCleanup: Bool {
         false
+    }
+
+    package func stop(
+        store: CodexReviewStore,
+        intent _: ReviewRuntimeTeardownIntent
+    ) async {
+        await stop(store: store)
     }
 
     package func startReview(
