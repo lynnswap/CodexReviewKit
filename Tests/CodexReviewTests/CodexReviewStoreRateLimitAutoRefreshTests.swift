@@ -214,6 +214,69 @@ struct CodexReviewStoreRateLimitAutoRefreshTests {
         }
     }
 
+    @Test func registeredWorkCloseCancelsAndAwaitsRateLimitRefresh() async throws {
+        let account = makeAccount(lastFetchAt: now.addingTimeInterval(-15 * 60))
+        let backend = BlockingRateLimitRefreshBackend(account: account)
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        store.loadForTesting(
+            serverState: .running,
+            authPhase: .signedOut,
+            account: account,
+            persistedAccounts: [account],
+            workspaces: []
+        )
+        store.refreshDueAccountRateLimits(now: now)
+        await backend.waitUntilRefreshStarts()
+
+        let close = Task { @MainActor in
+            await store.closeRegisteredStoreWork(
+                reason: .system(message: "Store work closed.")
+            )
+        }
+        try await waitForCondition {
+            store.storeWorkRegistryStatus == .closing
+        }
+
+        #expect(backend.refreshCompletionCount == 0)
+        #expect(store.accountRateLimitAutoRefreshInFlightAccountKeys == [account.accountKey])
+
+        await backend.releaseRefresh()
+        #expect(await close.value == .success)
+
+        #expect(backend.refreshCompletionCount == 1)
+        #expect(store.accountRateLimitAutoRefreshInFlightAccountKeys.isEmpty)
+        store.refreshDueAccountRateLimits(now: now)
+        #expect(backend.refreshedAccountKeys == [account.accountKey])
+    }
+
+    @Test func registeredWorkCloseSkipsRateLimitRefreshCancelledBeforeEntry() async throws {
+        let account = makeAccount(lastFetchAt: now.addingTimeInterval(-15 * 60))
+        let backend = NoProgressRateLimitRefreshBackend(account: account)
+        let store = CodexReviewStore.makeTestingStore(
+            backend: backend,
+            clock: .init(now: { now })
+        )
+        store.loadForTesting(
+            serverState: .running,
+            authPhase: .signedOut,
+            account: account,
+            persistedAccounts: [account],
+            workspaces: []
+        )
+
+        store.refreshDueAccountRateLimits(now: now)
+        let closeOperation = store.storeWorkRegistry.beginClosing {
+            store.accountRateLimitAutoRefreshDriver?.closeAdmission()
+        }
+        let result = await closeOperation.task.value
+        await store.cancelAccountRateLimitAutoRefreshAndWait()
+        store.storeWorkRegistry.completeClosing(closeOperation, result: result)
+
+        #expect(result == .success)
+        #expect(backend.refreshedAccountKeys.isEmpty)
+        #expect(store.accountRateLimitAutoRefreshInFlightAccountKeys.isEmpty)
+    }
+
     @Test func noProgressRefreshDoesNotImmediatelyRestartSameAccount() async throws {
         let account = makeAccount(lastFetchAt: now.addingTimeInterval(-15 * 60))
         let backend = NoProgressRateLimitRefreshBackend(account: account)
@@ -379,6 +442,7 @@ private final class BlockingRateLimitRefreshBackend: PreviewCodexReviewStoreBack
     private let startedGate = AsyncGate()
     private let releaseGate = AsyncGate()
     private(set) var refreshedAccountKeys: [String] = []
+    private(set) var refreshCompletionCount = 0
 
     init(account: CodexAccount) {
         super.init(seed: .init(
@@ -393,7 +457,8 @@ private final class BlockingRateLimitRefreshBackend: PreviewCodexReviewStoreBack
     ) async {
         refreshedAccountKeys.append(accountKey)
         await startedGate.open()
-        await releaseGate.wait()
+        await releaseGate.waitIgnoringCancellation()
+        refreshCompletionCount += 1
     }
 
     func waitUntilRefreshStarts() async {
