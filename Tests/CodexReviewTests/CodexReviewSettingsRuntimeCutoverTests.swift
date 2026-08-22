@@ -157,6 +157,121 @@ struct CodexReviewSettingsRuntimeCutoverTests {
         #expect(store.settings.selectedModel == "deferred-model")
     }
 
+    @Test func callerCancellationCannotCancelOwnedCommitReplay() async throws {
+        let initial = settingsSnapshot(model: "initial-model")
+        let backend = FakeCodexReviewBackend(settings: backendSnapshot(initial))
+        let store = makeStore(initial: initial, backend: backend)
+        let token = try await store.settingsService.beginRuntimeCutover()
+        await store.updateSettingsModel("deferred-model")
+
+        let replayGate = AsyncGate()
+        await backend.holdNextSettingsUpdateCheckingCancellationAfterGate(with: replayGate)
+        let commit = Task { @MainActor in
+            try await store.settingsService.commitRuntimeSnapshot(token: token, snapshot: initial)
+        }
+        await backend.waitForSettingsUpdate()
+
+        let joinedCommit = Task { @MainActor in
+            try await store.settingsService.commitRuntimeSnapshot(token: token, snapshot: initial)
+        }
+        await Task.yield()
+        commit.cancel()
+
+        await #expect(
+            throws: CodexReviewSettingsService.RuntimeCutoverError.cutoverAlreadyInProgress
+        ) {
+            try await store.settingsService.beginRuntimeCutover()
+        }
+        #expect(throws: CodexReviewSettingsService.RuntimeCutoverError.tokenAlreadyConsumed) {
+            try store.settingsService.cancelRuntimeCutover(token: token)
+        }
+        #expect(throws: CodexReviewSettingsService.RuntimeCutoverError.tokenAlreadyConsumed) {
+            try store.settingsService.abortRuntimeCutover(token: token, message: "Superseded.")
+        }
+        await #expect(
+            throws: CodexReviewSettingsService.RuntimeCutoverError.conflictingCommitSnapshot
+        ) {
+            try await store.settingsService.commitRuntimeSnapshot(
+                token: token,
+                snapshot: settingsSnapshot(model: "conflicting-model")
+            )
+        }
+
+        await replayGate.open()
+        try await commit.value
+        try await joinedCommit.value
+
+        #expect(store.settingsService.runtimeCutoverStatus == .active)
+        #expect(await backend.settingsSnapshot().model == "deferred-model")
+        #expect(store.settings.selectedModel == "deferred-model")
+        #expect(store.settings.lastErrorMessage == nil)
+
+        await backend.failNextSettingsUpdate(message: "Rejected after commit.")
+        await store.updateSettingsModel("rejected-model")
+        #expect(await backend.settingsSnapshot().model == "deferred-model")
+        #expect(store.settings.selectedModel == "deferred-model")
+        #expect(store.settings.lastErrorMessage == "Rejected after commit.")
+    }
+
+    @Test func genuineCommitReplayFailureRequeuesAndReprojectsRawIntent() async throws {
+        let initial = settingsSnapshot(model: "initial-model")
+        let backend = FakeCodexReviewBackend(settings: backendSnapshot(initial))
+        let store = makeStore(initial: initial, backend: backend)
+        let token = try await store.settingsService.beginRuntimeCutover()
+        await store.updateSettingsModel("deferred-model")
+        await backend.failNextSettingsUpdate(message: "Injected replay failure.")
+
+        do {
+            try await store.settingsService.commitRuntimeSnapshot(token: token, snapshot: initial)
+            Issue.record("Expected the backend replay failure.")
+        } catch {
+            #expect(error.localizedDescription == "Injected replay failure.")
+        }
+
+        #expect(store.settingsService.runtimeCutoverStatus == .awaitingRecovery)
+        #expect(await backend.settingsSnapshot().model == "initial-model")
+        #expect(store.settings.selectedModel == "deferred-model")
+        #expect(store.settings.lastErrorMessage == "Injected replay failure.")
+        await #expect(throws: CodexReviewSettingsService.RuntimeCutoverError.tokenAlreadyConsumed) {
+            try await store.settingsService.commitRuntimeSnapshot(token: token, snapshot: initial)
+        }
+
+        let recoveryToken = try await store.settingsService.beginRuntimeCutover()
+        try await store.settingsService.commitRuntimeSnapshot(
+            token: recoveryToken,
+            snapshot: initial
+        )
+
+        #expect(store.settingsService.runtimeCutoverStatus == .active)
+        #expect(await backend.settingsSnapshot().model == "deferred-model")
+        #expect(store.settings.selectedModel == "deferred-model")
+        #expect(store.settings.lastErrorMessage == nil)
+        #expect(await backend.recordedCommands().filter(\.isSettingsWrite).count == 2)
+    }
+
+    @Test func backendCommitCancellationRequeuesIntentForRecovery() async throws {
+        let initial = settingsSnapshot(model: "initial-model")
+        let backend = FakeCodexReviewBackend(settings: backendSnapshot(initial))
+        let store = makeStore(initial: initial, backend: backend)
+        let token = try await store.settingsService.beginRuntimeCutover()
+        await store.updateSettingsModel("deferred-model")
+        await backend.cancelNextSettingsUpdate()
+
+        await #expect(throws: CancellationError.self) {
+            try await store.settingsService.commitRuntimeSnapshot(token: token, snapshot: initial)
+        }
+        #expect(store.settingsService.runtimeCutoverStatus == .awaitingRecovery)
+        #expect(await backend.settingsSnapshot().model == "initial-model")
+        #expect(store.settings.selectedModel == "deferred-model")
+        #expect(store.settings.lastErrorMessage != nil)
+
+        let recoveryToken = try await store.settingsService.beginRuntimeCutover()
+        try await store.settingsService.commitRuntimeSnapshot(token: recoveryToken, snapshot: initial)
+        #expect(await backend.settingsSnapshot().model == "deferred-model")
+        #expect(store.settings.selectedModel == "deferred-model")
+        #expect(store.settings.lastErrorMessage == nil)
+    }
+
     @Test func cancellationTokenMisuseIsTypedAndNeverMutatesState() async throws {
         let initial = settingsSnapshot(model: "initial-model")
         let backend = FakeCodexReviewBackend(settings: backendSnapshot(initial))
