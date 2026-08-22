@@ -158,6 +158,7 @@ public final class CodexReviewStore {
             break
         }
 
+        closePublishedRuntimeAdmission(in: previousState)
         let generation = previousState.generation.successor()
         switch previousState {
         case .running(_, let runtime, let mcp):
@@ -253,6 +254,7 @@ public final class CodexReviewStore {
         }
 
         let previousState = runtimeState
+        closePublishedRuntimeAdmission(in: previousState)
         let generation = previousState.generation.successor()
         if case .failed(let message) = intent.finalState {
             transitionToFailed(message)
@@ -303,7 +305,6 @@ public final class CodexReviewStore {
             await stopMCPServer()
 
         case .running(_, let runtime, _):
-            await runtime.handle.closeAdmission()
             await stopPublishedRuntimeSemantics(intent: intent)
             await stopMCPServer()
             await closeRuntime(
@@ -358,6 +359,7 @@ public final class CodexReviewStore {
 
     package func admitRuntimeRecycleAfterAccountChange() -> Task<Void, Never>? {
         let previousState = runtimeState
+        closePublishedRuntimeAdmission(in: previousState)
         let predecessor: Task<Void, Never>?
         let context: RuntimeAcquisitionContext
         switch previousState {
@@ -710,7 +712,6 @@ public final class CodexReviewStore {
     private func closePublishedRuntimeForReplacement(
         _ runtime: PreparedRuntime
     ) async {
-        await runtime.handle.closeAdmission()
         await stopPublishedRuntimeSemantics(intent: .explicitStop)
         await closeRuntime(
             runtime,
@@ -746,7 +747,7 @@ public final class CodexReviewStore {
         admissionAlreadyClosed: Bool = false
     ) async {
         if admissionAlreadyClosed == false {
-            await runtime.handle.closeAdmission()
+            runtime.handle.closeAdmission()
         }
         do {
             try await runtime.handle.close(purpose: purpose)
@@ -758,6 +759,15 @@ public final class CodexReviewStore {
         } catch {
             writeDiagnosticsIfNeeded()
         }
+    }
+
+    private func closePublishedRuntimeAdmission(
+        in state: ReviewStoreRuntimeState
+    ) {
+        guard case .running(_, let runtime, _) = state else {
+            return
+        }
+        runtime.handle.closeAdmission()
     }
 
     private func stopMCPServer() async {

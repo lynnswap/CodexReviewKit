@@ -80,7 +80,7 @@ package func applyRuntimeAuthenticationSnapshot(
 @MainActor
 package protocol RuntimeLifecycleHandle: AnyObject, Sendable {
     func activate() async throws
-    func closeAdmission() async
+    func closeAdmission()
     func close(purpose: ReviewRuntimeTransitionPurpose) async throws
     func waitUntilClosed() async throws
 }

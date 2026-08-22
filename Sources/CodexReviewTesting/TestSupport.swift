@@ -884,7 +884,7 @@ package final class TestingRuntimeLifecycleHandle: RuntimeLifecycleHandle {
         onActivate()
     }
 
-    package func closeAdmission() async {
+    package func closeAdmission() {
         closeAdmissionCallCount += 1
     }
 
