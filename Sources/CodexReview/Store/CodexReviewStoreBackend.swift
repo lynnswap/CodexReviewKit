@@ -24,13 +24,25 @@ package struct CodexReviewStoreSeed {
 }
 
 @MainActor
-package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend {
+package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend, Sendable {
     var seed: CodexReviewStoreSeed { get }
     var isActive: Bool { get }
     var handlesActiveReviewStopCleanup: Bool { get }
+    var mcpServerLifecycle: any MCPServerLifecycleOwner { get }
 
     func attachStore(_ store: CodexReviewStore)
-    func start(store: CodexReviewStore, forceRestartIfNeeded: Bool) async
+    func prepareRuntime(
+        generation: ReviewRuntimeGeneration,
+        purpose: ReviewRuntimeTransitionPurpose
+    ) async throws -> PreparedRuntime
+    func commitRuntimePublication(
+        _ snapshot: RuntimePublicationSnapshot,
+        handle: any RuntimeLifecycleHandle,
+        auth: CodexReviewAuthModel
+    ) throws
+    func waitForRuntimePublication(
+        handle: any RuntimeLifecycleHandle
+    ) async
     func stop(store: CodexReviewStore) async
     func stop(
         store: CodexReviewStore,
@@ -75,6 +87,18 @@ extension CodexReviewStoreBackend {
     ) async {
         await stop(store: store)
     }
+
+    package func commitRuntimePublication(
+        _ snapshot: RuntimePublicationSnapshot,
+        handle _: any RuntimeLifecycleHandle,
+        auth: CodexReviewAuthModel
+    ) throws {
+        applyRuntimeAuthenticationSnapshot(snapshot.authentication, to: auth)
+    }
+
+    package func waitForRuntimePublication(
+        handle _: any RuntimeLifecycleHandle
+    ) async {}
 
     package func startReview(
         _ request: CodexReviewBackendModel.Review.Start
