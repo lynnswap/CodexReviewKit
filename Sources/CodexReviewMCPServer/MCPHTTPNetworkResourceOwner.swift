@@ -28,6 +28,7 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
     package enum TerminalCause: Equatable, Sendable {
         case serverStop
         case peerClosed
+        case responseComplete
         case transportFailure(String)
     }
 
@@ -291,7 +292,8 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         private weak var connection: Connection?
         private let lock = NSLock()
         private let handlerSlot = WorkSlot()
-        private var sourceSlot: (kind: ResponseSourceKind, slot: WorkSlot)?
+        private var responseSourceKind: ResponseSourceKind?
+        private var sourceSlot: WorkSlot?
         private var writerSlot: WorkSlot?
         private var responseQueueState: ResponseQueueState = .handling
         private var responseEnd: ResponseEndPhase = .notExpected
@@ -309,18 +311,34 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             handlerSlot.makeLease()
         }
 
-        func reserveResponseSource(_ kind: ResponseSourceKind) -> WorkLease? {
+        func declareResponseSource(_ kind: ResponseSourceKind) -> Bool {
             lock.lock()
             guard case .open = outcome,
                   responseEnd == .notExpected,
+                  responseSourceKind == nil,
+                  sourceSlot == nil else {
+                lock.unlock()
+                return false
+            }
+            responseSourceKind = kind
+            responseEnd = .pending
+            lock.unlock()
+            notifyChanged()
+            return true
+        }
+
+        func reserveResponseSource() -> WorkLease? {
+            lock.lock()
+            guard case .open = outcome,
+                  case .turnGranted = responseQueueState,
+                  responseSourceKind != nil,
                   sourceSlot == nil else {
                 lock.unlock()
                 return nil
             }
             let slot = WorkSlot()
             slot.attach(to: self)
-            sourceSlot = (kind, slot)
-            responseEnd = .pending
+            sourceSlot = slot
             lock.unlock()
             notifyChanged()
             return slot.makeLease()
@@ -330,6 +348,7 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             lock.lock()
             guard case .open = outcome,
                   responseEnd == .notExpected,
+                  responseSourceKind == nil,
                   sourceSlot == nil else {
                 lock.unlock()
                 return false
@@ -476,8 +495,8 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
                 case .completed, .notReserved: .responding
                 }
             }
-            let sourceKind = sourceSlot?.kind
-            let sourcePhase = sourceSlot?.slot.snapshot ?? .notReserved
+            let sourceKind = responseSourceKind
+            let sourcePhase = sourceSlot?.snapshot ?? .notReserved
             let writerPhase = writerSlot?.snapshot ?? .notReserved
             let responseEnd = responseEnd
             let responseIsReady = switch responseQueueState {
@@ -522,7 +541,7 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             } else {
                 waiter = nil
             }
-            slots = [handlerSlot, sourceSlot?.slot, writerSlot].compactMap { $0 }
+            slots = [handlerSlot, sourceSlot, writerSlot].compactMap { $0 }
             lock.unlock()
             waiter?.resume(returning: false)
             for slot in slots {
@@ -539,7 +558,7 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             guard didClose == false,
                   isTerminalLocked,
                   handlerSlot.isCompleted,
-                  sourceSlot?.slot.isCompleted != false,
+                  sourceSlot?.isCompleted != false,
                   writerSlot?.isCompleted != false else {
                 lock.unlock()
                 return
@@ -633,6 +652,10 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
 
         package func transportFailed(_ message: String) {
             beginClosing(.transportFailure(message), signalResourceClose: true)
+        }
+
+        package func closeAfterResponse() {
+            beginClosing(.responseComplete, signalResourceClose: true)
         }
 
         package func waitUntilClosed() async {

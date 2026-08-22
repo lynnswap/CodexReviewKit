@@ -959,7 +959,59 @@ package actor CodexReviewMCPHTTPServer {
     }
 
     package func handleHTTPRequest(_ request: HTTPRequest) async -> HTTPResponse {
-        await handleTrackedHTTPRequest(request).response
+        directResponse(from: await handleTrackedHTTPRequest(request))
+    }
+
+    private func directResponse(from trackedResponse: TrackedHTTPResponse) -> HTTPResponse {
+        guard case .stream(let source, let headers) = trackedResponse.response,
+              let completion = trackedResponse.streamCompletion else {
+            return trackedResponse.response
+        }
+        let heartbeatInterval = configuration.streamHeartbeatInterval
+        let stream = AsyncThrowingStream<Data, Swift.Error>(bufferingPolicy: .unbounded) { continuation in
+            let task = Task {
+                await withTaskGroup(of: Void.self) { group in
+                    group.addTask {
+                        do {
+                            for try await chunk in source {
+                                try Task.checkCancellation()
+                                continuation.yield(chunk)
+                            }
+                            await completion.finishAndWait()
+                            continuation.finish()
+                        } catch is CancellationError {
+                            await completion.finishAndWait()
+                            continuation.finish()
+                        } catch {
+                            await completion.finishAndWait()
+                            continuation.finish(throwing: error)
+                        }
+                    }
+                    if let heartbeatInterval {
+                        group.addTask {
+                            while Task.isCancelled == false {
+                                do {
+                                    try await Task.sleep(for: heartbeatInterval)
+                                } catch {
+                                    return
+                                }
+                                guard Task.isCancelled == false else {
+                                    return
+                                }
+                                continuation.yield(Data(": keep-alive\n\n".utf8))
+                            }
+                        }
+                    }
+                    _ = await group.next()
+                    group.cancelAll()
+                }
+            }
+            continuation.onTermination = { _ in
+                task.cancel()
+                completion.finish()
+            }
+        }
+        return .stream(stream, headers: headers)
     }
 
     fileprivate func handleTrackedHTTPRequest(_ request: HTTPRequest) async -> TrackedHTTPResponse {
@@ -1065,9 +1117,7 @@ package actor CodexReviewMCPHTTPServer {
         switch response {
         case .stream:
             let completion = ActiveRequestCompletion {
-                Task {
-                    await self.finishActiveRequest(sessionID: sessionID)
-                }
+                await self.finishActiveRequest(sessionID: sessionID)
             }
             return (
                 .init(
@@ -1235,22 +1285,38 @@ package actor CodexReviewMCPHTTPServer {
 
 private final class ActiveRequestCompletion: @unchecked Sendable {
     private let lock = NSLock()
-    private let onFinish: @Sendable () -> Void
+    private let onFinish: @Sendable () async -> Void
     private var didFinish = false
 
-    init(onFinish: @escaping @Sendable () -> Void) {
+    init(onFinish: @escaping @Sendable () async -> Void) {
         self.onFinish = onFinish
     }
 
     func finish() {
+        guard claim() else {
+            return
+        }
+        Task {
+            await onFinish()
+        }
+    }
+
+    func finishAndWait() async {
+        guard claim() else {
+            return
+        }
+        await onFinish()
+    }
+
+    private func claim() -> Bool {
         lock.lock()
         if didFinish {
             lock.unlock()
-            return
+            return false
         }
         didFinish = true
         lock.unlock()
-        onFinish()
+        return true
     }
 }
 
@@ -1377,6 +1443,7 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
                 .init(response: .error(statusCode: 404, .invalidRequest("Not Found"))),
                 operation: operation,
                 version: head.version,
+                closeAfterResponse: head.isKeepAlive == false,
                 context: context
             )
             return
@@ -1388,6 +1455,7 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
             response,
             operation: operation,
             version: head.version,
+            closeAfterResponse: head.isKeepAlive == false,
             context: context
         )
     }
@@ -1424,20 +1492,46 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
         _ trackedResponse: TrackedHTTPResponse,
         operation: MCPHTTPNetworkResourceOwner.RequestOperation,
         version: HTTPVersion,
+        closeAfterResponse: Bool,
         context: ChannelHandlerContext
     ) async {
         let response = trackedResponse.response
-        let preparedResponse: HTTPResponse
 
         switch response {
-        case .stream(let source, let headers):
+        case .stream:
             guard let kind = trackedResponse.responseSourceKind else {
-                trackedResponse.streamCompletion?.finish()
+                await trackedResponse.streamCompletion?.finishAndWait()
                 connection.transportFailed("Streaming response has no source lifetime contract.")
                 return
             }
-            guard let sourceLease = operation.reserveResponseSource(kind) else {
-                trackedResponse.streamCompletion?.finish()
+            guard operation.declareResponseSource(kind) else {
+                await trackedResponse.streamCompletion?.finishAndWait()
+                return
+            }
+
+        default:
+            guard operation.markResponseSourceNotRequired() else {
+                return
+            }
+        }
+
+        guard await connection.supplyResponse(for: operation) else {
+            await trackedResponse.streamCompletion?.finishAndWait()
+            return
+        }
+        guard let writerLease = operation.reserveWriter() else {
+            await trackedResponse.streamCompletion?.finishAndWait()
+            return
+        }
+
+        let preparedResponse: HTTPResponse
+        var admittedSource: (lease: MCPHTTPNetworkResourceOwner.WorkLease, task: Task<Void, Never>)?
+        switch response {
+        case .stream(let source, let headers):
+            guard let kind = trackedResponse.responseSourceKind,
+                  let sourceLease = operation.reserveResponseSource() else {
+                await trackedResponse.streamCompletion?.finishAndWait()
+                writerLease.acknowledgeCompletion()
                 return
             }
             let bridge = AsyncThrowingStream<Data, Swift.Error>.makeStream(
@@ -1464,23 +1558,17 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
                 } else {
                     bridge.continuation.finish()
                 }
-                trackedResponse.streamCompletion?.finish()
+                await trackedResponse.streamCompletion?.finishAndWait()
                 sourceLease.acknowledgeCompletion()
             }
-            sourceLease.install(sourceTask)
+            admittedSource = (sourceLease, sourceTask)
             preparedResponse = .stream(bridge.stream, headers: headers)
 
         default:
-            guard operation.markResponseSourceNotRequired() else {
-                return
-            }
+            admittedSource = nil
             preparedResponse = response
         }
 
-        guard await connection.supplyResponse(for: operation),
-              let writerLease = operation.reserveWriter() else {
-            return
-        }
         nonisolated(unsafe) let context = context
         let heartbeatInterval = await server.responseHeartbeatInterval
         let writerTask = Task {
@@ -1497,6 +1585,9 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
             switch result {
             case .responded:
                 operation.acknowledgeResponseEnd()
+                if closeAfterResponse {
+                    self.connection.closeAfterResponse()
+                }
                 await self.server.waitAfterResponseEndAcknowledgementForTesting()
             case .cancelled:
                 break
@@ -1511,6 +1602,9 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
             writerLease.acknowledgeCompletion()
         }
         writerLease.install(writerTask)
+        if let admittedSource {
+            admittedSource.lease.install(admittedSource.task)
+        }
     }
 
     private enum WriterCompletion {
