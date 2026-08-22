@@ -1352,7 +1352,11 @@ struct CodexReviewHostTests {
         )
         await firstTransport.waitForRequestCount(requestCount + 1)
 
+        let generationBeforeRestart = store.runtimeLifecycleAdmissionGeneration
         let restart = Task { @MainActor in await store.restart() }
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            store.runtimeLifecycleAdmissionGeneration > generationBeforeRestart
+        })
         await staleReadGate.open()
         await restart.value
 

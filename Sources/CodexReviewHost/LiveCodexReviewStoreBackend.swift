@@ -2051,7 +2051,7 @@ private final class LiveRuntimeLifecycleHandle: RuntimeLifecycleHandle {
         isActivated = true
     }
 
-    func closeAdmission() async {
+    func closeAdmission() {
         owner?.closeRuntimeAdmission(self)
     }
 
