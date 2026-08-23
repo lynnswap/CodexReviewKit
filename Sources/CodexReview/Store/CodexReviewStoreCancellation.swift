@@ -119,22 +119,33 @@ extension CodexReviewStore {
         let cancellation = ReviewCancellation.system(
             message: reason.nilIfEmpty ?? "Cancellation requested."
         )
+        try await performThrowingRegisteredStoreWork(
+            kind: .reviewMutation("cancel-all")
+        ) { @MainActor store in
+            try await store.performCancelAllRunningJobs(cancellation: cancellation)
+        }
+    }
+
+    private func performCancelAllRunningJobs(
+        cancellation: ReviewCancellation
+    ) async throws {
         let cancellableJobs = orderedJobs.filter { $0.isTerminal == false }
         var firstError: (any Error)?
         for job in cancellableJobs {
             do {
-                _ = try await cancelReview(
+                _ = try await performCancelReview(
                     jobID: job.id,
-                    sessionID: job.sessionID,
                     cancellation: cancellation
                 )
             } catch {
                 let message = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
-                try? recordCancellationFailure(
-                    jobID: job.id,
-                    sessionID: job.sessionID,
-                    message: message.isEmpty ? "Failed to cancel review." : message
-                )
+                if storeWorkRegistry.acceptsNewWork {
+                    try? recordCancellationFailure(
+                        jobID: job.id,
+                        sessionID: job.sessionID,
+                        message: message.isEmpty ? "Failed to cancel review." : message
+                    )
+                }
                 if firstError == nil {
                     firstError = error
                 }
