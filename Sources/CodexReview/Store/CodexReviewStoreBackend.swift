@@ -65,6 +65,10 @@ package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend, Sendable {
         admission: ReviewStartAdmission
     ) async throws -> BackendReviewAttempt
     func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws
+    func interruptReview(
+        _ admission: ReviewInterruptRequestAdmission,
+        reason: CodexReviewBackendModel.CancellationReason
+    ) async throws
     func beginReviewRecovery(
         _ run: CodexReviewBackendModel.Review.Run,
         reason: CodexReviewBackendModel.CancellationReason
@@ -111,6 +115,13 @@ extension CodexReviewStoreBackend {
     package func waitForRuntimePublication(
         handle _: any RuntimeLifecycleHandle
     ) async {}
+
+    package func interruptReview(
+        _: ReviewInterruptRequestAdmission,
+        reason _: CodexReviewBackendModel.CancellationReason
+    ) async throws {
+        throw ReviewAttemptContractFailure(message: "Typed review interrupt admission is not installed.")
+    }
 
     package func prepareReviewRecovery(
         _: ReviewRecoveryCandidate
