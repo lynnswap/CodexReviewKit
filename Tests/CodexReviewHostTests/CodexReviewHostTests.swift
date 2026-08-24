@@ -520,7 +520,8 @@ struct CodexReviewHostTests {
 
         await #expect(throws: CancellationError.self) {
             try await store.backend.startReview(
-                makeLiveRouteReviewStartRequest(jobID: "job-compatibility")
+                makeLiveRouteReviewStartRequest(jobID: "job-compatibility"),
+                admission: .compatibility()
             )
         }
 

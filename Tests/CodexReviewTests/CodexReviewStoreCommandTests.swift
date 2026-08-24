@@ -6,7 +6,7 @@ import CodexReviewTesting
 @Suite("Codex review store", .serialized)
 @MainActor
 struct CodexReviewStoreCommandTests {
-    @Test func storeBackendForwardsExplicitAdmissionAndKeepsLegacyStartAvailable() async throws {
+    @Test func storeBackendForwardsExplicitAdmission() async throws {
         let reviewBackend = FakeCodexReviewBackend()
         let storeBackend = TestingCodexReviewStoreBackend(reviewBackend: reviewBackend)
         let request = CodexReviewBackendModel.Review.Start(
@@ -19,11 +19,8 @@ struct CodexReviewStoreCommandTests {
         let explicitAttempt = try await storeBackend.startReview(request, admission: admission)
         #expect(await reviewBackend.receivedStartAdmission(admission))
         #expect(await admission.currentPhase() == .active(explicitAttempt.run))
-
-        let legacyAttempt = try await storeBackend.startReview(request)
-        #expect(legacyAttempt.run == explicitAttempt.run)
         let commands = await reviewBackend.recordedCommands()
-        #expect(commands.filter { if case .startReview = $0 { true } else { false } }.count == 2)
+        #expect(commands.contains(.startReview(request)))
     }
 
     @Test func failedExplicitInitialStartCleansItsExactProvisionalRun() async throws {
