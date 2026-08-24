@@ -4,6 +4,9 @@ CodexReviewKit provides ReviewMonitor, a native macOS app for running and
 observing Codex review. The package has one observable review store, one Codex
 app-server gateway, and an internal MCP adapter owned by the app.
 
+The active v0.6.2 recovery sequence, owner cutovers, and completion gates are
+tracked in [Recovery Completion Contract](recovery-completion-contract.md).
+
 The package is organized around four ownership boundaries:
 
 - `CodexReview` owns review behavior and observable product state.
