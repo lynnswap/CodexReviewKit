@@ -148,14 +148,24 @@ public final class CodexReviewStore {
     }
 
     public func start(forceRestartIfNeeded: Bool = false) async {
+        guard let task = admitRuntimeStart(
+            forceRestartIfNeeded: forceRestartIfNeeded
+        ) else {
+            return
+        }
+        await task.value
+    }
+
+    private func admitRuntimeStart(
+        forceRestartIfNeeded: Bool
+    ) -> Task<Void, Never>? {
         let previousState = runtimeState
         switch previousState {
         case .running where forceRestartIfNeeded == false:
-            return
+            return nil
         case .acquiring(_, _, let task) where forceRestartIfNeeded == false,
              .replacing(_, _, _, let task) where forceRestartIfNeeded == false:
-            await task.value
-            return
+            return task
         case .stopped, .acquiring, .running, .replacing, .tearingDown, .failed:
             break
         }
@@ -164,39 +174,39 @@ public final class CodexReviewStore {
         let generation = previousState.generation.successor()
         switch previousState {
         case .running(_, let runtime, let mcp):
-            await beginRuntimeReplacement(
+            return admitRuntimeReplacement(
                 generation: generation,
                 context: .init(retiringRuntime: runtime),
                 retainedMCP: mcp
             )
         case .replacing(_, let context, let retainedMCP, let task):
             task.cancel()
-            await beginRuntimeReplacement(
+            return admitRuntimeReplacement(
                 generation: generation,
                 context: context,
                 retainedMCP: retainedMCP,
                 predecessor: task
             )
         case .failed(_, let retainedMCP?):
-            await beginRuntimeReplacement(
+            return admitRuntimeReplacement(
                 generation: generation,
                 context: .init(retiringRuntime: nil),
                 retainedMCP: retainedMCP
             )
         case .acquiring(_, let context, let task):
             task.cancel()
-            await beginRuntimeAcquisition(
+            return admitRuntimeAcquisition(
                 generation: generation,
                 context: context,
                 predecessor: task
             )
         case .tearingDown(_, _, _, let task):
-            await beginRuntimeAcquisition(
+            return admitRuntimeAcquisition(
                 generation: generation,
                 predecessor: task
             )
         case .stopped, .failed:
-            await beginRuntimeAcquisition(generation: generation)
+            return admitRuntimeAcquisition(generation: generation)
         }
     }
 
@@ -503,11 +513,11 @@ public final class CodexReviewStore {
         }
     }
 
-    private func beginRuntimeAcquisition(
+    private func admitRuntimeAcquisition(
         generation: ReviewRuntimeGeneration,
         context: RuntimeAcquisitionContext = .init(),
         predecessor: Task<Void, Never>? = nil
-    ) async {
+    ) -> Task<Void, Never> {
         if predecessor == nil {
             serverState = .starting
             serverURL = nil
@@ -535,7 +545,7 @@ public final class CodexReviewStore {
             context: context,
             task: task
         )
-        await task.value
+        return task
     }
 
     private func performRuntimeAcquisition(
@@ -670,12 +680,12 @@ public final class CodexReviewStore {
         }
     }
 
-    private func beginRuntimeReplacement(
+    private func admitRuntimeReplacement(
         generation: ReviewRuntimeGeneration,
         context: RuntimeReplacementContext,
         retainedMCP: RetainedMCPServer,
         predecessor: Task<Void, Never>? = nil
-    ) async {
+    ) -> Task<Void, Never> {
         serverState = .starting
         serverURL = retainedMCP.serverURL
         writeDiagnosticsIfNeeded()
@@ -698,7 +708,7 @@ public final class CodexReviewStore {
             retainedMCP: retainedMCP,
             task: task
         )
-        await task.value
+        return task
     }
 
     private func performRuntimeReplacement(
