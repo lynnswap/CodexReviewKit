@@ -26,9 +26,9 @@ never reused as a writable recovery destination.
 - Recovery base: v0.6.2 annotated tag object `c8c01d6`, commit `82bddbc`,
   and tree `e7a054b`.
 - Exact-tree direct restore: `f554a3b`.
-- Current integration anchor: `d824d72` (PR #152 merged).
+- Current integration anchor: `ef8f02d` (PR #153 merged).
 - Merged successors are PRs #114, #115, #116, #122–#125, #127, #128,
-  #130–#132, #134–#140, and #142–#152. They provide the completed viewport,
+  #130–#132, #134–#140, and #142–#153. They provide the completed viewport,
   compatibility, terminal/admission, AppServer, runtime-transition, MCP
   transport, Store work-registry, recovery completion-contract, and runtime
   replacement ownership foundations.
@@ -272,8 +272,8 @@ the final completion report. Do not record credentials.
 | Store replacement admission and lifecycle owner | merged | #149 / `29e56db`, #150 / `a2dff9b` |
 | Store source-close receipt join | merged | #151 / `b28bbe6` |
 | Replacement publication transfer | merged | #152 / `d824d72` |
-| Attempt runtime routes | current slice | — |
-| Store initial-attempt cutover | pending | — |
+| Attempt runtime routes | merged | #153 / `ef8f02d` |
+| Store initial-attempt cutover | current slice | — |
 | Store typed recovery receipt and staging | pending | — |
 | Shared Store recovery activation | pending | — |
 | MCP SDK domain drain | pending | — |
