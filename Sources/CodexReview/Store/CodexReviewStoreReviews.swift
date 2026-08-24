@@ -812,6 +812,7 @@ extension CodexReviewStore {
                     active,
                     cancellation: requestedCancellation
                 )
+                reviewWorkerTasks[jobID]?.cancel()
                 await reviewWorkerTasks[jobID]?.value
             } catch {
                 guard job.isTerminal == false else {

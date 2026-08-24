@@ -2319,15 +2319,25 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func userCancellationWinsOverPendingNetworkRecovery() async throws {
-        let backend = FakeCodexReviewBackend()
+    @Test func userCancellationWakesPendingOutageStreamTerminal() async throws {
+        let run = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1",
+            model: "gpt-5"
+        )
+        let backend = FakeCodexReviewBackend(nextRun: run)
         let networkMonitor = ManualCodexReviewNetworkMonitor()
+        let outageSleepStarted = AsyncGate()
         let debounceGate = AsyncGate()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "job-1" }),
             networkMonitor: networkMonitor,
-            networkRecoveryPolicy: .init(sleep: { _ in await debounceGate.wait() })
+            networkRecoveryPolicy: .init(sleep: { _ in
+                await outageSleepStarted.open()
+                await debounceGate.wait()
+            })
         )
         try await withStoreCommandTestCleanup(backend: backend, store: store) {
             async let result = store.startReview(
@@ -2337,16 +2347,34 @@ struct CodexReviewStoreCommandTests {
             try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
 
             networkMonitor.yield(.init(status: .unsatisfied))
+            await outageSleepStarted.wait()
+            await backend.finishEvents(
+                throwing: ReviewAttemptStreamFailure.recoverableNetwork(.connection("Network closed")),
+                for: run
+            )
+            guard case .active(let active) = store.reviewAttemptOwnerships["job-1"] else {
+                Issue.record("Pending outage did not retain its exact active attempt.")
+                return
+            }
+            try #require(await waitUntil(timeout: .seconds(2)) {
+                await active.admission.activeTerminalResolution() != nil
+            })
+            #expect(try store.readReview(jobID: "job-1").core.lifecycle.status == .running)
+
             async let cancel = store.cancelReview(
                 jobID: "job-1", cancellation: .mcpClient(message: "Stop")
             )
-            try await backend.waitForInterruptReview(timeout: .seconds(2))
-            await debounceGate.open()
-            await backend.yield(.cancelled("Stop"))
             _ = try await cancel
             let read = try await result
+            await debounceGate.open()
 
             #expect(read.core.lifecycle.status == .cancelled)
+            #expect(read.core.lifecycle.cancellation?.message == "Stop")
+            #expect(store.reviewAttemptOwnerships["job-1"] == nil)
+            #expect(store.reviewWorkerTasks["job-1"] == nil)
+            #expect(await backend.recordedCommands().contains {
+                if case .interruptReviewAdmission = $0 { true } else { false }
+            } == false)
             #expect(await backend.recordedCommands().contains(where: isLegacyRecoveryCommand) == false)
         }
     }
