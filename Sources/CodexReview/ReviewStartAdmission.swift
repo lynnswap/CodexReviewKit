@@ -811,6 +811,12 @@ package actor ReviewStartAdmission {
         phase
     }
 
+    package func permitsRecoveryPublication(
+        of run: CodexReviewBackendModel.Review.Run
+    ) -> Bool {
+        requestedCancellation == nil && phase == .active(run)
+    }
+
     package func failedReviewStartDisposition(
         for preparedRun: CodexReviewBackendModel.Review.Run
     ) -> FailedReviewStartDisposition {

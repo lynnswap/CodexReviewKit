@@ -270,3 +270,21 @@ package struct PreparedReviewRecovery: Sendable {
         self.handoff = handoff
     }
 }
+
+package final class StagedReviewRecovery: Sendable {
+    package let receipt: ReviewRecoveryRouteReceipt
+    package let destinationGeneration: ReviewRuntimeGeneration
+    package let attempt: BackendReviewAttempt
+    package let admission: ReviewStartAdmission
+    package init(
+        receipt: ReviewRecoveryRouteReceipt,
+        destinationGeneration: ReviewRuntimeGeneration,
+        attempt: BackendReviewAttempt,
+        admission: ReviewStartAdmission
+    ) {
+        self.receipt = receipt
+        self.destinationGeneration = destinationGeneration
+        self.attempt = attempt
+        self.admission = admission
+    }
+}
