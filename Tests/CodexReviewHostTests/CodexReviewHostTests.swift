@@ -72,7 +72,7 @@ struct CodexReviewHostTests {
         let active = await StoreSnapshotProbe(store: host.store).waitUntil {
             $0.job()?.activeRun != nil
         }
-        try #require(active?.job()?.activeRun != nil)
+        let activeRun = try #require(active?.job()?.activeRun)
 
         let failure = Task { @MainActor in
             await host.store.stop(intent: .unexpectedFailure("Injected direct failure."))
@@ -81,14 +81,16 @@ struct CodexReviewHostTests {
         let expected = "Review runtime stopped unexpectedly: Injected direct failure."
         #expect(host.store.serverState == .failed(expected))
         let command = try #require(await backend.recordedCommands().last)
-        guard case .interruptReview(_, let reason) = command else {
+        guard case .interruptReviewAdmission(let admission, let reason) = command else {
             Issue.record("Expected an interrupt request.")
             return
         }
+        #expect(admission.run == activeRun)
         #expect(reason.message == expected)
         #expect(host.store.jobs.first?.core.lifecycle.cancellation?.message == expected)
 
         await interruptGate.open()
+        await backend.yield(.cancelled(expected), for: activeRun)
         await failure.value
         let result = try await review.value
         #expect(result.core.lifecycle.cancellation?.message == expected)
@@ -1788,7 +1790,19 @@ struct CodexReviewHostTests {
         )
         await waitUntil { store.jobs.first?.core.run.turnID == "turn-first" }
 
-        try await store.switchAccount(CodexAccount(email: "second@example.com"))
+        let accountSwitch = Task { @MainActor in
+            try await store.switchAccount(CodexAccount(email: "second@example.com"))
+        }
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            await firstTransport.recordedRequests().map(\.method).contains("turn/interrupt")
+        })
+        try await emitInterruptedTurn(
+            firstTransport,
+            threadID: "thread-first",
+            turnID: "turn-first",
+            message: "Account switched."
+        )
+        try await accountSwitch.value
         let result = try await reviewRead
         await secondTransport.waitForRequestCount(2)
         await firstTransport.waitForRequestCount(8)
@@ -1956,7 +1970,17 @@ struct CodexReviewHostTests {
         )
         await waitUntil { store.jobs.first?.core.run.turnID == "turn-active" }
 
-        await store.logout()
+        let logout = Task { @MainActor in await store.logout() }
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            await firstTransport.recordedRequests().map(\.method).contains("turn/interrupt")
+        })
+        try await emitInterruptedTurn(
+            firstTransport,
+            threadID: "thread-active",
+            turnID: "turn-active",
+            message: "Signed out."
+        )
+        await logout.value
         let result = try await reviewRead
         await secondTransport.waitForRequestCount(2)
 
@@ -2069,6 +2093,12 @@ struct CodexReviewHostTests {
         #expect(jobBeforeInterruptCompletes.cancellationRequested)
         #expect(jobBeforeInterruptCompletes.core.lifecycle.cancellation?.message == "Review runtime stopped.")
         await interruptGate.open()
+        try await emitInterruptedTurn(
+            transport,
+            threadID: "thread-1",
+            turnID: "turn-1",
+            message: "Review runtime stopped."
+        )
         await stopTask.value
         let result = try await reviewRead
 
@@ -2174,6 +2204,15 @@ struct CodexReviewHostTests {
         try #require(await waitUntil(timeout: .seconds(2)) {
             await transport.recordedRequests().map(\.method).contains("turn/interrupt")
         })
+        try await emitInterruptedTurn(
+            transport,
+            threadID: "review-thread-1",
+            turnID: "turn-1",
+            message: "Network recovery"
+        )
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            store.liveReviewRecoveryRouteCountForTesting == 1
+        })
 
         let stopFinished = CompletionFlag()
         let stopTask = Task { @MainActor in
@@ -2195,6 +2234,7 @@ struct CodexReviewHostTests {
         #expect(result.core.lifecycle.status == .cancelled)
         let methods = await transport.recordedRequests().map(\.method)
         #expect(methods.contains("thread/delete"))
+        #expect(store.liveReviewRecoveryRouteCountForTesting == 0)
     }
 
     @Test func liveStoreMarksRuntimeFailedWhenAppServerNotificationStreamCloses() async throws {
@@ -2351,6 +2391,12 @@ struct CodexReviewHostTests {
         #expect(await transport.recordedRequests().map(\.method).filter { $0 == "turn/interrupt" }.count == 1)
 
         await interruptGate.open()
+        try await emitInterruptedTurn(
+            transport,
+            threadID: "thread-1",
+            turnID: "turn-1",
+            message: expected
+        )
         await failure.value
         await explicitStop.value
         let result = try await review.value
@@ -3133,6 +3179,39 @@ private func initializeMCPSession(endpoint: URL) async throws -> String {
     let httpResponse = try #require(response as? HTTPURLResponse)
     #expect(httpResponse.statusCode == 200)
     return try #require(httpResponse.value(forHTTPHeaderField: "MCP-Session-Id"))
+}
+
+private func emitInterruptedTurn(
+    _ transport: FakeJSONRPCTransport,
+    threadID: String,
+    turnID: String,
+    message: String
+) async throws {
+    try await transport.emitServerNotification(
+        method: "turn/completed",
+        params: InterruptedTurnNotification(
+            threadID: threadID,
+            turn: .init(id: turnID, error: .init(message: message))
+        )
+    )
+}
+
+private struct InterruptedTurnNotification: Encodable, Sendable {
+    struct Turn: Encodable, Sendable {
+        struct Error: Encodable, Sendable { let message: String }
+        let id: String
+        let status = "interrupted"
+        let items: [String] = []
+        let error: Error
+    }
+
+    let threadID: String
+    let turn: Turn
+
+    enum CodingKeys: String, CodingKey {
+        case threadID = "threadId"
+        case turn
+    }
 }
 
 private func failedMessage(from phase: CodexReviewAuthModel.Phase) -> String? {

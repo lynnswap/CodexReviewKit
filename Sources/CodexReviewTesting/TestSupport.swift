@@ -196,6 +196,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     private var nextRun: CodexReviewBackendModel.Review.Run
     private var nextRecoveredRun: CodexReviewBackendModel.Review.Run?
     private var interruptFailureMessage: String?
+    private var interruptRejectionMessage: String?
     private var recoveryFailureMessage: String?
     private var cleanupFailure: ReviewRuntimeCloseFailure?
     private var interruptReviewGate: AsyncGate?
@@ -252,6 +253,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     package func failInterrupts(message: String) {
         interruptFailureMessage = message
     }
+    package func rejectInterrupts(message: String) { interruptRejectionMessage = message }
 
     package func failRecovery(message: String) {
         recoveryFailureMessage = message
@@ -295,6 +297,10 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
 
     package func holdInterruptReview(with gate: AsyncGate) {
         interruptReviewGate = gate
+    }
+
+    package func setNextRun(_ run: CodexReviewBackendModel.Review.Run) {
+        nextRun = run
     }
 
     package func holdCleanupReview(with gate: AsyncGate) {
@@ -597,6 +603,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         interruptReviewWaiters.removeAll(keepingCapacity: false)
         for waiter in waiters { waiter.resume() }
         await interruptReviewGate?.wait()
+        if let interruptRejectionMessage { throw ReviewInterruptRequestFailure(outcome: .rejected(code: nil, message: interruptRejectionMessage)) }
         if let interruptFailureMessage {
             throw ReviewInterruptRequestFailure(
                 outcome: .outcomeUnknown(message: interruptFailureMessage)
@@ -798,7 +805,7 @@ package final class StoreSnapshotProbe {
                     lastAgentMessage: job.core.output.lastAgentMessage,
                     logs: job.logEntries,
                     run: job.core.run,
-                    activeRun: store.activeRuns[job.id],
+                    activeRun: store.reviewAttemptOwnerships[job.id]?.run,
                     cancellationRequested: job.cancellationRequested
                 )
             }
@@ -1622,6 +1629,7 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
     private var maxActiveByMethod: [String: Int] = [:]
     private var gatesByMethod: [String: RequestGate] = [:]
     private var oneShotGatesByMethod: [String: [RequestGate]] = [:]
+    private var activeRequestGates: [UUID: AsyncGate] = [:]
     private var beforeReturningResponseByMethod: [String: [@Sendable () async -> Void]] = [:]
     private var requestCountWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
     private var notificationStreamCountWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
@@ -1685,18 +1693,23 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
         requests.append(request)
         resumeRequestCountWaiters()
         activeByMethod[request.method, default: 0] += 1
+        defer { activeByMethod[request.method, default: 1] -= 1 }
         maxActiveByMethod[request.method] = max(
             maxActiveByMethod[request.method] ?? 0,
             activeByMethod[request.method] ?? 0
         )
         let queuedResponse = dequeueResponse(for: request.method)
         if let gate = dequeueOneShotGate(for: request.method) ?? gatesByMethod[request.method] {
+            let gateID = UUID()
+            activeRequestGates[gateID] = gate.gate
             await gate.wait()
+            activeRequestGates.removeValue(forKey: gateID)
+            guard closed == false else { throw JSONRPC.Error.closed }
         }
         if let operation = dequeueBeforeReturningResponse(for: request.method) {
             await operation()
         }
-        activeByMethod[request.method, default: 1] -= 1
+        guard closed == false else { throw JSONRPC.Error.closed }
         if let queuedResponse {
             switch queuedResponse {
             case .success(let data):
@@ -1756,6 +1769,11 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
 
     package func close() async {
         closed = true
+        let requestGates = Array(activeRequestGates.values)
+        activeRequestGates.removeAll(keepingCapacity: false)
+        for gate in requestGates {
+            await gate.open()
+        }
         for continuation in serverNotificationContinuations {
             continuation.finish()
         }

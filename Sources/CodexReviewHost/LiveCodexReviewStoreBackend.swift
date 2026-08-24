@@ -1039,19 +1039,34 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         reason: ReviewCancellation,
         timeoutWarning: String
     ) async {
-        store.recordActiveReviewCancellationRequestsForRuntimeStop(reason: reason)
-        let didInterrupt = await runRuntimeShutdownCleanup(timeout: shutdownCleanupTimeout) {
-            await appServerBackend.interruptActiveReviewsForShutdown(reason: .init(message: reason.message))
+        let didRequestCancellation = await runRuntimeShutdownCleanup(
+            timeout: shutdownCleanupTimeout
+        ) {
+            _ = await store.requestActiveReviewCancellationsForRuntimeStop(reason: reason)
+        }
+        if didRequestCancellation == false {
+            let lifecycle = appServerBackend.runtimeOwnerLifecycleHandle
+            await lifecycle.closeAdmission()
+            do {
+                try await lifecycle.closeAndWait()
+            } catch {
+                logger.error(
+                    "Failed to force-close app-server after review cancellation timeout: \(error.localizedDescription, privacy: .public)"
+                )
+            }
         }
         let locallyCancelledJobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
             reason: reason,
             cancelWorkers: false
         )
-        store.cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
-        let didDrainReviewWorkers = await store.drainReviewWorkersForRuntimeStop(
-            timeout: shutdownCleanupTimeout
-        )
-        if didInterrupt == false || didDrainReviewWorkers == false {
+        var didDrainReviewWorkers = true
+        if locallyCancelledJobIDs.isEmpty == false {
+            store.cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
+            didDrainReviewWorkers = await store.drainReviewWorkersForRuntimeStop(
+                timeout: shutdownCleanupTimeout
+            )
+        }
+        if didRequestCancellation == false || didDrainReviewWorkers == false {
             logger.warning("\(timeoutWarning, privacy: .public)")
         }
     }

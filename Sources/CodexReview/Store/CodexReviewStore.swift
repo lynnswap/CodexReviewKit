@@ -7,6 +7,37 @@ private let runtimeLifecycleLogger = Logger(
     category: "runtime-lifecycle"
 )
 
+package enum StoreReviewAttemptOwnership {
+    case starting(ReviewStartAdmission)
+    case active(StoreReviewActiveAttempt)
+    case recovering(StoreReviewRecoveryReceipt)
+
+    package var run: CodexReviewBackendModel.Review.Run? {
+        switch self {
+        case .starting: nil
+        case .active(let active): active.run
+        case .recovering(let receipt): receipt.source.run
+        }
+    }
+
+    package var workerAdmission: ReviewStartAdmission {
+        switch self {
+        case .starting(let admission): admission
+        case .active(let active): active.workerAdmission
+        case .recovering(let receipt): receipt.source.workerAdmission
+        }
+    }
+
+    package func matches(_ other: Self) -> Bool {
+        switch (self, other) {
+        case (.starting(let lhs), .starting(let rhs)): lhs === rhs
+        case (.active(let lhs), .active(let rhs)): lhs.matches(rhs)
+        case (.recovering(let lhs), .recovering(let rhs)): lhs === rhs
+        default: false
+        }
+    }
+}
+
 @MainActor
 @Observable
 public final class CodexReviewStore {
@@ -48,9 +79,7 @@ public final class CodexReviewStore {
     @ObservationIgnored package var previewSupportRetainer: AnyObject?
     @ObservationIgnored package let clock: CodexReviewClock
     @ObservationIgnored package let idGenerator: CodexReviewIDGenerator
-    @ObservationIgnored package var activeRuns: [String: CodexReviewBackendModel.Review.Run] = [:]
-    @ObservationIgnored package var initialReviewStartAdmissions: [String: ReviewStartAdmission] = [:]
-    @ObservationIgnored package var reviewRecoveryWaitingJobIDs: Set<String> = []
+    @ObservationIgnored package var reviewAttemptOwnerships: [String: StoreReviewAttemptOwnership] = [:]
     @ObservationIgnored package var reviewWorkerTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored package var runtimeStopDetachedReviewWorkerTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored package var reviewTerminalWaiters: [String: [ReviewTerminalWaiter]] = [:]
@@ -482,9 +511,13 @@ public final class CodexReviewStore {
     package func closeRegisteredStoreWork(
         reason: ReviewCancellation
     ) async -> ReviewStoreWorkDrainResult {
+        var reviewWorkerJobIDs: [String] = []
         let operation = storeWorkRegistry.beginClosing { [self] in
-            recordActiveReviewCancellationRequestsForRuntimeStop(reason: reason)
+            reviewWorkerJobIDs = recordActiveReviewCancellationRequestsForRuntimeStop(reason: reason)
             accountRateLimitAutoRefreshDriver?.closeAdmission()
+        }
+        for jobID in reviewWorkerJobIDs {
+            reviewWorkerTasks[jobID]?.cancel()
         }
         let result = await operation.task.value
         await cancelAccountRateLimitAutoRefreshAndWait()

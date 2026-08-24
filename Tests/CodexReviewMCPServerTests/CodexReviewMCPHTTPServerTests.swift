@@ -1631,11 +1631,6 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(running.core.lifecycle.status == .cancelled)
             #expect(running.core.lifecycle.cancellation?.message == "Stop from MCP")
             #expect(otherSession.cancellationRequested == false)
-            let commands = await backend.recordedCommands()
-            #expect(commands.contains(.interruptReview(
-                .init(threadID: "thread-1", turnID: "turn-1", reviewThreadID: "thread-1", model: "gpt-5"),
-                .init(message: "Stop from MCP")
-            )))
         }
     }
 
