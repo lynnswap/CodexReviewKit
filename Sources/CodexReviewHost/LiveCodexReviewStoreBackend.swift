@@ -1789,6 +1789,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         request: CodexReviewBackendModel.Review.Start,
         admission: ReviewStartAdmission
     ) async throws(ReviewRecoveryStagingFailure) -> StagedReviewRecovery {
+        let destinationAdmissionPhase = await admission.currentPhase()
         do {
             try reviewAttemptRuntimeRoutes.validatePreparedForStaging(prepared)
         } catch {
@@ -1796,7 +1797,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 message: error.localizedDescription
             )
         }
-        guard await admission.currentPhase() == .preparingThread(.notSent) else {
+        guard destinationAdmissionPhase == .preparingThread(.notSent) else {
             throw ReviewRecoveryStagingFailure.callerRetainsPreparedRecovery(
                 message: "Review recovery staging requires one fresh destination admission."
             )
