@@ -225,4 +225,4 @@ xcrun swift-api-digester \
   -swift-version 6 \
   "${search_args[@]}" || true
 diff -u "$baseline_path" "$current_path" | sed -n '1,240p' >&2 || true
-fail "the canonical v0.6.2 public surface changed. An accepted change requires an explicit entry in scripts/compatibility-baselines/README.md and a baseline update."
+fail "the canonical v0.6.2 public surface changed. An accepted change requires one reviewed PR that updates the baseline, metadata, and checksum together."
