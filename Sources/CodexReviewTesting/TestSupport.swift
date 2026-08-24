@@ -870,6 +870,7 @@ package final class TestingRuntimeLifecycleHandle: RuntimeLifecycleHandle {
     private var closeGate: AsyncGate?
     private var closeStartedGate = AsyncGate()
     private var didClose = false
+    private var closeFailure: ReviewRuntimeCloseFailure?
 
     package init(
         onActivate: @escaping @MainActor @Sendable () -> Void = {},
@@ -897,6 +898,10 @@ package final class TestingRuntimeLifecycleHandle: RuntimeLifecycleHandle {
         await closeStartedGate.wait()
     }
 
+    package func failClose(with failure: ReviewRuntimeCloseFailure) {
+        closeFailure = failure
+    }
+
     package func close(purpose: ReviewRuntimeTransitionPurpose) async throws {
         closePurposes.append(purpose)
         await closeStartedGate.open()
@@ -907,6 +912,9 @@ package final class TestingRuntimeLifecycleHandle: RuntimeLifecycleHandle {
         }
         didClose = true
         onClose()
+        if let closeFailure {
+            throw closeFailure
+        }
     }
 
     package func waitUntilClosed() async throws {

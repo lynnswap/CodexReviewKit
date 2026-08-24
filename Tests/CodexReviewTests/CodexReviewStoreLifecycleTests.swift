@@ -427,6 +427,70 @@ struct CodexReviewStoreLifecycleTests {
         await store.stop()
     }
 
+    @Test func sourceCloseFailureReplaysAndConsumesOnceWhileReplacementPublishes() async throws {
+        let expectedFailure = ReviewRuntimeCloseFailure.connection("Injected source close failure.")
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+        let sourceHandle = try #require(backend.lastPreparedRuntimeHandle)
+        sourceHandle.failClose(with: expectedFailure)
+
+        let preparationGate = AsyncGate()
+        backend.holdRuntimePreparation(with: preparationGate)
+        let caller = Task { @MainActor in await store.restart() }
+        await backend.waitForRuntimePreparation()
+        guard case .replacing(let replacement, _) = store.runtimeState else {
+            Issue.record("Expected a replacement after source close.")
+            return
+        }
+        var firstReceipt = replacement.sourceCloseResults().makeAsyncIterator()
+        var replayedReceipt = replacement.sourceCloseResults().makeAsyncIterator()
+
+        #expect(await firstReceipt.next() == .failed(expectedFailure))
+        #expect(await replayedReceipt.next() == .failed(expectedFailure))
+        #expect(sourceHandle.closeAdmissionCallCount == 1)
+        #expect(sourceHandle.closePurposes == [.restartSameAccount])
+        #expect(sourceHandle.waitUntilClosedCallCount == 1)
+
+        await preparationGate.open()
+        await caller.value
+
+        #expect(store.serverState == .running)
+        #expect(backend.startRequests == [false, true])
+        #expect(store.settings.lastErrorMessage == expectedFailure.localizedDescription)
+        #expect(replacement.consumeSourceCloseFailure() == nil)
+        await store.stop()
+    }
+
+    @Test func cancelledRestartWaitsForSupersedingSourceCloseReceipt() async throws {
+        let expectedFailure = ReviewRuntimeCloseFailure.connection("Injected superseding close failure.")
+        let reviewBackend = FakeCodexReviewBackend(settings: .init(model: "initial-model"))
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: reviewBackend)
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+        let sourceHandle = try #require(backend.lastPreparedRuntimeHandle)
+        sourceHandle.failClose(with: expectedFailure)
+
+        let writeGate = AsyncGate()
+        await reviewBackend.holdNextSettingsUpdate(with: writeGate)
+        let oldWrite = Task { @MainActor in await store.updateSettingsModel("held-before-replacement") }
+        await reviewBackend.waitForSettingsUpdate()
+
+        let restart = Task { @MainActor in await store.restart() }
+        try await waitForCutoverStatus(.draining, service: store.settingsService)
+        restart.cancel()
+        let stop = Task { @MainActor in await store.stop() }
+
+        await writeGate.open()
+        await oldWrite.value
+        await restart.value
+        await stop.value
+
+        #expect(sourceHandle.closePurposes == [.restartSameAccount])
+        #expect(sourceHandle.waitUntilClosedCallCount == 1)
+        #expect(store.settings.lastErrorMessage == expectedFailure.localizedDescription)
+    }
+
     @Test func callerCancellationStillConsumesCutoverByPublishingCurrentRuntime() async throws {
         let preparationGate = AsyncGate()
         let backend = TestingCodexReviewStoreBackend(
