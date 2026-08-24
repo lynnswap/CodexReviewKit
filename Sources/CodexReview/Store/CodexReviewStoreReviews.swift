@@ -48,7 +48,10 @@ extension CodexReviewStore {
         request: CodexReviewAPI.Start.Request,
         waitTimeout: Duration?
     ) async throws -> CodexReviewAPI.Read.Result {
-        let jobID = try beginReview(sessionID: sessionID, request: request)
+        let (jobID, workerAdmission) = try beginReview(
+            sessionID: sessionID,
+            request: request
+        )
         guard let waitTimeout else {
             return try await withTaskCancellationHandler {
                 _ = try await awaitReview(sessionID: sessionID, jobID: jobID)
@@ -56,7 +59,10 @@ extension CodexReviewStore {
                 return try readReview(sessionID: sessionID, jobID: jobID)
             } onCancel: {
                 Task { @MainActor [weak self] in
-                    self?.reviewWorkerTasks[jobID]?.cancel()
+                    await self?.cancelReviewWorkerForCallerCancellation(
+                        jobID: jobID,
+                        workerAdmission: workerAdmission
+                    )
                 }
             }
         }
@@ -91,7 +97,7 @@ extension CodexReviewStore {
     private func beginReview(
         sessionID: String,
         request: CodexReviewAPI.Start.Request
-    ) throws -> String {
+    ) throws -> (jobID: String, workerAdmission: ReviewStartAdmission) {
         guard closedSessions.contains(sessionID) == false else {
             throw CodexReviewAPI.Error.invalidArguments("Review session \(sessionID) is closed.")
         }
@@ -125,7 +131,24 @@ extension CodexReviewStore {
         reviewAttemptOwnerships[jobID] = .starting(admission)
         reviewWorkerTasks[jobID]?.cancel()
         reviewWorkerTasks[jobID] = workerTask
-        return jobID
+        return (jobID, admission)
+    }
+
+    private func cancelReviewWorkerForCallerCancellation(
+        jobID: String,
+        workerAdmission: ReviewStartAdmission
+    ) async {
+        guard let ownership = reviewAttemptOwnerships[jobID],
+              ownership.workerAdmission === workerAdmission else {
+            return
+        }
+        if case .recovering(let receipt) = ownership {
+            await receipt.cancelOwnedOperation(.system())
+        }
+        guard reviewAttemptOwnerships[jobID]?.workerAdmission === workerAdmission else {
+            return
+        }
+        reviewWorkerTasks[jobID]?.cancel()
     }
 
     private func makeReviewWorker(

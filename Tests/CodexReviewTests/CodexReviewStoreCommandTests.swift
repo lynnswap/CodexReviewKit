@@ -2709,6 +2709,63 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func reviewStartTaskCancellationCancelsHeldTypedRecoveryStage() async throws {
+        let initialRun = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1"
+        )
+        let recoveredRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-recovered",
+            threadID: "thread-1",
+            turnID: "turn-2",
+            reviewThreadID: "review-thread-1"
+        )
+        let reviewBackend = FakeCodexReviewBackend(nextRun: initialRun)
+        await reviewBackend.setNextRecoveredRun(recoveredRun)
+        let storeBackend = TestingCodexReviewStoreBackend(reviewBackend: reviewBackend)
+        let stageGate = AsyncGate()
+        storeBackend.holdReviewRecoveryStage(with: stageGate)
+        let networkMonitor = ManualCodexReviewNetworkMonitor()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: storeBackend,
+            idGenerator: .init(next: { "job-1" }),
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: .init(sleep: { _ in })
+        )
+        try await withStoreCommandTestCleanup(backend: reviewBackend, store: store) {
+            let review = Task { @MainActor in
+                try await store.startReview(
+                    sessionID: "session-1",
+                    request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+                )
+            }
+            networkMonitor.yield(.init(status: .unsatisfied))
+            try await resolveTypedRecoveryDisposition(backend: reviewBackend, store: store)
+            networkMonitor.yield(.satisfied())
+            await storeBackend.waitForReviewRecoveryStage()
+            let stageAdmission = try #require(storeBackend.reviewRecoveryCommands.compactMap { command in
+                if case .stage(_, _, let admission) = command { admission } else { nil }
+            }.last)
+
+            review.cancel()
+            let cancellationReachedReceipt = await waitUntil {
+                await stageAdmission.cancellationRequest() == .system()
+            }
+            await stageGate.open()
+            #expect(cancellationReachedReceipt)
+            let result = try await review.value
+
+            #expect(result.core.lifecycle.status == .cancelled)
+            #expect(result.core.lifecycle.cancellation == .system())
+            #expect(storeBackend.reviewRecoveryCommands.contains {
+                if case .commit = $0 { true } else { false }
+            } == false)
+            #expect(store.reviewAttemptOwnerships["job-1"] == nil)
+            #expect(store.reviewWorkerTasks["job-1"] == nil)
+        }
+    }
+
     @Test func failedInterruptClearsCancellationRequestState() async throws {
         let backend = FakeCodexReviewBackend()
         await backend.rejectInterrupts(message: "Interrupt failed")
