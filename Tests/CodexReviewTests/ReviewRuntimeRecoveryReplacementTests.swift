@@ -105,6 +105,26 @@ struct ReviewRuntimeRecoveryReplacementTests {
         #expect(replacement.consumeSourceCloseFailure() == nil)
     }
 
+    @Test func sourceCloseJoinIgnoresCallerCancellation() async {
+        let replacement = ReviewRuntimeRecoveryReplacement(
+            sourceGeneration: .init(rawValue: 16),
+            retiringRuntime: nil,
+            retainedMCP: .init(serverURL: nil)
+        )
+        let expected = ReviewRuntimeRecoveryReplacement.SourceCloseResult.failed(
+            .process("Injected close failure.")
+        )
+        let sourceCloseJoin = replacement.sourceCloseJoin()
+        let waiter = Task { @MainActor in
+            await sourceCloseJoin.value()
+        }
+
+        waiter.cancel()
+        replacement.finishSourceClose(expected)
+
+        #expect(await waiter.value == expected)
+    }
+
     @Test func abandonedOutcomeWaitersAreRemovedBeforeTerminalCompletion() async {
         let replacement = ReviewRuntimeRecoveryReplacement(
             sourceGeneration: .init(rawValue: 18),

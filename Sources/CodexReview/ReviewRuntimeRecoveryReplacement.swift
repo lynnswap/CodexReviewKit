@@ -3,6 +3,14 @@ import Synchronization
 
 @MainActor
 package final class ReviewRuntimeRecoveryReplacement {
+    package struct SourceCloseJoin: Sendable {
+        fileprivate let waiter: ReviewRuntimeRecoveryJoinWaiter<SourceCloseResult>
+
+        package func value() async -> SourceCloseResult {
+            await waiter.value()
+        }
+    }
+
     private enum PublishedRuntimeOwnership {
         case awaitingInstallation
         case installed(PreparedRuntime)
@@ -88,6 +96,10 @@ package final class ReviewRuntimeRecoveryReplacement {
         sourceCloseResultOwner.values()
     }
 
+    package func sourceCloseJoin() -> SourceCloseJoin {
+        .init(waiter: sourceCloseResultOwner.makeJoin())
+    }
+
     package func finishSourceClose(_ result: SourceCloseResult) {
         sourceCloseResultOwner.finish(result)
     }
@@ -121,6 +133,7 @@ private final class ReviewRuntimeRecoveryReplayOwner<Value: Sendable>: Sendable 
     private struct State: Sendable {
         var value: Value?
         var continuations: [UUID: Continuation] = [:]
+        var joiners: [ReviewRuntimeRecoveryJoinWaiter<Value>] = []
     }
 
     private let state = Mutex(State())
@@ -153,24 +166,89 @@ private final class ReviewRuntimeRecoveryReplayOwner<Value: Sendable>: Sendable 
         }
     }
 
+    func makeJoin() -> ReviewRuntimeRecoveryJoinWaiter<Value> {
+        let joiner = ReviewRuntimeRecoveryJoinWaiter<Value>()
+        let value = state.withLock { state -> Value? in
+            guard let value = state.value else {
+                state.joiners.append(joiner)
+                return nil
+            }
+            return value
+        }
+        if let value {
+            joiner.finish(value)
+        }
+        return joiner
+    }
+
     func finish(_ value: Value) {
-        let continuations = state.withLock { state -> [Continuation] in
+        let continuations = state.withLock { state -> (
+            streams: [Continuation],
+            joiners: [ReviewRuntimeRecoveryJoinWaiter<Value>]
+        ) in
             guard state.value == nil else {
-                return []
+                return ([], [])
             }
             state.value = value
-            defer { state.continuations.removeAll(keepingCapacity: false) }
-            return Array(state.continuations.values)
+            defer {
+                state.continuations.removeAll(keepingCapacity: false)
+                state.joiners.removeAll(keepingCapacity: false)
+            }
+            return (
+                Array(state.continuations.values),
+                state.joiners
+            )
         }
-        for continuation in continuations {
+        for continuation in continuations.streams {
             continuation.yield(value)
             continuation.finish()
+        }
+        for joiner in continuations.joiners {
+            joiner.finish(value)
         }
     }
 
     private func removeContinuation(id: UUID) {
         _ = state.withLock { state in
             state.continuations.removeValue(forKey: id)
+        }
+    }
+}
+
+private final class ReviewRuntimeRecoveryJoinWaiter<Value: Sendable>: Sendable {
+    private struct State: Sendable {
+        var value: Value?
+        var continuations: [CheckedContinuation<Value, Never>] = []
+    }
+
+    private let state = Mutex(State())
+
+    func finish(_ value: Value) {
+        let continuations = state.withLock { state -> [CheckedContinuation<Value, Never>] in
+            guard state.value == nil else {
+                return []
+            }
+            state.value = value
+            defer { state.continuations.removeAll(keepingCapacity: false) }
+            return state.continuations
+        }
+        for continuation in continuations {
+            continuation.resume(returning: value)
+        }
+    }
+
+    func value() async -> Value {
+        await withCheckedContinuation { continuation in
+            let value = state.withLock { state -> Value? in
+                guard let value = state.value else {
+                    state.continuations.append(continuation)
+                    return nil
+                }
+                return value
+            }
+            if let value {
+                continuation.resume(returning: value)
+            }
         }
     }
 }
