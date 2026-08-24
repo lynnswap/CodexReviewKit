@@ -26,11 +26,12 @@ never reused as a writable recovery destination.
 - Recovery base: v0.6.2 annotated tag object `c8c01d6`, commit `82bddbc`,
   and tree `e7a054b`.
 - Exact-tree direct restore: `f554a3b`.
-- Current integration anchor: `9de6dd0` (PR #145 merged).
+- Current integration anchor: `b28bbe6` (PR #151 merged).
 - Merged successors are PRs #114, #115, #116, #122–#125, #127, #128,
-  #130–#132, #134–#140, and #142–#145. They provide the completed viewport,
+  #130–#132, #134–#140, and #142–#151. They provide the completed viewport,
   compatibility, terminal/admission, AppServer, runtime-transition, MCP
-  transport, and Store work-registry foundations.
+  transport, Store work-registry, recovery completion-contract, and runtime
+  replacement ownership foundations.
 - PR #112 was closed without merge. PRs #117, #121, #126, #129, #133, and
   #141 are not integration anchors; #117 remains open as evidence and the
   others were closed as superseded.
@@ -266,7 +267,11 @@ the final completion report. Do not record credentials.
 | Slice | Status | PR / merge |
 | --- | --- | --- |
 | v0.6.2 recovery foundations through Store work registry | merged | successors listed in Baseline / `9de6dd0` |
-| Shared replacement state | next | — |
+| Recovery completion contract | merged | #146 / `9115bdf` |
+| Replacement owner and source-close join primitives | merged | #147 / `62e9f80`, #148 / `6cf5212` |
+| Store replacement admission and lifecycle owner | merged | #149 / `29e56db`, #150 / `a2dff9b` |
+| Store source-close receipt join | merged | #151 / `b28bbe6` |
+| Replacement publication transfer | current slice | — |
 | Attempt runtime routes | pending | — |
 | Store initial-attempt cutover | pending | — |
 | Store typed recovery receipt and staging | pending | — |

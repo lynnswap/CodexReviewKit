@@ -866,7 +866,7 @@ package final class TestingRuntimeLifecycleHandle: RuntimeLifecycleHandle {
     package private(set) var waitUntilClosedCallCount = 0
 
     private let onActivate: @MainActor @Sendable () -> Void
-    private let onClose: @MainActor @Sendable () -> Void
+    private let onClose: @MainActor @Sendable (TestingRuntimeLifecycleHandle) -> Void
     private var closeGate: AsyncGate?
     private var closeStartedGate = AsyncGate()
     private var didClose = false
@@ -874,7 +874,7 @@ package final class TestingRuntimeLifecycleHandle: RuntimeLifecycleHandle {
 
     package init(
         onActivate: @escaping @MainActor @Sendable () -> Void = {},
-        onClose: @escaping @MainActor @Sendable () -> Void = {}
+        onClose: @escaping @MainActor @Sendable (TestingRuntimeLifecycleHandle) -> Void = { _ in }
     ) {
         self.onActivate = onActivate
         self.onClose = onClose
@@ -911,7 +911,7 @@ package final class TestingRuntimeLifecycleHandle: RuntimeLifecycleHandle {
             return
         }
         didClose = true
-        onClose()
+        onClose(self)
         if let closeFailure {
             throw closeFailure
         }
@@ -1025,6 +1025,10 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     private var runtimePreparationStartedGate = AsyncGate()
     private var runtimePreparationCancellationGate = AsyncGate()
     private var runtimePublicationAction: (@MainActor @Sendable () async -> Void)?
+    private var runtimePublicationIsHeld = false
+    private var runtimePublicationHandle: TestingRuntimeLifecycleHandle?
+    private var runtimePublicationEntryWaiters: [CheckedContinuation<Void, Never>] = []
+    private var runtimePublicationReleaseWaiters: [CheckedContinuation<Void, Never>] = []
 
     package init(
         reviewBackend: FakeCodexReviewBackend,
@@ -1075,6 +1079,40 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         runtimePublicationAction = action
     }
 
+    package func holdRuntimePublication() {
+        precondition(
+            runtimePublicationIsHeld == false && runtimePublicationReleaseWaiters.isEmpty,
+            "TestingCodexReviewStoreBackend owns one held runtime publication at a time."
+        )
+        runtimePublicationIsHeld = true
+        runtimePublicationHandle = nil
+    }
+
+    package func waitForRuntimePublicationEntry() async {
+        if runtimePublicationHandle != nil {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            if runtimePublicationHandle != nil {
+                continuation.resume()
+            } else {
+                runtimePublicationEntryWaiters.append(continuation)
+            }
+        }
+    }
+
+    package func releaseRuntimePublication() {
+        guard runtimePublicationIsHeld else {
+            return
+        }
+        runtimePublicationIsHeld = false
+        let waiters = runtimePublicationReleaseWaiters
+        runtimePublicationReleaseWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+
     package func prepareRuntime(
         generation _: ReviewRuntimeGeneration,
         purpose: ReviewRuntimeTransitionPurpose
@@ -1082,7 +1120,15 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         startRequests.append(purpose == .restartSameAccount)
         let handle = TestingRuntimeLifecycleHandle(
             onActivate: { [weak self] in self?.isActive = true },
-            onClose: { [weak self] in self?.isActive = false }
+            onClose: { [weak self] handle in
+                guard let self else {
+                    return
+                }
+                self.isActive = false
+                if self.runtimePublicationHandle === handle {
+                    self.releaseRuntimePublication()
+                }
+            }
         )
         lastPreparedRuntimeHandle = handle
         await runtimePreparationStartedGate.open()
@@ -1115,11 +1161,32 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     package func waitForRuntimePublication(
-        handle _: any RuntimeLifecycleHandle
+        handle: any RuntimeLifecycleHandle
     ) async {
         let action = runtimePublicationAction
         runtimePublicationAction = nil
         await action?()
+        guard let handle = handle as? TestingRuntimeLifecycleHandle else {
+            return
+        }
+        runtimePublicationHandle = handle
+        let entryWaiters = runtimePublicationEntryWaiters
+        runtimePublicationEntryWaiters.removeAll(keepingCapacity: false)
+        for waiter in entryWaiters {
+            waiter.resume()
+        }
+        if runtimePublicationIsHeld {
+            await withCheckedContinuation { continuation in
+                if runtimePublicationIsHeld {
+                    runtimePublicationReleaseWaiters.append(continuation)
+                } else {
+                    continuation.resume()
+                }
+            }
+        }
+        if runtimePublicationHandle === handle {
+            runtimePublicationHandle = nil
+        }
     }
 
     package func stop(store _: CodexReviewStore) async {
