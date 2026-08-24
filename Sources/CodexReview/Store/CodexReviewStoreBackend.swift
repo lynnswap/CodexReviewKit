@@ -120,7 +120,10 @@ extension CodexReviewStoreBackend {
         _: ReviewInterruptRequestAdmission,
         reason _: CodexReviewBackendModel.CancellationReason
     ) async throws {
-        throw ReviewAttemptContractFailure(message: "Typed review interrupt admission is not installed.")
+        throw ReviewInterruptRequestFailure(outcome: .rejected(
+            code: nil,
+            message: "Typed review interrupt admission is not installed."
+        ))
     }
 
     package func prepareReviewRecovery(

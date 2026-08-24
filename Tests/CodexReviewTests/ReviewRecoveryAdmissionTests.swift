@@ -5,6 +5,32 @@ import CodexReviewTesting
 
 @Suite("review recovery admission")
 struct ReviewRecoveryAdmissionTests {
+    @Test @MainActor
+    func storeBackendDefaultTypedInterruptRejectsBeforeDispatch() async throws {
+        let backend = PreviewCodexReviewStoreBackend()
+        let (admission, run) = try await makeActiveRecoveryAdmission()
+
+        do {
+            _ = try await admission.beginRecovery(
+                run,
+                trigger: .recoverableNetworkLoss,
+                request: { request, reason in
+                    try await backend.interruptReview(request, reason: reason)
+                }
+            )
+            Issue.record("An unavailable typed interrupt entered the terminal barrier.")
+        } catch let failure as ReviewInterruptRequestFailure {
+            guard case .rejected(let code, let message) = failure.outcome else {
+                Issue.record("An unavailable typed interrupt was not rejected before dispatch.")
+                return
+            }
+            #expect(code == nil)
+            #expect(message == "Typed review interrupt admission is not installed.")
+        }
+
+        #expect(await admission.currentPhase() == .active(run))
+    }
+
     @Test func recoveryAckWaitsForInterruptedTerminalAndReturnsBarrier() async throws {
         let (admission, run) = try await makeActiveRecoveryAdmission()
         let requestStarted = AsyncGate()
