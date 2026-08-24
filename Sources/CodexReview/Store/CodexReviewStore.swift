@@ -263,6 +263,9 @@ public final class CodexReviewStore {
         let previousState = runtimeState
         closePublishedRuntimeAdmission(in: previousState)
         let generation = previousState.generation.successor()
+        if case .replacing(let replacement, _) = previousState {
+            replacement.finish(.superseded(runtimeTransitionPurpose(for: intent)))
+        }
         if case .failed(let message) = intent.finalState {
             transitionToFailed(message)
         }
@@ -304,7 +307,6 @@ public final class CodexReviewStore {
             }
 
         case .replacing(let replacement, let task):
-            replacement.finish(.superseded(runtimeTransitionPurpose(for: intent)))
             task.cancel()
             await task.value
             if let retiringRuntime = replacement.takeRetiringRuntime() {
@@ -368,6 +370,7 @@ public final class CodexReviewStore {
     package func admitRuntimeRecycleAfterAccountChange() -> Task<Void, Never>? {
         let previousState = runtimeState
         closePublishedRuntimeAdmission(in: previousState)
+        let generation = previousState.generation.successor()
         let predecessor: Task<Void, Never>?
         let context: RuntimeAcquisitionContext
         switch previousState {
@@ -375,10 +378,20 @@ public final class CodexReviewStore {
             task.cancel()
             predecessor = task
             context = currentContext
-        case .replacing(_, let task):
+        case .replacing(let replacement, let task):
+            replacement.finish(.superseded(.start))
             task.cancel()
-            predecessor = task
-            context = .init(recycling: previousState)
+            predecessor = Task<Void, Never> { @MainActor [weak self] in
+                guard let self else {
+                    return
+                }
+                await self.performRuntimeTeardown(
+                    previousState: previousState,
+                    generation: generation,
+                    intent: .explicitStop
+                )
+            }
+            context = .init()
         case .running:
             predecessor = nil
             context = .init(recycling: previousState)
@@ -386,7 +399,6 @@ public final class CodexReviewStore {
             return nil
         }
 
-        let generation = previousState.generation.successor()
         serverState = .starting
         serverURL = nil
         writeDiagnosticsIfNeeded()

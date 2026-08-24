@@ -268,6 +268,84 @@ struct CodexReviewStoreLifecycleTests {
         #expect(store.settings.lastErrorMessage == nil)
     }
 
+    @Test func accountRecycleSupersedesHeldReplacementAndClosesStaleRuntimeOnce() async throws {
+        let endpoint = try #require(URL(string: "http://127.0.0.1:19432/mcp"))
+        let mcpOwner = TestingMCPServerLifecycleOwner(serverURL: endpoint)
+        let backend = TestingCodexReviewStoreBackend(
+            reviewBackend: FakeCodexReviewBackend(),
+            mcpServerLifecycle: mcpOwner
+        )
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+        let sourceHandle = try #require(backend.lastPreparedRuntimeHandle)
+
+        let preparationGate = AsyncGate()
+        backend.holdRuntimePreparation(with: preparationGate)
+        let restart = Task { @MainActor in await store.restart() }
+        await backend.waitForRuntimePreparation()
+        guard case .replacing(let replacement, _) = store.runtimeState else {
+            Issue.record("Expected an admitted runtime replacement.")
+            return
+        }
+        var replacementOutcomes = replacement.outcomes().makeAsyncIterator()
+        let staleReplacement = try #require(backend.lastPreparedRuntimeHandle)
+
+        let recycle = Task { @MainActor in
+            await store.recycleRuntimeAfterAccountChange()
+        }
+        #expect(await replacementOutcomes.next() == .superseded(.start))
+        await backend.waitForRuntimePreparationCancellation()
+        await preparationGate.open()
+        _ = await recycle.value
+        _ = await restart.value
+
+        let currentHandle = try #require(backend.lastPreparedRuntimeHandle)
+        #expect(currentHandle !== sourceHandle)
+        #expect(currentHandle !== staleReplacement)
+        #expect(sourceHandle.closePurposes == [.restartSameAccount])
+        #expect(sourceHandle.waitUntilClosedCallCount == 1)
+        #expect(staleReplacement.closePurposes == [.restartSameAccount])
+        #expect(staleReplacement.waitUntilClosedCallCount == 1)
+        #expect(backend.startRequests == [false, true, false])
+        #expect(mcpOwner.stopCallCount == 1)
+        #expect(store.serverState == .running)
+        #expect(store.serverURL == endpoint)
+        await store.stop()
+    }
+
+    @Test func runtimeFailureSupersedesHeldReplacementBeforeCancellation() async throws {
+        let backend = TestingCodexReviewStoreBackend(
+            reviewBackend: FakeCodexReviewBackend()
+        )
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+
+        let preparationGate = AsyncGate()
+        backend.holdRuntimePreparation(with: preparationGate)
+        let restart = Task { @MainActor in await store.restart() }
+        await backend.waitForRuntimePreparation()
+        guard case .replacing(let replacement, _) = store.runtimeState else {
+            Issue.record("Expected an admitted runtime replacement.")
+            return
+        }
+        var replacementOutcomes = replacement.outcomes().makeAsyncIterator()
+        let staleReplacement = try #require(backend.lastPreparedRuntimeHandle)
+
+        store.requestRuntimeTeardown(intent: .unexpectedFailure("Injected failure."))
+        #expect(await replacementOutcomes.next() == .superseded(.runtimeFailure))
+        await backend.waitForRuntimePreparationCancellation()
+        await preparationGate.open()
+        await store.waitUntilStopped()
+        _ = await restart.value
+
+        #expect(staleReplacement.closePurposes == [.restartSameAccount])
+        #expect(staleReplacement.waitUntilClosedCallCount == 1)
+        #expect(store.serverState == .failed(
+            "Review runtime stopped unexpectedly: Injected failure."
+        ))
+        await store.stop()
+    }
+
     @Test func concurrentManualRestartsJoinOneReplacementFactoryAndGeneration() async throws {
         let backend = TestingCodexReviewStoreBackend(
             reviewBackend: FakeCodexReviewBackend()
