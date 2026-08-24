@@ -1033,11 +1033,27 @@ package final class TestingMCPServerLifecycleOwner: MCPServerLifecycleOwner {
 
 @MainActor
 package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
+    private enum ScriptedReviewRecoveryRoute {
+        case ready(ReviewRuntimeGeneration, ReviewRuntimeGeneration)
+        case preparing
+        case prepared(PreparedReviewRecovery, ReviewRuntimeGeneration)
+        case staging
+        case staged(StagedReviewRecovery)
+        case discardingPrepared(PreparedReviewRecovery, ReviewRuntimeGeneration)
+    }
+    package enum ReviewRecoveryCommand {
+        case prepare(ReviewRecoveryCandidate, ReviewRuntimeGeneration)
+        case stage(PreparedReviewRecovery, ReviewRuntimeGeneration, ReviewStartAdmission)
+        case commit(StagedReviewRecovery)
+        case discardPrepared(PreparedReviewRecovery)
+        case discardStaged(StagedReviewRecovery)
+    }
     package let reviewBackend: FakeCodexReviewBackend
     package let seed: CodexReviewStoreSeed
     package var currentSettingsSnapshot: CodexReviewSettings.Snapshot
     package private(set) var isActive = false
     package private(set) var startRequests: [Bool] = []
+    package private(set) var reviewRecoveryCommands: [ReviewRecoveryCommand] = []
     package let mcpServerLifecycle: any MCPServerLifecycleOwner
     package private(set) var lastPreparedRuntimeHandle: TestingRuntimeLifecycleHandle?
     private var runtimePreparationGate: AsyncGate?
@@ -1050,6 +1066,7 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     private var runtimePublicationHandle: TestingRuntimeLifecycleHandle?
     private var runtimePublicationEntryWaiters: [CheckedContinuation<Void, Never>] = []
     private var runtimePublicationReleaseWaiters: [CheckedContinuation<Void, Never>] = []
+    private var scriptedReviewRecoveryRoute: ScriptedReviewRecoveryRoute?
 
     package init(
         reviewBackend: FakeCodexReviewBackend,
@@ -1067,6 +1084,19 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     package func attachStore(_: CodexReviewStore) {}
+
+    package func scriptReviewRecoveryRoute(
+        sourceGeneration: ReviewRuntimeGeneration,
+        destinationGeneration: ReviewRuntimeGeneration
+    ) throws {
+        guard min(sourceGeneration.rawValue, destinationGeneration.rawValue) > 0,
+              scriptedReviewRecoveryRoute == nil else {
+            throw ReviewAttemptContractFailure(
+                message: "Testing recovery requires one explicit unused generation route."
+            )
+        }
+        scriptedReviewRecoveryRoute = .ready(sourceGeneration, destinationGeneration)
+    }
 
     package func holdRuntimePreparation(with gate: AsyncGate) {
         runtimePreparationGate = gate
@@ -1332,6 +1362,155 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         reason: CodexReviewBackendModel.CancellationReason
     ) async throws {
         try await reviewBackend.interruptReview(admission, reason: reason)
+    }
+
+    package func prepareReviewRecovery(
+        _ candidate: ReviewRecoveryCandidate
+    ) async throws -> PreparedReviewRecovery {
+        guard case .ready(let sourceGeneration, let destinationGeneration) = scriptedReviewRecoveryRoute,
+              candidate.trigger != .sameAccountRestart || sourceGeneration != destinationGeneration else {
+            throw recoveryRouteFailure("prepare")
+        }
+        let receipt = ReviewRecoveryRouteReceipt(
+            sourceRun: candidate.resolved.run,
+            sourceGeneration: sourceGeneration
+        )
+        scriptedReviewRecoveryRoute = .preparing
+        reviewRecoveryCommands.append(.prepare(candidate, sourceGeneration))
+        do {
+            let prepared = PreparedReviewRecovery(
+                receipt: receipt,
+                handoff: try await reviewBackend.prepareReviewRecovery(candidate)
+            )
+            scriptedReviewRecoveryRoute = .prepared(prepared, destinationGeneration)
+            return prepared
+        } catch {
+            scriptedReviewRecoveryRoute = nil
+            throw await recoveryFailure(error, cleanupRun: candidate.resolved.run)
+        }
+    }
+
+    package func stageReviewRecovery(
+        _ prepared: PreparedReviewRecovery,
+        destinationGeneration: ReviewRuntimeGeneration,
+        request: CodexReviewBackendModel.Review.Start,
+        admission: ReviewStartAdmission
+    ) async throws -> StagedReviewRecovery {
+        guard case .prepared(let current, let expectedGeneration) = scriptedReviewRecoveryRoute,
+              current.receipt === prepared.receipt,
+              current.handoff == prepared.handoff,
+              destinationGeneration == expectedGeneration else {
+            throw recoveryRouteFailure("stage")
+        }
+        scriptedReviewRecoveryRoute = .staging
+        guard await admission.currentPhase() == .preparingThread(.notSent) else {
+            scriptedReviewRecoveryRoute = .prepared(current, expectedGeneration)
+            throw recoveryRouteFailure("stage with a nonfresh admission")
+        }
+        reviewRecoveryCommands.append(.stage(prepared, destinationGeneration, admission))
+        do {
+            let attempt = try await reviewBackend.resumeReviewRecovery(
+                prepared.handoff,
+                request: request,
+                admission: admission
+            )
+            guard attempt.run.attemptID != prepared.receipt.sourceRun.attemptID,
+                  await admission.permitsRecoveryPublication(of: attempt.run) else {
+                throw recoveryRouteFailure("finish stage")
+            }
+            let staged = StagedReviewRecovery(
+                receipt: prepared.receipt,
+                destinationGeneration: destinationGeneration,
+                attempt: attempt,
+                admission: admission
+            )
+            scriptedReviewRecoveryRoute = .staged(staged)
+            return staged
+        } catch {
+            scriptedReviewRecoveryRoute = nil
+            throw await recoveryFailure(
+                error,
+                invalidating: prepared.handoff,
+                cleanupRun: await provisionalRecoveryRun(admission) ?? prepared.receipt.sourceRun
+            )
+        }
+    }
+
+    package func commitReviewRecovery(_ staged: StagedReviewRecovery) async throws {
+        guard case .staged(let current) = scriptedReviewRecoveryRoute,
+              current === staged,
+              await staged.admission.permitsRecoveryPublication(of: staged.attempt.run),
+              case .staged(let revalidated) = scriptedReviewRecoveryRoute,
+              revalidated === staged else {
+            throw recoveryRouteFailure("commit")
+        }
+        scriptedReviewRecoveryRoute = nil
+        reviewRecoveryCommands.append(.commit(staged))
+    }
+
+    package func discardReviewRecovery(_ prepared: PreparedReviewRecovery) async throws {
+        guard case .prepared(let current, let destinationGeneration) = scriptedReviewRecoveryRoute,
+              current.receipt === prepared.receipt,
+              current.handoff == prepared.handoff else {
+            throw recoveryRouteFailure("discard prepared")
+        }
+        scriptedReviewRecoveryRoute = .discardingPrepared(current, destinationGeneration)
+        do {
+            try await prepared.handoff.discard()
+        } catch {
+            scriptedReviewRecoveryRoute = .prepared(current, destinationGeneration)
+            throw error
+        }
+        scriptedReviewRecoveryRoute = nil
+        reviewRecoveryCommands.append(.discardPrepared(prepared))
+        try await reviewBackend.cleanupReview(prepared.receipt.sourceRun)
+    }
+
+    package func discardReviewRecovery(_ staged: StagedReviewRecovery) async throws {
+        guard case .staged(let current) = scriptedReviewRecoveryRoute,
+              current === staged else { throw recoveryRouteFailure("discard staged") }
+        scriptedReviewRecoveryRoute = nil
+        reviewRecoveryCommands.append(.discardStaged(staged))
+        try await reviewBackend.cleanupReview(staged.attempt.run)
+    }
+
+    private func provisionalRecoveryRun(
+        _ admission: ReviewStartAdmission
+    ) async -> CodexReviewBackendModel.Review.Run? {
+        switch await admission.currentPhase() {
+        case .startingReview(let run, _), .active(let run),
+             .interrupting(let run, _, _), .finishing(let run, _, _, _),
+             .recovering(let run, _, _), .finishingRecovery(let run, _, _, _): run
+        case .terminal(.active(let resolution)): resolution.run
+        case .preparingThread, .rollingBackRecovery, .terminal: nil
+        }
+    }
+
+    private func recoveryFailure(
+        _ original: any Error,
+        invalidating handoff: ReviewRecoveryHandoff? = nil,
+        cleanupRun: CodexReviewBackendModel.Review.Run
+    ) async -> any Error {
+        var primary = original
+        if let handoff {
+            do { try await handoff.discard() } catch is ReviewRecoveryHandoffAlreadyConsumed {} catch {
+                primary = ReviewAttemptContractFailure(
+                    message: "\(primary.localizedDescription) Handoff invalidation also failed: \(error.localizedDescription)"
+                )
+            }
+        }
+        do {
+            try await reviewBackend.cleanupReview(cleanupRun)
+            return primary
+        } catch {
+            return ReviewAttemptContractFailure(
+                message: "\(primary.localizedDescription) Exact recovery cleanup also failed: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func recoveryRouteFailure(_ operation: String) -> ReviewAttemptContractFailure {
+        .init(message: "Testing recovery cannot \(operation) without its exact scripted route.")
     }
 
     package func beginReviewRecovery(
