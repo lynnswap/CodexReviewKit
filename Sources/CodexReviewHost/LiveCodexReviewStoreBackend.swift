@@ -75,6 +75,11 @@ private struct PendingLoginRuntimeCleanup {
     }
 }
 
+private enum CodexExecutableDependency: Sendable {
+    case resolvedForTesting(URL)
+    case resolver(CodexExecutableResolver)
+}
+
 package struct CodexReviewMCPPortOwner: Equatable, Sendable {
     package var processIdentifier: Int32
     package var command: String?
@@ -119,6 +124,7 @@ public extension CodexReviewStore {
     package static func makeLiveStoreForTesting(
         environment: [String: String],
         runtimePreferences: CodexReviewRuntime.Preferences = .defaults,
+        resolvedCodexExecutableURLForTesting: URL = URL(fileURLWithPath: "/usr/bin/true"),
         nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration? = nil,
         webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory,
         externalURLOpener: @escaping @MainActor @Sendable (URL) -> Void = defaultExternalURLOpener,
@@ -132,6 +138,7 @@ public extension CodexReviewStore {
         makeLiveStoreForTesting(
             environment: environment,
             runtimePreferences: runtimePreferences,
+            resolvedCodexExecutableURLForTesting: resolvedCodexExecutableURLForTesting,
             nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
             webAuthenticationSessionFactory: webAuthenticationSessionFactory,
             externalURLOpener: externalURLOpener,
@@ -147,6 +154,7 @@ public extension CodexReviewStore {
     package static func makeLiveStoreForTesting(
         environment: [String: String],
         runtimePreferences: CodexReviewRuntime.Preferences = .defaults,
+        resolvedCodexExecutableURLForTesting: URL = URL(fileURLWithPath: "/usr/bin/true"),
         nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration? = nil,
         webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory,
         externalURLOpener: @escaping @MainActor @Sendable (URL) -> Void = defaultExternalURLOpener,
@@ -161,10 +169,89 @@ public extension CodexReviewStore {
         networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
         transportFactory: @escaping @MainActor @Sendable (URL) async throws -> any JSONRPC.Transport
     ) -> CodexReviewStore {
+        makeLiveStoreForTesting(
+            environment: environment,
+            runtimePreferences: runtimePreferences,
+            executableDependency: .resolvedForTesting(resolvedCodexExecutableURLForTesting),
+            nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
+            webAuthenticationSessionFactory: webAuthenticationSessionFactory,
+            externalURLOpener: externalURLOpener,
+            mcpHTTPServerFactory: mcpHTTPServerFactory,
+            mcpPortOwnerResolver: mcpPortOwnerResolver,
+            mcpHTTPServerBindChecker: mcpHTTPServerBindChecker,
+            shutdownCleanupTimeout: shutdownCleanupTimeout,
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: networkRecoveryPolicy,
+            resolvedTransportFactory: { codexHomeURL, _ in
+                try await transportFactory(codexHomeURL)
+            }
+        )
+    }
+
+    package static func makeLiveStoreForTesting(
+        environment: [String: String],
+        runtimePreferences: CodexReviewRuntime.Preferences = .defaults,
+        codexExecutableResolver: CodexExecutableResolver,
+        nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration? = nil,
+        webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory,
+        externalURLOpener: @escaping @MainActor @Sendable (URL) -> Void = defaultExternalURLOpener,
+        mcpHTTPServerFactory: (@MainActor @Sendable (
+            CodexReviewStore,
+            CodexReviewMCPHTTPServer.Configuration
+        ) -> any CodexReviewMCPHTTPServing)? = nil,
+        mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
+        mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
+        shutdownCleanupTimeout: Duration = .seconds(2),
+        networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
+        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
+        resolvedTransportFactory: @escaping @MainActor @Sendable (
+            URL,
+            URL
+        ) async throws -> any JSONRPC.Transport
+    ) -> CodexReviewStore {
+        makeLiveStoreForTesting(
+            environment: environment,
+            runtimePreferences: runtimePreferences,
+            executableDependency: .resolver(codexExecutableResolver),
+            nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
+            webAuthenticationSessionFactory: webAuthenticationSessionFactory,
+            externalURLOpener: externalURLOpener,
+            mcpHTTPServerFactory: mcpHTTPServerFactory,
+            mcpPortOwnerResolver: mcpPortOwnerResolver,
+            mcpHTTPServerBindChecker: mcpHTTPServerBindChecker,
+            shutdownCleanupTimeout: shutdownCleanupTimeout,
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: networkRecoveryPolicy,
+            resolvedTransportFactory: resolvedTransportFactory
+        )
+    }
+
+    private static func makeLiveStoreForTesting(
+        environment: [String: String],
+        runtimePreferences: CodexReviewRuntime.Preferences,
+        executableDependency: CodexExecutableDependency,
+        nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration?,
+        webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory,
+        externalURLOpener: @escaping @MainActor @Sendable (URL) -> Void,
+        mcpHTTPServerFactory: (@MainActor @Sendable (
+            CodexReviewStore,
+            CodexReviewMCPHTTPServer.Configuration
+        ) -> any CodexReviewMCPHTTPServing)?,
+        mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver?,
+        mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker?,
+        shutdownCleanupTimeout: Duration,
+        networkMonitor: any CodexReviewNetworkMonitoring,
+        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy,
+        resolvedTransportFactory: @escaping @MainActor @Sendable (
+            URL,
+            URL
+        ) async throws -> any JSONRPC.Transport
+    ) -> CodexReviewStore {
         CodexReviewStore(
             backend: LiveCodexReviewStoreBackend(
                 environment: environment,
                 runtimePreferences: runtimePreferences,
+                codexExecutableDependencyForTesting: executableDependency,
                 nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
                 webAuthenticationSessionFactory: webAuthenticationSessionFactory,
                 externalURLOpener: externalURLOpener,
@@ -172,8 +259,9 @@ public extension CodexReviewStore {
                 mcpPortOwnerResolver: mcpPortOwnerResolver,
                 mcpHTTPServerBindChecker: mcpHTTPServerBindChecker,
                 shutdownCleanupTimeout: shutdownCleanupTimeout,
-                appServerRuntimeFactory: { codexHomeURL in
-                    let client = AppServerClient(transport: try await transportFactory(codexHomeURL))
+                appServerRuntimeFactory: { codexHomeURL, executableURL in
+                    let transport = try await resolvedTransportFactory(codexHomeURL, executableURL)
+                    let client = AppServerClient(transport: transport)
                     return .init(
                         client: client,
                         backend: AppServerCodexReviewBackend(client: client)
@@ -422,6 +510,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
     init(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         runtimePreferences: CodexReviewRuntime.Preferences = .defaults,
+        codexExecutableDependencyForTesting: CodexExecutableDependency? = nil,
         nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration? = nil,
         webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory = CodexReviewNativeAuthentication.WebSessions.system,
         externalURLOpener: @escaping ExternalURLOpener = defaultExternalURLOpener,
@@ -434,7 +523,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
         mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
         shutdownCleanupTimeout: Duration = .seconds(2),
-        appServerRuntimeFactory: AppServerRuntimeFactory? = nil
+        appServerRuntimeFactory: ResolvedAppServerRuntimeFactory? = nil
     ) {
         let runtimePreferences = runtimePreferences.normalized
         codexHomeURL = Self.codexHomeURL(
@@ -453,9 +542,33 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         self.mcpPortOwnerResolver = mcpPortOwnerResolver ?? Self.defaultMCPPortOwnerResolver
         self.mcpHTTPServerBindChecker = mcpHTTPServerBindChecker ?? Self.defaultMCPHTTPServerBindChecker
         self.shutdownCleanupTimeout = shutdownCleanupTimeout
-        self.appServerRuntimeFactory = appServerRuntimeFactory ?? Self.makeAppServerRuntimeFactory(
-            codexExecutablePath: runtimePreferences.codexExecutablePath
-        )
+        let executableResolution: Result<URL, CodexExecutableResolutionError>
+        switch codexExecutableDependencyForTesting {
+        case .resolvedForTesting(let url):
+            executableResolution = .success(url)
+        case .resolver(let resolver):
+            do {
+                executableResolution = .success(try resolver.resolve(
+                    configuredPath: runtimePreferences.codexExecutablePath,
+                    environment: environment
+                ))
+            } catch {
+                executableResolution = .failure(error)
+            }
+        case nil:
+            do {
+                executableResolution = .success(try CodexExecutableResolver(configuration: .live()).resolve(
+                    configuredPath: runtimePreferences.codexExecutablePath,
+                    environment: environment
+                ))
+            } catch {
+                executableResolution = .failure(error)
+            }
+        }
+        let resolvedFactory = appServerRuntimeFactory ?? Self.makeAppServerRuntimeFactory()
+        self.appServerRuntimeFactory = { codexHomeURL in
+            try await resolvedFactory(codexHomeURL, executableResolution.get())
+        }
         let registry = CodexReviewAccountRegistry.load(
             codexHomeURL: codexHomeURL
         )
@@ -566,14 +679,12 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         try await CodexReviewMCPHTTPServer.checkBind(configuration: configuration)
     }
 
-    private static func makeAppServerRuntimeFactory(
-        codexExecutablePath: String?
-    ) -> AppServerRuntimeFactory {
-        { codexHomeURL in
+    private static func makeAppServerRuntimeFactory() -> ResolvedAppServerRuntimeFactory {
+        { codexHomeURL, executableURL in
             let processRuntime = try await Task.detached(priority: .userInitiated) {
                 // The configuration probe can wait on `codex app-server --help`; keep it off the MainActor.
                 let configuration = AppServerProcessTransport.Configuration(
-                    executable: codexExecutablePath,
+                    executableURL: executableURL,
                     codexHomeURL: codexHomeURL
                 )
                 let transport = try AppServerProcessTransport(configuration: configuration)
@@ -2469,6 +2580,10 @@ private enum LoginActivation: Equatable, Sendable {
 }
 
 private typealias AppServerRuntimeFactory = @MainActor @Sendable (URL) async throws -> AppServerRuntime
+private typealias ResolvedAppServerRuntimeFactory = @MainActor @Sendable (
+    URL,
+    URL
+) async throws -> AppServerRuntime
 
 private struct AppServerAccountLoginCompletedNotification: Decodable, Equatable, Sendable {
     var error: String?

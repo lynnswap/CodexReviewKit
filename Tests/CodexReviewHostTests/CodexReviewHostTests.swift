@@ -2163,7 +2163,33 @@ struct CodexReviewHostTests {
         #expect(methods.filter { $0 == "thread/delete" }.count == 1)
     }
 
-    @Test func liveStoreCleansIsolatedLoginRuntimeWhenMainNotificationStreamCloses() async throws {
+    @Test func liveStoreReplaysExecutableResolutionFailureWithoutTransportSearch() async throws {
+        let homeURL = try temporaryHome()
+        var transportFactoryCalls = 0
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            codexExecutableResolver: makeResolver(),
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            resolvedTransportFactory: { _, _ in
+                transportFactoryCalls += 1
+                return FakeJSONRPCTransport()
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        let firstFailure = store.serverState
+        await store.start(forceRestartIfNeeded: true)
+
+        #expect(store.serverState == firstFailure)
+        #expect(transportFactoryCalls == 0)
+        guard case .failed(let message) = firstFailure else {
+            Issue.record("Expected executable resolution failure.")
+            return
+        }
+        #expect(message.contains("No usable Codex executable was found."))
+    }
+
+    @Test func liveStoreUsesOneExecutableForPrimaryAndStagingAndCleansLoginOnFailure() async throws {
         let homeURL = try temporaryHome()
         let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
         try writeRegistry(
@@ -2194,15 +2220,20 @@ struct CodexReviewHostTests {
         )
         let sessions = FakeWebAuthenticationSessions()
         var isolatedCodexHomeURL: URL?
+        let executableURL = URL(fileURLWithPath: "/resolved/codex")
+        var runtimeExecutables: [URL] = []
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
+            runtimePreferences: .init(codexExecutablePath: executableURL.path),
+            codexExecutableResolver: makeResolver(executables: [executableURL.path]),
             nativeAuthenticationConfiguration: .init(
                 callbackScheme: "lynnpd.CodexReviewMonitor.auth",
                 browserSessionPolicy: .ephemeral,
                 presentationAnchorProvider: { NSWindow() }
             ),
             webAuthenticationSessionFactory: sessions.makeSession,
-            transportFactory: { codexHomeURL in
+            resolvedTransportFactory: { codexHomeURL, resolvedExecutableURL in
+                runtimeExecutables.append(resolvedExecutableURL)
                 if codexHomeURL == mainCodexHomeURL {
                     return mainTransport
                 }
@@ -2217,6 +2248,7 @@ struct CodexReviewHostTests {
         await store.addAccount()
         let session = await sessions.waitForSession()
         await session.waitUntilWaitingForCallback()
+        #expect(runtimeExecutables == [executableURL, executableURL])
         let resolvedIsolatedCodexHomeURL = try #require(isolatedCodexHomeURL)
         #expect(FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path))
 

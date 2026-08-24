@@ -11,34 +11,29 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
     }
 
     package struct Configuration: Sendable {
-        package var executable: String
+        package var executableURL: URL
         package var arguments: [String]
         package var environment: [String: String]
         package var codexHomeURL: URL
         package var threadStartPermissionStrategy: AppServerAPI.Thread.Start.PermissionStrategy
 
         package init(
-            executable: String? = nil,
+            executableURL: URL,
             arguments: [String]? = nil,
             environment: [String: String] = ProcessInfo.processInfo.environment,
             codexHomeURL: URL? = nil
         ) {
             let resolvedCodexHomeURL = codexHomeURL ?? AppServerCodexHome.url(environment: environment)
-            let resolvedExecutable = executable.map {
-                CodexAppServerExecutable.resolveExecutable($0, environment: environment)
-            } ?? CodexAppServerExecutable.resolveExecutable(
-                environment: environment
-            )
             let supportsSessionSource: Bool
             if let arguments {
                 supportsSessionSource = arguments.contains("--session-source")
             } else {
                 supportsSessionSource = CodexAppServerExecutable.supportsAppServerSessionSource(
-                    executable: resolvedExecutable,
+                    executableURL: executableURL,
                     environment: environment
                 )
             }
-            self.executable = resolvedExecutable
+            self.executableURL = executableURL
             self.arguments = arguments ?? CodexAppServerExecutable.appServerArguments(
                 supportsSessionSource: supportsSessionSource
             )
@@ -77,20 +72,24 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
     private var terminalError: JSONRPC.Error?
 
     package init(
-        configuration: Configuration = .init(),
+        configuration: Configuration,
         closeAdmissionForTesting: (@Sendable () async -> Void)? = nil,
         closeCompletionForTesting: (@Sendable () async throws -> Void)? = nil,
         closedRequestAdmissionForTesting: (@Sendable () async -> Void)? = nil
     ) throws {
-        guard FileManager.default.isExecutableFile(atPath: configuration.executable) else {
-            throw AppServerProcessTransportError.executableNotFound(
-                command: configuration.executable,
-                path: configuration.environment["PATH"]
-            )
+        let executableURL = configuration.executableURL
+        let fileManager = FileManager.default
+        guard executableURL.isFileURL,
+              executableURL.path.hasPrefix("/"),
+              fileManager.isExecutableFile(atPath: executableURL.path),
+              let attributes = try? fileManager.attributesOfItem(atPath: executableURL.path),
+              attributes[.type] as? FileAttributeType == .typeRegular
+        else {
+            throw AppServerProcessTransportError.invalidExecutable(path: executableURL.path)
         }
         try AppServerCodexHome.ensureScaffold(at: configuration.codexHomeURL)
         let launch = try AppServerSpawnedProcess.launch(
-            executable: configuration.executable,
+            executableURL: executableURL,
             arguments: configuration.arguments,
             environment: configuration.environment
         )
@@ -115,7 +114,7 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
         self.closeAdmissionForTesting = closeAdmissionForTesting
         self.closeCompletionForTesting = closeCompletionForTesting
         self.closedRequestAdmissionForTesting = closedRequestAdmissionForTesting
-        logger.info("Launching codex app-server: \(configuration.executable, privacy: .public) \(configuration.arguments.joined(separator: " "), privacy: .public)")
+        logger.info("Launching codex app-server: \(executableURL.path, privacy: .public) \(configuration.arguments.joined(separator: " "), privacy: .public)")
         logger.info("Using codex app-server home: \(configuration.codexHomeURL.path, privacy: .public)")
         logger.info("codex app-server launched with pid \(process.processIdentifier, privacy: .public)")
         stdoutEvents.start()
@@ -726,7 +725,7 @@ private final class AppServerSpawnedProcess: @unchecked Sendable {
     }
 
     static func launch(
-        executable: String,
+        executableURL: URL,
         arguments: [String],
         environment: [String: String]
     ) throws -> AppServerProcessLaunch {
@@ -771,13 +770,14 @@ private final class AppServerSpawnedProcess: @unchecked Sendable {
         try check(posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP)))
         try check(posix_spawnattr_setpgroup(&attributes, 0))
 
-        let argv = [executable] + arguments
+        let executablePath = executableURL.path
+        let argv = [executablePath] + arguments
         let envp = environment
             .sorted { $0.key < $1.key }
             .map { "\($0.key)=\($0.value)" }
 
         var processIdentifier = pid_t()
-        try executable.withCString { executablePointer in
+        try executablePath.withCString { executablePointer in
             try withCStringArray(argv) { argvPointers in
                 try withCStringArray(envp) { envPointers in
                     try check(posix_spawn(
@@ -967,17 +967,13 @@ private final class AppServerSpawnedProcess: @unchecked Sendable {
 }
 
 private enum AppServerProcessTransportError: LocalizedError {
-    case executableNotFound(command: String, path: String?)
+    case invalidExecutable(path: String)
     case processDidNotTerminate(pid_t)
 
     var errorDescription: String? {
         switch self {
-        case .executableNotFound(let command, let path):
-            let resolvedPath = path?.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let resolvedPath, resolvedPath.isEmpty == false {
-                return "Unable to locate \(command) executable in PATH: \(resolvedPath)"
-            }
-            return "Unable to locate \(command) executable. Set PATH so codex can be found."
+        case .invalidExecutable(let path):
+            return "Resolved Codex executable is not an executable regular file: \(path)"
         case .processDidNotTerminate(let processIdentifier):
             return "Codex app-server process \(processIdentifier) did not terminate after SIGKILL."
         }
@@ -1040,58 +1036,7 @@ package enum AppServerCodexHome {
 }
 
 package enum CodexAppServerExecutable {
-    package struct Command {
-        package var executable: String
-        package var arguments: [String]
-    }
-
     package static let fileBackedAuthConfiguration = #"cli_auth_credentials_store="file""#
-
-    package static func resolve(environment: [String: String] = ProcessInfo.processInfo.environment) -> Command {
-        let executable = resolveExecutable(environment: environment)
-        return .init(
-            executable: executable,
-            arguments: appServerArguments(for: executable, environment: environment)
-        )
-    }
-
-    package static func resolveExecutable(
-        environment: [String: String] = ProcessInfo.processInfo.environment
-    ) -> String {
-        let requestedCommand = [
-            environment["CODEX_APP_SERVER_CODEX_EXECUTABLE"],
-            environment["CODEX_REVIEW_CODEX_EXECUTABLE"],
-            environment["CODEX_EXECUTABLE"],
-        ].compactMap(\.self).first ?? "codex"
-
-        return resolveExecutable(requestedCommand, environment: environment)
-    }
-
-    package static func resolveExecutable(
-        _ requestedCommand: String,
-        environment: [String: String] = ProcessInfo.processInfo.environment
-    ) -> String {
-        if let candidate = findExecutable(
-            requestedCommand,
-            environment: environment
-        ) {
-            return candidate
-        }
-
-        return requestedCommand
-    }
-
-    package static func appServerArguments(
-        for executable: String,
-        environment: [String: String] = ProcessInfo.processInfo.environment
-    ) -> [String] {
-        appServerArguments(
-            supportsSessionSource: supportsAppServerSessionSource(
-                executable: executable,
-                environment: environment
-            )
-        )
-    }
 
     package static func appServerArguments(supportsSessionSource: Bool = false) -> [String] {
         var arguments = [
@@ -1105,38 +1050,18 @@ package enum CodexAppServerExecutable {
         return arguments
     }
 
-    private static func findExecutable(
-        _ requestedCommand: String,
-        environment: [String: String]
-    ) -> String? {
-        let trimmedCommand = requestedCommand.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmedCommand.isEmpty == false else {
-            return nil
-        }
-        if trimmedCommand.contains("/") {
-            return FileManager.default.isExecutableFile(atPath: trimmedCommand) ? trimmedCommand : nil
-        }
-        for directory in pathSearchDirectories(environment: environment) {
-            let candidate = URL(fileURLWithPath: directory, isDirectory: true)
-                .appendingPathComponent(trimmedCommand)
-                .path
-            if FileManager.default.isExecutableFile(atPath: candidate) {
-                return candidate
-            }
-        }
-        return nil
-    }
-
     package static func supportsAppServerSessionSource(
-        executable: String,
+        executableURL: URL,
         environment: [String: String]
     ) -> Bool {
-        guard FileManager.default.isExecutableFile(atPath: executable) else {
+        guard executableURL.isFileURL,
+              FileManager.default.isExecutableFile(atPath: executableURL.path)
+        else {
             return false
         }
 
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
+        process.executableURL = executableURL
         process.arguments = ["app-server", "--help"]
         process.environment = environment
         let pipe = Pipe()
@@ -1165,38 +1090,6 @@ package enum CodexAppServerExecutable {
         return help.contains("--session-source")
     }
 
-    package static func pathSearchDirectories(environment: [String: String]) -> [String] {
-        let environmentDirectories = (environment["PATH"] ?? "")
-            .split(separator: ":", omittingEmptySubsequences: true)
-            .map(String.init)
-        var knownDirectories: [String] = []
-        if let homeDirectory = environment["HOME"]?.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        ),
-           homeDirectory.isEmpty == false {
-            // The standalone Codex installer defaults here even when a GUI app's PATH omits it.
-            knownDirectories.append(
-                URL(fileURLWithPath: homeDirectory, isDirectory: true)
-                    .appendingPathComponent(".local/bin", isDirectory: true)
-                    .path
-            )
-        }
-        knownDirectories += [
-            "/Applications/Codex.app/Contents/Resources",
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            "/usr/bin",
-            "/bin",
-            "/usr/sbin",
-            "/sbin",
-        ]
-        var directories: [String] = []
-        for directory in environmentDirectories + knownDirectories
-        where directories.contains(directory) == false {
-            directories.append(directory)
-        }
-        return directories
-    }
 }
 
 private func makeRequestPayload(_ request: JSONRPC.Request) throws -> Data {
