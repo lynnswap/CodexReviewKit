@@ -26,6 +26,30 @@ struct CodexReviewStoreCommandTests {
         #expect(commands.filter { if case .startReview = $0 { true } else { false } }.count == 2)
     }
 
+    @Test func failedExplicitInitialStartCleansItsExactProvisionalRun() async throws {
+        let provisionalRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-provisional",
+            threadID: "thread-provisional",
+            reviewThreadID: "thread-provisional",
+            model: "gpt-5"
+        )
+        let backend = OutcomeUnknownStartStoreBackend(provisionalRun: provisionalRun)
+        let store = CodexReviewStore.makeTestingStore(
+            backend: backend,
+            idGenerator: .init(next: { "job-1" })
+        )
+
+        let result = try await store.startReview(
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        )
+
+        #expect(result.core.lifecycle.status == .cancelled)
+        #expect(backend.cleanedRuns == [provisionalRun])
+        #expect(store.initialReviewStartAdmissions["job-1"] == nil)
+        #expect(store.activeRuns["job-1"] == nil)
+    }
+
     @Test func reviewStartPublishesCompletedJobAndRetainsResult() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
@@ -1850,6 +1874,7 @@ struct CodexReviewStoreCommandTests {
                 )
             }
             try await backend.waitForStartReview(timeout: .seconds(2))
+            let admission = try #require(store.initialReviewStartAdmissions["job-1"])
 
             let locallyCancelledJobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
                 reason: .system(message: "Review runtime stopped."),
@@ -1863,7 +1888,13 @@ struct CodexReviewStoreCommandTests {
                 running,
                 timeout: .seconds(1)
             )
+            #expect(store.initialReviewStartAdmissions["job-1"] == nil)
+            guard case .startingReview(_, .outcomeUnknown) = await admission.currentPhase() else {
+                Issue.record("Detached worker did not retain its exact in-flight admission.")
+                return
+            }
             await startReviewGate.open()
+            await store.cancelAndDrainReviewWorkersForTesting()
             let result = try #require(resultBeforeStartReviewUnblocked)
 
             #expect(locallyCancelledJobIDs == ["job-1"])
@@ -1871,6 +1902,11 @@ struct CodexReviewStoreCommandTests {
             #expect(result.core.lifecycle.status == .cancelled)
             #expect(store.reviewWorkerTasks["job-1"] == nil)
             #expect(store.activeRuns["job-1"] == nil)
+            #expect(await backend.recordedCommands().contains(.cleanupReview(.init(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                reviewThreadID: "review-thread-1"
+            ))))
         }
     }
 
@@ -2120,6 +2156,7 @@ struct CodexReviewStoreCommandTests {
                 workspaces: [.init(cwd: "/tmp/project")],
                 jobs: [running]
             )
+            store.activeRuns.removeValue(forKey: running.id)
 
             let cancel = try await store.cancelReview(
                 jobID: "job-1",
@@ -2141,6 +2178,13 @@ struct CodexReviewStoreCommandTests {
             #expect(closed.metadata?.startedAt == startedAt)
             #expect(closed.metadata?.completedAt == completedAt)
             #expect(closed.metadata?.durationMs == 4_000)
+            #expect(await backend.recordedCommands().contains { command in
+                if case .interruptReview = command {
+                    true
+                } else {
+                    false
+                }
+            } == false)
         }
     }
 
@@ -2534,8 +2578,10 @@ struct CodexReviewStoreCommandTests {
 
     @Test func cancelDuringReviewStartupInterruptsAfterRunBecomesAvailable() async throws {
         let backend = FakeCodexReviewBackend()
-        let gate = AsyncGate()
-        await backend.holdStartReview(with: gate)
+        let startGate = AsyncGate()
+        let interruptGate = AsyncGate()
+        await backend.holdStartReview(with: startGate)
+        await backend.holdInterruptReview(with: interruptGate)
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "job-1" })
@@ -2546,21 +2592,76 @@ struct CodexReviewStoreCommandTests {
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
             try await backend.waitForStartReview(timeout: .seconds(2))
+            let admission = try #require(store.initialReviewStartAdmissions["job-1"])
+            #expect(await backend.receivedStartAdmission(admission))
+
             let cancel = try await store.cancelReview(jobID: "job-1", cancellation: .mcpClient(message: "Stop"))
+            let laterCancel = try await store.cancelReview(
+                jobID: "job-1",
+                cancellation: .system(message: "Later cancellation")
+            )
             let cancelledDuringStartup = try #require(store.jobs.first)
             #expect(cancel.core.lifecycle.status == .cancelled)
+            #expect(laterCancel.cancelled == false)
             #expect(cancelledDuringStartup.core.lifecycle.status == .cancelled)
-            await gate.open()
+            #expect(await admission.cancellationRequest() == .mcpClient(message: "Stop"))
+
+            await startGate.open()
+            try await backend.waitForInterruptReview(timeout: .seconds(2))
+            let activeRun = CodexReviewBackendModel.Review.Run(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                reviewThreadID: "review-thread-1"
+            )
+            #expect(store.initialReviewStartAdmissions["job-1"] == nil)
+            #expect(store.activeRuns["job-1"] == activeRun)
+            #expect(cancelledDuringStartup.core.run.threadID == activeRun.threadID)
+            #expect(cancelledDuringStartup.core.run.turnID == activeRun.turnID)
+
+            await interruptGate.open()
             let read = try await result
 
             #expect(cancel.cancelled)
             #expect(read.core.lifecycle.status == .cancelled)
             let commands = await backend.recordedCommands()
             #expect(commands.contains(.interruptReview(
-                .init(threadID: "thread-1", turnID: "turn-1", reviewThreadID: "review-thread-1"),
+                activeRun,
                 .init(message: "Stop")
             )))
-            #expect(commands.contains(.cleanupReview(.init(
+            #expect(commands.contains(.cleanupReview(activeRun)))
+        }
+    }
+
+    @Test func lateInitialStartCannotPublishOverAnotherAdmissionForTheSameJobID() async throws {
+        let backend = FakeCodexReviewBackend()
+        let startGate = AsyncGate()
+        await backend.holdStartReviewIgnoringCancellation(with: startGate)
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            let result = Task { @MainActor in
+                try await store.startReview(
+                    sessionID: "session-1",
+                    request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+                )
+            }
+            try await backend.waitForStartReview(timeout: .seconds(2))
+            let original = try #require(store.initialReviewStartAdmissions["job-1"])
+            let replacement = ReviewStartAdmission()
+            store.initialReviewStartAdmissions["job-1"] = replacement
+
+            await startGate.open()
+            let read = try await result.value
+
+            #expect(read.core.lifecycle.status == .failed)
+            #expect(read.core.lifecycle.errorMessage ==
+                "Initial review start completed after its Store ownership changed.")
+            #expect(store.initialReviewStartAdmissions["job-1"] === replacement)
+            #expect(store.initialReviewStartAdmissions["job-1"] !== original)
+            #expect(store.activeRuns["job-1"] == nil)
+            #expect(await backend.recordedCommands().contains(.cleanupReview(.init(
                 threadID: "thread-1",
                 turnID: "turn-1",
                 reviewThreadID: "review-thread-1"
@@ -2803,6 +2904,33 @@ private final class SwitchRecordingBackend: PreviewCodexReviewStoreBackend {
         accountKey _: String
     ) -> Bool {
         true
+    }
+}
+
+@MainActor
+private final class OutcomeUnknownStartStoreBackend: PreviewCodexReviewStoreBackend {
+    private let provisionalRun: CodexReviewBackendModel.Review.Run
+    private(set) var cleanedRuns: [CodexReviewBackendModel.Review.Run] = []
+
+    init(provisionalRun: CodexReviewBackendModel.Review.Run) {
+        self.provisionalRun = provisionalRun
+        super.init()
+    }
+
+    override func startReview(
+        _: CodexReviewBackendModel.Review.Start,
+        admission: ReviewStartAdmission
+    ) async throws -> BackendReviewAttempt {
+        try await admission.admitThreadStartDispatch()
+        try await admission.recordPreparedThread(provisionalRun)
+        try await admission.admitReviewStartDispatch(for: provisionalRun)
+        throw CancellationError()
+    }
+
+    override func cleanupReview(
+        _ run: CodexReviewBackendModel.Review.Run
+    ) async {
+        cleanedRuns.append(run)
     }
 }
 

@@ -111,16 +111,18 @@ extension CodexReviewStore {
             ),
             logEntries: []
         )
+        let admission = ReviewStartAdmission()
         guard let workerTask = makeReviewWorker(
             jobID: jobID,
             sessionID: sessionID,
-            request: validatedRequest
+            request: validatedRequest,
+            admission: admission
         ) else {
             throw CodexReviewAPI.Error.io("Review Store work admission is closed.")
         }
         insertReviewJob(job)
         markReviewRunning(job, startedAt: createdAt)
-        startingJobIDs.insert(jobID)
+        initialReviewStartAdmissions[jobID] = admission
         reviewWorkerTasks[jobID]?.cancel()
         reviewWorkerTasks[jobID] = workerTask
         return jobID
@@ -129,25 +131,37 @@ extension CodexReviewStore {
     private func makeReviewWorker(
         jobID: String,
         sessionID: String,
-        request: CodexReviewAPI.Start.Request
+        request: CodexReviewAPI.Start.Request,
+        admission: ReviewStartAdmission
     ) -> Task<Void, Never>? {
         startRegisteredStoreWork(
             kind: .reviewWorker(jobID: jobID),
             cancelledBeforeEntry: .runFinalizer { store in
-                store.finishReviewWorkerCancelledBeforeStart(jobID: jobID)
+                store.finishReviewWorkerCancelledBeforeStart(
+                    jobID: jobID,
+                    admission: admission
+                )
             }
         ) { @MainActor store in
             await store.runReviewWorker(
                 jobID: jobID,
                 sessionID: sessionID,
-                request: request
+                request: request,
+                admission: admission
             )
         }
     }
 
-    private func finishReviewWorkerCancelledBeforeStart(jobID: String) {
-        startingJobIDs.remove(jobID)
-        startupCancellations.removeValue(forKey: jobID)
+    private func finishReviewWorkerCancelledBeforeStart(
+        jobID: String,
+        admission: ReviewStartAdmission
+    ) {
+        guard removeInitialReviewStartAdmission(
+            for: jobID,
+            ifOwnedBy: admission
+        ) else {
+            return
+        }
         activeRuns.removeValue(forKey: jobID)
         reviewRecoveryWaitingJobIDs.remove(jobID)
         if let job = job(id: jobID), job.isTerminal == false {
@@ -164,11 +178,13 @@ extension CodexReviewStore {
     private func runReviewWorker(
         jobID: String,
         sessionID: String,
-        request validatedRequest: CodexReviewAPI.Start.Request
+        request validatedRequest: CodexReviewAPI.Start.Request,
+        admission: ReviewStartAdmission
     ) async {
         guard let job = job(id: jobID) else {
-            startingJobIDs.remove(jobID)
+            removeInitialReviewStartAdmission(for: jobID, ifOwnedBy: admission)
             reviewWorkerTasks.removeValue(forKey: jobID)
+            runtimeStopDetachedReviewWorkerTasks.removeValue(forKey: jobID)
             resumeReviewWaiters(for: jobID)
             return
         }
@@ -180,15 +196,21 @@ extension CodexReviewStore {
         )
         var run: CodexReviewBackendModel.Review.Run?
         do {
-            let backendAttempt = try await backend.startReview(startRequest)
+            let backendAttempt = try await backend.startReview(
+                startRequest,
+                admission: admission
+            )
             let backendRun = backendAttempt.run
-            startingJobIDs.remove(jobID)
             run = backendRun
+            try await publishInitialReviewStart(
+                backendRun,
+                for: job,
+                admission: admission
+            )
             if Task.isCancelled {
                 throw CancellationError()
             }
-            applyBackendRun(backendRun, to: job)
-            if let startupCancellation = startupCancellations.removeValue(forKey: jobID) {
+            if let startupCancellation = await admission.cancellationRequest() {
                 try? await backend.interruptReview(
                     backendRun,
                     reason: .init(message: startupCancellation.message)
@@ -226,26 +248,44 @@ extension CodexReviewStore {
                 activeRuns.removeValue(forKey: jobID)
                 reviewRecoveryWaitingJobIDs.remove(jobID)
             }
+        } catch let cancellation as ReviewStartCancelledBeforeDispatch {
+            if job.isTerminal == false {
+                try? completeCancellationAfterRegisteredWorkSuspension(
+                    for: job,
+                    requested: cancellation.cancellation
+                )
+            }
         } catch let error where error is CancellationError || Task.isCancelled {
-            startingJobIDs.remove(jobID)
-            let startupCancellation = startupCancellations.removeValue(forKey: jobID)
+            let startupCancellation = await admission.cancellationRequest()
             if let cleanupRun = activeRuns[jobID] ?? run {
                 await interruptReviewAfterTaskCancellation(cleanupRun, job: job)
                 await cleanupReviewAndRetainFailure(cleanupRun, for: job)
-            } else if job.isTerminal == false || startupCancellation != nil {
-                try? completeCancellationAfterRegisteredWorkSuspension(
-                    for: job,
-                    requested: startupCancellation ?? job.core.lifecycle.cancellation ?? .system()
-                )
+            } else {
+                if let cleanupRun = await provisionalInitialReviewStartRun(
+                    admission: admission
+                ) {
+                    await cleanupReviewAndRetainFailure(cleanupRun, for: job)
+                }
+                if job.isTerminal == false || startupCancellation != nil {
+                    try? completeCancellationAfterRegisteredWorkSuspension(
+                        for: job,
+                        requested: startupCancellation
+                            ?? job.core.lifecycle.cancellation
+                            ?? .system()
+                    )
+                }
             }
             activeRuns.removeValue(forKey: jobID)
             reviewRecoveryWaitingJobIDs.remove(jobID)
         } catch {
             let primaryError = error
-            startingJobIDs.remove(jobID)
-            let startupCancellation = startupCancellations.removeValue(forKey: jobID)
+            let startupCancellation = await admission.cancellationRequest()
             let cleanupFailure: ReviewRuntimeCloseFailure?
             if let cleanupRun = activeRuns[jobID] ?? run {
+                cleanupFailure = await cleanupReviewFailure(cleanupRun)
+            } else if let cleanupRun = await provisionalInitialReviewStartRun(
+                admission: admission
+            ) {
                 cleanupFailure = await cleanupReviewFailure(cleanupRun)
             } else {
                 cleanupFailure = nil
@@ -270,11 +310,54 @@ extension CodexReviewStore {
                 retainCleanupFailure(cleanupFailure, for: job)
             }
         }
+        removeInitialReviewStartAdmission(for: jobID, ifOwnedBy: admission)
         reviewWorkerTasks.removeValue(forKey: jobID)
         runtimeStopDetachedReviewWorkerTasks.removeValue(forKey: jobID)
         if job.isTerminal {
             resumeReviewWaiters(for: jobID)
         }
+    }
+
+    private func publishInitialReviewStart(
+        _ run: CodexReviewBackendModel.Review.Run,
+        for job: CodexReviewJob,
+        admission: ReviewStartAdmission
+    ) async throws {
+        guard await admission.currentPhase() == .active(run) else {
+            throw ReviewAttemptContractFailure(
+                message: "Initial review start returned before its exact run became active."
+            )
+        }
+        guard initialReviewStartAdmissions[job.id] === admission else {
+            throw ReviewAttemptContractFailure(
+                message: "Initial review start completed after its Store ownership changed."
+            )
+        }
+        initialReviewStartAdmissions.removeValue(forKey: job.id)
+        applyBackendRun(run, to: job)
+    }
+
+    @discardableResult
+    private func removeInitialReviewStartAdmission(
+        for jobID: String,
+        ifOwnedBy admission: ReviewStartAdmission
+    ) -> Bool {
+        guard initialReviewStartAdmissions[jobID] === admission else {
+            return false
+        }
+        initialReviewStartAdmissions.removeValue(forKey: jobID)
+        return true
+    }
+
+    private func provisionalInitialReviewStartRun(
+        admission: ReviewStartAdmission
+    ) async -> CodexReviewBackendModel.Review.Run? {
+        guard case .startingReview(let preparedRun, .outcomeUnknown) = await admission.currentPhase(),
+              await admission.failedReviewStartDisposition(for: preparedRun) == .preserveOutcomeUnknown
+        else {
+            return nil
+        }
+        return preparedRun
     }
 
     private func cleanupReviewAndRetainFailure(
@@ -572,15 +655,6 @@ extension CodexReviewStore {
         )
         recordCancellationRequest(requestedCancellation, for: job)
 
-        if job.core.lifecycle.status == .queued {
-            try completeCancellationLocally(
-                jobID: job.id,
-                sessionID: job.sessionID,
-                cancellation: requestedCancellation
-            )
-            return .init(jobID: job.id, cancelled: true, core: job.core)
-        }
-
         if reviewRecoveryWaitingJobIDs.contains(jobID) {
             try completeCancellationLocally(
                 jobID: job.id,
@@ -618,39 +692,14 @@ extension CodexReviewStore {
                 )
                 throw error
             }
-        } else if let run = job.backendRun {
-            do {
-                try await backend.interruptReview(
-                    run,
-                    reason: .init(message: requestedCancellation.message)
-                )
-                if job.isTerminal == false {
-                    try completeCancellationAfterRegisteredWorkSuspension(
-                        for: job,
-                        requested: requestedCancellation
-                    )
-                    reviewWorkerTasks[jobID]?.cancel()
-                }
-            } catch {
-                guard job.isTerminal == false else {
-                    return .init(
-                        jobID: job.id,
-                        cancelled: job.core.lifecycle.status == .cancelled,
-                        core: job.core
-                    )
-                }
-                try recordCancellationFailureAfterRegisteredWorkSuspension(
-                    for: job,
-                    message: error.localizedDescription
-                )
-                throw error
-            }
-        } else if startingJobIDs.contains(jobID) {
-            startupCancellations[jobID] = requestedCancellation
+        } else if let admission = initialReviewStartAdmissions[jobID] {
+            await admission.recordCancellation(requestedCancellation)
+            let startupCancellation = await admission.cancellationRequest()
+                ?? requestedCancellation
             try completeCancellationLocally(
                 jobID: job.id,
                 sessionID: job.sessionID,
-                cancellation: requestedCancellation
+                cancellation: startupCancellation
             )
             return .init(jobID: job.id, cancelled: true, core: job.core)
         } else {
@@ -1402,18 +1451,6 @@ private func shouldAppendReviewReadLogDelta(for kind: ReviewLogEntry.Kind) -> Bo
 }
 
 private extension CodexReviewJob {
-    var backendRun: CodexReviewBackendModel.Review.Run? {
-        guard let threadID = core.run.threadID else {
-            return nil
-        }
-        return .init(
-            threadID: threadID,
-            turnID: core.run.turnID,
-            reviewThreadID: core.run.reviewThreadID,
-            model: core.run.model
-        )
-    }
-
     func appendAgentMessageDelta(itemID: String, delta: String) -> String? {
         guard completedAgentMessageItemIDs.contains(itemID) == false else {
             return nil
