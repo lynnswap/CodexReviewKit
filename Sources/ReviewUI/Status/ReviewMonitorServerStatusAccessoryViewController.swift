@@ -172,10 +172,15 @@ struct StatusView: View {
 
     var body: some View {
         let currentAccount = store.auth.selectedAccount
+        let usagePresentation = AccountUsageSummaryPresentation(account: currentAccount)
         VStack{
             Menu {
-                Section(currentAccount?.email ?? "") {
-                    AccountRateLimitsSectionView(account: currentAccount)
+                if let currentAccount,
+                   usagePresentation.showsRateLimitControls
+                {
+                    Section(currentAccount.reviewMonitorIdentityName) {
+                        AccountRateLimitsSectionView(account: currentAccount)
+                    }
                 }
                 if let showSettings {
                     Section{
@@ -196,7 +201,7 @@ struct StatusView: View {
                     }
                 }
             } label: {
-                AccountRateLimitGaugesView(account: currentAccount)
+                AccountUsageSummaryView(account: currentAccount)
                     .transition(.blurReplace)
                     .animation(.default, value: currentAccount)
                     .frame(maxWidth: .infinity, alignment: .leading)

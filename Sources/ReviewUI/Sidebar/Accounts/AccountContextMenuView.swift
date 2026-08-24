@@ -9,6 +9,10 @@ struct AccountContextMenuView: View {
         store.auth
     }
 
+    private var usagePresentation: AccountUsageSummaryPresentation {
+        AccountUsageSummaryPresentation(account: account)
+    }
+
     private func requestDestructiveAccountAction() {
         if auth.selectedAccount == account {
             store.requestSignOutActiveAccount(requiresConfirmation: store.hasRunningJobs)
@@ -18,18 +22,22 @@ struct AccountContextMenuView: View {
     }
 
     var body: some View {
-        Section(account.email){
+        Section(account.reviewMonitorIdentityName){
             Button("Switch", systemImage: "arrow.triangle.swap") {
                 store.requestSwitchAccountFromUserAction(account)
             }
             .disabled(store.switchActionIsDisabled(for: account))
-            
-            Button("Refresh", systemImage: "arrow.clockwise") {
-                refreshRateLimits()
+
+            if usagePresentation.showsRateLimitControls {
+                Button("Refresh", systemImage: "arrow.clockwise") {
+                    refreshRateLimits()
+                }
             }
         }
-        Section{
-            AccountRateLimitsSectionView(account:account)
+        if usagePresentation.showsRateLimitControls {
+            Section{
+                AccountRateLimitsSectionView(account:account)
+            }
         }
         Section{
             Button("Sign Out", systemImage: "rectangle.portrait.and.arrow.right", role:.destructive) {

@@ -1008,7 +1008,7 @@ private final class ReviewMonitorAccountCellView: NSTableCellView {
 
     func configure(account: CodexAccount) {
         objectValue = account
-        toolTip = account.email
+        toolTip = account.reviewMonitorIdentityName
         hostingView.rootView.account = account
     }
 
