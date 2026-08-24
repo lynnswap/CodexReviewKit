@@ -184,10 +184,105 @@ public extension CodexReviewStore {
             networkRecoveryPolicy: networkRecoveryPolicy
         )
     }
+
+    package var liveReviewAttemptRouteCountForTesting: Int? {
+        (backend as? LiveCodexReviewStoreBackend)?.reviewAttemptRuntimeRouteCountForTesting
+    }
 }
 
 @MainActor
 private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPServerLifecycleOwner {
+    private struct ReviewAttemptRuntimeRouteRegistry {
+        private var runtimeByAttemptID: [String: LiveRuntimeLifecycleHandle] = [:]
+
+        var count: Int {
+            runtimeByAttemptID.count
+        }
+
+        mutating func bind(
+            attemptID: String,
+            to runtime: LiveRuntimeLifecycleHandle
+        ) throws {
+            if let existing = runtimeByAttemptID[attemptID] {
+                guard existing === runtime else {
+                    throw ReviewAttemptContractFailure(
+                        message: "Review attempt \(attemptID) is already routed to another runtime."
+                    )
+                }
+                return
+            }
+            runtimeByAttemptID[attemptID] = runtime
+        }
+
+        func runtime(
+            for attemptID: String,
+            operation: String
+        ) throws -> LiveRuntimeLifecycleHandle {
+            guard let runtime = runtimeByAttemptID[attemptID] else {
+                throw ReviewAttemptContractFailure(
+                    message: "Review \(operation) requires a runtime route for attempt \(attemptID)."
+                )
+            }
+            return runtime
+        }
+
+        func contains(
+            attemptID: String,
+            runtime: LiveRuntimeLifecycleHandle
+        ) -> Bool {
+            runtimeByAttemptID[attemptID] === runtime
+        }
+
+        mutating func move(
+            sourceAttemptID: String,
+            recoveredAttemptID: String,
+            runtime: LiveRuntimeLifecycleHandle
+        ) throws {
+            guard runtimeByAttemptID[sourceAttemptID] === runtime else {
+                throw ReviewAttemptContractFailure(
+                    message: "Review recovery source route changed before attempt \(recoveredAttemptID) became active."
+                )
+            }
+            guard sourceAttemptID != recoveredAttemptID else {
+                return
+            }
+            if let existing = runtimeByAttemptID[recoveredAttemptID] {
+                guard existing === runtime else {
+                    throw ReviewAttemptContractFailure(
+                        message: "Recovered review attempt \(recoveredAttemptID) is already routed to another runtime."
+                    )
+                }
+                throw ReviewAttemptContractFailure(
+                    message: "Recovered review attempt \(recoveredAttemptID) already has a runtime route."
+                )
+            }
+            runtimeByAttemptID.removeValue(forKey: sourceAttemptID)
+            runtimeByAttemptID[recoveredAttemptID] = runtime
+        }
+
+        mutating func take(
+            attemptID: String,
+            operation: String
+        ) throws -> LiveRuntimeLifecycleHandle {
+            guard let runtime = runtimeByAttemptID.removeValue(forKey: attemptID) else {
+                throw ReviewAttemptContractFailure(
+                    message: "Review \(operation) requires a runtime route for attempt \(attemptID)."
+                )
+            }
+            return runtime
+        }
+
+        mutating func removeIfCurrent(
+            attemptID: String,
+            runtime: LiveRuntimeLifecycleHandle
+        ) {
+            guard runtimeByAttemptID[attemptID] === runtime else {
+                return
+            }
+            runtimeByAttemptID.removeValue(forKey: attemptID)
+        }
+    }
+
     typealias MCPHTTPServerFactory = @MainActor @Sendable (
         CodexReviewStore,
         CodexReviewMCPHTTPServer.Configuration
@@ -198,6 +293,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
     private var client: AppServerClient?
     private var appServerBackend: AppServerCodexReviewBackend?
     private var activeRuntimeHandle: LiveRuntimeLifecycleHandle?
+    private var reviewAttemptRuntimeRoutes = ReviewAttemptRuntimeRouteRegistry()
+    fileprivate var reviewAttemptRuntimeRouteCountForTesting: Int {
+        reviewAttemptRuntimeRoutes.count
+    }
     private var acceptsRuntimeRequests = false
     private var mcpHTTPServer: (any CodexReviewMCPHTTPServing)?
     private var loginChallenge: CodexReviewBackendModel.Login.Challenge?
@@ -1241,44 +1340,145 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         _ request: CodexReviewBackendModel.Review.Start,
         admission: ReviewStartAdmission
     ) async throws -> BackendReviewAttempt {
-        guard acceptsRuntimeRequests, let appServerBackend else {
+        guard acceptsRuntimeRequests, let runtime = activeRuntimeHandle else {
             throw CodexReviewAPI.Error.io("Review runtime is not running.")
         }
-        return try await appServerBackend.startReview(request, admission: admission)
+        let attempt: BackendReviewAttempt
+        do {
+            attempt = try await runtime.backend.startReview(
+                request,
+                admission: admission
+            )
+        } catch {
+            if case .startingReview(let preparedRun, .outcomeUnknown) = await admission.currentPhase(),
+               await admission.failedReviewStartDisposition(for: preparedRun) == .preserveOutcomeUnknown
+            {
+                do {
+                    try reviewAttemptRuntimeRoutes.bind(
+                        attemptID: preparedRun.attemptID,
+                        to: runtime
+                    )
+                } catch let routeError {
+                    throw await reviewRouteBindingFailure(
+                        routeError,
+                        startError: error,
+                        cleanupRun: preparedRun,
+                        runtime: runtime
+                    )
+                }
+            }
+            throw error
+        }
+        do {
+            try reviewAttemptRuntimeRoutes.bind(
+                attemptID: attempt.run.attemptID,
+                to: runtime
+            )
+        } catch {
+            throw await reviewRouteBindingFailure(
+                error,
+                startError: nil,
+                cleanupRun: attempt.run,
+                runtime: runtime
+            )
+        }
+        return attempt
     }
 
     func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws {
-        guard acceptsRuntimeRequests, let appServerBackend else {
-            throw CodexReviewAPI.Error.io("Review runtime is not running.")
-        }
-        try await appServerBackend.interruptReview(run, reason: reason)
+        let runtime = try reviewAttemptRuntimeRoutes.runtime(
+            for: run.attemptID,
+            operation: "interrupt"
+        )
+        try await runtime.backend.interruptReview(run, reason: reason)
     }
 
     func beginReviewRecovery(
         _ run: CodexReviewBackendModel.Review.Run,
         reason: CodexReviewBackendModel.CancellationReason
     ) async throws -> CodexReviewBackendModel.Review.RecoveryToken {
-        guard acceptsRuntimeRequests, let appServerBackend else {
-            throw CodexReviewAPI.Error.io("Review runtime is not running.")
+        let runtime = try reviewAttemptRuntimeRoutes.runtime(
+            for: run.attemptID,
+            operation: "recovery"
+        )
+        let token = try await runtime.backend.beginReviewRecovery(run, reason: reason)
+        guard reviewAttemptRuntimeRoutes.contains(
+            attemptID: run.attemptID,
+            runtime: runtime
+        ) else {
+            throw ReviewAttemptContractFailure(
+                message: "Review recovery source route changed before attempt \(run.attemptID) was prepared."
+            )
         }
-        return try await appServerBackend.beginReviewRecovery(run, reason: reason)
+        return token
     }
 
     func resumeReviewRecovery(
         _ token: CodexReviewBackendModel.Review.RecoveryToken,
         request: CodexReviewBackendModel.Review.Start
     ) async throws -> BackendReviewAttempt {
-        guard acceptsRuntimeRequests, let appServerBackend else {
-            throw CodexReviewAPI.Error.io("Review runtime is not running.")
+        let sourceAttemptID = token.interruptedRun.attemptID
+        let runtime = try reviewAttemptRuntimeRoutes.runtime(
+            for: sourceAttemptID,
+            operation: "recovery resume"
+        )
+        let attempt = try await runtime.backend.resumeReviewRecovery(
+            token,
+            request: request
+        )
+        do {
+            try reviewAttemptRuntimeRoutes.move(
+                sourceAttemptID: sourceAttemptID,
+                recoveredAttemptID: attempt.run.attemptID,
+                runtime: runtime
+            )
+        } catch {
+            reviewAttemptRuntimeRoutes.removeIfCurrent(
+                attemptID: sourceAttemptID,
+                runtime: runtime
+            )
+            throw await reviewRouteBindingFailure(
+                error,
+                startError: nil,
+                cleanupRun: attempt.run,
+                runtime: runtime
+            )
         }
-        return try await appServerBackend.resumeReviewRecovery(token, request: request)
+        return attempt
     }
 
     func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws {
-        guard activeRuntimeHandle != nil, let appServerBackend else {
-            throw ReviewRuntimeCloseFailure.cleanup("Review runtime is not running.")
+        let runtime: LiveRuntimeLifecycleHandle
+        do {
+            // Cleanup is a terminal admission, not a retry boundary. AppServer cleanup
+            // can partially delete multiple resources before reporting failure, so
+            // restoring this route would permit duplicate cleanup side effects.
+            runtime = try reviewAttemptRuntimeRoutes.take(
+                attemptID: run.attemptID,
+                operation: "cleanup"
+            )
+        } catch {
+            throw ReviewRuntimeCloseFailure.cleanup(error.localizedDescription)
         }
-        try await appServerBackend.cleanupReview(run)
+        try await runtime.backend.cleanupReview(run)
+    }
+
+    private func reviewRouteBindingFailure(
+        _ routeError: any Error,
+        startError: (any Error)?,
+        cleanupRun: CodexReviewBackendModel.Review.Run,
+        runtime: LiveRuntimeLifecycleHandle
+    ) async -> ReviewAttemptContractFailure {
+        var message = routeError.localizedDescription
+        if let startError {
+            message += " Original review start failure: \(startError.localizedDescription)"
+        }
+        do {
+            try await runtime.backend.cleanupReview(cleanupRun)
+        } catch {
+            message += " Exact cleanup also failed: \(error.localizedDescription)"
+        }
+        return ReviewAttemptContractFailure(message: message)
     }
 
     @discardableResult

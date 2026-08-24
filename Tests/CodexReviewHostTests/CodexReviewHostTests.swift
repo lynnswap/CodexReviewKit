@@ -451,6 +451,235 @@ struct CodexReviewHostTests {
         #expect(server.stopCallCount == 1)
     }
 
+    @Test func liveExplicitOutcomeUnknownStartRetainsProvisionalRouteForExactCleanup() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(transport)
+        try await transport.enqueue(
+            AppServerAPI.Thread.Start.Response(threadID: "route-thread", model: "gpt-5"),
+            for: "thread/start"
+        )
+        await transport.enqueueCancellation(for: "review/start")
+        try await enqueueReviewCleanupResponses(transport)
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transport: transport
+        )
+        await store.start()
+        let admission = ReviewStartAdmission()
+
+        await #expect(throws: CancellationError.self) {
+            try await store.backend.startReview(
+                makeLiveRouteReviewStartRequest(jobID: "job-outcome-unknown"),
+                admission: admission
+            )
+        }
+        guard case .startingReview(let preparedRun, .outcomeUnknown) = await admission.currentPhase() else {
+            Issue.record("Outcome-unknown review start did not retain its prepared run.")
+            await store.stop()
+            return
+        }
+        #expect(store.liveReviewAttemptRouteCountForTesting == 1)
+        let methodsBeforeCleanup = await transport.recordedRequests().map(\.method)
+        #expect(methodsBeforeCleanup.contains("thread/backgroundTerminals/clean") == false)
+        #expect(methodsBeforeCleanup.contains("thread/unsubscribe") == false)
+        #expect(methodsBeforeCleanup.contains("thread/delete") == false)
+
+        var lateActiveRun = preparedRun
+        lateActiveRun.turnID = "late-turn"
+        lateActiveRun.reviewThreadID = "late-review-thread"
+        try await store.backend.cleanupReview(lateActiveRun)
+
+        #expect(store.liveReviewAttemptRouteCountForTesting == 0)
+        let methodsAfterCleanup = await transport.recordedRequests().map(\.method)
+        #expect(methodsAfterCleanup.filter { $0 == "thread/backgroundTerminals/clean" }.count == 1)
+        #expect(methodsAfterCleanup.filter { $0 == "thread/unsubscribe" }.count == 1)
+        #expect(methodsAfterCleanup.filter { $0 == "thread/delete" }.count == 2)
+        await #expect(throws: ReviewRuntimeCloseFailure.self) {
+            try await store.backend.cleanupReview(lateActiveRun)
+        }
+        #expect(await transport.recordedRequests().map(\.method) == methodsAfterCleanup)
+        await store.stop()
+    }
+
+    @Test func liveCompatibilityOutcomeUnknownStartDoesNotRetainLowerCleanupRoute() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(transport)
+        try await transport.enqueue(
+            AppServerAPI.Thread.Start.Response(threadID: "compatibility-thread", model: "gpt-5"),
+            for: "thread/start"
+        )
+        await transport.enqueueCancellation(for: "review/start")
+        try await enqueueReviewCleanupResponses(transport)
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transport: transport
+        )
+        await store.start()
+
+        await #expect(throws: CancellationError.self) {
+            try await store.backend.startReview(
+                makeLiveRouteReviewStartRequest(jobID: "job-compatibility")
+            )
+        }
+
+        #expect(store.liveReviewAttemptRouteCountForTesting == 0)
+        let methods = await transport.recordedRequests().map(\.method)
+        #expect(methods.filter { $0 == "thread/backgroundTerminals/clean" }.count == 1)
+        #expect(methods.filter { $0 == "thread/unsubscribe" }.count == 1)
+        #expect(methods.filter { $0 == "thread/delete" }.count == 1)
+        await store.stop()
+    }
+
+    @Test func liveLegacyRecoveryMovesOneSourceRouteToRecoveredAttempt() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(transport)
+        try await enqueueLiveRouteReviewStartResponses(
+            transport,
+            threadID: "recovery-thread",
+            turnID: "source-turn",
+            reviewThreadID: "source-review-thread"
+        )
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        try await transport.enqueue(EmptyResponse(), for: "thread/rollback")
+        try await transport.enqueue(
+            AppServerAPI.Review.Start.Response(
+                turnID: "recovered-turn",
+                reviewThreadID: "recovered-review-thread"
+            ),
+            for: "review/start"
+        )
+        try await enqueueReviewCleanupResponses(transport)
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transport: transport
+        )
+        await store.start()
+        let request = makeLiveRouteReviewStartRequest(jobID: "job-recovery")
+        let sourceAttempt = try await store.backend.startReview(
+            request,
+            admission: ReviewStartAdmission()
+        )
+        #expect(store.liveReviewAttemptRouteCountForTesting == 1)
+        let token = try await store.backend.beginReviewRecovery(
+            sourceAttempt.run,
+            reason: .init(message: "Recover")
+        )
+        #expect(store.liveReviewAttemptRouteCountForTesting == 1)
+
+        let recoveredAttempt = try await store.backend.resumeReviewRecovery(
+            token,
+            request: request
+        )
+
+        #expect(recoveredAttempt.run.attemptID != sourceAttempt.run.attemptID)
+        #expect(store.liveReviewAttemptRouteCountForTesting == 1)
+        try await store.backend.cleanupReview(recoveredAttempt.run)
+        #expect(store.liveReviewAttemptRouteCountForTesting == 0)
+        await #expect(throws: ReviewRuntimeCloseFailure.self) {
+            try await store.backend.cleanupReview(sourceAttempt.run)
+        }
+        await store.stop()
+    }
+
+    @Test func liveLateInterruptNeverFallsThroughToReplacementRuntime() async throws {
+        let sourceTransport = FakeJSONRPCTransport()
+        let replacementTransport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(sourceTransport)
+        try await enqueueRuntimeStartResponses(replacementTransport)
+        try await enqueueLiveRouteReviewStartResponses(
+            sourceTransport,
+            threadID: "late-interrupt-thread",
+            turnID: "late-interrupt-turn",
+            reviewThreadID: "late-interrupt-review-thread"
+        )
+        try await sourceTransport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        var transports = [sourceTransport, replacementTransport]
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transportFactory: { _ in transports.removeFirst() }
+        )
+        await store.start()
+        let attempt = try await store.backend.startReview(
+            makeLiveRouteReviewStartRequest(jobID: "job-late-interrupt"),
+            admission: ReviewStartAdmission()
+        )
+        await store.restart()
+        #expect(store.liveReviewAttemptRouteCountForTesting == 1)
+
+        await #expect(throws: JSONRPC.Error.closed) {
+            try await store.backend.interruptReview(
+                attempt.run,
+                reason: .init(message: "Late interrupt")
+            )
+        }
+
+        let replacementMethods = await replacementTransport.recordedRequests().map(\.method)
+        #expect(replacementMethods.contains("turn/interrupt") == false)
+        await #expect(throws: JSONRPC.Error.closed) {
+            try await store.backend.cleanupReview(attempt.run)
+        }
+        #expect(store.liveReviewAttemptRouteCountForTesting == 0)
+        #expect(await replacementTransport.recordedRequests().map(\.method) == replacementMethods)
+        await store.stop()
+    }
+
+    @Test func liveLegacyRecoveryNeverInfersReplacementRuntime() async throws {
+        let sourceTransport = FakeJSONRPCTransport()
+        let replacementTransport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(sourceTransport)
+        try await enqueueRuntimeStartResponses(replacementTransport)
+        try await enqueueLiveRouteReviewStartResponses(
+            sourceTransport,
+            threadID: "source-recovery-thread",
+            turnID: "source-recovery-turn",
+            reviewThreadID: "source-recovery-review-thread"
+        )
+        try await sourceTransport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        try await replacementTransport.enqueue(EmptyResponse(), for: "thread/rollback")
+        try await replacementTransport.enqueue(
+            AppServerAPI.Review.Start.Response(
+                turnID: "wrong-runtime-turn",
+                reviewThreadID: "wrong-runtime-review-thread"
+            ),
+            for: "review/start"
+        )
+        var transports = [sourceTransport, replacementTransport]
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transportFactory: { _ in transports.removeFirst() }
+        )
+        await store.start()
+        let request = makeLiveRouteReviewStartRequest(jobID: "job-source-recovery")
+        let attempt = try await store.backend.startReview(
+            request,
+            admission: ReviewStartAdmission()
+        )
+        let token = try await store.backend.beginReviewRecovery(
+            attempt.run,
+            reason: .init(message: "Prepare recovery")
+        )
+        await store.restart()
+        #expect(store.liveReviewAttemptRouteCountForTesting == 1)
+
+        await #expect(throws: JSONRPC.Error.closed) {
+            try await store.backend.resumeReviewRecovery(token, request: request)
+        }
+
+        let replacementMethods = await replacementTransport.recordedRequests().map(\.method)
+        #expect(replacementMethods.contains("thread/rollback") == false)
+        #expect(replacementMethods.contains("review/start") == false)
+        await #expect(throws: JSONRPC.Error.closed) {
+            try await store.backend.cleanupReview(attempt.run)
+        }
+        #expect(store.liveReviewAttemptRouteCountForTesting == 0)
+        await store.stop()
+    }
+
     @Test func liveStoreReportsMCPPortOwnerWhenEndpointPortInUseAndDoesNotLaunchAppServer() async throws {
         let homeURL = try temporaryHome()
         let port = 54321
@@ -2335,6 +2564,45 @@ private func enqueueRuntimeStartResponses(
         for: "config/read"
     )
     try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+}
+
+private func makeLiveRouteReviewStartRequest(
+    jobID: String
+) -> CodexReviewBackendModel.Review.Start {
+    .init(
+        jobID: jobID,
+        sessionID: "route-session",
+        request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+        model: "gpt-5"
+    )
+}
+
+private func enqueueLiveRouteReviewStartResponses(
+    _ transport: FakeJSONRPCTransport,
+    threadID: String,
+    turnID: String,
+    reviewThreadID: String
+) async throws {
+    try await transport.enqueue(
+        AppServerAPI.Thread.Start.Response(threadID: threadID, model: "gpt-5"),
+        for: "thread/start"
+    )
+    try await transport.enqueue(
+        AppServerAPI.Review.Start.Response(
+            turnID: turnID,
+            reviewThreadID: reviewThreadID
+        ),
+        for: "review/start"
+    )
+}
+
+private func enqueueReviewCleanupResponses(
+    _ transport: FakeJSONRPCTransport
+) async throws {
+    try await transport.enqueue(
+        AppServerAPI.Thread.Unsubscribe.Response(status: .unsubscribed),
+        for: "thread/unsubscribe"
+    )
 }
 
 private func temporaryHome() throws -> URL {
