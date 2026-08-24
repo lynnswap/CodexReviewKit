@@ -12,11 +12,25 @@ private let defaultExternalURLOpener: ExternalURLOpener = { url in
     _ = NSWorkspace.shared.open(url)
 }
 
-private actor RuntimeShutdownCleanupRace {
-    private var result: Bool?
-    private var continuation: CheckedContinuation<Bool, Never>?
+private enum RuntimeShutdownCleanupOutcome: Sendable {
+    case completed
+    case failed(String)
+    case timedOut
 
-    func finish(_ value: Bool) {
+    var completedSuccessfully: Bool {
+        if case .completed = self { true } else { false }
+    }
+
+    var timedOut: Bool {
+        if case .timedOut = self { true } else { false }
+    }
+}
+
+private actor RuntimeShutdownCleanupRace {
+    private var result: RuntimeShutdownCleanupOutcome?
+    private var continuation: CheckedContinuation<RuntimeShutdownCleanupOutcome, Never>?
+
+    func finish(_ value: RuntimeShutdownCleanupOutcome) {
         guard result == nil else {
             return
         }
@@ -25,7 +39,7 @@ private actor RuntimeShutdownCleanupRace {
         continuation = nil
     }
 
-    func wait() async -> Bool {
+    func wait() async -> RuntimeShutdownCleanupOutcome {
         if let result {
             return result
         }
@@ -41,12 +55,16 @@ private actor RuntimeShutdownCleanupRace {
 
 private func runRuntimeShutdownCleanup(
     timeout: Duration,
-    operation: @escaping @Sendable () async -> Void
-) async -> Bool {
+    operation: @escaping @Sendable () async throws -> Void
+) async -> RuntimeShutdownCleanupOutcome {
     let race = RuntimeShutdownCleanupRace()
     let operationTask = Task {
-        await operation()
-        await race.finish(true)
+        do {
+            try await operation()
+            await race.finish(.completed)
+        } catch {
+            await race.finish(.failed(error.localizedDescription))
+        }
     }
     let timeoutTask = Task {
         do {
@@ -54,12 +72,13 @@ private func runRuntimeShutdownCleanup(
         } catch {
             return
         }
-        await race.finish(false)
+        await race.finish(.timedOut)
     }
     let result = await race.wait()
-    if result {
+    switch result {
+    case .completed, .failed:
         timeoutTask.cancel()
-    } else {
+    case .timedOut:
         operationTask.cancel()
     }
     return result
@@ -1040,19 +1059,27 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         timeoutWarning: String
     ) async {
         let workerJobIDs = store.reviewWorkerJobIDsForRuntimeStop
-        let didRequestCancellation = await runRuntimeShutdownCleanup(
+        let cancellationOutcome = await runRuntimeShutdownCleanup(
             timeout: shutdownCleanupTimeout
         ) {
-            _ = await store.requestActiveReviewCancellationsForRuntimeStop(reason: reason)
+            let outcome = await store.requestActiveReviewCancellationsForRuntimeStop(reason: reason)
+            if let failure = outcome.firstFailure {
+                throw failure
+            }
         }
-        if didRequestCancellation == false {
+        if case .failed(let message) = cancellationOutcome {
+            logger.error(
+                "Failed to request active review cancellation before runtime teardown: \(message, privacy: .public)"
+            )
+        }
+        if cancellationOutcome.completedSuccessfully == false {
             let lifecycle = appServerBackend.runtimeOwnerLifecycleHandle
             await lifecycle.closeAdmission()
             do {
                 try await lifecycle.closeAndWait()
             } catch {
                 logger.error(
-                    "Failed to force-close app-server after review cancellation timeout: \(error.localizedDescription, privacy: .public)"
+                    "Failed to force-close app-server during review cancellation fallback: \(error.localizedDescription, privacy: .public)"
                 )
             }
         }
@@ -1066,7 +1093,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         let didDrainReviewWorkers = await store.drainReviewWorkersForRuntimeStop(
             timeout: shutdownCleanupTimeout
         )
-        if didRequestCancellation == false || didDrainReviewWorkers == false {
+        if cancellationOutcome.timedOut || didDrainReviewWorkers == false {
             logger.warning("\(timeoutWarning, privacy: .public)")
         }
     }

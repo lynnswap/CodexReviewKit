@@ -934,9 +934,15 @@ public final class CodexReviewStore {
         if backend.handlesActiveReviewStopCleanup {
             locallyCancelledJobIDs = []
         } else {
-            locallyCancelledJobIDs = await requestActiveReviewCancellationsForRuntimeStop(
+            let cancellationOutcome = await requestActiveReviewCancellationsForRuntimeStop(
                 reason: intent.reviewCancellation
             )
+            locallyCancelledJobIDs = cancellationOutcome.jobIDs
+            if let failure = cancellationOutcome.firstFailure {
+                runtimeLifecycleLogger.error(
+                    "Review cancellation request failed before runtime stop: \(failure.localizedDescription, privacy: .public)"
+                )
+            }
         }
         await backend.stop(store: self, intent: intent)
         let remainingLocallyCancelledJobIDs = cancelActiveReviewsLocallyForRuntimeStop(

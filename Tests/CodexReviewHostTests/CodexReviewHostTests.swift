@@ -2157,6 +2157,70 @@ struct CodexReviewHostTests {
         #expect(await transport.recordedRequests().map(\.method).contains("turn/interrupt"))
     }
 
+    @Test func liveStoreStopForceClosesBeforeCleanupAfterInterruptRejection() async throws {
+        let homeURL = try temporaryHome()
+        let cleanupGate = AsyncGate()
+        let transport = FakeJSONRPCTransport()
+        await transport.holdNextIgnoringCancellation(
+            method: "thread/backgroundTerminals/clean",
+            gate: cleanupGate
+        )
+        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
+        try await transport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await transport.enqueue(
+            AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"),
+            for: "thread/start"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Review.Start.Response(turnID: "turn-1"),
+            for: "review/start"
+        )
+        await transport.enqueueFailure(
+            .responseError(code: -32000, message: "Interrupt rejected."),
+            for: "turn/interrupt"
+        )
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            shutdownCleanupTimeout: .seconds(5),
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        let review = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        await waitUntil { store.jobs.first?.core.run.turnID == "turn-1" }
+
+        let stop = Task { @MainActor in
+            await store.stop()
+        }
+        let reachedForcedCloseBoundary = await waitUntil(timeout: .seconds(2)) {
+            let methods = await transport.recordedRequests().map(\.method)
+            return await transport.isClosedForTesting()
+                || methods.contains("thread/backgroundTerminals/clean")
+        }
+        let methodsAtBoundary = await transport.recordedRequests().map(\.method)
+        let forcedClosedBeforeCleanup = await transport.isClosedForTesting()
+            && methodsAtBoundary.contains("thread/backgroundTerminals/clean") == false
+        await cleanupGate.open()
+        await stop.value
+        let result = try await review.value
+
+        #expect(reachedForcedCloseBoundary)
+        #expect(forcedClosedBeforeCleanup)
+        #expect(methodsAtBoundary.contains("turn/interrupt"))
+        #expect(result.core.lifecycle.status == .cancelled)
+    }
+
     @Test func liveStoreStopDetachesStartingWorkerFromPreCancellationSnapshot() async throws {
         let homeURL = try temporaryHome()
         let reviewStartGate = AsyncGate()

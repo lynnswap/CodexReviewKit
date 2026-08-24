@@ -27,6 +27,11 @@ private actor RuntimeStopDetachedReviewWorkerDrainRace {
     }
 }
 
+package struct ReviewRuntimeCancellationRequestOutcome: Sendable {
+    package let jobIDs: [String]
+    package let firstFailure: ReviewRuntimeCloseFailure?
+}
+
 extension CodexReviewStore {
     package func recordCancellationRequest(
         _ cancellation: ReviewCancellation,
@@ -158,14 +163,22 @@ extension CodexReviewStore {
 
     package func requestActiveReviewCancellationsForRuntimeStop(
         reason: ReviewCancellation = .system(message: "Review runtime stopped.")
-    ) async -> [String] {
+    ) async -> ReviewRuntimeCancellationRequestOutcome {
         let activeJobIDs = orderedJobs
             .filter { $0.isTerminal == false }
             .map(\.id)
+        var firstFailure: ReviewRuntimeCloseFailure?
         for jobID in activeJobIDs {
-            _ = try? await cancelReview(jobID: jobID, cancellation: reason)
+            do {
+                _ = try await cancelReview(jobID: jobID, cancellation: reason)
+            } catch {
+                if firstFailure == nil {
+                    firstFailure = (error as? ReviewRuntimeCloseFailure)
+                        ?? .cleanup(error.localizedDescription)
+                }
+            }
         }
-        return activeJobIDs
+        return .init(jobIDs: activeJobIDs, firstFailure: firstFailure)
     }
 
     package var reviewWorkerJobIDsForRuntimeStop: [String] {
