@@ -447,7 +447,7 @@ extension CodexReviewStore {
                 return .failure(error)
             }
         }
-        if await active.admission.activeTerminalResolution() == nil {
+        if try await active.admission.hasRecordedActiveTerminal(for: active.run) == false {
             try await recordNextTerminal(for: active, inputs: inputs)
         }
         return try await interrupt.value.get()

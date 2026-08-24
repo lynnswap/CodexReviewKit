@@ -273,8 +273,19 @@ struct ReviewInterruptAdmissionTests {
         )) {
             try await admission.recordCanonicalTerminal(.completed, for: staleRun)
         }
+        await #expect(throws: ReviewStartAdmissionContractFailure(
+            violation: .staleRun(
+                operation: .inspectRecordedActiveTerminal,
+                expected: run,
+                received: staleRun
+            )
+        )) {
+            try await admission.hasRecordedActiveTerminal(for: staleRun)
+        }
 
+        #expect(try await admission.hasRecordedActiveTerminal(for: run) == false)
         try await admission.recordCanonicalTerminal(.completed, for: run)
+        #expect(try await admission.hasRecordedActiveTerminal(for: run))
         try await admission.recordCanonicalTerminal(.completed, for: run)
         await #expect(throws: ReviewStartAdmissionContractFailure(
             violation: .conflictingActiveTerminal(

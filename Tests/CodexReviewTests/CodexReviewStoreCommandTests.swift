@@ -1936,7 +1936,7 @@ struct CodexReviewStoreCommandTests {
         #expect(await closeCompletion.isComplete())
     }
 
-    @Test func registeredWorkCloseReasonWinsInFlightTypedCancellation() async throws {
+    @Test func registeredWorkCloseJoinsInterruptWithRecordedTerminal() async throws {
         let backend = FakeCodexReviewBackend()
         let interruptGate = AsyncGate()
         await backend.holdInterruptReview(with: interruptGate)
@@ -1954,6 +1954,10 @@ struct CodexReviewStoreCommandTests {
             "attempt-1",
             jobID: "job-1"
         ) != nil)
+        guard case .active(let active) = store.reviewAttemptOwnerships["job-1"] else {
+            Issue.record("Review did not publish its exact active attempt.")
+            return
+        }
         let cancellation = Task { @MainActor in
             try await store.cancelReview(
                 jobID: "job-1",
@@ -1961,6 +1965,10 @@ struct CodexReviewStoreCommandTests {
             )
         }
         try await backend.waitForInterruptReview(timeout: .seconds(2))
+        await backend.yield(.cancelled("User cancellation."), for: active.run)
+        try #require(await waitUntil {
+            if case .finishing = await active.admission.currentPhase() { true } else { false }
+        })
         let closeReason = ReviewCancellation.system(message: "Store work owner closed.")
         let close = Task { @MainActor in
             await store.closeRegisteredStoreWork(reason: closeReason)
@@ -1969,15 +1977,22 @@ struct CodexReviewStoreCommandTests {
             store.storeWorkRegistryStatus == .closing
         })
 
-        #expect(try store.readReview(jobID: "job-1").core.lifecycle.cancellation == closeReason)
+        #expect(store.reviewWorkerTasks["job-1"]?.isCancelled == true)
         await interruptGate.open()
         let outcome = try await cancellation.value
         #expect(await close.value == .success)
         let final = try await review.value
 
-        #expect(outcome.core.lifecycle.cancellation == closeReason)
+        #expect(outcome.core.lifecycle.cancellation?.message == "User cancellation.")
         #expect(final.core.lifecycle.status == .cancelled)
-        #expect(final.core.lifecycle.cancellation == closeReason)
+        #expect(final.core.lifecycle.cancellation?.message == "User cancellation.")
+        #expect(await backend.recordedCommands().filter {
+            if case .interruptReviewAdmission = $0 { true } else { false }
+        }.count == 1)
+        #expect(store.job(id: "job-1")?.logEntries.contains {
+            $0.kind == .diagnostic && $0.text.contains("conflicting active terminals")
+        } == false)
+        #expect(store.reviewAttemptOwnerships["job-1"] == nil)
         #expect(store.reviewWorkerTasks["job-1"] == nil)
         #expect(store.storeWorkRegistry.activeOrdinals.isEmpty)
     }
