@@ -98,7 +98,7 @@ package final class StoreReviewRecoveryReceipt {
 
     package func startStaging(
         admission: ReviewStartAdmission,
-        _ work: @escaping @MainActor @Sendable () async throws -> StagedReviewRecovery
+        _ work: @escaping @MainActor @Sendable () async throws(ReviewRecoveryStagingFailure) -> StagedReviewRecovery
     ) throws {
         try requireStart("staging")
         guard case .prepared(let prepared) = phase else {
@@ -225,6 +225,20 @@ package final class StoreReviewRecoveryReceipt {
                 guard permitsPublication else { throw contractFailure("finish staging") }
                 phase = .staged(staged)
                 return .staged(staged)
+            } catch let failure as ReviewRecoveryStagingFailure {
+                ownedOperation = nil
+                switch phase {
+                case .staged, .stagedForDiscard:
+                    break
+                default:
+                    switch failure {
+                    case .callerRetainsPreparedRecovery:
+                        phase = .prepared(prepared)
+                    case .backendOwnsRecovery:
+                        phase = .failed
+                    }
+                }
+                throw failure
             } catch {
                 ownedOperation = nil
                 switch phase {

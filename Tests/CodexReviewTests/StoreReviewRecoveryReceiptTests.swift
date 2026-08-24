@@ -45,13 +45,46 @@ struct StoreReviewRecoveryReceiptTests {
         }
         #expect(throws: ReviewAttemptContractFailure.self) {
             try preparedReceipt.startStaging(admission: ReviewStartAdmission()) {
-                throw ReviewAttemptContractFailure(message: "Must not run")
+                () async throws(ReviewRecoveryStagingFailure) -> StagedReviewRecovery in
+                throw ReviewRecoveryStagingFailure.callerRetainsPreparedRecovery(
+                    message: "Must not run"
+                )
             }
         }
         guard case .prepared(let exactPrepared) = try preparedReceipt.suppress() else {
             Issue.record("Prepared discard target was lost."); return
         }
         #expect(exactPrepared.receipt === invalidPrepared.receipt)
+
+        let callerRetained = StoreReviewRecoveryReceipt(source: source)
+        try await advance(callerRetained, candidate: candidate, prepared: prepared)
+        let callerRetainedFailure = ReviewRecoveryStagingFailure
+            .callerRetainsPreparedRecovery(message: "Destination is not ready")
+        try callerRetained.startStaging(admission: ReviewStartAdmission()) {
+            () async throws(ReviewRecoveryStagingFailure) -> StagedReviewRecovery in
+            throw callerRetainedFailure
+        }
+        await #expect(throws: callerRetainedFailure) {
+            try await callerRetained.joinOwnedOperation().value
+        }
+        guard case .prepared(let callerRetainedTarget) = try callerRetained.suppress() else {
+            Issue.record("Caller-retained staging failure lost the prepared target."); return
+        }
+        #expect(callerRetainedTarget.receipt === prepared.receipt)
+
+        let backendOwned = StoreReviewRecoveryReceipt(source: source)
+        try await advance(backendOwned, candidate: candidate, prepared: prepared)
+        let backendOwnedFailure = ReviewRecoveryStagingFailure
+            .backendOwnsRecovery(message: "Backend consumed the recovery route")
+        try backendOwned.startStaging(admission: ReviewStartAdmission()) {
+            () async throws(ReviewRecoveryStagingFailure) -> StagedReviewRecovery in
+            throw backendOwnedFailure
+        }
+        await #expect(throws: backendOwnedFailure) {
+            try await backendOwned.joinOwnedOperation().value
+        }
+        #expect(try backendOwned.suppress() == nil)
+
         let inactive = StagedReviewRecovery(
             receipt: prepared.receipt, destinationGeneration: .init(rawValue: 2),
             attempt: .init(run: .init(attemptID: "inactive", threadID: run.threadID)),
