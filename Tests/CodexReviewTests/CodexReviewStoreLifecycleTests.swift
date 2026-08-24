@@ -241,8 +241,14 @@ struct CodexReviewStoreLifecycleTests {
         backend.holdRuntimePreparation(with: preparationGate)
         let restart = Task { @MainActor in await store.restart() }
         await backend.waitForRuntimePreparation()
+        guard case .replacing(let replacement, _) = store.runtimeState else {
+            Issue.record("Expected an admitted runtime replacement.")
+            return
+        }
+        var replacementOutcomes = replacement.outcomes().makeAsyncIterator()
         let staleReplacement = try #require(backend.lastPreparedRuntimeHandle)
-        let stop = Task { @MainActor in await store.stop() }
+        store.requestRuntimeTeardown(intent: .explicitStop)
+        #expect(await replacementOutcomes.next() == .superseded(.stop))
         await backend.waitForRuntimePreparationCancellation()
 
         #expect(firstHandle.closePurposes == [.restartSameAccount])
@@ -250,8 +256,8 @@ struct CodexReviewStoreLifecycleTests {
         #expect(store.serverURL == endpoint)
 
         await preparationGate.open()
-        await stop.value
-        await restart.value
+        await store.stop()
+        _ = await restart.value
 
         #expect(store.serverState == .stopped)
         #expect(store.serverURL == nil)
@@ -262,7 +268,52 @@ struct CodexReviewStoreLifecycleTests {
         #expect(store.settings.lastErrorMessage == nil)
     }
 
-    @Test func replacementCancellationCatchReplaysThroughFreshCutoverWithoutError() async throws {
+    @Test func concurrentManualRestartsJoinOneReplacementFactoryAndGeneration() async throws {
+        let backend = TestingCodexReviewStoreBackend(
+            reviewBackend: FakeCodexReviewBackend()
+        )
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+        let sourceGeneration = store.runtimeLifecycleAdmissionGeneration
+
+        let preparationGate = AsyncGate()
+        backend.holdRuntimePreparation(with: preparationGate)
+        let firstRestart = Task { @MainActor in await store.restart() }
+        await backend.waitForRuntimePreparation()
+        guard case .replacing(let firstReplacement, _) = store.runtimeState else {
+            Issue.record("Expected the first runtime replacement admission.")
+            return
+        }
+        let replacementGeneration = store.runtimeLifecycleAdmissionGeneration
+        let secondCallerEntered = AsyncGate()
+        let secondRestart = Task { @MainActor in
+            await secondCallerEntered.open()
+            await store.restart()
+        }
+        await secondCallerEntered.wait()
+
+        #expect(replacementGeneration == sourceGeneration + 1)
+        #expect(store.runtimeLifecycleAdmissionGeneration == replacementGeneration)
+        #expect(backend.startRequests == [false, true])
+        await preparationGate.open()
+        _ = await secondRestart.value
+        _ = await firstRestart.value
+
+        #expect(store.serverState == .running)
+        guard case .running(let currentGeneration, _, _) = store.runtimeState else {
+            Issue.record("Expected one published replacement runtime.")
+            return
+        }
+        #expect(firstReplacement.replacementGeneration == currentGeneration)
+        #expect(store.runtimeLifecycleAdmissionGeneration == replacementGeneration)
+        #expect(backend.startRequests == [false, true])
+        #expect(store.settingsService.runtimeCutoverStatus == .active)
+        #expect(store.settings.isLoading == false)
+        #expect(store.settings.lastErrorMessage == nil)
+        await store.stop()
+    }
+
+    @Test func cancellingOuterRestartCallerCannotCancelOwnedReplacement() async throws {
         let backend = TestingCodexReviewStoreBackend(
             reviewBackend: FakeCodexReviewBackend()
         )
@@ -271,19 +322,30 @@ struct CodexReviewStoreLifecycleTests {
 
         let preparationGate = AsyncGate()
         backend.holdRuntimePreparation(with: preparationGate)
-        backend.throwCancellationAfterHeldRuntimePreparation()
-        let firstRestart = Task { @MainActor in await store.restart() }
+        let caller = Task { @MainActor in await store.restart() }
         await backend.waitForRuntimePreparation()
-        let secondRestart = Task { @MainActor in await store.restart() }
-        await backend.waitForRuntimePreparationCancellation()
+        guard case .replacing(let replacement, _) = store.runtimeState else {
+            Issue.record("Expected an owned runtime replacement.")
+            return
+        }
+        var outcomes = replacement.outcomes().makeAsyncIterator()
+
+        caller.cancel()
         await preparationGate.open()
-        await secondRestart.value
-        await firstRestart.value
+        await caller.value
+
+        #expect(await outcomes.next() == .running(replacement.replacementGeneration))
+        #expect(store.serverState == .running)
+        #expect(backend.startRequests == [false, true])
+
+        await store.restart()
 
         #expect(store.serverState == .running)
-        #expect(store.settingsService.runtimeCutoverStatus == .active)
-        #expect(store.settings.isLoading == false)
-        #expect(store.settings.lastErrorMessage == nil)
+        #expect(
+            store.runtimeLifecycleAdmissionGeneration
+                == replacement.replacementGeneration.successor().rawValue
+        )
+        #expect(backend.startRequests == [false, true, true])
         await store.stop()
     }
 

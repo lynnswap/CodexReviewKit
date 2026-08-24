@@ -94,7 +94,7 @@ public final class CodexReviewStore {
         storeWorkRegistry.cancelWithoutWaiting()
         switch runtimeState {
         case .acquiring(_, _, let task),
-             .replacing(_, _, _, let task),
+             .replacing(_, let task),
              .tearingDown(_, _, _, let task):
             task.cancel()
         case .stopped, .running, .failed:
@@ -163,50 +163,45 @@ public final class CodexReviewStore {
         switch previousState {
         case .running where forceRestartIfNeeded == false:
             return nil
-        case .acquiring(_, _, let task) where forceRestartIfNeeded == false,
-             .replacing(_, _, _, let task) where forceRestartIfNeeded == false:
+        case .acquiring(_, _, let task) where forceRestartIfNeeded == false:
             return task
-        case .stopped, .acquiring, .running, .replacing, .tearingDown, .failed:
+        case .replacing(_, let task):
+            return task
+        case .stopped, .acquiring, .running, .tearingDown, .failed:
             break
         }
 
         closePublishedRuntimeAdmission(in: previousState)
-        let generation = previousState.generation.successor()
         switch previousState {
-        case .running(_, let runtime, let mcp):
+        case .running(let sourceGeneration, let runtime, let mcp):
             return admitRuntimeReplacement(
-                generation: generation,
-                context: .init(retiringRuntime: runtime),
+                sourceGeneration: sourceGeneration,
+                retiringRuntime: runtime,
                 retainedMCP: mcp
             )
-        case .replacing(_, let context, let retainedMCP, let task):
-            task.cancel()
+        case .failed(let sourceGeneration, let retainedMCP?):
             return admitRuntimeReplacement(
-                generation: generation,
-                context: context,
-                retainedMCP: retainedMCP,
-                predecessor: task
-            )
-        case .failed(_, let retainedMCP?):
-            return admitRuntimeReplacement(
-                generation: generation,
-                context: .init(retiringRuntime: nil),
+                sourceGeneration: sourceGeneration,
+                retiringRuntime: nil,
                 retainedMCP: retainedMCP
             )
-        case .acquiring(_, let context, let task):
+        case .acquiring(let sourceGeneration, let context, let task):
             task.cancel()
             return admitRuntimeAcquisition(
-                generation: generation,
+                generation: sourceGeneration.successor(),
                 context: context,
                 predecessor: task
             )
-        case .tearingDown(_, _, _, let task):
+        case .tearingDown(let sourceGeneration, _, _, let task):
             return admitRuntimeAcquisition(
-                generation: generation,
+                generation: sourceGeneration.successor(),
                 predecessor: task
             )
-        case .stopped, .failed:
-            return admitRuntimeAcquisition(generation: generation)
+        case .stopped(let sourceGeneration),
+             .failed(let sourceGeneration, nil):
+            return admitRuntimeAcquisition(generation: sourceGeneration.successor())
+        case .replacing(_, let task):
+            return task
         }
     }
 
@@ -308,10 +303,11 @@ public final class CodexReviewStore {
                 )
             }
 
-        case .replacing(_, let context, _, let task):
+        case .replacing(let replacement, let task):
+            replacement.finish(.superseded(runtimeTransitionPurpose(for: intent)))
             task.cancel()
             await task.value
-            if let retiringRuntime = context.takeRetiringRuntime() {
+            if let retiringRuntime = replacement.takeRetiringRuntime() {
                 await closePublishedRuntimeForReplacement(retiringRuntime)
             }
             await stopMCPServer()
@@ -379,7 +375,7 @@ public final class CodexReviewStore {
             task.cancel()
             predecessor = task
             context = currentContext
-        case .replacing(_, _, _, let task):
+        case .replacing(_, let task):
             task.cancel()
             predecessor = task
             context = .init(recycling: previousState)
@@ -681,75 +677,66 @@ public final class CodexReviewStore {
     }
 
     private func admitRuntimeReplacement(
-        generation: ReviewRuntimeGeneration,
-        context: RuntimeReplacementContext,
-        retainedMCP: RetainedMCPServer,
-        predecessor: Task<Void, Never>? = nil
+        sourceGeneration: ReviewRuntimeGeneration,
+        retiringRuntime: PreparedRuntime?,
+        retainedMCP: RetainedMCPServer
     ) -> Task<Void, Never> {
+        let replacement = ReviewRuntimeRecoveryReplacement(
+            sourceGeneration: sourceGeneration,
+            retiringRuntime: retiringRuntime,
+            retainedMCP: retainedMCP
+        )
         serverState = .starting
         serverURL = retainedMCP.serverURL
         writeDiagnosticsIfNeeded()
         let task = Task<Void, Never> { @MainActor [weak self] in
-            if let predecessor {
-                await predecessor.value
-            }
             guard let self else {
                 return
             }
-            await self.performRuntimeReplacement(
-                generation: generation,
-                context: context,
-                retainedMCP: retainedMCP
-            )
+            await self.performRuntimeReplacement(replacement)
         }
         runtimeState = .replacing(
-            generation: generation,
-            context: context,
-            retainedMCP: retainedMCP,
+            replacement: replacement,
             task: task
         )
         return task
     }
 
     private func performRuntimeReplacement(
-        generation: ReviewRuntimeGeneration,
-        context: RuntimeReplacementContext,
-        retainedMCP: RetainedMCPServer
+        _ replacement: ReviewRuntimeRecoveryReplacement
     ) async {
-        guard isCurrentReplacement(generation) else {
+        guard isCurrentReplacement(replacement) else {
             return
         }
         var cutoverToken: CodexReviewSettingsService.RuntimeCutoverToken?
         var settingsServiceOwnsCutover = false
-        var closedPreviousRuntime = false
         var preparedRuntime: PreparedRuntime?
 
         do {
             let token = try await settingsService.beginRuntimeCutover()
             cutoverToken = token
 
-            if let retiringRuntime = context.takeRetiringRuntime() {
+            if let retiringRuntime = replacement.takeRetiringRuntime() {
                 await closePublishedRuntimeForReplacement(retiringRuntime)
-                closedPreviousRuntime = true
             }
-            guard isCurrentReplacement(generation) else {
+            guard isCurrentReplacement(replacement) else {
                 cancelRuntimeCutover(token)
                 return
             }
 
             let runtime = try await backend.prepareRuntime(
-                generation: generation,
+                generation: replacement.replacementGeneration,
                 purpose: .restartSameAccount
             )
             preparedRuntime = runtime
-            guard isCurrentReplacement(generation) else {
+            guard isCurrentReplacement(replacement) else {
                 await closeRuntime(runtime, purpose: .restartSameAccount)
                 cancelRuntimeCutover(token)
                 return
             }
 
             try await runtime.handle.activate()
-            guard isCurrentReplacement(generation) else {
+            guard isCurrentReplacement(replacement) else {
                 await closeRuntime(runtime, purpose: .restartSameAccount)
                 cancelRuntimeCutover(token)
                 return
@@ -760,7 +747,7 @@ public final class CodexReviewStore {
                 token: token,
                 snapshot: runtime.snapshot.settings
             )
-            guard isCurrentReplacement(generation) else {
+            guard isCurrentReplacement(replacement) else {
                 await closeRuntime(runtime, purpose: .restartSameAccount)
                 return
             }
@@ -770,28 +757,27 @@ public final class CodexReviewStore {
                 handle: runtime.handle,
                 auth: auth
             )
-            guard isCurrentReplacement(generation) else {
+            guard isCurrentReplacement(replacement) else {
                 await closeRuntime(runtime, purpose: .restartSameAccount)
                 return
             }
 
             runtimeState = .running(
-                generation: generation,
+                generation: replacement.replacementGeneration,
                 runtime: runtime,
-                mcp: retainedMCP
+                mcp: replacement.retainedMCP
             )
-            publishRuntime(serverURL: retainedMCP.serverURL)
+            publishRuntime(serverURL: replacement.retainedMCP.serverURL)
+            replacement.finish(.running(replacement.replacementGeneration))
             await backend.waitForRuntimePublication(handle: runtime.handle)
         } catch {
-            if closedPreviousRuntime == false,
-               let retiringRuntime = context.takeRetiringRuntime()
-            {
+            if let retiringRuntime = replacement.takeRetiringRuntime() {
                 await closePublishedRuntimeForReplacement(retiringRuntime)
             }
             if let preparedRuntime {
                 await closeRuntime(preparedRuntime, purpose: .restartSameAccount)
             }
-            let isCurrentGeneration = isCurrentReplacement(generation)
+            let isCurrentGeneration = isCurrentReplacement(replacement)
             let wasIntentionallyCancelled = Task.isCancelled || isCurrentGeneration == false
             if let cutoverToken, settingsServiceOwnsCutover == false {
                 if wasIntentionallyCancelled {
@@ -804,12 +790,13 @@ public final class CodexReviewStore {
                 return
             }
             runtimeState = .failed(
-                generation: generation,
-                retainedMCP: retainedMCP
+                generation: replacement.replacementGeneration,
+                retainedMCP: replacement.retainedMCP
             )
-            serverURL = retainedMCP.serverURL
+            serverURL = replacement.retainedMCP.serverURL
             serverState = .failed(error.localizedDescription)
             writeDiagnosticsIfNeeded()
+            replacement.finish(.failed(error.localizedDescription))
         }
     }
 
@@ -917,12 +904,23 @@ public final class CodexReviewStore {
     }
 
     private func isCurrentReplacement(
-        _ generation: ReviewRuntimeGeneration
+        _ replacement: ReviewRuntimeRecoveryReplacement
     ) -> Bool {
-        guard case .replacing(let currentGeneration, _, _, _) = runtimeState else {
+        guard case .replacing(let currentReplacement, _) = runtimeState else {
             return false
         }
-        return currentGeneration == generation
+        return currentReplacement === replacement
+    }
+
+    private func runtimeTransitionPurpose(
+        for intent: ReviewRuntimeTeardownIntent
+    ) -> ReviewRuntimeTransitionPurpose {
+        switch intent {
+        case .explicitStop:
+            .stop
+        case .unexpectedFailure:
+            .runtimeFailure
+        }
     }
 
     private func publishRuntime(serverURL: URL?) {
