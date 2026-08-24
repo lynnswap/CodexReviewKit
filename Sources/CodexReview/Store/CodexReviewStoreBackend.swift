@@ -100,9 +100,4 @@ extension CodexReviewStoreBackend {
         handle _: any RuntimeLifecycleHandle
     ) async {}
 
-    package func startReview(
-        _ request: CodexReviewBackendModel.Review.Start
-    ) async throws -> BackendReviewAttempt {
-        try await startReview(request, admission: .compatibility())
-    }
 }
