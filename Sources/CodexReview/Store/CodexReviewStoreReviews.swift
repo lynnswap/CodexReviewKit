@@ -496,7 +496,8 @@ extension CodexReviewStore {
             case .cleanupInterruptFailed(let message):
                 throw ReviewWorkerInputQueueError(failure: .workerContract(.init(message: message)))
             case .reviewEvent, .reviewStreamTerminal, .networkSnapshot,
-                 .networkOutageConfirmed, .networkRecoverySettled:
+                 .networkOutageConfirmed, .networkRecoverySettled,
+                 .recoveryDispositionCompleted:
                 continue
             }
         }
@@ -553,11 +554,14 @@ extension CodexReviewStore {
                 await receipt.cancelOwnedOperation(cancellation)
             }
             do {
-                if await receipt.source.admission.activeTerminalResolution() == nil {
+                let dispositionJoin = try receipt.reserveDispositionJoinIfPresent()
+                if dispositionJoin != nil,
+                   await receipt.source.admission.activeTerminalResolution() == nil {
                     guard let inputs else { throw recoveryOwnershipFailure("drain recovery cancellation") }
                     try await recordNextTerminal(for: receipt.source, inputs: inputs)
                 }
-                if let join = try receipt.joinOwnedOperationIfPresent() {
+                let join = try dispositionJoin ?? receipt.joinOwnedOperationIfPresent()
+                if let join {
                     let completion = try await join.value
                     if case .disposition(let disposition) = completion {
                         failure = failure ?? cleanupFailure(
@@ -785,6 +789,11 @@ extension CodexReviewStore {
         guard job.isTerminal == false else {
             return .init(jobID: job.id, cancelled: false, core: job.core)
         }
+        guard let ownership = reviewAttemptOwnerships[jobID] else {
+            throw ReviewAttemptContractFailure(
+                message: "Review cancellation requires its exact Store attempt owner."
+            )
+        }
 
         let requestedCancellation = authoritativeCancellation(
             for: job,
@@ -792,7 +801,7 @@ extension CodexReviewStore {
         )
         recordCancellationRequest(requestedCancellation, for: job)
 
-        switch reviewAttemptOwnerships[jobID] {
+        switch ownership {
         case .recovering(let receipt):
             await receipt.cancelOwnedOperation(requestedCancellation)
             reviewWorkerTasks[jobID]?.cancel()
@@ -826,12 +835,6 @@ extension CodexReviewStore {
                 jobID: job.id,
                 sessionID: job.sessionID,
                 cancellation: startupCancellation
-            )
-        case nil:
-            try completeCancellationLocally(
-                jobID: job.id,
-                sessionID: job.sessionID,
-                cancellation: requestedCancellation
             )
         }
         return .init(
@@ -987,6 +990,7 @@ extension CodexReviewStore {
         var recoveryState = ReviewNetworkRecoveryLoopState()
         var activeEventSubscriptionID: Int? = inputs.initialEventSubscriptionID
         while let input = await inputs.next() {
+            if Task.isCancelled { throw CancellationError() }
             if job.isTerminal {
                 return
             }
@@ -1018,10 +1022,13 @@ extension CodexReviewStore {
                     )
                     if job.isTerminal { return }
                 case .recovering(let receipt) where receipt.source.matches(event.source):
-                    guard terminal != nil else { continue }
+                    guard terminal != nil,
+                          let dispositionJoin = try receipt.reserveDispositionJoinIfPresent()
+                    else { continue }
                     activeEventSubscriptionID = nil
                     let effect = try await finishRecoveryDisposition(
                         receipt,
+                        dispositionJoin: dispositionJoin,
                         terminalEvent: event.event,
                         job: job,
                         inputs: inputs
@@ -1071,9 +1078,11 @@ extension CodexReviewStore {
                     }
                     try throwReviewEventStreamFailure(failure)
                 case .recovering(let receipt) where receipt.source.matches(streamTerminal.source):
+                    guard let dispositionJoin = try receipt.reserveDispositionJoinIfPresent() else { continue }
                     activeEventSubscriptionID = nil
                     let effect = try await finishRecoveryDisposition(
                         receipt,
+                        dispositionJoin: dispositionJoin,
                         terminalEvent: nil,
                         job: job,
                         inputs: inputs
@@ -1122,22 +1131,57 @@ extension CodexReviewStore {
                 reviewAttemptOwnerships[job.id] = .recovering(receipt)
                 markReviewWaitingForNetworkRecovery(job)
                 try receipt.startDisposition { [backend = self.backend] in
-                    try await active.admission.beginRecovery(
-                        active.run,
-                        trigger: .recoverableNetworkLoss
-                    ) { requestAdmission, reason in
-                        try await backend.interruptReview(requestAdmission, reason: reason)
+                    do {
+                        let disposition = try await active.admission.beginRecovery(
+                            active.run,
+                            trigger: .recoverableNetworkLoss
+                        ) { requestAdmission, reason in
+                            try await backend.interruptReview(requestAdmission, reason: reason)
+                        }
+                        await inputs.queue.send(.recoveryDispositionCompleted(receipt))
+                        return disposition
+                    } catch {
+                        await inputs.queue.send(.recoveryDispositionCompleted(receipt))
+                        throw error
                     }
                 }
                 if hadPendingTerminal {
+                    guard let dispositionJoin = try receipt.reserveDispositionJoinIfPresent() else {
+                        throw recoveryOwnershipFailure("reserve pending disposition")
+                    }
                     let effect = try await finishRecoveryDisposition(
                         receipt,
+                        dispositionJoin: dispositionJoin,
                         terminalEvent: nil,
                         job: job,
                         inputs: inputs
                     )
                     activeEventSubscriptionID = nil
                     if effect == .finished { return }
+                }
+            case .recoveryDispositionCompleted(let receipt):
+                guard case .recovering(let current) = reviewAttemptOwnerships[job.id],
+                      current === receipt,
+                      let dispositionJoin = try receipt.reserveDispositionJoinIfPresent()
+                else { continue }
+                let effect = try await finishRecoveryDisposition(
+                    receipt,
+                    dispositionJoin: dispositionJoin,
+                    terminalEvent: nil,
+                    job: job,
+                    inputs: inputs
+                )
+                activeEventSubscriptionID = nil
+                if effect == .finished { return }
+                if recoveryState.isReadyToStageRecovery,
+                   let subscriptionID = try await stagePreparedRecovery(
+                       receipt,
+                       job: job,
+                       startRequest: startRequest,
+                       inputs: inputs,
+                       recoveryState: &recoveryState
+                   ) {
+                    activeEventSubscriptionID = subscriptionID
                 }
             case .cleanupInterruptFailed(let message):
                 throw ReviewWorkerInputQueueError(failure: .workerContract(.init(message: message)))
@@ -1180,12 +1224,13 @@ extension CodexReviewStore {
 
     private func finishRecoveryDisposition(
         _ receipt: StoreReviewRecoveryReceipt,
+        dispositionJoin: Task<StoreReviewRecoveryReceipt.Completion, any Error>,
         terminalEvent: CodexReviewBackendModel.Review.Event?,
         job: CodexReviewJob,
         inputs: ReviewWorkerInputs
     ) async throws -> RecoveryDispositionEffect {
         try requireRecoveryReceipt(receipt, jobID: job.id, operation: "join disposition")
-        guard case .disposition(let disposition) = try await receipt.joinOwnedOperation().value else {
+        guard case .disposition(let disposition) = try await dispositionJoin.value else {
             throw recoveryOwnershipFailure("receive disposition")
         }
         try requireRecoveryReceipt(receipt, jobID: job.id, operation: "publish disposition")
@@ -1225,7 +1270,7 @@ extension CodexReviewStore {
         guard recoveryState.isReadyToStageRecovery,
               await inputs.networkStatusTracker.currentStatus() == .satisfied,
               case .running(let destinationGeneration, _, _) = runtimeState else { return nil }
-        try requireRecoveryReceipt(receipt, jobID: job.id, operation: "start staging")
+        try requireRecoveryMutation(receipt, job: job, operation: "start staging")
         let admission = ReviewStartAdmission()
         try receipt.startStaging(admission: admission) {
             [backend] prepared async throws(ReviewRecoveryStagingFailure) -> StagedReviewRecovery in
@@ -1239,7 +1284,7 @@ extension CodexReviewStore {
         guard case .staged = try await receipt.joinOwnedOperation().value else {
             throw recoveryOwnershipFailure("receive staging")
         }
-        try requireRecoveryReceipt(receipt, jobID: job.id, operation: "publish staging")
+        try requireRecoveryMutation(receipt, job: job, operation: "start commit")
         try receipt.startCommit { [backend] staged in
             try await backend.commitReviewRecovery(staged)
         }
@@ -1300,6 +1345,17 @@ extension CodexReviewStore {
     ) throws {
         guard case .recovering(let current) = reviewAttemptOwnerships[jobID],
               current === receipt else { throw recoveryOwnershipFailure(operation) }
+    }
+
+    private func requireRecoveryMutation(
+        _ receipt: StoreReviewRecoveryReceipt,
+        job: CodexReviewJob,
+        operation: String
+    ) throws {
+        try requireRecoveryReceipt(receipt, jobID: job.id, operation: operation)
+        if Task.isCancelled || job.isTerminal || job.cancellationRequested {
+            throw CancellationError()
+        }
     }
 
     func handleReviewEvent(
@@ -1678,6 +1734,7 @@ private enum ReviewWorkerInput: Sendable {
     case networkSnapshot(CodexReviewNetworkSnapshot, recoveryGeneration: Int)
     case networkOutageConfirmed
     case networkRecoverySettled(recoveryGeneration: Int)
+    case recoveryDispositionCompleted(StoreReviewRecoveryReceipt)
     case cleanupInterruptFailed(String)
 }
 

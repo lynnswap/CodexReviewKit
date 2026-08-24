@@ -154,6 +154,12 @@ package final class StoreReviewRecoveryReceipt {
         return try joinOwnedOperation()
     }
 
+    package func reserveDispositionJoinIfPresent() throws -> Task<Completion, any Error>? {
+        guard joinIsReserved == false,
+              case .disposition = ownedOperation else { return nil }
+        return try joinOwnedOperation()
+    }
+
     package var isPreparedForStaging: Bool {
         guard ownedOperation == nil, joinIsReserved == false,
               case .prepared = phase else { return false }

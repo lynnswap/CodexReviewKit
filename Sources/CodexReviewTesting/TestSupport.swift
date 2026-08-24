@@ -1074,6 +1074,10 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     private var runtimePublicationEntryWaiters: [CheckedContinuation<Void, Never>] = []
     private var runtimePublicationReleaseWaiters: [CheckedContinuation<Void, Never>] = []
     private var scriptedReviewRecoveryRoute: ScriptedReviewRecoveryRoute?
+    private var reviewRecoveryStageGate: AsyncGate?
+    private var reviewRecoveryStageStartedGate = AsyncGate()
+    private var reviewRecoveryCommitGate: AsyncGate?
+    private var reviewRecoveryCommitStartedGate = AsyncGate()
 
     package init(
         reviewBackend: FakeCodexReviewBackend,
@@ -1103,6 +1107,24 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
             )
         }
         scriptedReviewRecoveryRoute = .ready(sourceGeneration, destinationGeneration)
+    }
+
+    package func holdReviewRecoveryStage(with gate: AsyncGate) {
+        reviewRecoveryStageGate = gate
+        reviewRecoveryStageStartedGate = AsyncGate()
+    }
+
+    package func waitForReviewRecoveryStage() async {
+        await reviewRecoveryStageStartedGate.wait()
+    }
+
+    package func holdReviewRecoveryCommit(with gate: AsyncGate) {
+        reviewRecoveryCommitGate = gate
+        reviewRecoveryCommitStartedGate = AsyncGate()
+    }
+
+    package func waitForReviewRecoveryCommit() async {
+        await reviewRecoveryCommitStartedGate.wait()
     }
 
     package func holdRuntimePreparation(with gate: AsyncGate) {
@@ -1428,6 +1450,9 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         }
         scriptedReviewRecoveryRoute = .staging
         reviewRecoveryCommands.append(.stage(prepared, destinationGeneration, admission))
+        await reviewRecoveryStageStartedGate.open()
+        await reviewRecoveryStageGate?.waitIgnoringCancellation()
+        reviewRecoveryStageGate = nil
         do {
             let attempt = try await reviewBackend.resumeReviewRecovery(
                 prepared.handoff,
@@ -1467,6 +1492,9 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         }
         scriptedReviewRecoveryRoute = nil
         reviewRecoveryCommands.append(.commit(staged))
+        await reviewRecoveryCommitStartedGate.open()
+        await reviewRecoveryCommitGate?.waitIgnoringCancellation()
+        reviewRecoveryCommitGate = nil
     }
 
     package func discardReviewRecovery(_ prepared: PreparedReviewRecovery) async throws {

@@ -168,10 +168,13 @@ extension CodexReviewStore {
         return activeJobIDs
     }
 
+    package var reviewWorkerJobIDsForRuntimeStop: [String] {
+        reviewWorkerTasks.keys.sorted()
+    }
+
     @discardableResult
     package func cancelActiveReviewsLocallyForRuntimeStop(
-        reason: ReviewCancellation = .system(message: "Review runtime stopped."),
-        cancelWorkers: Bool = true
+        reason: ReviewCancellation = .system(message: "Review runtime stopped.")
     ) -> [String] {
         let activeJobIDs = orderedJobs
             .filter { $0.isTerminal == false }
@@ -188,15 +191,18 @@ extension CodexReviewStore {
                     cancellation: reason
                 )
             }
-            if cancelWorkers {
-                reviewWorkerTasks[jobID]?.cancel()
-            }
         }
         return activeJobIDs
     }
 
-    package func cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: [String]) {
+    package func cancelAndDetachReviewWorkersForRuntimeStop(
+        jobIDs: [String],
+        reason: ReviewCancellation
+    ) async {
         for jobID in jobIDs {
+            if case .recovering(let receipt) = reviewAttemptOwnerships[jobID] {
+                await receipt.cancelOwnedOperation(reason)
+            }
             if let task = reviewWorkerTasks.removeValue(forKey: jobID) {
                 task.cancel()
                 runtimeStopDetachedReviewWorkerTasks[jobID] = task

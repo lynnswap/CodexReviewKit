@@ -2157,6 +2157,56 @@ struct CodexReviewHostTests {
         #expect(await transport.recordedRequests().map(\.method).contains("turn/interrupt"))
     }
 
+    @Test func liveStoreStopDetachesStartingWorkerFromPreCancellationSnapshot() async throws {
+        let homeURL = try temporaryHome()
+        let reviewStartGate = AsyncGate()
+        let transport = FakeJSONRPCTransport()
+        await transport.holdNextIgnoringCancellation(method: "review/start", gate: reviewStartGate)
+        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
+        try await transport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await transport.enqueue(
+            AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"),
+            for: "thread/start"
+        )
+        try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-1"), for: "review/start")
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            shutdownCleanupTimeout: .milliseconds(20),
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        let review = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            await transport.recordedRequests().contains { $0.method == "review/start" }
+        })
+        let job = try #require(store.jobs.first)
+        guard case .starting = store.reviewAttemptOwnerships[job.id] else {
+            Issue.record("Expected the held review/start to retain its starting owner.")
+            return
+        }
+
+        await store.stop()
+        let result = try #require(try await waitForTaskValue(review, timeout: .seconds(1)))
+        await reviewStartGate.open()
+
+        #expect(result.core.lifecycle.status == .cancelled)
+        #expect(store.reviewWorkerTasks[job.id] == nil)
+        #expect(store.reviewAttemptOwnerships[job.id] == nil)
+        #expect(await transport.isClosedForTesting())
+    }
+
     @Test func liveStoreStopDrainsRecoveryWaitingWorkerCleanupBeforeDroppingBackend() async throws {
         let homeURL = try temporaryHome()
         let cleanupGate = AsyncGate()

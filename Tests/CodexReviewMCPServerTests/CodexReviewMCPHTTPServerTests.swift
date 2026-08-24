@@ -1573,40 +1573,24 @@ struct CodexReviewMCPHTTPServerTests {
     @Test func streamableHTTPCancelsReviewByTransportScopedSelector() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-running" })
         )
 
         try await withHTTPServer(store: store) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
-            let running = CodexReviewJob.makeForTesting(
-                id: "job-running",
-                sessionID: sessionID,
-                cwd: "/tmp/project",
-                targetSummary: "Uncommitted changes",
-                threadID: "thread-1",
-                turnID: "turn-1",
-                status: .running,
-                summary: "Running"
-            )
-            let otherSession = CodexReviewJob.makeForTesting(
-                id: "job-other-session",
-                sessionID: "other-session",
-                cwd: "/tmp/project",
-                targetSummary: "Uncommitted changes",
-                threadID: "thread-2",
-                turnID: "turn-2",
-                status: .running,
-                summary: "Running"
-            )
-            store.loadForTesting(
-                serverState: .running,
-                workspaces: [.init(cwd: "/tmp/project")],
-                jobs: [running, otherSession]
-            )
-            let response = try await postJSONRPC(
-                endpoint: await server.url,
-                sessionID: sessionID,
-                body: [
+            let review = Task { @MainActor in
+                try await store.startReview(
+                    sessionID: sessionID,
+                    request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+                )
+            }
+            try #require(await StoreSnapshotProbe(store: store).waitUntilRunAttempt(
+                "attempt-1",
+                jobID: "job-running"
+            ) != nil)
+            let cancellation = Task {
+                let response = try await postJSONRPC(endpoint: await server.url, sessionID: sessionID, body: [
                     "jsonrpc": "2.0",
                     "id": 2,
                     "method": "tools/call",
@@ -1619,8 +1603,15 @@ struct CodexReviewMCPHTTPServerTests {
                             "reason": "Stop from MCP",
                         ],
                     ],
-                ]
+                ])
+                return try JSONSerialization.data(withJSONObject: response)
+            }
+            try await backend.waitForInterruptReview(timeout: .seconds(2))
+            await backend.yield(.cancelled("Stop from MCP"))
+            let response = try #require(
+                JSONSerialization.jsonObject(with: try await cancellation.value) as? [String: Any]
             )
+            let result = try await review.value
 
             #expect(response.value(for: ["result", "structuredContent", "jobId"]) as? String == "job-running")
             #expect(response.value(for: ["result", "structuredContent", "cancelled"]) as? Bool == true)
@@ -1628,50 +1619,32 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(response.value(for: ["result", "structuredContent", "lifecycle", "terminal", "cause", "kind"]) as? String == "requested")
             #expect(response.value(for: ["result", "structuredContent", "lifecycle", "terminal", "cause", "source"]) as? String == "mcpClient")
             #expect(response.value(for: ["result", "structuredContent", "lifecycle", "terminal", "cause", "message"]) as? String == "Stop from MCP")
-            #expect(running.core.lifecycle.status == .cancelled)
-            #expect(running.core.lifecycle.cancellation?.message == "Stop from MCP")
-            #expect(otherSession.cancellationRequested == false)
+            #expect(result.core.lifecycle.status == .cancelled)
+            #expect(result.core.lifecycle.cancellation?.message == "Stop from MCP")
         }
     }
 
     @Test func streamableHTTPCancelDefaultsSelectorToActiveJobsInTransportSession() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-running" })
         )
 
         try await withHTTPServer(store: store) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
-            let completed = CodexReviewJob.makeForTesting(
-                id: "job-completed",
-                sessionID: sessionID,
-                cwd: "/tmp/project",
-                targetSummary: "Completed",
-                threadID: "thread-completed",
-                turnID: "turn-completed",
-                status: .succeeded,
-                summary: "Done"
-            )
-            let running = CodexReviewJob.makeForTesting(
-                id: "job-running",
-                sessionID: sessionID,
-                cwd: "/tmp/project",
-                targetSummary: "Running",
-                threadID: "thread-running",
-                turnID: "turn-running",
-                status: .running,
-                summary: "Running"
-            )
-            store.loadForTesting(
-                serverState: .running,
-                workspaces: [.init(cwd: "/tmp/project")],
-                jobs: [completed, running]
-            )
-
-            let response = try await postJSONRPC(
-                endpoint: await server.url,
-                sessionID: sessionID,
-                body: [
+            let review = Task { @MainActor in
+                try await store.startReview(
+                    sessionID: sessionID,
+                    request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+                )
+            }
+            try #require(await StoreSnapshotProbe(store: store).waitUntilRunAttempt(
+                "attempt-1",
+                jobID: "job-running"
+            ) != nil)
+            let cancellation = Task {
+                let response = try await postJSONRPC(endpoint: await server.url, sessionID: sessionID, body: [
                     "jsonrpc": "2.0",
                     "id": 2,
                     "method": "tools/call",
@@ -1682,13 +1655,19 @@ struct CodexReviewMCPHTTPServerTests {
                             "reason": "Stop from MCP",
                         ],
                     ],
-                ]
+                ])
+                return try JSONSerialization.data(withJSONObject: response)
+            }
+            try await backend.waitForInterruptReview(timeout: .seconds(2))
+            await backend.yield(.cancelled("Stop from MCP"))
+            let response = try #require(
+                JSONSerialization.jsonObject(with: try await cancellation.value) as? [String: Any]
             )
+            let result = try await review.value
 
             #expect(response.value(for: ["result", "structuredContent", "jobId"]) as? String == "job-running")
             #expect(response.value(for: ["result", "structuredContent", "cancelled"]) as? Bool == true)
-            #expect(completed.core.lifecycle.status == .succeeded)
-            #expect(running.core.lifecycle.status == .cancelled)
+            #expect(result.core.lifecycle.status == .cancelled)
         }
     }
 
@@ -1755,31 +1734,24 @@ struct CodexReviewMCPHTTPServerTests {
     @Test func streamableHTTPCancelsDocumentedJobId() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-running" })
         )
 
         try await withHTTPServer(store: store) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
-            let running = CodexReviewJob.makeForTesting(
-                id: "job-running",
-                sessionID: sessionID,
-                cwd: "/tmp/project",
-                targetSummary: "Running",
-                threadID: "thread-running",
-                turnID: "turn-running",
-                status: .running,
-                summary: "Running"
-            )
-            store.loadForTesting(
-                serverState: .running,
-                workspaces: [.init(cwd: "/tmp/project")],
-                jobs: [running]
-            )
-
-            let response = try await postJSONRPC(
-                endpoint: await server.url,
-                sessionID: sessionID,
-                body: [
+            let review = Task { @MainActor in
+                try await store.startReview(
+                    sessionID: sessionID,
+                    request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+                )
+            }
+            try #require(await StoreSnapshotProbe(store: store).waitUntilRunAttempt(
+                "attempt-1",
+                jobID: "job-running"
+            ) != nil)
+            let cancellation = Task {
+                let response = try await postJSONRPC(endpoint: await server.url, sessionID: sessionID, body: [
                     "jsonrpc": "2.0",
                     "id": 2,
                     "method": "tools/call",
@@ -1790,11 +1762,18 @@ struct CodexReviewMCPHTTPServerTests {
                             "reason": "Stop from MCP",
                         ],
                     ],
-                ]
+                ])
+                return try JSONSerialization.data(withJSONObject: response)
+            }
+            try await backend.waitForInterruptReview(timeout: .seconds(2))
+            await backend.yield(.cancelled("Stop from MCP"))
+            let response = try #require(
+                JSONSerialization.jsonObject(with: try await cancellation.value) as? [String: Any]
             )
+            let result = try await review.value
 
             #expect(response.value(for: ["result", "structuredContent", "jobId"]) as? String == "job-running")
-            #expect(running.core.lifecycle.status == .cancelled)
+            #expect(result.core.lifecycle.status == .cancelled)
         }
     }
 
@@ -1971,31 +1950,34 @@ struct CodexReviewMCPHTTPServerTests {
     @Test func streamableHTTPDeleteClosesStoreSession() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-running" })
         )
 
         try await withHTTPServer(store: store) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
-            let running = CodexReviewJob.makeForTesting(
-                id: "job-running",
-                sessionID: sessionID,
-                cwd: "/tmp/project",
-                targetSummary: "Running",
-                threadID: "thread-running",
-                turnID: "turn-running",
-                status: .running,
-                summary: "Running"
-            )
-            store.loadForTesting(
-                serverState: .running,
-                workspaces: [.init(cwd: "/tmp/project")],
-                jobs: [running]
-            )
-
-            let response = try await deleteSession(endpoint: await server.url, sessionID: sessionID)
+            let review = Task { @MainActor in
+                try await store.startReview(
+                    sessionID: sessionID,
+                    request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+                )
+            }
+            try #require(await StoreSnapshotProbe(store: store).waitUntilRunAttempt(
+                "attempt-1",
+                jobID: "job-running"
+            ) != nil)
+            let deletion = Task {
+                try await deleteSession(endpoint: await server.url, sessionID: sessionID)
+            }
+            try await backend.waitForInterruptReview(timeout: .seconds(2))
+            await backend.yield(.cancelled(
+                "Cancellation requested because the MCP session closed."
+            ))
+            let response = try await deletion.value
+            let result = try await review.value
 
             #expect(response.statusCode == 200)
-            #expect(running.core.lifecycle.status == .cancelled)
+            #expect(result.core.lifecycle.status == .cancelled)
             await #expect(throws: (any Error).self) {
                 try await store.startReview(
                     sessionID: sessionID,

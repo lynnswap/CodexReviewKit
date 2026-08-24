@@ -517,6 +517,9 @@ public final class CodexReviewStore {
             accountRateLimitAutoRefreshDriver?.closeAdmission()
         }
         for jobID in reviewWorkerJobIDs {
+            if case .recovering(let receipt) = reviewAttemptOwnerships[jobID] {
+                await receipt.cancelOwnedOperation(reason)
+            }
             reviewWorkerTasks[jobID]?.cancel()
         }
         let result = await operation.task.value
@@ -937,11 +940,11 @@ public final class CodexReviewStore {
         }
         await backend.stop(store: self, intent: intent)
         let remainingLocallyCancelledJobIDs = cancelActiveReviewsLocallyForRuntimeStop(
-            reason: intent.reviewCancellation,
-            cancelWorkers: false
+            reason: intent.reviewCancellation
         )
-        cancelAndDetachReviewWorkersForRuntimeStop(
-            jobIDs: Array(Set(locallyCancelledJobIDs + remainingLocallyCancelledJobIDs))
+        await cancelAndDetachReviewWorkersForRuntimeStop(
+            jobIDs: Array(Set(locallyCancelledJobIDs + remainingLocallyCancelledJobIDs)),
+            reason: intent.reviewCancellation
         )
     }
 
