@@ -119,20 +119,6 @@ package struct RetainedMCPServer: Sendable {
 }
 
 @MainActor
-package final class RuntimeReplacementContext {
-    private var retiringRuntime: PreparedRuntime?
-
-    package init(retiringRuntime: PreparedRuntime?) {
-        self.retiringRuntime = retiringRuntime
-    }
-
-    package func takeRetiringRuntime() -> PreparedRuntime? {
-        defer { retiringRuntime = nil }
-        return retiringRuntime
-    }
-}
-
-@MainActor
 package final class RuntimeAcquisitionContext {
     private var recyclingState: ReviewStoreRuntimeState?
 
@@ -159,9 +145,7 @@ package enum ReviewStoreRuntimeState {
         mcp: RetainedMCPServer
     )
     case replacing(
-        generation: ReviewRuntimeGeneration,
-        context: RuntimeReplacementContext,
-        retainedMCP: RetainedMCPServer,
+        replacement: ReviewRuntimeRecoveryReplacement,
         task: Task<Void, Never>
     )
     case tearingDown(
@@ -180,10 +164,11 @@ package enum ReviewStoreRuntimeState {
         case .stopped(let generation),
              .acquiring(let generation, _, _),
              .running(let generation, _, _),
-             .replacing(let generation, _, _, _),
              .tearingDown(let generation, _, _, _),
              .failed(let generation, _):
             generation
+        case .replacing(let replacement, _):
+            replacement.replacementGeneration
         }
     }
 }
