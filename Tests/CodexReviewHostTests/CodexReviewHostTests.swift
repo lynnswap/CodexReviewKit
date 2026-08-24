@@ -688,6 +688,131 @@ struct CodexReviewHostTests {
         await store.stop()
     }
 
+    @Test func liveTypedRecoveryDestinationCommitsOnlyItsExactGeneration() async throws {
+        let fixture = try await makeLiveTypedRecoveryFixture()
+        let methodsBeforeStaging = await fixture.destination.recordedRequests().map(\.method)
+        await #expect(throws: ReviewAttemptContractFailure.self) {
+            try await fixture.store.backend.stageReviewRecovery(
+                fixture.prepared,
+                destinationGeneration: fixture.destinationGeneration.successor(),
+                request: fixture.request,
+                admission: ReviewStartAdmission()
+            )
+        }
+        #expect(await fixture.destination.recordedRequests().map(\.method) == methodsBeforeStaging)
+        let admission = ReviewStartAdmission()
+        let staged = try await fixture.store.backend.stageReviewRecovery(
+            fixture.prepared,
+            destinationGeneration: fixture.destinationGeneration,
+            request: fixture.request,
+            admission: admission
+        )
+        let methodsAfterStaging = await fixture.destination.recordedRequests().map(\.method)
+        await #expect(throws: ReviewAttemptContractFailure.self) {
+            try await fixture.store.backend.stageReviewRecovery(
+                fixture.prepared,
+                destinationGeneration: fixture.destinationGeneration,
+                request: fixture.request,
+                admission: ReviewStartAdmission()
+            )
+        }
+        #expect(await fixture.destination.recordedRequests().map(\.method) == methodsAfterStaging)
+        let reconstructed = StagedReviewRecovery(
+            receipt: staged.receipt,
+            destinationGeneration: staged.destinationGeneration,
+            attempt: staged.attempt,
+            admission: staged.admission
+        )
+        await #expect(throws: ReviewAttemptContractFailure.self) {
+            try await fixture.store.backend.commitReviewRecovery(reconstructed)
+        }
+        #expect(await fixture.destination.recordedRequests().map(\.method) == methodsAfterStaging)
+        try await fixture.store.backend.commitReviewRecovery(staged)
+        #expect(fixture.store.liveReviewRecoveryRouteCountForTesting == 0)
+        #expect(fixture.store.liveReviewAttemptRouteCountForTesting == 1)
+        await #expect(throws: ReviewAttemptContractFailure.self) {
+            try await fixture.store.backend.commitReviewRecovery(staged)
+        }
+        await #expect(throws: ReviewAttemptContractFailure.self) {
+            try await fixture.store.backend.discardReviewRecovery(staged)
+        }
+        #expect(await fixture.destination.recordedRequests().map(\.method) == methodsAfterStaging)
+        try await fixture.store.backend.cleanupReview(staged.attempt.run)
+        #expect(fixture.store.liveReviewAttemptRouteCountForTesting == 0)
+        let sourceMethods = await fixture.source.recordedRequests().map(\.method)
+        let destinationMethods = await fixture.destination.recordedRequests().map(\.method)
+        #expect(sourceMethods.contains("thread/rollback") == false)
+        #expect(destinationMethods.filter { $0 == "thread/rollback" }.count == 1)
+        #expect(destinationMethods.filter { $0 == "review/start" }.count == 1)
+        await fixture.store.stop()
+    }
+
+    @Test func liveTypedRecoveryDestinationDiscardIsTerminalAndExact() async throws {
+        let fixture = try await makeLiveTypedRecoveryFixture()
+        let staged = try await fixture.store.backend.stageReviewRecovery(
+            fixture.prepared,
+            destinationGeneration: fixture.destinationGeneration,
+            request: fixture.request,
+            admission: ReviewStartAdmission()
+        )
+        try await staged.admission.recordCanonicalTerminal(
+            .interrupted(.server(message: "Recovery superseded")),
+            for: staged.attempt.run
+        )
+        await #expect(throws: ReviewAttemptContractFailure.self) {
+            try await fixture.store.backend.commitReviewRecovery(staged)
+        }
+        try await fixture.store.backend.discardReviewRecovery(staged)
+        #expect(fixture.store.liveReviewAttemptRouteCountForTesting == 0)
+        #expect(fixture.store.liveReviewRecoveryRouteCountForTesting == 0)
+        let methods = await fixture.destination.recordedRequests().map(\.method)
+        await #expect(throws: ReviewAttemptContractFailure.self) {
+            try await fixture.store.backend.discardReviewRecovery(staged)
+        }
+        #expect(await fixture.destination.recordedRequests().map(\.method) == methods)
+        #expect(methods.filter { $0 == "thread/unsubscribe" }.count == 1)
+        await fixture.store.stop()
+    }
+
+    @Test(arguments: [false, true])
+    func liveTypedRecoveryDestinationCleansFailedStart(cancelAfterRollback: Bool) async throws {
+        let fixture = try await makeLiveTypedRecoveryFixture(
+            outcomeUnknown: cancelAfterRollback == false
+        )
+        let retainedHandoff = fixture.prepared.handoff
+        let admission = ReviewStartAdmission()
+        if cancelAfterRollback {
+            await fixture.destination.beforeReturningNextResponse(
+                method: "thread/rollback"
+            ) {
+                await admission.recordCancellation(.system())
+            }
+        }
+        await #expect(throws: (any Error).self) {
+            try await fixture.store.backend.stageReviewRecovery(
+                fixture.prepared,
+                destinationGeneration: fixture.destinationGeneration,
+                request: fixture.request,
+                admission: admission
+            )
+        }
+        #expect(fixture.store.liveReviewAttemptRouteCountForTesting == 0)
+        #expect(fixture.store.liveReviewRecoveryRouteCountForTesting == 0)
+        let methods = await fixture.destination.recordedRequests().map(\.method)
+        #expect(methods.filter { $0 == "thread/rollback" }.count == 1)
+        #expect(methods.filter { $0 == "review/start" }.count == (cancelAfterRollback ? 0 : 1))
+        #expect(methods.filter { $0 == "thread/unsubscribe" }.count == 1)
+        #expect(methods.filter { $0 == "thread/backgroundTerminals/clean" }.count == 1)
+        await #expect(throws: ReviewRecoveryHandoffAlreadyConsumed.self) {
+            try await retainedHandoff.consume()
+        }
+        await #expect(throws: ReviewRecoveryHandoffAlreadyConsumed.self) {
+            try await fixture.store.backend.discardReviewRecovery(fixture.prepared)
+        }
+        #expect(await fixture.destination.recordedRequests().map(\.method) == methods)
+        await fixture.store.stop()
+    }
+
     @Test func liveLateInterruptNeverFallsThroughToReplacementRuntime() async throws {
         let sourceTransport = FakeJSONRPCTransport()
         let replacementTransport = FakeJSONRPCTransport()
@@ -2765,6 +2890,67 @@ private func makeRecoveryCandidate(
         throw ReviewAttemptContractFailure(message: "Expected a recovery candidate.")
     }
     return candidate
+}
+
+@MainActor
+private struct LiveTypedRecoveryFixture {
+    var store: CodexReviewStore
+    var source: FakeJSONRPCTransport
+    var destination: FakeJSONRPCTransport
+    var request: CodexReviewBackendModel.Review.Start
+    var prepared: PreparedReviewRecovery
+    var destinationGeneration: ReviewRuntimeGeneration
+}
+@MainActor
+private func makeLiveTypedRecoveryFixture(
+    outcomeUnknown: Bool = false
+) async throws -> LiveTypedRecoveryFixture {
+    let source = FakeJSONRPCTransport()
+    let destination = FakeJSONRPCTransport()
+    try await enqueueRuntimeStartResponses(source)
+    try await enqueueRuntimeStartResponses(destination)
+    try await enqueueLiveRouteReviewStartResponses(
+        source,
+        threadID: "typed-stage-thread",
+        turnID: "typed-stage-source-turn",
+        reviewThreadID: "typed-stage-source-review"
+    )
+    try await destination.enqueue(EmptyResponse(), for: "thread/rollback")
+    if outcomeUnknown {
+        await destination.enqueueCancellation(for: "review/start")
+    } else {
+        try await destination.enqueue(
+            AppServerAPI.Review.Start.Response(
+                turnID: "typed-stage-destination-turn",
+                reviewThreadID: "typed-stage-destination-review"
+            ),
+            for: "review/start"
+        )
+    }
+    try await enqueueReviewCleanupResponses(destination)
+    var transports = [source, destination]
+    let store = CodexReviewStore.makeLiveStoreForTesting(
+        environment: ["HOME": try temporaryHome().path],
+        webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+        transportFactory: { _ in transports.removeFirst() }
+    )
+    await store.start()
+    let request = makeLiveRouteReviewStartRequest(jobID: "job-typed-stage")
+    let attempt = try await store.backend.startReview(
+        request,
+        admission: ReviewStartAdmission()
+    )
+    let candidate = try await makeRecoveryCandidate(for: attempt.run)
+    let prepared = try await store.backend.prepareReviewRecovery(candidate)
+    await store.restart()
+    return .init(
+        store: store,
+        source: source,
+        destination: destination,
+        request: request,
+        prepared: prepared,
+        destinationGeneration: .init(rawValue: store.runtimeLifecycleAdmissionGeneration)
+    )
 }
 
 private func temporaryHome() throws -> URL {

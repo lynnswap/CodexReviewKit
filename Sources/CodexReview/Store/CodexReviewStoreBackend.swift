@@ -76,7 +76,15 @@ package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend, Sendable {
     func prepareReviewRecovery(
         _ candidate: ReviewRecoveryCandidate
     ) async throws -> PreparedReviewRecovery
+    func stageReviewRecovery(
+        _ prepared: PreparedReviewRecovery,
+        destinationGeneration: ReviewRuntimeGeneration,
+        request: CodexReviewBackendModel.Review.Start,
+        admission: ReviewStartAdmission
+    ) async throws -> StagedReviewRecovery
+    func commitReviewRecovery(_ staged: StagedReviewRecovery) async throws
     func discardReviewRecovery(_ prepared: PreparedReviewRecovery) async throws
+    func discardReviewRecovery(_ staged: StagedReviewRecovery) async throws
     func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws
 }
 
@@ -112,9 +120,32 @@ extension CodexReviewStoreBackend {
         )
     }
 
+    package func stageReviewRecovery(
+        _: PreparedReviewRecovery,
+        destinationGeneration _: ReviewRuntimeGeneration,
+        request _: CodexReviewBackendModel.Review.Start,
+        admission _: ReviewStartAdmission
+    ) async throws -> StagedReviewRecovery {
+        throw ReviewAttemptContractFailure(
+            message: "Typed review recovery route staging is not installed."
+        )
+    }
+
+    package func commitReviewRecovery(_: StagedReviewRecovery) async throws {
+        throw ReviewAttemptContractFailure(
+            message: "Typed review recovery route commit is not installed."
+        )
+    }
+
     package func discardReviewRecovery(_: PreparedReviewRecovery) async throws {
         throw ReviewAttemptContractFailure(
             message: "Typed prepared review recovery discard is not installed."
+        )
+    }
+
+    package func discardReviewRecovery(_: StagedReviewRecovery) async throws {
+        throw ReviewAttemptContractFailure(
+            message: "Typed staged review recovery discard is not installed."
         )
     }
 

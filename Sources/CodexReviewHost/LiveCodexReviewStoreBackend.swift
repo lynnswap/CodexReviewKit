@@ -288,6 +288,12 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         private enum Recovery {
             case preparing(ReviewRecoveryRouteReceipt)
             case prepared(PreparedReviewRecovery)
+            case staging(
+                PreparedReviewRecovery,
+                LiveRuntimeLifecycleHandle,
+                ReviewStartAdmission
+            )
+            case staged(StagedReviewRecovery, LiveRuntimeLifecycleHandle)
         }
 
         private struct Route {
@@ -440,8 +446,66 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             return route.runtime
         }
 
+        mutating func beginStaging(
+            _ prepared: PreparedReviewRecovery,
+            destination: LiveRuntimeLifecycleHandle,
+            admission: ReviewStartAdmission
+        ) throws {
+            let id = prepared.receipt.sourceRun.attemptID
+            guard var route = routes[id],
+                  case .prepared(let current) = route.recovery,
+                  current.receipt === prepared.receipt,
+                  current.handoff == prepared.handoff
+            else { throw routeFailure("staging", attemptID: id) }
+            route.recovery = .staging(prepared, destination, admission)
+            routes[id] = route
+        }
+
+        mutating func finishStaging(_ staged: StagedReviewRecovery) throws {
+            let id = staged.receipt.sourceRun.attemptID
+            guard var route = routes[id],
+                  case .staging(let prepared, let destination, let admission) = route.recovery,
+                  prepared.receipt === staged.receipt,
+                  destination.generation == staged.destinationGeneration,
+                  admission === staged.admission
+            else { throw routeFailure("staging completion", attemptID: id) }
+            route.recovery = .staged(staged, destination)
+            routes[id] = route
+        }
+
+        mutating func commit(
+            _ staged: StagedReviewRecovery,
+            activeRuntime: LiveRuntimeLifecycleHandle?
+        ) throws {
+            let sourceID = staged.receipt.sourceRun.attemptID
+            let recoveredRun = staged.attempt.run
+            guard sourceID != recoveredRun.attemptID,
+                  routes[recoveredRun.attemptID] == nil,
+                  let route = routes[sourceID],
+                  case .staged(let current, let destination) = route.recovery,
+                  current === staged,
+                  destination === activeRuntime,
+                  destination.generation == staged.destinationGeneration
+            else { throw routeFailure("commit", attemptID: sourceID) }
+            routes.removeValue(forKey: sourceID)
+            routes[recoveredRun.attemptID] = .init(run: recoveredRun, runtime: destination)
+        }
+
+        mutating func takeStaged(
+            _ staged: StagedReviewRecovery
+        ) throws -> LiveRuntimeLifecycleHandle {
+            let id = staged.receipt.sourceRun.attemptID
+            guard let route = routes[id],
+                  case .staged(let current, let destination) = route.recovery,
+                  current === staged
+            else { throw routeFailure("staged discard", attemptID: id) }
+            routes.removeValue(forKey: id)
+            return destination
+        }
+
         mutating func takeInFlight(
-            _ receipt: ReviewRecoveryRouteReceipt
+            _ receipt: ReviewRecoveryRouteReceipt,
+            admission: ReviewStartAdmission? = nil
         ) throws -> (CodexReviewBackendModel.Review.Run, LiveRuntimeLifecycleHandle) {
             let id = receipt.sourceRun.attemptID
             guard let route = routes[id] else { throw routeFailure("failure cleanup", attemptID: id) }
@@ -449,7 +513,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             case .preparing(let current) where current === receipt:
                 routes.removeValue(forKey: id)
                 return (route.run, route.runtime)
-            case .preparing, .prepared, nil:
+            case .staging(let prepared, _, let currentAdmission)
+                where prepared.receipt === receipt && currentAdmission === admission:
+                routes.removeValue(forKey: id)
+                return (route.run, route.runtime)
+            case .preparing, .prepared, .staging, .staged, nil:
                 throw routeFailure("failure cleanup", attemptID: id)
             }
         }
@@ -1670,10 +1738,102 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         }
     }
 
+    func stageReviewRecovery(
+        _ prepared: PreparedReviewRecovery,
+        destinationGeneration: ReviewRuntimeGeneration,
+        request: CodexReviewBackendModel.Review.Start,
+        admission: ReviewStartAdmission
+    ) async throws -> StagedReviewRecovery {
+        guard await admission.currentPhase() == .preparingThread(.notSent) else {
+            throw ReviewAttemptContractFailure(
+                message: "Review recovery staging requires one fresh destination admission."
+            )
+        }
+        if prepared.handoff.candidate.trigger == .sameAccountRestart,
+           destinationGeneration == prepared.receipt.sourceGeneration {
+            throw ReviewAttemptContractFailure(
+                message: "Same-account recovery requires a replacement runtime generation."
+            )
+        }
+        guard acceptsRuntimeRequests,
+              let destination = activeRuntimeHandle,
+              destination.generation == destinationGeneration
+        else {
+            throw ReviewAttemptContractFailure(
+                message: "Review recovery destination generation \(destinationGeneration.rawValue) is not active."
+            )
+        }
+        try reviewAttemptRuntimeRoutes.beginStaging(
+            prepared,
+            destination: destination,
+            admission: admission
+        )
+        do {
+            let attempt = try await destination.backend.resumeReviewRecovery(
+                prepared.handoff,
+                request: request,
+                admission: admission
+            )
+            guard attempt.run.attemptID != prepared.receipt.sourceRun.attemptID,
+                  await admission.currentPhase() == .active(attempt.run)
+            else {
+                throw ReviewAttemptContractFailure(
+                    message: "Review recovery destination did not return one fresh active attempt."
+                )
+            }
+            let staged = StagedReviewRecovery(
+                receipt: prepared.receipt,
+                destinationGeneration: destinationGeneration,
+                attempt: attempt,
+                admission: admission
+            )
+            try reviewAttemptRuntimeRoutes.finishStaging(staged)
+            return staged
+        } catch {
+            let stageFailure = error
+            let primaryFailure: any Error
+            do {
+                try await prepared.handoff.discard()
+                primaryFailure = stageFailure
+            } catch is ReviewRecoveryHandoffAlreadyConsumed {
+                primaryFailure = stageFailure
+            } catch {
+                primaryFailure = ReviewAttemptContractFailure(
+                    message: "\(stageFailure.localizedDescription) Handoff invalidation also failed: \(error.localizedDescription)"
+                )
+            }
+            let provisionalRun = await provisionalRecoveryRun(admission)
+            _ = try reviewAttemptRuntimeRoutes.takeInFlight(
+                prepared.receipt,
+                admission: admission
+            )
+            throw await recoveryFailure(
+                primaryFailure,
+                cleanup: (provisionalRun ?? prepared.receipt.sourceRun, destination)
+            )
+        }
+    }
+
+    func commitReviewRecovery(_ staged: StagedReviewRecovery) async throws {
+        guard await staged.admission.permitsRecoveryPublication(
+            of: staged.attempt.run
+        ), acceptsRuntimeRequests else {
+            throw ReviewAttemptContractFailure(
+                message: "Review recovery commit lost its active admission."
+            )
+        }
+        try reviewAttemptRuntimeRoutes.commit(staged, activeRuntime: activeRuntimeHandle)
+    }
+
     func discardReviewRecovery(_ prepared: PreparedReviewRecovery) async throws {
         try await prepared.handoff.discard()
         let runtime = try reviewAttemptRuntimeRoutes.takePrepared(prepared)
         try await runtime.backend.cleanupReview(prepared.receipt.sourceRun)
+    }
+
+    func discardReviewRecovery(_ staged: StagedReviewRecovery) async throws {
+        let runtime = try reviewAttemptRuntimeRoutes.takeStaged(staged)
+        try await runtime.backend.cleanupReview(staged.attempt.run)
     }
 
     func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws {
@@ -1721,6 +1881,21 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             return ReviewAttemptContractFailure(
                 message: "\(primary.localizedDescription) Exact recovery cleanup also failed: \(error.localizedDescription)"
             )
+        }
+    }
+
+    private func provisionalRecoveryRun(
+        _ admission: ReviewStartAdmission
+    ) async -> CodexReviewBackendModel.Review.Run? {
+        switch await admission.currentPhase() {
+        case .startingReview(let run, _), .active(let run),
+             .interrupting(let run, _, _), .finishing(let run, _, _, _),
+             .recovering(let run, _, _), .finishingRecovery(let run, _, _, _):
+            run
+        case .terminal(.active(let resolution)):
+            resolution.run
+        case .preparingThread, .rollingBackRecovery, .terminal:
+            nil
         }
     }
 
