@@ -243,6 +243,111 @@ struct StoreReviewRecoveryReceiptTests {
         cancelled = nil
         #expect(released == nil)
     }
+    @Test func testingBackendRecordsExactRecoveryScript() async throws {
+        let fake = FakeCodexReviewBackend()
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: fake)
+        let sourceGeneration = ReviewRuntimeGeneration(rawValue: 3)
+        let destinationGeneration = ReviewRuntimeGeneration(rawValue: 4)
+        let run1 = CodexReviewBackendModel.Review.Run(attemptID: "source-1", threadID: "thread-1")
+        let candidate1 = recoveryCandidate(for: run1)
+        await #expect(throws: ReviewAttemptContractFailure.self) {
+            try await backend.prepareReviewRecovery(candidate1)
+        }
+        #expect(throws: ReviewAttemptContractFailure.self) {
+            try backend.scriptReviewRecoveryRoute(
+                sourceGeneration: .init(rawValue: 0), destinationGeneration: destinationGeneration
+            )
+        }
+        try script(backend, source: sourceGeneration, destination: destinationGeneration)
+        let prepared1 = try await backend.prepareReviewRecovery(candidate1)
+        try await backend.discardReviewRecovery(prepared1)
+
+        let run2 = CodexReviewBackendModel.Review.Run(attemptID: "source-2", threadID: "thread-2")
+        let candidate2 = recoveryCandidate(for: run2)
+        try script(backend, source: sourceGeneration, destination: destinationGeneration)
+        let prepared2 = try await backend.prepareReviewRecovery(candidate2)
+        let recovered2 = CodexReviewBackendModel.Review.Run(attemptID: "destination-2", threadID: run2.threadID)
+        await fake.setNextRecoveredRun(recovered2)
+        let admission2 = ReviewStartAdmission()
+        let generationFailure = ReviewRecoveryStagingFailure.callerRetainsPreparedRecovery(
+            message: "Testing recovery destination generation was not scripted exactly."
+        )
+        await #expect(throws: generationFailure) {
+            try await backend.stageReviewRecovery(
+                prepared2, destinationGeneration: .init(rawValue: 5),
+                request: reviewRequest(), admission: admission2
+            )
+        }
+        let nonfreshAdmission = try await activeAdmission(for: recovered2)
+        let admissionFailure = ReviewRecoveryStagingFailure.callerRetainsPreparedRecovery(
+            message: "Testing recovery staging requires one fresh destination admission."
+        )
+        await #expect(throws: admissionFailure) {
+            try await backend.stageReviewRecovery(
+                prepared2, destinationGeneration: destinationGeneration,
+                request: reviewRequest(), admission: nonfreshAdmission
+            )
+        }
+        let staged2 = try await backend.stageReviewRecovery(
+            prepared2, destinationGeneration: destinationGeneration,
+            request: reviewRequest(), admission: admission2
+        )
+        let staleRouteFailure = ReviewRecoveryStagingFailure.backendOwnsRecovery(
+            message: "Testing recovery staging lost its exact scripted prepared route."
+        )
+        await #expect(throws: staleRouteFailure) {
+            try await backend.stageReviewRecovery(
+                prepared2, destinationGeneration: destinationGeneration,
+                request: reviewRequest(), admission: ReviewStartAdmission()
+            )
+        }
+        try await backend.commitReviewRecovery(staged2)
+        await #expect(throws: ReviewAttemptContractFailure.self) {
+            try await backend.discardReviewRecovery(staged2)
+        }
+
+        let run3 = CodexReviewBackendModel.Review.Run(attemptID: "source-3", threadID: "thread-3")
+        try script(backend, source: destinationGeneration, destination: destinationGeneration)
+        let prepared3 = try await backend.prepareReviewRecovery(recoveryCandidate(for: run3))
+        let recovered3 = CodexReviewBackendModel.Review.Run(attemptID: "destination-3", threadID: run3.threadID)
+        await fake.setNextRecoveredRun(recovered3)
+        let staged3 = try await backend.stageReviewRecovery(
+            prepared3, destinationGeneration: destinationGeneration,
+            request: reviewRequest(), admission: ReviewStartAdmission()
+        )
+        try await backend.discardReviewRecovery(staged3)
+
+        let run4 = CodexReviewBackendModel.Review.Run(attemptID: "source-4", threadID: "thread-4")
+        try script(backend, source: destinationGeneration, destination: .init(rawValue: 5))
+        let prepared4 = try await backend.prepareReviewRecovery(recoveryCandidate(for: run4))
+        await fake.failRecovery(message: "stage failed")
+        await #expect(throws: ReviewRecoveryStagingFailure.backendOwnsRecovery(
+            message: "stage failed"
+        )) {
+            try await backend.stageReviewRecovery(
+                prepared4, destinationGeneration: .init(rawValue: 5),
+                request: reviewRequest(), admission: ReviewStartAdmission()
+            )
+        }
+
+        let commands = backend.reviewRecoveryCommands
+        guard commands.count == 10,
+              case .prepare(let loggedCandidate, let loggedSource) = commands[0],
+              case .discardPrepared(let loggedPrepared) = commands[1],
+              case .stage(let loggedStage, let loggedDestination, let loggedAdmission) = commands[3],
+              case .commit(let loggedCommit) = commands[4],
+              case .discardStaged(let loggedDiscard) = commands[7] else {
+            Issue.record("Testing recovery command script was incomplete."); return
+        }
+        #expect(loggedCandidate == candidate1 && loggedSource == sourceGeneration)
+        #expect(loggedPrepared.receipt === prepared1.receipt)
+        #expect(loggedStage.receipt === prepared2.receipt && loggedDestination == destinationGeneration)
+        #expect(loggedAdmission === admission2 && loggedCommit === staged2 && loggedDiscard === staged3)
+        guard case .cleanupReview(let rollbackRun) = await fake.recordedCommands().last else {
+            Issue.record("Failed staging did not record exact rollback cleanup."); return
+        }
+        #expect(rollbackRun == run4)
+    }
     private func advance(
         _ receipt: StoreReviewRecoveryReceipt, candidate: ReviewRecoveryCandidate,
         prepared: PreparedReviewRecovery
@@ -283,5 +388,21 @@ struct StoreReviewRecoveryReceiptTests {
         try await admission.admitReviewStartDispatch(for: run)
         try await admission.recordActiveRun(run)
         return admission
+    }
+    private func script(
+        _ backend: TestingCodexReviewStoreBackend,
+        source: ReviewRuntimeGeneration,
+        destination: ReviewRuntimeGeneration
+    ) throws {
+        try backend.scriptReviewRecoveryRoute(
+            sourceGeneration: source,
+            destinationGeneration: destination
+        )
+    }
+    private func reviewRequest() -> CodexReviewBackendModel.Review.Start {
+        .init(
+            jobID: "job", sessionID: "session",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges), model: "gpt-5"
+        )
     }
 }
