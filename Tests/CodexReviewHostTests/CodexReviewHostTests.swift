@@ -617,6 +617,7 @@ struct CodexReviewHostTests {
 
         let candidate = try await makeRecoveryCandidate(for: attempt.run)
         let prepared = try await store.backend.prepareReviewRecovery(candidate)
+        let retainedHandoff = prepared.handoff
         #expect(prepared.receipt.sourceRun == attempt.run)
         #expect(prepared.receipt.sourceGeneration.rawValue == store.runtimeLifecycleAdmissionGeneration)
         #expect(store.liveReviewRecoveryRouteCountForTesting == 1)
@@ -631,7 +632,10 @@ struct CodexReviewHostTests {
         }
         #expect(store.liveReviewAttemptRouteCountForTesting == 0)
         #expect(store.liveReviewRecoveryRouteCountForTesting == 0)
-        await #expect(throws: ReviewAttemptContractFailure.self) {
+        await #expect(throws: ReviewRecoveryHandoffAlreadyConsumed.self) {
+            try await retainedHandoff.consume()
+        }
+        await #expect(throws: ReviewRecoveryHandoffAlreadyConsumed.self) {
             try await store.backend.discardReviewRecovery(prepared)
         }
         await #expect(throws: ReviewAttemptContractFailure.self) {
@@ -640,6 +644,47 @@ struct CodexReviewHostTests {
             )
         }
         #expect(await replacement.recordedRequests().map(\.method) == replacementMethods)
+        await store.stop()
+    }
+
+    @Test func liveTypedRecoveryDiscardInvalidatesRetainedHandoffBeforeCleanup() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(transport)
+        try await enqueueLiveRouteReviewStartResponses(
+            transport,
+            threadID: "typed-discard-thread",
+            turnID: "typed-discard-turn",
+            reviewThreadID: "typed-discard-review"
+        )
+        try await enqueueReviewCleanupResponses(transport)
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transport: transport
+        )
+        await store.start()
+        let attempt = try await store.backend.startReview(
+            makeLiveRouteReviewStartRequest(jobID: "job-typed-discard"),
+            admission: ReviewStartAdmission()
+        )
+        let candidate = try await makeRecoveryCandidate(for: attempt.run)
+        let prepared = try await store.backend.prepareReviewRecovery(candidate)
+        let retainedHandoff = prepared.handoff
+
+        try await store.backend.discardReviewRecovery(prepared)
+
+        #expect(store.liveReviewAttemptRouteCountForTesting == 0)
+        #expect(store.liveReviewRecoveryRouteCountForTesting == 0)
+        await #expect(throws: ReviewRecoveryHandoffAlreadyConsumed.self) {
+            try await retainedHandoff.consume()
+        }
+        let methodsAfterDiscard = await transport.recordedRequests().map(\.method)
+        #expect(methodsAfterDiscard.filter { $0 == "thread/backgroundTerminals/clean" }.count == 1)
+        #expect(methodsAfterDiscard.filter { $0 == "thread/unsubscribe" }.count == 1)
+        await #expect(throws: ReviewRecoveryHandoffAlreadyConsumed.self) {
+            try await store.backend.discardReviewRecovery(prepared)
+        }
+        #expect(await transport.recordedRequests().map(\.method) == methodsAfterDiscard)
         await store.stop()
     }
 

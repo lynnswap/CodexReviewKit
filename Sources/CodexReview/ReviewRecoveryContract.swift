@@ -178,8 +178,8 @@ package struct ReviewRecoveryHandoffAlreadyConsumed: LocalizedError, Equatable, 
     }
 }
 
-/// Copies share one consumption owner, so a rollback token can leave this
-/// handoff exactly once even when concurrent callers retain the value.
+/// Copies share one consumption owner, so a rollback token can be consumed or
+/// discarded exactly once even when concurrent callers retain the value.
 package struct ReviewRecoveryHandoff: Equatable, Sendable {
     package struct Consumption: Equatable, Sendable {
         package let candidate: ReviewRecoveryCandidate
@@ -212,6 +212,10 @@ package struct ReviewRecoveryHandoff: Equatable, Sendable {
         )
     }
 
+    package func discard() async throws {
+        try await consumptionOwner.discard()
+    }
+
     package static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.consumptionOwner === rhs.consumptionOwner
     }
@@ -225,9 +229,15 @@ private actor ReviewRecoveryHandoffConsumptionOwner {
     }
 
     func consume() throws -> CodexReviewBackendModel.Review.RecoveryToken {
-        guard let token else {
-            throw ReviewRecoveryHandoffAlreadyConsumed()
-        }
+        try takeToken()
+    }
+
+    func discard() throws {
+        _ = try takeToken()
+    }
+
+    private func takeToken() throws -> CodexReviewBackendModel.Review.RecoveryToken {
+        guard let token else { throw ReviewRecoveryHandoffAlreadyConsumed() }
         self.token = nil
         return token
     }

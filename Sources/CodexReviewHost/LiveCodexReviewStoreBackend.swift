@@ -1560,6 +1560,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
     }
 
     func discardReviewRecovery(_ prepared: PreparedReviewRecovery) async throws {
+        try await prepared.handoff.discard()
         let runtime = try reviewAttemptRuntimeRoutes.takePrepared(prepared)
         try await runtime.backend.cleanupReview(prepared.receipt.sourceRun)
     }

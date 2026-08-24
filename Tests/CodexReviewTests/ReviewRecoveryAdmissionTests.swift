@@ -299,6 +299,23 @@ struct ReviewRecoveryAdmissionTests {
         #expect(results.filter { $0 == .alreadyConsumed }.count == 1)
     }
 
+    @Test func recoveryHandoffDiscardAndConsumeShareOneTokenOwner() async throws {
+        let candidate = makeRecoveryCandidate()
+        let token = CodexReviewBackendModel.Review.RecoveryToken(
+            interruptedRun: candidate.resolved.run,
+            rollbackThreadID: "review-thread"
+        )
+        let handoff = try await candidate.prepareHandoff(token: token)
+        let copy = handoff
+
+        async let discarded = discard(handoff)
+        async let consumed = consume(copy)
+        let results = await [discarded, consumed]
+
+        #expect(results.filter { $0 == .discarded || $0 == .consumed(token) }.count == 1)
+        #expect(results.filter { $0 == .alreadyConsumed }.count == 1)
+    }
+
     @Test func ownerCancellationRemainsATypedMailboxFailure() async {
         let mailbox = BackendReviewEventMailbox()
         await mailbox.fail(.ownerCancellation)
@@ -347,6 +364,7 @@ struct ReviewRecoveryAdmissionTests {
 
 private enum HandoffConsumptionResult: Equatable, Sendable {
     case consumed(CodexReviewBackendModel.Review.RecoveryToken)
+    case discarded
     case alreadyConsumed
     case otherFailure(String)
 }
@@ -356,6 +374,19 @@ private func consume(
 ) async -> HandoffConsumptionResult {
     do {
         return .consumed(try await handoff.consume().token)
+    } catch is ReviewRecoveryHandoffAlreadyConsumed {
+        return .alreadyConsumed
+    } catch {
+        return .otherFailure(error.localizedDescription)
+    }
+}
+
+private func discard(
+    _ handoff: ReviewRecoveryHandoff
+) async -> HandoffConsumptionResult {
+    do {
+        try await handoff.discard()
+        return .discarded
     } catch is ReviewRecoveryHandoffAlreadyConsumed {
         return .alreadyConsumed
     } catch {
