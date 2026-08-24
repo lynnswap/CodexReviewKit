@@ -178,6 +178,19 @@ package struct ReviewRecoveryHandoffAlreadyConsumed: LocalizedError, Equatable, 
     }
 }
 
+package enum ReviewRecoveryStagingFailure: LocalizedError, Equatable, Sendable {
+    case callerRetainsPreparedRecovery(message: String)
+    case backendOwnsRecovery(message: String)
+
+    package var errorDescription: String? {
+        switch self {
+        case .callerRetainsPreparedRecovery(let message),
+             .backendOwnsRecovery(let message):
+            message
+        }
+    }
+}
+
 /// Copies share one consumption owner, so a rollback token can be consumed or
 /// discarded exactly once even when concurrent callers retain the value.
 package struct ReviewRecoveryHandoff: Equatable, Sendable {

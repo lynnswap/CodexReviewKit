@@ -85,7 +85,7 @@ package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend, Sendable {
         destinationGeneration: ReviewRuntimeGeneration,
         request: CodexReviewBackendModel.Review.Start,
         admission: ReviewStartAdmission
-    ) async throws -> StagedReviewRecovery
+    ) async throws(ReviewRecoveryStagingFailure) -> StagedReviewRecovery
     func commitReviewRecovery(_ staged: StagedReviewRecovery) async throws
     func discardReviewRecovery(_ prepared: PreparedReviewRecovery) async throws
     func discardReviewRecovery(_ staged: StagedReviewRecovery) async throws
@@ -139,8 +139,8 @@ extension CodexReviewStoreBackend {
         destinationGeneration _: ReviewRuntimeGeneration,
         request _: CodexReviewBackendModel.Review.Start,
         admission _: ReviewStartAdmission
-    ) async throws -> StagedReviewRecovery {
-        throw ReviewAttemptContractFailure(
+    ) async throws(ReviewRecoveryStagingFailure) -> StagedReviewRecovery {
+        throw ReviewRecoveryStagingFailure.callerRetainsPreparedRecovery(
             message: "Typed review recovery route staging is not installed."
         )
     }
