@@ -1899,6 +1899,108 @@ struct ReviewUITests {
         #expect(accountsViewController.hasTemporaryContextMenuForTesting == false)
     }
 
+    @Test func accountUsageSummaryDistinguishesLoadingGaugesAndProviderModes() {
+        let loadingAccount = CodexAccount(
+            accountKey: "chatgpt@example.com",
+            email: "chatgpt@example.com",
+            kind: .chatGPT
+        )
+        let gaugesAccount = CodexAccount(
+            accountKey: "gauges@example.com",
+            email: "gauges@example.com",
+            kind: .chatGPT
+        )
+        gaugesAccount.updateRateLimits([
+            (windowDurationMinutes: 300, usedPercent: 25, resetsAt: nil),
+        ])
+        let apiKeyAccount = CodexAccount(
+            accountKey: "api-key",
+            email: "api-key@example.invalid",
+            kind: .apiKey
+        )
+        let bedrockAccount = CodexAccount(
+            accountKey: "bedrock",
+            email: "bedrock@example.invalid",
+            kind: .amazonBedrock
+        )
+        let capabilityDrivenAccount = CodexAccount(
+            accountKey: "chatgpt-without-limits",
+            email: "chatgpt-without-limits@example.com",
+            kind: .chatGPT,
+            capabilities: .noCodexRateLimits
+        )
+
+        #expect(AccountUsageSummaryPresentation(account: nil) == .loading)
+        #expect(AccountUsageSummaryPresentation(account: loadingAccount) == .loading)
+        #expect(AccountUsageSummaryPresentation(account: gaugesAccount) == .gauges)
+        #expect(
+            AccountUsageSummaryPresentation(account: apiKeyAccount)
+                == .provider(title: "Using API Key", systemImage: "key.fill")
+        )
+        #expect(
+            AccountUsageSummaryPresentation(account: bedrockAccount)
+                == .provider(title: "Using Amazon Bedrock", systemImage: "cloud.fill")
+        )
+        #expect(
+            AccountUsageSummaryPresentation(account: capabilityDrivenAccount)
+                == .provider(title: "Using ChatGPT", systemImage: "person.crop.circle.fill")
+        )
+        #expect(AccountUsageSummaryPresentation.loading.showsRateLimitControls)
+        #expect(AccountUsageSummaryPresentation.gauges.showsRateLimitControls)
+        #expect(
+            AccountUsageSummaryPresentation
+                .provider(title: "Using API Key", systemImage: "key.fill")
+                .showsRateLimitControls == false
+        )
+    }
+
+    @Test func providerAccountsUseProviderNamesWithoutReplacingChatGPTLabels() {
+        let chatGPTAccount = CodexAccount(email: "chatgpt@example.com")
+        let apiKeyAccount = CodexAccount(
+            accountKey: "api-key",
+            email: "api-key@example.invalid",
+            kind: .apiKey
+        )
+        let bedrockAccount = CodexAccount(
+            accountKey: "bedrock",
+            email: "bedrock@example.invalid",
+            kind: .amazonBedrock
+        )
+
+        #expect(chatGPTAccount.reviewMonitorDisplayName == chatGPTAccount.maskedEmail)
+        #expect(chatGPTAccount.reviewMonitorIdentityName == "chatgpt@example.com")
+        #expect(apiKeyAccount.reviewMonitorDisplayName == "API Key")
+        #expect(apiKeyAccount.reviewMonitorIdentityName == "API Key")
+        #expect(bedrockAccount.reviewMonitorDisplayName == "Amazon Bedrock")
+        #expect(bedrockAccount.reviewMonitorIdentityName == "Amazon Bedrock")
+    }
+
+    @Test func apiKeyAccountContextMenuOmitsRateLimitActions() throws {
+        let apiKeyAccount = CodexAccount(
+            accountKey: "api-key",
+            email: "api-key@example.invalid",
+            kind: .apiKey
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            account: apiKeyAccount,
+            persistedAccounts: [apiKeyAccount],
+            workspaces: []
+        )
+        let displayedAPIKeyAccount = try #require(store.auth.persistedAccounts.first)
+
+        let menu = NSHostingMenu(
+            rootView: AccountContextMenuView(
+                store: store,
+                account: displayedAPIKeyAccount
+            )
+        )
+        let presentedTitles = menu.items.map(\.title).filter { $0.isEmpty == false }
+
+        #expect(presentedTitles == ["API Key", "Switch", "Sign Out"])
+    }
+
     @Test func accountOutlineRowsRejectUserSelection() async throws {
         let activeAccount = CodexAccount(email: "active@example.com", planType: "pro")
         let otherAccount = CodexAccount(email: "other@example.com", planType: "plus")
