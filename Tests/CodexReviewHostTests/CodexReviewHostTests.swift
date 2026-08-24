@@ -585,6 +585,109 @@ struct CodexReviewHostTests {
         await store.stop()
     }
 
+    @Test func liveTypedRecoveryPreparationRetainsOnlyItsExactSourceRoute() async throws {
+        let source = FakeJSONRPCTransport()
+        let replacement = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(source)
+        try await enqueueRuntimeStartResponses(replacement)
+        try await enqueueLiveRouteReviewStartResponses(
+            source,
+            threadID: "typed-source-thread",
+            turnID: "typed-source-turn",
+            reviewThreadID: "typed-source-review"
+        )
+        var transports = [source, replacement]
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transportFactory: { _ in transports.removeFirst() }
+        )
+        await store.start()
+        let attempt = try await store.backend.startReview(
+            makeLiveRouteReviewStartRequest(jobID: "job-typed-source"),
+            admission: ReviewStartAdmission()
+        )
+        var staleRun = attempt.run
+        staleRun.turnID = "stale-turn"
+        await #expect(throws: ReviewAttemptContractFailure.self) {
+            try await store.backend.prepareReviewRecovery(
+                makeRecoveryCandidate(for: staleRun)
+            )
+        }
+
+        let candidate = try await makeRecoveryCandidate(for: attempt.run)
+        let prepared = try await store.backend.prepareReviewRecovery(candidate)
+        let retainedHandoff = prepared.handoff
+        #expect(prepared.receipt.sourceRun == attempt.run)
+        #expect(prepared.receipt.sourceGeneration.rawValue == store.runtimeLifecycleAdmissionGeneration)
+        #expect(store.liveReviewRecoveryRouteCountForTesting == 1)
+        await #expect(throws: ReviewAttemptContractFailure.self) {
+            try await store.backend.prepareReviewRecovery(candidate)
+        }
+
+        await store.restart()
+        let replacementMethods = await replacement.recordedRequests().map(\.method)
+        await #expect(throws: JSONRPC.Error.closed) {
+            try await store.backend.discardReviewRecovery(prepared)
+        }
+        #expect(store.liveReviewAttemptRouteCountForTesting == 0)
+        #expect(store.liveReviewRecoveryRouteCountForTesting == 0)
+        await #expect(throws: ReviewRecoveryHandoffAlreadyConsumed.self) {
+            try await retainedHandoff.consume()
+        }
+        await #expect(throws: ReviewRecoveryHandoffAlreadyConsumed.self) {
+            try await store.backend.discardReviewRecovery(prepared)
+        }
+        await #expect(throws: ReviewAttemptContractFailure.self) {
+            try await store.backend.prepareReviewRecovery(
+                makeRecoveryCandidate(for: attempt.run)
+            )
+        }
+        #expect(await replacement.recordedRequests().map(\.method) == replacementMethods)
+        await store.stop()
+    }
+
+    @Test func liveTypedRecoveryDiscardInvalidatesRetainedHandoffBeforeCleanup() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(transport)
+        try await enqueueLiveRouteReviewStartResponses(
+            transport,
+            threadID: "typed-discard-thread",
+            turnID: "typed-discard-turn",
+            reviewThreadID: "typed-discard-review"
+        )
+        try await enqueueReviewCleanupResponses(transport)
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transport: transport
+        )
+        await store.start()
+        let attempt = try await store.backend.startReview(
+            makeLiveRouteReviewStartRequest(jobID: "job-typed-discard"),
+            admission: ReviewStartAdmission()
+        )
+        let candidate = try await makeRecoveryCandidate(for: attempt.run)
+        let prepared = try await store.backend.prepareReviewRecovery(candidate)
+        let retainedHandoff = prepared.handoff
+
+        try await store.backend.discardReviewRecovery(prepared)
+
+        #expect(store.liveReviewAttemptRouteCountForTesting == 0)
+        #expect(store.liveReviewRecoveryRouteCountForTesting == 0)
+        await #expect(throws: ReviewRecoveryHandoffAlreadyConsumed.self) {
+            try await retainedHandoff.consume()
+        }
+        let methodsAfterDiscard = await transport.recordedRequests().map(\.method)
+        #expect(methodsAfterDiscard.filter { $0 == "thread/backgroundTerminals/clean" }.count == 1)
+        #expect(methodsAfterDiscard.filter { $0 == "thread/unsubscribe" }.count == 1)
+        await #expect(throws: ReviewRecoveryHandoffAlreadyConsumed.self) {
+            try await store.backend.discardReviewRecovery(prepared)
+        }
+        #expect(await transport.recordedRequests().map(\.method) == methodsAfterDiscard)
+        await store.stop()
+    }
+
     @Test func liveLateInterruptNeverFallsThroughToReplacementRuntime() async throws {
         let sourceTransport = FakeJSONRPCTransport()
         let replacementTransport = FakeJSONRPCTransport()
@@ -2604,6 +2707,32 @@ private func enqueueReviewCleanupResponses(
         AppServerAPI.Thread.Unsubscribe.Response(status: .unsubscribed),
         for: "thread/unsubscribe"
     )
+}
+
+private func makeRecoveryCandidate(
+    for run: CodexReviewBackendModel.Review.Run
+) async throws -> ReviewRecoveryCandidate {
+    let admission = ReviewStartAdmission()
+    try await admission.recordPreparedRecoveryRun(run)
+    try await admission.admitReviewStartDispatch(for: run)
+    try await admission.recordActiveRun(run)
+    let requestStarted = AsyncGate()
+    let task = Task {
+        try await admission.beginRecovery(
+            run,
+            trigger: .sameAccountRestart,
+            request: { _, _ in await requestStarted.open() }
+        )
+    }
+    await requestStarted.wait()
+    try await admission.recordCanonicalTerminal(
+        .interrupted(.server(message: "Prepare replacement")),
+        for: run
+    )
+    guard case .replacement(let candidate) = try await task.value else {
+        throw ReviewAttemptContractFailure(message: "Expected a recovery candidate.")
+    }
+    return candidate
 }
 
 private func temporaryHome() throws -> URL {

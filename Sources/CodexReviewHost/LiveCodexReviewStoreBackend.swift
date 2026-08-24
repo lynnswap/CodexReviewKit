@@ -188,57 +188,81 @@ public extension CodexReviewStore {
     package var liveReviewAttemptRouteCountForTesting: Int? {
         (backend as? LiveCodexReviewStoreBackend)?.reviewAttemptRuntimeRouteCountForTesting
     }
+
+    package var liveReviewRecoveryRouteCountForTesting: Int? {
+        (backend as? LiveCodexReviewStoreBackend)?.reviewRecoveryRouteCountForTesting
+    }
 }
 
 @MainActor
 private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPServerLifecycleOwner {
     private struct ReviewAttemptRuntimeRouteRegistry {
-        private var runtimeByAttemptID: [String: LiveRuntimeLifecycleHandle] = [:]
+        private enum Recovery {
+            case preparing(ReviewRecoveryRouteReceipt)
+            case prepared(PreparedReviewRecovery)
+        }
+
+        private struct Route {
+            var run: CodexReviewBackendModel.Review.Run
+            var runtime: LiveRuntimeLifecycleHandle
+            var recovery: Recovery?
+        }
+
+        private var routes: [String: Route] = [:]
 
         var count: Int {
-            runtimeByAttemptID.count
+            routes.count
+        }
+
+        var recoveryCount: Int {
+            routes.values.count { $0.recovery != nil }
         }
 
         mutating func bind(
-            attemptID: String,
+            run: CodexReviewBackendModel.Review.Run,
             to runtime: LiveRuntimeLifecycleHandle
         ) throws {
-            if let existing = runtimeByAttemptID[attemptID] {
-                guard existing === runtime else {
+            if let existing = routes[run.attemptID] {
+                guard existing.runtime === runtime, existing.recovery == nil else {
                     throw ReviewAttemptContractFailure(
-                        message: "Review attempt \(attemptID) is already routed to another runtime."
+                        message: "Review attempt \(run.attemptID) is already routed to another runtime."
                     )
                 }
                 return
             }
-            runtimeByAttemptID[attemptID] = runtime
+            routes[run.attemptID] = .init(run: run, runtime: runtime)
         }
 
         func runtime(
             for attemptID: String,
             operation: String
         ) throws -> LiveRuntimeLifecycleHandle {
-            guard let runtime = runtimeByAttemptID[attemptID] else {
+            guard let route = routes[attemptID], route.recovery == nil else {
                 throw ReviewAttemptContractFailure(
                     message: "Review \(operation) requires a runtime route for attempt \(attemptID)."
                 )
             }
-            return runtime
+            return route.runtime
         }
 
         func contains(
             attemptID: String,
             runtime: LiveRuntimeLifecycleHandle
         ) -> Bool {
-            runtimeByAttemptID[attemptID] === runtime
+            guard let route = routes[attemptID] else { return false }
+            return route.runtime === runtime && route.recovery == nil
         }
 
         mutating func move(
             sourceAttemptID: String,
-            recoveredAttemptID: String,
+            recoveredRun: CodexReviewBackendModel.Review.Run,
             runtime: LiveRuntimeLifecycleHandle
         ) throws {
-            guard runtimeByAttemptID[sourceAttemptID] === runtime else {
+            let recoveredAttemptID = recoveredRun.attemptID
+            guard let source = routes[sourceAttemptID],
+                  source.runtime === runtime,
+                  source.recovery == nil
+            else {
                 throw ReviewAttemptContractFailure(
                     message: "Review recovery source route changed before attempt \(recoveredAttemptID) became active."
                 )
@@ -246,8 +270,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             guard sourceAttemptID != recoveredAttemptID else {
                 return
             }
-            if let existing = runtimeByAttemptID[recoveredAttemptID] {
-                guard existing === runtime else {
+            if let existing = routes[recoveredAttemptID] {
+                guard existing.runtime === runtime else {
                     throw ReviewAttemptContractFailure(
                         message: "Recovered review attempt \(recoveredAttemptID) is already routed to another runtime."
                     )
@@ -256,30 +280,97 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                     message: "Recovered review attempt \(recoveredAttemptID) already has a runtime route."
                 )
             }
-            runtimeByAttemptID.removeValue(forKey: sourceAttemptID)
-            runtimeByAttemptID[recoveredAttemptID] = runtime
+            routes.removeValue(forKey: sourceAttemptID)
+            var recovered = source
+            recovered.run = recoveredRun
+            routes[recoveredAttemptID] = recovered
         }
 
         mutating func take(
             attemptID: String,
             operation: String
         ) throws -> LiveRuntimeLifecycleHandle {
-            guard let runtime = runtimeByAttemptID.removeValue(forKey: attemptID) else {
+            guard let route = routes[attemptID], route.recovery == nil else {
                 throw ReviewAttemptContractFailure(
                     message: "Review \(operation) requires a runtime route for attempt \(attemptID)."
                 )
             }
-            return runtime
+            routes.removeValue(forKey: attemptID)
+            return route.runtime
         }
 
         mutating func removeIfCurrent(
             attemptID: String,
             runtime: LiveRuntimeLifecycleHandle
         ) {
-            guard runtimeByAttemptID[attemptID] === runtime else {
+            guard let route = routes[attemptID],
+                  route.runtime === runtime,
+                  route.recovery == nil
+            else {
                 return
             }
-            runtimeByAttemptID.removeValue(forKey: attemptID)
+            routes.removeValue(forKey: attemptID)
+        }
+
+        mutating func beginPreparation(
+            _ candidate: ReviewRecoveryCandidate
+        ) throws -> (ReviewRecoveryRouteReceipt, LiveRuntimeLifecycleHandle) {
+            let run = candidate.resolved.run
+            guard var route = routes[run.attemptID],
+                  route.run == run,
+                  route.recovery == nil
+            else { throw routeFailure("preparation", attemptID: run.attemptID) }
+            let receipt = ReviewRecoveryRouteReceipt(
+                sourceRun: run,
+                sourceGeneration: route.runtime.generation
+            )
+            route.recovery = .preparing(receipt)
+            routes[run.attemptID] = route
+            return (receipt, route.runtime)
+        }
+
+        mutating func finishPreparation(_ prepared: PreparedReviewRecovery) throws {
+            let id = prepared.receipt.sourceRun.attemptID
+            guard var route = routes[id],
+                  case .preparing(let receipt) = route.recovery,
+                  receipt === prepared.receipt
+            else { throw routeFailure("preparation completion", attemptID: id) }
+            route.recovery = .prepared(prepared)
+            routes[id] = route
+        }
+
+        mutating func takePrepared(
+            _ prepared: PreparedReviewRecovery
+        ) throws -> LiveRuntimeLifecycleHandle {
+            let id = prepared.receipt.sourceRun.attemptID
+            guard let route = routes[id],
+                  case .prepared(let current) = route.recovery,
+                  current.receipt === prepared.receipt,
+                  current.handoff == prepared.handoff
+            else { throw routeFailure("prepared discard", attemptID: id) }
+            routes.removeValue(forKey: id)
+            return route.runtime
+        }
+
+        mutating func takeInFlight(
+            _ receipt: ReviewRecoveryRouteReceipt
+        ) throws -> (CodexReviewBackendModel.Review.Run, LiveRuntimeLifecycleHandle) {
+            let id = receipt.sourceRun.attemptID
+            guard let route = routes[id] else { throw routeFailure("failure cleanup", attemptID: id) }
+            switch route.recovery {
+            case .preparing(let current) where current === receipt:
+                routes.removeValue(forKey: id)
+                return (route.run, route.runtime)
+            case .preparing, .prepared, nil:
+                throw routeFailure("failure cleanup", attemptID: id)
+            }
+        }
+
+        private func routeFailure(
+            _ operation: String,
+            attemptID: String
+        ) -> ReviewAttemptContractFailure {
+            .init(message: "Review recovery \(operation) requires its exact route for attempt \(attemptID).")
         }
     }
 
@@ -296,6 +387,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
     private var reviewAttemptRuntimeRoutes = ReviewAttemptRuntimeRouteRegistry()
     fileprivate var reviewAttemptRuntimeRouteCountForTesting: Int {
         reviewAttemptRuntimeRoutes.count
+    }
+    fileprivate var reviewRecoveryRouteCountForTesting: Int {
+        reviewAttemptRuntimeRoutes.recoveryCount
     }
     private var acceptsRuntimeRequests = false
     private var mcpHTTPServer: (any CodexReviewMCPHTTPServing)?
@@ -589,7 +683,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
     }
 
     func prepareRuntime(
-        generation _: ReviewRuntimeGeneration,
+        generation: ReviewRuntimeGeneration,
         purpose _: ReviewRuntimeTransitionPurpose
     ) async throws -> PreparedRuntime {
         logger.info("Preparing review runtime")
@@ -600,6 +694,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             let settings = try await Self.monitorSettings(from: runtime.backend.readSettings())
             let handle = LiveRuntimeLifecycleHandle(
                 owner: self,
+                generation: generation,
                 client: runtime.client,
                 backend: runtime.backend,
                 authNotificationStream: authNotificationStream,
@@ -1355,7 +1450,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             {
                 do {
                     try reviewAttemptRuntimeRoutes.bind(
-                        attemptID: preparedRun.attemptID,
+                        run: preparedRun,
                         to: runtime
                     )
                 } catch let routeError {
@@ -1371,7 +1466,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         }
         do {
             try reviewAttemptRuntimeRoutes.bind(
-                attemptID: attempt.run.attemptID,
+                run: attempt.run,
                 to: runtime
             )
         } catch {
@@ -1429,7 +1524,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         do {
             try reviewAttemptRuntimeRoutes.move(
                 sourceAttemptID: sourceAttemptID,
-                recoveredAttemptID: attempt.run.attemptID,
+                recoveredRun: attempt.run,
                 runtime: runtime
             )
         } catch {
@@ -1445,6 +1540,29 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             )
         }
         return attempt
+    }
+
+    func prepareReviewRecovery(
+        _ candidate: ReviewRecoveryCandidate
+    ) async throws -> PreparedReviewRecovery {
+        let (receipt, runtime) = try reviewAttemptRuntimeRoutes.beginPreparation(candidate)
+        do {
+            let prepared = PreparedReviewRecovery(
+                receipt: receipt,
+                handoff: try await runtime.backend.prepareReviewRecovery(candidate)
+            )
+            try reviewAttemptRuntimeRoutes.finishPreparation(prepared)
+            return prepared
+        } catch {
+            let cleanup = try reviewAttemptRuntimeRoutes.takeInFlight(receipt)
+            throw await recoveryFailure(error, cleanup: cleanup)
+        }
+    }
+
+    func discardReviewRecovery(_ prepared: PreparedReviewRecovery) async throws {
+        try await prepared.handoff.discard()
+        let runtime = try reviewAttemptRuntimeRoutes.takePrepared(prepared)
+        try await runtime.backend.cleanupReview(prepared.receipt.sourceRun)
     }
 
     func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws {
@@ -1479,6 +1597,20 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             message += " Exact cleanup also failed: \(error.localizedDescription)"
         }
         return ReviewAttemptContractFailure(message: message)
+    }
+
+    private func recoveryFailure(
+        _ primary: any Error,
+        cleanup: (CodexReviewBackendModel.Review.Run, LiveRuntimeLifecycleHandle)
+    ) async -> any Error {
+        do {
+            try await cleanup.1.backend.cleanupReview(cleanup.0)
+            return primary
+        } catch {
+            return ReviewAttemptContractFailure(
+                message: "\(primary.localizedDescription) Exact recovery cleanup also failed: \(error.localizedDescription)"
+            )
+        }
     }
 
     @discardableResult
@@ -2219,6 +2351,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
 
 @MainActor
 private final class LiveRuntimeLifecycleHandle: RuntimeLifecycleHandle {
+    fileprivate let generation: ReviewRuntimeGeneration
     fileprivate let client: AppServerClient
     fileprivate let backend: AppServerCodexReviewBackend
     fileprivate let authNotificationStream: AsyncThrowingStream<JSONRPC.Notification, Error>
@@ -2231,12 +2364,14 @@ private final class LiveRuntimeLifecycleHandle: RuntimeLifecycleHandle {
 
     init(
         owner: LiveCodexReviewStoreBackend,
+        generation: ReviewRuntimeGeneration,
         client: AppServerClient,
         backend: AppServerCodexReviewBackend,
         authNotificationStream: AsyncThrowingStream<JSONRPC.Notification, Error>,
         snapshot: RuntimePublicationSnapshot
     ) {
         self.owner = owner
+        self.generation = generation
         self.client = client
         self.backend = backend
         self.authNotificationStream = authNotificationStream
