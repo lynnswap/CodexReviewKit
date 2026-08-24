@@ -1,9 +1,20 @@
 import Foundation
 import Observation
+import OSLog
+
+private let runtimeLifecycleLogger = Logger(
+    subsystem: "CodexReviewKit",
+    category: "runtime-lifecycle"
+)
 
 @MainActor
 @Observable
 public final class CodexReviewStore {
+    private struct RuntimeStartOperation {
+        let task: Task<Void, Never>
+        let sourceCloseReceiptOwner: ReviewRuntimeRecoveryReplacement?
+    }
+
     package struct ReviewTerminalWaiter {
         package var id: UUID
         package var continuation: CheckedContinuation<Void, Never>
@@ -148,25 +159,37 @@ public final class CodexReviewStore {
     }
 
     public func start(forceRestartIfNeeded: Bool = false) async {
-        guard let task = admitRuntimeStart(
+        guard let operation = admitRuntimeStart(
             forceRestartIfNeeded: forceRestartIfNeeded
         ) else {
             return
         }
-        await task.value
+        let sourceCloseJoin = operation.sourceCloseReceiptOwner?.sourceCloseJoin()
+        await operation.task.value
+        guard let replacement = operation.sourceCloseReceiptOwner,
+              let sourceCloseJoin
+        else {
+            return
+        }
+        _ = await sourceCloseJoin.value()
+        if let failure = replacement.consumeSourceCloseFailure() {
+            runtimeLifecycleLogger.error(
+                "Source runtime close failed; sourceGeneration=\(replacement.sourceGeneration.rawValue, privacy: .public) replacementGeneration=\(replacement.replacementGeneration.rawValue, privacy: .public) error=\(failure.localizedDescription)"
+            )
+        }
     }
 
     private func admitRuntimeStart(
         forceRestartIfNeeded: Bool
-    ) -> Task<Void, Never>? {
+    ) -> RuntimeStartOperation? {
         let previousState = runtimeState
         switch previousState {
         case .running where forceRestartIfNeeded == false:
             return nil
         case .acquiring(_, _, let task) where forceRestartIfNeeded == false:
-            return task
+            return .init(task: task, sourceCloseReceiptOwner: nil)
         case .replacing(_, let task):
-            return task
+            return .init(task: task, sourceCloseReceiptOwner: nil)
         case .stopped, .acquiring, .running, .tearingDown, .failed:
             break
         }
@@ -187,21 +210,32 @@ public final class CodexReviewStore {
             )
         case .acquiring(let sourceGeneration, let context, let task):
             task.cancel()
-            return admitRuntimeAcquisition(
-                generation: sourceGeneration.successor(),
-                context: context,
-                predecessor: task
+            return .init(
+                task: admitRuntimeAcquisition(
+                    generation: sourceGeneration.successor(),
+                    context: context,
+                    predecessor: task
+                ),
+                sourceCloseReceiptOwner: nil
             )
         case .tearingDown(let sourceGeneration, _, _, let task):
-            return admitRuntimeAcquisition(
-                generation: sourceGeneration.successor(),
-                predecessor: task
+            return .init(
+                task: admitRuntimeAcquisition(
+                    generation: sourceGeneration.successor(),
+                    predecessor: task
+                ),
+                sourceCloseReceiptOwner: nil
             )
         case .stopped(let sourceGeneration),
              .failed(let sourceGeneration, nil):
-            return admitRuntimeAcquisition(generation: sourceGeneration.successor())
+            return .init(
+                task: admitRuntimeAcquisition(
+                    generation: sourceGeneration.successor()
+                ),
+                sourceCloseReceiptOwner: nil
+            )
         case .replacing(_, let task):
-            return task
+            return .init(task: task, sourceCloseReceiptOwner: nil)
         }
     }
 
@@ -309,9 +343,7 @@ public final class CodexReviewStore {
         case .replacing(let replacement, let task):
             task.cancel()
             await task.value
-            if let retiringRuntime = replacement.takeRetiringRuntime() {
-                await closePublishedRuntimeForReplacement(retiringRuntime)
-            }
+            await closeRetiringRuntime(for: replacement)
             await stopMCPServer()
 
         case .running(_, let runtime, _):
@@ -692,7 +724,7 @@ public final class CodexReviewStore {
         sourceGeneration: ReviewRuntimeGeneration,
         retiringRuntime: PreparedRuntime?,
         retainedMCP: RetainedMCPServer
-    ) -> Task<Void, Never> {
+    ) -> RuntimeStartOperation {
         let replacement = ReviewRuntimeRecoveryReplacement(
             sourceGeneration: sourceGeneration,
             retiringRuntime: retiringRuntime,
@@ -711,7 +743,7 @@ public final class CodexReviewStore {
             replacement: replacement,
             task: task
         )
-        return task
+        return .init(task: task, sourceCloseReceiptOwner: replacement)
     }
 
     private func performRuntimeReplacement(
@@ -728,9 +760,7 @@ public final class CodexReviewStore {
             let token = try await settingsService.beginRuntimeCutover()
             cutoverToken = token
 
-            if let retiringRuntime = replacement.takeRetiringRuntime() {
-                await closePublishedRuntimeForReplacement(retiringRuntime)
-            }
+            await closeRetiringRuntime(for: replacement)
             guard isCurrentReplacement(replacement) else {
                 cancelRuntimeCutover(token)
                 return
@@ -783,9 +813,7 @@ public final class CodexReviewStore {
             replacement.finish(.running(replacement.replacementGeneration))
             await backend.waitForRuntimePublication(handle: runtime.handle)
         } catch {
-            if let retiringRuntime = replacement.takeRetiringRuntime() {
-                await closePublishedRuntimeForReplacement(retiringRuntime)
-            }
+            await closeRetiringRuntime(for: replacement)
             if let preparedRuntime {
                 await closeRuntime(preparedRuntime, purpose: .restartSameAccount)
             }
@@ -814,13 +842,28 @@ public final class CodexReviewStore {
 
     private func closePublishedRuntimeForReplacement(
         _ runtime: PreparedRuntime
-    ) async {
+    ) async -> ReviewRuntimeCloseFailure? {
         await stopPublishedRuntimeSemantics(intent: .explicitStop)
-        await closeRuntime(
+        return await closeRuntime(
             runtime,
             purpose: .restartSameAccount,
             admissionAlreadyClosed: true
         )
+    }
+
+    private func closeRetiringRuntime(
+        for replacement: ReviewRuntimeRecoveryReplacement
+    ) async {
+        guard let retiringRuntime = replacement.takeRetiringRuntime() else {
+            replacement.finishSourceClose(.closed)
+            return
+        }
+        let failure = await closePublishedRuntimeForReplacement(retiringRuntime)
+        if let failure {
+            replacement.finishSourceClose(.failed(failure))
+        } else {
+            replacement.finishSourceClose(.closed)
+        }
     }
 
     private func stopPublishedRuntimeSemantics(
@@ -844,24 +887,40 @@ public final class CodexReviewStore {
         )
     }
 
+    @discardableResult
     private func closeRuntime(
         _ runtime: PreparedRuntime,
         purpose: ReviewRuntimeTransitionPurpose,
         admissionAlreadyClosed: Bool = false
-    ) async {
+    ) async -> ReviewRuntimeCloseFailure? {
         if admissionAlreadyClosed == false {
             runtime.handle.closeAdmission()
         }
+        var firstFailure: ReviewRuntimeCloseFailure?
         do {
             try await runtime.handle.close(purpose: purpose)
         } catch {
+            firstFailure = runtimeCloseFailure(from: error)
             writeDiagnosticsIfNeeded()
         }
         do {
             try await runtime.handle.waitUntilClosed()
         } catch {
+            if firstFailure == nil {
+                firstFailure = runtimeCloseFailure(from: error)
+            }
             writeDiagnosticsIfNeeded()
         }
+        return firstFailure
+    }
+
+    private func runtimeCloseFailure(
+        from error: any Error
+    ) -> ReviewRuntimeCloseFailure {
+        if let failure = error as? ReviewRuntimeCloseFailure {
+            return failure
+        }
+        return .cleanup(error.localizedDescription)
     }
 
     private func closePublishedRuntimeAdmission(
