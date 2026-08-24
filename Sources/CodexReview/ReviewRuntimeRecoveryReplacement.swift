@@ -88,6 +88,10 @@ package final class ReviewRuntimeRecoveryReplacement {
         sourceCloseResultOwner.values()
     }
 
+    package func waitForSourceClose() async -> SourceCloseResult {
+        await sourceCloseResultOwner.waitForValue()
+    }
+
     package func finishSourceClose(_ result: SourceCloseResult) {
         sourceCloseResultOwner.finish(result)
     }
@@ -121,6 +125,7 @@ private final class ReviewRuntimeRecoveryReplayOwner<Value: Sendable>: Sendable 
     private struct State: Sendable {
         var value: Value?
         var continuations: [UUID: Continuation] = [:]
+        var joinContinuations: [CheckedContinuation<Value, Never>] = []
     }
 
     private let state = Mutex(State())
@@ -153,18 +158,45 @@ private final class ReviewRuntimeRecoveryReplayOwner<Value: Sendable>: Sendable 
         }
     }
 
+    func waitForValue() async -> Value {
+        await withCheckedContinuation { continuation in
+            let value = state.withLock { state -> Value? in
+                guard let value = state.value else {
+                    state.joinContinuations.append(continuation)
+                    return nil
+                }
+                return value
+            }
+            if let value {
+                continuation.resume(returning: value)
+            }
+        }
+    }
+
     func finish(_ value: Value) {
-        let continuations = state.withLock { state -> [Continuation] in
+        let continuations = state.withLock { state -> (
+            streams: [Continuation],
+            joins: [CheckedContinuation<Value, Never>]
+        ) in
             guard state.value == nil else {
-                return []
+                return ([], [])
             }
             state.value = value
-            defer { state.continuations.removeAll(keepingCapacity: false) }
-            return Array(state.continuations.values)
+            defer {
+                state.continuations.removeAll(keepingCapacity: false)
+                state.joinContinuations.removeAll(keepingCapacity: false)
+            }
+            return (
+                Array(state.continuations.values),
+                state.joinContinuations
+            )
         }
-        for continuation in continuations {
+        for continuation in continuations.streams {
             continuation.yield(value)
             continuation.finish()
+        }
+        for continuation in continuations.joins {
+            continuation.resume(returning: value)
         }
     }
 
