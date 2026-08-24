@@ -92,7 +92,7 @@ private func makeProcessTransport(
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
     return try AppServerProcessTransport(
         configuration: .init(
-            executable: executable.path,
+            executableURL: executable,
             arguments: [],
             environment: [
                 "HOME": directory.path,
@@ -278,7 +278,7 @@ private actor CompletionProbe {
 
 @Suite("app-server client")
 struct AppServerClientTests {
-    @Test func processTransportConfigurationResolvesCodexFromProvidedPath() throws {
+    @Test func processTransportConfigurationUsesResolvedExecutableForSessionSourceProbe() throws {
         let directory = FileManager.default.temporaryDirectory
             .appending(path: "codex-review-transport-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -296,10 +296,11 @@ struct AppServerClientTests {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codex.path)
 
         let configuration = AppServerProcessTransport.Configuration(
+            executableURL: codex,
             environment: ["PATH": directory.path, "HOME": "/tmp/review-home"]
         )
 
-        #expect(configuration.executable == codex.path)
+        #expect(configuration.executableURL == codex)
         #expect(configuration.arguments == [
             "-c", CodexAppServerExecutable.fileBackedAuthConfiguration,
             "app-server",
@@ -310,89 +311,6 @@ struct AppServerClientTests {
         #expect(configuration.threadStartPermissionStrategy == .modernPermissions)
         let sessionSourceIndex = try #require(configuration.arguments.firstIndex(of: "--session-source"))
         #expect(configuration.arguments[sessionSourceIndex + 1] == "app-server")
-    }
-
-    @Test func processTransportConfigurationResolvesExplicitCommandFromPath() throws {
-        let directory = FileManager.default.temporaryDirectory
-            .appending(path: "codex-review-explicit-executable-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer {
-            try? FileManager.default.removeItem(at: directory)
-        }
-        let codex = directory.appending(path: "codex")
-        let script = """
-        #!/bin/sh
-        if [ "$1" = "app-server" ] && [ "$2" = "--help" ]; then
-          printf 'Usage: custom codex app-server --listen <URL>\\n'
-        fi
-        """
-        try Data(script.utf8).write(to: codex)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codex.path)
-
-        let configuration = AppServerProcessTransport.Configuration(
-            executable: "codex",
-            environment: [
-                "PATH": directory.path,
-                "HOME": "/tmp/review-home",
-            ]
-        )
-
-        #expect(configuration.executable == codex.path)
-        #expect(configuration.arguments == CodexAppServerExecutable.appServerArguments())
-    }
-
-    @Test func processTransportConfigurationFindsStandaloneInstallerOutsidePath() throws {
-        let root = FileManager.default.temporaryDirectory
-            .appending(path: "codex-review-local-bin-\(UUID().uuidString)")
-        let home = root.appending(path: "home")
-        let bin = home.appending(path: ".local/bin")
-        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let codex = bin.appending(path: "codex")
-        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: codex)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codex.path)
-
-        let configuration = AppServerProcessTransport.Configuration(
-            arguments: [],
-            environment: ["HOME": home.path, "PATH": root.appending(path: "empty-bin").path]
-        )
-
-        #expect(configuration.executable == codex.path)
-    }
-
-    @Test func processTransportExecutableEnvironmentUsesDedicatedPrecedenceWithoutFallback() throws {
-        let directory = FileManager.default.temporaryDirectory
-            .appending(path: "codex-review-executable-precedence-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let review = directory.appending(path: "review-codex")
-        let legacy = directory.appending(path: "legacy-codex")
-        for executable in [review, legacy] {
-            try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
-            try FileManager.default.setAttributes(
-                [.posixPermissions: 0o755],
-                ofItemAtPath: executable.path
-            )
-        }
-
-        #expect(CodexAppServerExecutable.resolveExecutable(environment: [
-            "CODEX_REVIEW_CODEX_EXECUTABLE": review.path,
-            "CODEX_EXECUTABLE": legacy.path,
-            "PATH": directory.path,
-        ]) == review.path)
-        #expect(CodexAppServerExecutable.resolveExecutable(environment: [
-            "CODEX_EXECUTABLE": legacy.path,
-            "PATH": directory.path,
-        ]) == legacy.path)
-
-        let resolved = CodexAppServerExecutable.resolveExecutable(environment: [
-            "CODEX_APP_SERVER_CODEX_EXECUTABLE": "missing-preferred-codex",
-            "CODEX_REVIEW_CODEX_EXECUTABLE": review.path,
-            "CODEX_EXECUTABLE": legacy.path,
-            "PATH": directory.path,
-        ])
-
-        #expect(resolved == "missing-preferred-codex")
     }
 
     @Test func processTransportConfigurationOmitsUnsupportedSessionSourceFlag() throws {
@@ -413,10 +331,11 @@ struct AppServerClientTests {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codex.path)
 
         let configuration = AppServerProcessTransport.Configuration(
+            executableURL: codex,
             environment: ["PATH": directory.path, "HOME": "/tmp/review-home"]
         )
 
-        #expect(configuration.executable == codex.path)
+        #expect(configuration.executableURL == codex)
         #expect(configuration.arguments == CodexAppServerExecutable.appServerArguments())
         #expect(configuration.arguments.contains("--session-source") == false)
         #expect(configuration.threadStartPermissionStrategy == .legacySandbox)
@@ -439,27 +358,15 @@ struct AppServerClientTests {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codex.path)
 
         let configuration = AppServerProcessTransport.Configuration(
-            executable: codex.path,
+            executableURL: codex,
             arguments: ["custom", "argument"],
             environment: ["PATH": directory.path, "HOME": "/tmp/review-home"]
         )
 
-        #expect(configuration.executable == codex.path)
+        #expect(configuration.executableURL == codex)
         #expect(configuration.arguments == ["custom", "argument"])
         #expect(configuration.threadStartPermissionStrategy == .legacySandbox)
         #expect(FileManager.default.fileExists(atPath: probed.path) == false)
-    }
-
-    @Test func processTransportSearchesCodexAppBundleResourcesFallback() throws {
-        let directories = CodexAppServerExecutable.pathSearchDirectories(
-            environment: ["PATH": "/tmp/codex-bin:/usr/bin"]
-        )
-
-        #expect(directories.contains("/Applications/Codex.app/Contents/Resources"))
-        #expect(directories.filter { $0 == "/usr/bin" }.count == 1)
-        let appBundleIndex = try #require(directories.firstIndex(of: "/Applications/Codex.app/Contents/Resources"))
-        let homebrewIndex = try #require(directories.firstIndex(of: "/opt/homebrew/bin"))
-        #expect(appBundleIndex < homebrewIndex)
     }
 
     @Test func stderrLogFilterSuppressesCommandOutputAfterToolError() {
@@ -491,6 +398,8 @@ struct AppServerClientTests {
 
     @Test func processTransportConfigurationUsesDedicatedCodexHome() throws {
         let configuration = AppServerProcessTransport.Configuration(
+            executableURL: URL(fileURLWithPath: "/usr/bin/true"),
+            arguments: [],
             environment: [
                 "PATH": "/usr/bin",
                 "HOME": "/tmp/review-home",
@@ -505,6 +414,8 @@ struct AppServerClientTests {
 
     @Test func processTransportConfigurationUsesExplicitCodexHome() throws {
         let configuration = AppServerProcessTransport.Configuration(
+            executableURL: URL(fileURLWithPath: "/usr/bin/true"),
+            arguments: [],
             environment: [
                 "PATH": "/usr/bin",
                 "HOME": "/tmp/review-home",
@@ -560,7 +471,7 @@ struct AppServerClientTests {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
 
         let transport = try AppServerProcessTransport(configuration: .init(
-            executable: executable.path,
+            executableURL: executable,
             arguments: [childPIDFile.path, readyFile.path],
             environment: [
                 "HOME": directory.path,
@@ -608,7 +519,7 @@ struct AppServerClientTests {
         let failure = TransportCloseTestError.injected
         let transport = try AppServerProcessTransport(
             configuration: .init(
-                executable: "/bin/cat",
+                executableURL: URL(fileURLWithPath: "/bin/cat"),
                 arguments: [],
                 environment: [
                     "HOME": directory.path,
@@ -661,7 +572,7 @@ struct AppServerClientTests {
         let failure = TransportCloseTestError.injected
         let transport = try AppServerProcessTransport(
             configuration: .init(
-                executable: "/bin/cat",
+                executableURL: URL(fileURLWithPath: "/bin/cat"),
                 arguments: [],
                 environment: [
                     "HOME": directory.path,
@@ -694,7 +605,7 @@ struct AppServerClientTests {
         let failure = TransportCloseTestError.injected
         let transport = try AppServerProcessTransport(
             configuration: .init(
-                executable: "/bin/cat",
+                executableURL: URL(fileURLWithPath: "/bin/cat"),
                 arguments: [],
                 environment: [
                     "HOME": directory.path,
@@ -898,7 +809,7 @@ struct AppServerClientTests {
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
         let transport = try AppServerProcessTransport(configuration: .init(
-            executable: executable.path,
+            executableURL: executable,
             arguments: [],
             environment: [
                 "HOME": directory.path,
@@ -934,7 +845,7 @@ struct AppServerClientTests {
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
         let transport = try AppServerProcessTransport(configuration: .init(
-            executable: executable.path,
+            executableURL: executable,
             arguments: [],
             environment: [
                 "HOME": directory.path,
@@ -976,7 +887,7 @@ struct AppServerClientTests {
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
         let transport = try AppServerProcessTransport(configuration: .init(
-            executable: executable.path,
+            executableURL: executable,
             arguments: [],
             environment: [
                 "HOME": directory.path,
@@ -1020,7 +931,7 @@ struct AppServerClientTests {
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
         let transport = try AppServerProcessTransport(configuration: .init(
-            executable: executable.path,
+            executableURL: executable,
             arguments: [requestFile.path, notificationFile.path],
             environment: [
                 "HOME": directory.path,
