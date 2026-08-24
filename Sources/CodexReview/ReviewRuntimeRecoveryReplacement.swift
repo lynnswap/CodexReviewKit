@@ -3,6 +3,12 @@ import Synchronization
 
 @MainActor
 package final class ReviewRuntimeRecoveryReplacement {
+    private enum PublishedRuntimeOwnership {
+        case awaitingInstallation
+        case installed(PreparedRuntime)
+        case transferred
+    }
+
     package enum Outcome: Equatable, Sendable {
         case running(ReviewRuntimeGeneration)
         case failed(String)
@@ -19,7 +25,7 @@ package final class ReviewRuntimeRecoveryReplacement {
     package let retainedMCP: RetainedMCPServer
 
     private var retiringRuntime: PreparedRuntime?
-    private var publishedRuntime: PreparedRuntime?
+    private var publishedRuntimeOwnership: PublishedRuntimeOwnership = .awaitingInstallation
     private var sourceCloseFailureWasConsumed = false
     private let outcomeOwner = ReviewRuntimeRecoveryReplayOwner<Outcome>()
     private let sourceCloseResultOwner = ReviewRuntimeRecoveryReplayOwner<SourceCloseResult>()
@@ -41,26 +47,41 @@ package final class ReviewRuntimeRecoveryReplacement {
     }
 
     package func installPublishedRuntime(_ runtime: PreparedRuntime) {
-        precondition(
-            publishedRuntime == nil,
-            "ReviewRuntimeRecoveryReplacement owns at most one published runtime before transfer."
-        )
-        publishedRuntime = runtime
+        guard case .awaitingInstallation = publishedRuntimeOwnership else {
+            preconditionFailure(
+                "ReviewRuntimeRecoveryReplacement installs exactly one published runtime before transfer."
+            )
+        }
+        publishedRuntimeOwnership = .installed(runtime)
     }
 
     package func closePublishedRuntimeAdmission() {
-        publishedRuntime?.handle.closeAdmission()
+        guard case .installed(let runtime) = publishedRuntimeOwnership else {
+            return
+        }
+        runtime.handle.closeAdmission()
     }
 
     package func takePublishedRuntime() -> PreparedRuntime? {
-        defer { publishedRuntime = nil }
-        return publishedRuntime
+        switch publishedRuntimeOwnership {
+        case .awaitingInstallation:
+            publishedRuntimeOwnership = .transferred
+            return nil
+        case .installed(let runtime):
+            publishedRuntimeOwnership = .transferred
+            return runtime
+        case .transferred:
+            return nil
+        }
     }
 
     package func ownsPublishedRuntime(
         handle: any RuntimeLifecycleHandle
     ) -> Bool {
-        publishedRuntime?.handle === handle
+        guard case .installed(let runtime) = publishedRuntimeOwnership else {
+            return false
+        }
+        return runtime.handle === handle
     }
 
     package func sourceCloseResults() -> AsyncStream<SourceCloseResult> {

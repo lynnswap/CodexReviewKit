@@ -42,6 +42,30 @@ struct ReviewRuntimeRecoveryReplacementTests {
         #expect(replacement.takeRetiringRuntime() == nil)
     }
 
+    @Test func publishedRuntimeCanBeTransferredOnlyOnce() async throws {
+        let generation = ReviewRuntimeGeneration(rawValue: 9)
+        let backend = TestingCodexReviewStoreBackend(
+            reviewBackend: FakeCodexReviewBackend()
+        )
+        let runtime = try await backend.prepareRuntime(
+            generation: generation.successor(),
+            purpose: .restartSameAccount
+        )
+        let replacement = ReviewRuntimeRecoveryReplacement(
+            sourceGeneration: generation,
+            retiringRuntime: nil,
+            retainedMCP: .init(serverURL: nil)
+        )
+
+        replacement.installPublishedRuntime(runtime)
+        #expect(replacement.ownsPublishedRuntime(handle: runtime.handle))
+        let transferredRuntime = try #require(replacement.takePublishedRuntime())
+
+        #expect(transferredRuntime.handle === runtime.handle)
+        #expect(replacement.ownsPublishedRuntime(handle: runtime.handle) == false)
+        #expect(replacement.takePublishedRuntime() == nil)
+    }
+
     @Test func terminalOutcomeReplaysToPreAndPostCompletionWaiters() async {
         let replacement = ReviewRuntimeRecoveryReplacement(
             sourceGeneration: .init(rawValue: 12),
