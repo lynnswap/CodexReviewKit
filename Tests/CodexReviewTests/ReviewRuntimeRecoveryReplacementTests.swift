@@ -114,8 +114,9 @@ struct ReviewRuntimeRecoveryReplacementTests {
         let expected = ReviewRuntimeRecoveryReplacement.SourceCloseResult.failed(
             .process("Injected close failure.")
         )
+        let sourceCloseJoin = replacement.sourceCloseJoin()
         let waiter = Task { @MainActor in
-            await replacement.waitForSourceClose()
+            await sourceCloseJoin.value()
         }
 
         waiter.cancel()
