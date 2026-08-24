@@ -288,6 +288,13 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
         try await backend.interruptReview(run, reason: reason)
     }
 
+    func interruptReview(
+        _ admission: ReviewInterruptRequestAdmission,
+        reason: CodexReviewBackendModel.CancellationReason
+    ) async throws {
+        try await backend.interruptReview(admission, reason: reason)
+    }
+
     func beginReviewRecovery(
         _ run: CodexReviewBackendModel.Review.Run,
         reason: CodexReviewBackendModel.CancellationReason

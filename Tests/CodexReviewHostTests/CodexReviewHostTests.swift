@@ -824,6 +824,12 @@ struct CodexReviewHostTests {
             turnID: "late-interrupt-turn",
             reviewThreadID: "late-interrupt-review-thread"
         )
+        try await enqueueLiveRouteReviewStartResponses(
+            sourceTransport,
+            threadID: "late-source-thread",
+            turnID: "late-source-turn",
+            reviewThreadID: "late-source-review-thread"
+        )
         try await sourceTransport.enqueue(EmptyResponse(), for: "turn/interrupt")
         var transports = [sourceTransport, replacementTransport]
         let store = CodexReviewStore.makeLiveStoreForTesting(
@@ -832,24 +838,82 @@ struct CodexReviewHostTests {
             transportFactory: { _ in transports.removeFirst() }
         )
         await store.start()
+        let admission = ReviewStartAdmission()
         let attempt = try await store.backend.startReview(
             makeLiveRouteReviewStartRequest(jobID: "job-late-interrupt"),
-            admission: ReviewStartAdmission()
+            admission: admission
+        )
+
+        var staleRun = attempt.run
+        staleRun.turnID = "stale-turn"
+        let staleAdmission = ReviewStartAdmission()
+        try await staleAdmission.recordPreparedRecoveryRun(staleRun)
+        try await staleAdmission.admitReviewStartDispatch(for: staleRun)
+        try await staleAdmission.recordActiveRun(staleRun)
+        let staleRequestEntered = AsyncGate()
+        let staleRecovery = Task {
+            try await staleAdmission.beginRecovery(
+                staleRun,
+                trigger: .recoverableNetworkLoss
+            ) { request, reason in
+                await staleRequestEntered.open()
+                try await store.backend.interruptReview(request, reason: reason)
+            }
+        }
+        await staleRequestEntered.wait()
+        await #expect(throws: ReviewInterruptRequestFailure.self) {
+            try await staleRecovery.value
+        }
+        #expect(await staleAdmission.currentPhase() == .active(staleRun))
+        #expect(await sourceTransport.recordedRequests().map(\.method).contains("turn/interrupt") == false)
+
+        let interruptAcknowledged = AsyncGate()
+        let recovery = Task {
+            try await admission.beginRecovery(
+                attempt.run,
+                trigger: .recoverableNetworkLoss
+            ) { request, reason in
+                try await store.backend.interruptReview(request, reason: reason)
+                await interruptAcknowledged.open()
+            }
+        }
+        await interruptAcknowledged.wait()
+        #expect(await attempt.events.isFinished() == false)
+        try await admission.recordCanonicalTerminal(.completed, for: attempt.run)
+        _ = try await recovery.value
+        #expect(await attempt.events.isFinished() == false)
+
+        let lateAdmission = ReviewStartAdmission()
+        let lateAttempt = try await store.backend.startReview(
+            makeLiveRouteReviewStartRequest(jobID: "job-late-source"),
+            admission: lateAdmission
         )
         await store.restart()
-        #expect(store.liveReviewAttemptRouteCountForTesting == 1)
+        #expect(store.liveReviewAttemptRouteCountForTesting == 2)
 
-        await #expect(throws: JSONRPC.Error.closed) {
-            try await store.backend.interruptReview(
-                attempt.run,
-                reason: .init(message: "Late interrupt")
-            )
+        let exactRequestEntered = AsyncGate()
+        let exactRecovery = Task {
+            try await lateAdmission.beginRecovery(
+                lateAttempt.run,
+                trigger: .recoverableNetworkLoss
+            ) { request, reason in
+                await exactRequestEntered.open()
+                try await store.backend.interruptReview(request, reason: reason)
+            }
         }
+        await exactRequestEntered.wait()
+        try await lateAdmission.recordConnectionTerminal(
+            .connection("Source runtime closed."),
+            for: lateAttempt.run
+        )
+        _ = try await exactRecovery.value
 
         let replacementMethods = await replacementTransport.recordedRequests().map(\.method)
         #expect(replacementMethods.contains("turn/interrupt") == false)
-        await #expect(throws: JSONRPC.Error.closed) {
-            try await store.backend.cleanupReview(attempt.run)
+        for run in [attempt.run, lateAttempt.run] {
+            await #expect(throws: JSONRPC.Error.closed) {
+                try await store.backend.cleanupReview(run)
+            }
         }
         #expect(store.liveReviewAttemptRouteCountForTesting == 0)
         #expect(await replacementTransport.recordedRequests().map(\.method) == replacementMethods)

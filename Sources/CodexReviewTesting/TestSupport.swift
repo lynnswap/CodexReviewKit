@@ -176,6 +176,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         case logout(CodexReviewBackendModel.Account.ID)
         case startReview(CodexReviewBackendModel.Review.Start)
         case interruptReview(CodexReviewBackendModel.Review.Run, CodexReviewBackendModel.CancellationReason)
+        case interruptReviewAdmission(ReviewInterruptRequestAdmission, CodexReviewBackendModel.CancellationReason)
         case beginReviewRecovery(CodexReviewBackendModel.Review.Run, CodexReviewBackendModel.CancellationReason)
         case prepareReviewRecovery(ReviewRecoveryCandidate)
         case resumeReviewRecovery(CodexReviewBackendModel.Review.RecoveryToken, CodexReviewBackendModel.Review.Start)
@@ -350,6 +351,8 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         if commands.contains(where: {
             if case .interruptReview = $0 {
                 true
+            } else if case .interruptReviewAdmission = $0 {
+                true
             } else {
                 false
             }
@@ -361,6 +364,8 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
             await withCheckedContinuation { continuation in
                 if commands.contains(where: {
                     if case .interruptReview = $0 {
+                        true
+                    } else if case .interruptReviewAdmission = $0 {
                         true
                     } else {
                         false
@@ -580,6 +585,22 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         }
         if let interruptFailureMessage {
             throw FakeCodexReviewBackendError(message: interruptFailureMessage)
+        }
+    }
+
+    package func interruptReview(
+        _ admission: ReviewInterruptRequestAdmission,
+        reason: CodexReviewBackendModel.CancellationReason
+    ) async throws {
+        commands.append(.interruptReviewAdmission(admission, reason))
+        let waiters = Array(interruptReviewWaiters.values)
+        interruptReviewWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters { waiter.resume() }
+        await interruptReviewGate?.wait()
+        if let interruptFailureMessage {
+            throw ReviewInterruptRequestFailure(
+                outcome: .outcomeUnknown(message: interruptFailureMessage)
+            )
         }
     }
 
@@ -1304,6 +1325,13 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         reason: CodexReviewBackendModel.CancellationReason
     ) async throws {
         try await reviewBackend.interruptReview(run, reason: reason)
+    }
+
+    package func interruptReview(
+        _ admission: ReviewInterruptRequestAdmission,
+        reason: CodexReviewBackendModel.CancellationReason
+    ) async throws {
+        try await reviewBackend.interruptReview(admission, reason: reason)
     }
 
     package func beginReviewRecovery(

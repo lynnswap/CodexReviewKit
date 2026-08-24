@@ -339,6 +339,20 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             return route.runtime
         }
 
+        func runtime(
+            for run: CodexReviewBackendModel.Review.Run,
+            operation: String
+        ) throws -> LiveRuntimeLifecycleHandle {
+            guard let route = routes[run.attemptID],
+                  route.run == run,
+                  route.recovery == nil else {
+                throw ReviewAttemptContractFailure(
+                    message: "Review \(operation) requires the exact runtime route for attempt \(run.attemptID)."
+                )
+            }
+            return route.runtime
+        }
+
         func contains(
             attemptID: String,
             runtime: LiveRuntimeLifecycleHandle
@@ -1665,6 +1679,25 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             operation: "interrupt"
         )
         try await runtime.backend.interruptReview(run, reason: reason)
+    }
+
+    func interruptReview(
+        _ admission: ReviewInterruptRequestAdmission,
+        reason: CodexReviewBackendModel.CancellationReason
+    ) async throws {
+        let runtime: LiveRuntimeLifecycleHandle
+        do {
+            runtime = try reviewAttemptRuntimeRoutes.runtime(
+                for: admission.run,
+                operation: "typed interrupt"
+            )
+        } catch {
+            throw ReviewInterruptRequestFailure(outcome: .rejected(
+                code: nil,
+                message: error.localizedDescription
+            ))
+        }
+        try await runtime.backend.interruptReview(admission, reason: reason)
     }
 
     func beginReviewRecovery(
