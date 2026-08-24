@@ -145,7 +145,10 @@ extension CodexReviewStore {
         guard let job = job(id: jobID), job.isTerminal == false else {
             return
         }
-        let cancellation = ReviewCancellation.system()
+        let cancellation = authoritativeCancellation(
+            for: job,
+            requested: .system()
+        )
         recordCancellationRequest(cancellation, for: job)
         if case .recovering(let receipt) = ownership {
             await receipt.cancelOwnedOperation(cancellation)
