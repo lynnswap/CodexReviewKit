@@ -497,6 +497,80 @@ struct CodexReviewStoreLifecycleTests {
         #expect(store.settings.lastErrorMessage == nil)
     }
 
+    @Test func stopJoinsPostPublicationReplacementWithoutLatePublication() async throws {
+        let endpoint = try #require(URL(string: "http://127.0.0.1:19433/mcp"))
+        let mcpOwner = TestingMCPServerLifecycleOwner(serverURL: endpoint)
+        let backend = TestingCodexReviewStoreBackend(
+            reviewBackend: FakeCodexReviewBackend(),
+            mcpServerLifecycle: mcpOwner
+        )
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+
+        backend.holdRuntimePublication()
+        let firstRestart = Task { @MainActor in await store.restart() }
+        await backend.waitForRuntimePublicationEntry()
+        let publishedHandle = try #require(backend.lastPreparedRuntimeHandle)
+        guard case .replacing(let replacement, _) = store.runtimeState else {
+            Issue.record("Expected replacement ownership through publication completion.")
+            return
+        }
+        var outcomes = replacement.outcomes().makeAsyncIterator()
+        let secondCallerEntered = AsyncGate()
+        let secondRestart = Task { @MainActor in
+            await secondCallerEntered.open()
+            await store.restart()
+        }
+        await secondCallerEntered.wait()
+
+        let stop = Task { @MainActor in await store.stop() }
+        await publishedHandle.waitForClose()
+        #expect(await outcomes.next() == .superseded(.stop))
+        await stop.value
+        await firstRestart.value
+        await secondRestart.value
+
+        #expect(store.serverState == .stopped)
+        #expect(store.serverURL == nil)
+        #expect(backend.startRequests == [false, true])
+        #expect(publishedHandle.activateCallCount == 1)
+        #expect(publishedHandle.closeAdmissionCallCount == 1)
+        #expect(publishedHandle.closePurposes == [.stop])
+        #expect(publishedHandle.waitUntilClosedCallCount == 1)
+        #expect(mcpOwner.stopCallCount == 1)
+    }
+
+    @Test func runtimeFailureRecognizesPostPublicationReplacementHandle() async throws {
+        let backend = TestingCodexReviewStoreBackend(
+            reviewBackend: FakeCodexReviewBackend()
+        )
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+
+        backend.holdRuntimePublication()
+        let restart = Task { @MainActor in await store.restart() }
+        await backend.waitForRuntimePublicationEntry()
+        let publishedHandle = try #require(backend.lastPreparedRuntimeHandle)
+
+        store.requestRuntimeFailure(
+            handle: publishedHandle,
+            cause: "Injected post-publication failure."
+        )
+        await publishedHandle.waitForClose()
+        await store.waitUntilStopped()
+        await restart.value
+
+        #expect(store.serverState == .failed(
+            "Review runtime stopped unexpectedly: Injected post-publication failure."
+        ))
+        #expect(store.serverURL == nil)
+        #expect(backend.startRequests == [false, true])
+        #expect(publishedHandle.closeAdmissionCallCount == 1)
+        #expect(publishedHandle.closePurposes == [.runtimeFailure])
+        #expect(publishedHandle.waitUntilClosedCallCount == 1)
+        await store.stop()
+    }
+
     @Test func callerCancellationStillConsumesCutoverByPublishingCurrentRuntime() async throws {
         let preparationGate = AsyncGate()
         let backend = TestingCodexReviewStoreBackend(

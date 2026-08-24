@@ -258,9 +258,16 @@ public final class CodexReviewStore {
         handle: any RuntimeLifecycleHandle,
         cause: String
     ) {
-        guard case .running(_, let runtime, _) = runtimeState,
-              runtime.handle === handle
-        else {
+        let ownsHandle: Bool
+        switch runtimeState {
+        case .running(_, let runtime, _):
+            ownsHandle = runtime.handle === handle
+        case .replacing(let replacement, _):
+            ownsHandle = replacement.ownsPublishedRuntime(handle: handle)
+        case .stopped, .acquiring, .tearingDown, .failed:
+            ownsHandle = false
+        }
+        guard ownsHandle else {
             return
         }
         _ = admitRuntimeTeardown(intent: .unexpectedFailure(cause))
@@ -342,6 +349,14 @@ public final class CodexReviewStore {
 
         case .replacing(let replacement, let task):
             task.cancel()
+            if let publishedRuntime = replacement.takePublishedRuntime() {
+                await stopPublishedRuntimeSemantics(intent: intent)
+                await closeRuntime(
+                    publishedRuntime,
+                    purpose: runtimeTransitionPurpose(for: intent),
+                    admissionAlreadyClosed: true
+                )
+            }
             await task.value
             await closeRetiringRuntime(for: replacement)
             await stopMCPServer()
@@ -804,14 +819,25 @@ public final class CodexReviewStore {
                 return
             }
 
+            replacement.installPublishedRuntime(runtime)
+            preparedRuntime = nil
+            await backend.waitForRuntimePublication(handle: runtime.handle)
+            guard isCurrentReplacement(replacement) else {
+                return
+            }
+            guard let publishedRuntime = replacement.takePublishedRuntime() else {
+                preconditionFailure(
+                    "ReviewRuntimeRecoveryReplacement must own its published runtime until exact-identity transfer."
+                )
+            }
+
             runtimeState = .running(
                 generation: replacement.replacementGeneration,
-                runtime: runtime,
+                runtime: publishedRuntime,
                 mcp: replacement.retainedMCP
             )
             publishRuntime(serverURL: replacement.retainedMCP.serverURL)
             replacement.finish(.running(replacement.replacementGeneration))
-            await backend.waitForRuntimePublication(handle: runtime.handle)
         } catch {
             await closeRetiringRuntime(for: replacement)
             if let preparedRuntime {
@@ -926,10 +952,14 @@ public final class CodexReviewStore {
     private func closePublishedRuntimeAdmission(
         in state: ReviewStoreRuntimeState
     ) {
-        guard case .running(_, let runtime, _) = state else {
-            return
+        switch state {
+        case .running(_, let runtime, _):
+            runtime.handle.closeAdmission()
+        case .replacing(let replacement, _):
+            replacement.closePublishedRuntimeAdmission()
+        case .stopped, .acquiring, .tearingDown, .failed:
+            break
         }
-        runtime.handle.closeAdmission()
     }
 
     private func stopMCPServer() async {
