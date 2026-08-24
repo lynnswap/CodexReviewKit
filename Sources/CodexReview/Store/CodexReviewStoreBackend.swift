@@ -73,6 +73,10 @@ package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend, Sendable {
         _ token: CodexReviewBackendModel.Review.RecoveryToken,
         request: CodexReviewBackendModel.Review.Start
     ) async throws -> BackendReviewAttempt
+    func prepareReviewRecovery(
+        _ candidate: ReviewRecoveryCandidate
+    ) async throws -> PreparedReviewRecovery
+    func discardReviewRecovery(_ prepared: PreparedReviewRecovery) async throws
     func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws
 }
 
@@ -99,5 +103,19 @@ extension CodexReviewStoreBackend {
     package func waitForRuntimePublication(
         handle _: any RuntimeLifecycleHandle
     ) async {}
+
+    package func prepareReviewRecovery(
+        _: ReviewRecoveryCandidate
+    ) async throws -> PreparedReviewRecovery {
+        throw ReviewAttemptContractFailure(
+            message: "Typed review recovery route preparation is not installed."
+        )
+    }
+
+    package func discardReviewRecovery(_: PreparedReviewRecovery) async throws {
+        throw ReviewAttemptContractFailure(
+            message: "Typed prepared review recovery discard is not installed."
+        )
+    }
 
 }

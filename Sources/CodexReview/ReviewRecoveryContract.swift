@@ -232,3 +232,31 @@ private actor ReviewRecoveryHandoffConsumptionOwner {
         return token
     }
 }
+
+/// Identifies the exact source attempt and runtime generation owned by one
+/// backend recovery route. Mutable route state remains backend-owned.
+package final class ReviewRecoveryRouteReceipt: Sendable {
+    package let sourceRun: CodexReviewBackendModel.Review.Run
+    package let sourceGeneration: ReviewRuntimeGeneration
+
+    package init(
+        sourceRun: CodexReviewBackendModel.Review.Run,
+        sourceGeneration: ReviewRuntimeGeneration
+    ) {
+        self.sourceRun = sourceRun
+        self.sourceGeneration = sourceGeneration
+    }
+}
+
+package struct PreparedReviewRecovery: Sendable {
+    package let receipt: ReviewRecoveryRouteReceipt
+    package let handoff: ReviewRecoveryHandoff
+
+    package init(
+        receipt: ReviewRecoveryRouteReceipt,
+        handoff: ReviewRecoveryHandoff
+    ) {
+        self.receipt = receipt
+        self.handoff = handoff
+    }
+}
