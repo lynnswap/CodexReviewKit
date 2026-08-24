@@ -2749,10 +2749,14 @@ struct CodexReviewStoreCommandTests {
             }.last)
 
             review.cancel()
+            let cancellationWasPublished = await waitUntil {
+                store.job(id: "job-1")?.cancellationRequested == true
+            }
             let cancellationReachedReceipt = await waitUntil {
                 await stageAdmission.cancellationRequest() == .system()
             }
             await stageGate.open()
+            #expect(cancellationWasPublished)
             #expect(cancellationReachedReceipt)
             let result = try await review.value
 

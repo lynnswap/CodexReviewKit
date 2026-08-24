@@ -142,8 +142,13 @@ extension CodexReviewStore {
               ownership.workerAdmission === workerAdmission else {
             return
         }
+        guard let job = job(id: jobID), job.isTerminal == false else {
+            return
+        }
+        let cancellation = ReviewCancellation.system()
+        recordCancellationRequest(cancellation, for: job)
         if case .recovering(let receipt) = ownership {
-            await receipt.cancelOwnedOperation(.system())
+            await receipt.cancelOwnedOperation(cancellation)
         }
         guard reviewAttemptOwnerships[jobID]?.workerAdmission === workerAdmission else {
             return
