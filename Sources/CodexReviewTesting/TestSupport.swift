@@ -1367,8 +1367,7 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     package func prepareReviewRecovery(
         _ candidate: ReviewRecoveryCandidate
     ) async throws -> PreparedReviewRecovery {
-        guard case .ready(let sourceGeneration, let destinationGeneration) = scriptedReviewRecoveryRoute,
-              candidate.trigger != .sameAccountRestart || sourceGeneration != destinationGeneration else {
+        guard case .ready(let sourceGeneration, let destinationGeneration) = scriptedReviewRecoveryRoute else {
             throw recoveryRouteFailure("prepare")
         }
         let receipt = ReviewRecoveryRouteReceipt(
@@ -1395,18 +1394,32 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         destinationGeneration: ReviewRuntimeGeneration,
         request: CodexReviewBackendModel.Review.Start,
         admission: ReviewStartAdmission
-    ) async throws -> StagedReviewRecovery {
+    ) async throws(ReviewRecoveryStagingFailure) -> StagedReviewRecovery {
+        let admissionPhase = await admission.currentPhase()
         guard case .prepared(let current, let expectedGeneration) = scriptedReviewRecoveryRoute,
               current.receipt === prepared.receipt,
-              current.handoff == prepared.handoff,
-              destinationGeneration == expectedGeneration else {
-            throw recoveryRouteFailure("stage")
+              current.handoff == prepared.handoff else {
+            throw .backendOwnsRecovery(
+                message: "Testing recovery staging lost its exact scripted prepared route."
+            )
+        }
+        guard admissionPhase == .preparingThread(.notSent) else {
+            throw .callerRetainsPreparedRecovery(
+                message: "Testing recovery staging requires one fresh destination admission."
+            )
+        }
+        if prepared.handoff.candidate.trigger == .sameAccountRestart,
+           destinationGeneration == prepared.receipt.sourceGeneration {
+            throw .callerRetainsPreparedRecovery(
+                message: "Testing same-account recovery requires a replacement generation."
+            )
+        }
+        guard destinationGeneration == expectedGeneration else {
+            throw .callerRetainsPreparedRecovery(
+                message: "Testing recovery destination generation was not scripted exactly."
+            )
         }
         scriptedReviewRecoveryRoute = .staging
-        guard await admission.currentPhase() == .preparingThread(.notSent) else {
-            scriptedReviewRecoveryRoute = .prepared(current, expectedGeneration)
-            throw recoveryRouteFailure("stage with a nonfresh admission")
-        }
         reviewRecoveryCommands.append(.stage(prepared, destinationGeneration, admission))
         do {
             let attempt = try await reviewBackend.resumeReviewRecovery(
@@ -1415,7 +1428,7 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
                 admission: admission
             )
             guard attempt.run.attemptID != prepared.receipt.sourceRun.attemptID,
-                  await admission.permitsRecoveryPublication(of: attempt.run) else {
+                  await admission.currentPhase() == .active(attempt.run) else {
                 throw recoveryRouteFailure("finish stage")
             }
             let staged = StagedReviewRecovery(
@@ -1428,11 +1441,12 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
             return staged
         } catch {
             scriptedReviewRecoveryRoute = nil
-            throw await recoveryFailure(
+            let failure = await recoveryFailure(
                 error,
                 invalidating: prepared.handoff,
                 cleanupRun: await provisionalRecoveryRun(admission) ?? prepared.receipt.sourceRun
             )
+            throw .backendOwnsRecovery(message: failure.localizedDescription)
         }
     }
 

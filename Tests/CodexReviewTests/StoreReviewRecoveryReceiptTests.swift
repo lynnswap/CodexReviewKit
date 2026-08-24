@@ -269,16 +269,38 @@ struct StoreReviewRecoveryReceiptTests {
         let recovered2 = CodexReviewBackendModel.Review.Run(attemptID: "destination-2", threadID: run2.threadID)
         await fake.setNextRecoveredRun(recovered2)
         let admission2 = ReviewStartAdmission()
-        await #expect(throws: ReviewAttemptContractFailure.self) {
+        let generationFailure = ReviewRecoveryStagingFailure.callerRetainsPreparedRecovery(
+            message: "Testing recovery destination generation was not scripted exactly."
+        )
+        await #expect(throws: generationFailure) {
             try await backend.stageReviewRecovery(
                 prepared2, destinationGeneration: .init(rawValue: 5),
                 request: reviewRequest(), admission: admission2
+            )
+        }
+        let nonfreshAdmission = try await activeAdmission(for: recovered2)
+        let admissionFailure = ReviewRecoveryStagingFailure.callerRetainsPreparedRecovery(
+            message: "Testing recovery staging requires one fresh destination admission."
+        )
+        await #expect(throws: admissionFailure) {
+            try await backend.stageReviewRecovery(
+                prepared2, destinationGeneration: destinationGeneration,
+                request: reviewRequest(), admission: nonfreshAdmission
             )
         }
         let staged2 = try await backend.stageReviewRecovery(
             prepared2, destinationGeneration: destinationGeneration,
             request: reviewRequest(), admission: admission2
         )
+        let staleRouteFailure = ReviewRecoveryStagingFailure.backendOwnsRecovery(
+            message: "Testing recovery staging lost its exact scripted prepared route."
+        )
+        await #expect(throws: staleRouteFailure) {
+            try await backend.stageReviewRecovery(
+                prepared2, destinationGeneration: destinationGeneration,
+                request: reviewRequest(), admission: ReviewStartAdmission()
+            )
+        }
         try await backend.commitReviewRecovery(staged2)
         await #expect(throws: ReviewAttemptContractFailure.self) {
             try await backend.discardReviewRecovery(staged2)
@@ -299,7 +321,9 @@ struct StoreReviewRecoveryReceiptTests {
         try script(backend, source: destinationGeneration, destination: .init(rawValue: 5))
         let prepared4 = try await backend.prepareReviewRecovery(recoveryCandidate(for: run4))
         await fake.failRecovery(message: "stage failed")
-        await #expect(throws: FakeCodexReviewBackendError.self) {
+        await #expect(throws: ReviewRecoveryStagingFailure.backendOwnsRecovery(
+            message: "stage failed"
+        )) {
             try await backend.stageReviewRecovery(
                 prepared4, destinationGeneration: .init(rawValue: 5),
                 request: reviewRequest(), admission: ReviewStartAdmission()
