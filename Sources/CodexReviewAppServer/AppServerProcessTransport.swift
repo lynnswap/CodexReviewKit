@@ -24,7 +24,9 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
             codexHomeURL: URL? = nil
         ) {
             let resolvedCodexHomeURL = codexHomeURL ?? AppServerCodexHome.url(environment: environment)
-            let resolvedExecutable = executable ?? CodexAppServerExecutable.resolveExecutable(
+            let resolvedExecutable = executable.map {
+                CodexAppServerExecutable.resolveExecutable($0, environment: environment)
+            } ?? CodexAppServerExecutable.resolveExecutable(
                 environment: environment
             )
             let supportsSessionSource: Bool
@@ -1057,10 +1059,18 @@ package enum CodexAppServerExecutable {
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> String {
         let requestedCommand = [
+            environment["CODEX_APP_SERVER_CODEX_EXECUTABLE"],
             environment["CODEX_REVIEW_CODEX_EXECUTABLE"],
             environment["CODEX_EXECUTABLE"],
         ].compactMap(\.self).first ?? "codex"
 
+        return resolveExecutable(requestedCommand, environment: environment)
+    }
+
+    package static func resolveExecutable(
+        _ requestedCommand: String,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> String {
         if let candidate = findExecutable(
             requestedCommand,
             environment: environment
@@ -1159,8 +1169,19 @@ package enum CodexAppServerExecutable {
         let environmentDirectories = (environment["PATH"] ?? "")
             .split(separator: ":", omittingEmptySubsequences: true)
             .map(String.init)
-        var directories: [String] = []
-        for directory in environmentDirectories + [
+        var knownDirectories: [String] = []
+        if let homeDirectory = environment["HOME"]?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ),
+           homeDirectory.isEmpty == false {
+            // The standalone Codex installer defaults here even when a GUI app's PATH omits it.
+            knownDirectories.append(
+                URL(fileURLWithPath: homeDirectory, isDirectory: true)
+                    .appendingPathComponent(".local/bin", isDirectory: true)
+                    .path
+            )
+        }
+        knownDirectories += [
             "/Applications/Codex.app/Contents/Resources",
             "/opt/homebrew/bin",
             "/usr/local/bin",
@@ -1168,7 +1189,10 @@ package enum CodexAppServerExecutable {
             "/bin",
             "/usr/sbin",
             "/sbin",
-        ] where directories.contains(directory) == false {
+        ]
+        var directories: [String] = []
+        for directory in environmentDirectories + knownDirectories
+        where directories.contains(directory) == false {
             directories.append(directory)
         }
         return directories

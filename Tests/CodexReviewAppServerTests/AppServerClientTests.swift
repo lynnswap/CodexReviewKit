@@ -312,14 +312,14 @@ struct AppServerClientTests {
         #expect(configuration.arguments[sessionSourceIndex + 1] == "app-server")
     }
 
-    @Test func processTransportConfigurationUsesExplicitExecutableWithoutPathSearch() throws {
+    @Test func processTransportConfigurationResolvesExplicitCommandFromPath() throws {
         let directory = FileManager.default.temporaryDirectory
             .appending(path: "codex-review-explicit-executable-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer {
             try? FileManager.default.removeItem(at: directory)
         }
-        let codex = directory.appending(path: "custom-codex")
+        let codex = directory.appending(path: "codex")
         let script = """
         #!/bin/sh
         if [ "$1" = "app-server" ] && [ "$2" = "--help" ]; then
@@ -330,15 +330,69 @@ struct AppServerClientTests {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codex.path)
 
         let configuration = AppServerProcessTransport.Configuration(
-            executable: codex.path,
+            executable: "codex",
             environment: [
-                "PATH": "/tmp/not-used",
+                "PATH": directory.path,
                 "HOME": "/tmp/review-home",
             ]
         )
 
         #expect(configuration.executable == codex.path)
         #expect(configuration.arguments == CodexAppServerExecutable.appServerArguments())
+    }
+
+    @Test func processTransportConfigurationFindsStandaloneInstallerOutsidePath() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "codex-review-local-bin-\(UUID().uuidString)")
+        let home = root.appending(path: "home")
+        let bin = home.appending(path: ".local/bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let codex = bin.appending(path: "codex")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: codex)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codex.path)
+
+        let configuration = AppServerProcessTransport.Configuration(
+            arguments: [],
+            environment: ["HOME": home.path, "PATH": root.appending(path: "empty-bin").path]
+        )
+
+        #expect(configuration.executable == codex.path)
+    }
+
+    @Test func processTransportExecutableEnvironmentUsesDedicatedPrecedenceWithoutFallback() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "codex-review-executable-precedence-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let review = directory.appending(path: "review-codex")
+        let legacy = directory.appending(path: "legacy-codex")
+        for executable in [review, legacy] {
+            try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: executable.path
+            )
+        }
+
+        #expect(CodexAppServerExecutable.resolveExecutable(environment: [
+            "CODEX_REVIEW_CODEX_EXECUTABLE": review.path,
+            "CODEX_EXECUTABLE": legacy.path,
+            "PATH": directory.path,
+        ]) == review.path)
+        #expect(CodexAppServerExecutable.resolveExecutable(environment: [
+            "CODEX_EXECUTABLE": legacy.path,
+            "PATH": directory.path,
+        ]) == legacy.path)
+
+        let resolved = CodexAppServerExecutable.resolveExecutable(environment: [
+            "CODEX_APP_SERVER_CODEX_EXECUTABLE": "missing-preferred-codex",
+            "CODEX_REVIEW_CODEX_EXECUTABLE": review.path,
+            "CODEX_EXECUTABLE": legacy.path,
+            "PATH": directory.path,
+        ])
+
+        #expect(resolved == "missing-preferred-codex")
     }
 
     @Test func processTransportConfigurationOmitsUnsupportedSessionSourceFlag() throws {
