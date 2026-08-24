@@ -691,7 +691,9 @@ struct CodexReviewHostTests {
     @Test func liveTypedRecoveryDestinationCommitsOnlyItsExactGeneration() async throws {
         let fixture = try await makeLiveTypedRecoveryFixture()
         let methodsBeforeStaging = await fixture.destination.recordedRequests().map(\.method)
-        await #expect(throws: ReviewAttemptContractFailure.self) {
+        await #expect(throws: ReviewRecoveryStagingFailure.callerRetainsPreparedRecovery(
+            message: "Review recovery destination generation \(fixture.destinationGeneration.successor().rawValue) is not active."
+        )) {
             try await fixture.store.backend.stageReviewRecovery(
                 fixture.prepared,
                 destinationGeneration: fixture.destinationGeneration.successor(),
@@ -708,10 +710,12 @@ struct CodexReviewHostTests {
             admission: admission
         )
         let methodsAfterStaging = await fixture.destination.recordedRequests().map(\.method)
-        await #expect(throws: ReviewAttemptContractFailure.self) {
+        await #expect(throws: ReviewRecoveryStagingFailure.backendOwnsRecovery(
+            message: "Review recovery staging requires its exact route for attempt \(fixture.prepared.receipt.sourceRun.attemptID)."
+        )) {
             try await fixture.store.backend.stageReviewRecovery(
                 fixture.prepared,
-                destinationGeneration: fixture.destinationGeneration,
+                destinationGeneration: fixture.destinationGeneration.successor(),
                 request: fixture.request,
                 admission: ReviewStartAdmission()
             )
@@ -788,13 +792,18 @@ struct CodexReviewHostTests {
                 await admission.recordCancellation(.system())
             }
         }
-        await #expect(throws: (any Error).self) {
+        await #expect {
             try await fixture.store.backend.stageReviewRecovery(
                 fixture.prepared,
                 destinationGeneration: fixture.destinationGeneration,
                 request: fixture.request,
                 admission: admission
             )
+        } throws: { error in
+            guard case ReviewRecoveryStagingFailure.backendOwnsRecovery = error else {
+                return false
+            }
+            return true
         }
         #expect(fixture.store.liveReviewAttemptRouteCountForTesting == 0)
         #expect(fixture.store.liveReviewRecoveryRouteCountForTesting == 0)
