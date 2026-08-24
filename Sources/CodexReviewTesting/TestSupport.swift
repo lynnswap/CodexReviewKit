@@ -1024,6 +1024,7 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     private var throwsCancellationAfterHeldRuntimePreparation = false
     private var runtimePreparationStartedGate = AsyncGate()
     private var runtimePreparationCancellationGate = AsyncGate()
+    private var runtimePublicationAction: (@MainActor @Sendable () async -> Void)?
 
     package init(
         reviewBackend: FakeCodexReviewBackend,
@@ -1064,6 +1065,16 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         throwsCancellationAfterHeldRuntimePreparation = true
     }
 
+    package func runOnNextRuntimePublication(
+        _ action: @escaping @MainActor @Sendable () async -> Void
+    ) {
+        precondition(
+            runtimePublicationAction == nil,
+            "TestingCodexReviewStoreBackend owns one runtime publication action at a time."
+        )
+        runtimePublicationAction = action
+    }
+
     package func prepareRuntime(
         generation _: ReviewRuntimeGeneration,
         purpose: ReviewRuntimeTransitionPurpose
@@ -1101,6 +1112,14 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
             ),
             handle: handle
         )
+    }
+
+    package func waitForRuntimePublication(
+        handle _: any RuntimeLifecycleHandle
+    ) async {
+        let action = runtimePublicationAction
+        runtimePublicationAction = nil
+        await action?()
     }
 
     package func stop(store _: CodexReviewStore) async {

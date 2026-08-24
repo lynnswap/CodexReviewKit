@@ -1,5 +1,11 @@
 import Foundation
 import Observation
+import OSLog
+
+private let runtimeLifecycleLogger = Logger(
+    subsystem: "CodexReviewKit",
+    category: "runtime-lifecycle"
+)
 
 @MainActor
 @Observable
@@ -167,8 +173,9 @@ public final class CodexReviewStore {
         }
         _ = await sourceCloseJoin.value()
         if let failure = replacement.consumeSourceCloseFailure() {
-            settings.finishLoading(errorMessage: failure.localizedDescription)
-            writeDiagnosticsIfNeeded()
+            runtimeLifecycleLogger.error(
+                "Source runtime close failed; sourceGeneration=\(replacement.sourceGeneration.rawValue, privacy: .public) replacementGeneration=\(replacement.replacementGeneration.rawValue, privacy: .public) error=\(failure.localizedDescription)"
+            )
         }
     }
 

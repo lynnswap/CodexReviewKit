@@ -429,11 +429,17 @@ struct CodexReviewStoreLifecycleTests {
 
     @Test func sourceCloseFailureReplaysAndConsumesOnceWhileReplacementPublishes() async throws {
         let expectedFailure = ReviewRuntimeCloseFailure.connection("Injected source close failure.")
-        let backend = TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        let newerSettingsError = "Newer settings failure."
+        let reviewBackend = FakeCodexReviewBackend()
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: reviewBackend)
         let store = CodexReviewStore.makeTestingStore(backend: backend)
         await store.start()
         let sourceHandle = try #require(backend.lastPreparedRuntimeHandle)
         sourceHandle.failClose(with: expectedFailure)
+        await reviewBackend.failNextSettingsUpdate(message: newerSettingsError)
+        backend.runOnNextRuntimePublication { [store] in
+            await store.updateSettingsModel("newer-model")
+        }
 
         let preparationGate = AsyncGate()
         backend.holdRuntimePreparation(with: preparationGate)
@@ -457,7 +463,7 @@ struct CodexReviewStoreLifecycleTests {
 
         #expect(store.serverState == .running)
         #expect(backend.startRequests == [false, true])
-        #expect(store.settings.lastErrorMessage == expectedFailure.localizedDescription)
+        #expect(store.settings.lastErrorMessage == newerSettingsError)
         #expect(replacement.consumeSourceCloseFailure() == nil)
         await store.stop()
     }
@@ -488,7 +494,7 @@ struct CodexReviewStoreLifecycleTests {
 
         #expect(sourceHandle.closePurposes == [.restartSameAccount])
         #expect(sourceHandle.waitUntilClosedCallCount == 1)
-        #expect(store.settings.lastErrorMessage == expectedFailure.localizedDescription)
+        #expect(store.settings.lastErrorMessage == nil)
     }
 
     @Test func callerCancellationStillConsumesCutoverByPublishingCurrentRuntime() async throws {
