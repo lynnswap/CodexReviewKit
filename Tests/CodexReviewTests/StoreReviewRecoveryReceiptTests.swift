@@ -8,9 +8,9 @@ struct StoreReviewRecoveryReceiptTests {
         let (_, source, candidate, prepared) = try await fixture()
         let receipt = StoreReviewRecoveryReceipt(source: source)
         let release = AsyncGate()
-        try receipt.start(.disposition) {
+        try receipt.startDisposition {
             await release.waitIgnoringCancellation()
-            return .disposition(.success(.replacement(candidate)))
+            return .replacement(candidate)
         }
         let first = try receipt.joinOwnedOperation()
         #expect(throws: ReviewAttemptContractFailure.self) {
@@ -21,7 +21,7 @@ struct StoreReviewRecoveryReceiptTests {
               case .disposition = try await first.value else {
             Issue.record("A completed join did not replay its result."); return
         }
-        try receipt.start(.preparation) { .prepared(.success(prepared)) }
+        try receipt.startPreparation { prepared }
         guard case .prepared(let owned) = try await receipt.joinOwnedOperation().value else {
             Issue.record("Successor phase was not joinable."); return
         }
@@ -37,11 +37,16 @@ struct StoreReviewRecoveryReceiptTests {
             handoff: prepared.handoff
         )
         let preparedReceipt = StoreReviewRecoveryReceipt(source: source)
-        try preparedReceipt.start(.disposition) { .disposition(.success(.replacement(candidate))) }
+        try preparedReceipt.startDisposition { .replacement(candidate) }
         _ = try await preparedReceipt.joinOwnedOperation().value
-        try preparedReceipt.start(.preparation) { .prepared(.success(invalidPrepared)) }
+        try preparedReceipt.startPreparation { invalidPrepared }
         await #expect(throws: ReviewAttemptContractFailure.self) {
             try await preparedReceipt.joinOwnedOperation().value
+        }
+        #expect(throws: ReviewAttemptContractFailure.self) {
+            try preparedReceipt.startStaging(admission: ReviewStartAdmission()) {
+                throw ReviewAttemptContractFailure(message: "Must not run")
+            }
         }
         guard case .prepared(let exactPrepared) = try preparedReceipt.suppress() else {
             Issue.record("Prepared discard target was lost."); return
@@ -54,9 +59,14 @@ struct StoreReviewRecoveryReceiptTests {
         )
         let rejected = StoreReviewRecoveryReceipt(source: source)
         try await advance(rejected, candidate: candidate, prepared: prepared)
-        try rejected.start(.staging(inactive.admission)) { .staged(.success(inactive)) }
+        try rejected.startStaging(admission: inactive.admission) { inactive }
         await #expect(throws: ReviewAttemptContractFailure.self) {
             try await rejected.joinOwnedOperation().value
+        }
+        #expect(throws: ReviewAttemptContractFailure.self) {
+            try rejected.startCommit { _ in
+                Issue.record("A rejected staged recovery reached commit.")
+            }
         }
         guard case .staged(let exactStaged) = try rejected.suppress() else {
             Issue.record("Rejected staged target was lost."); return
@@ -71,38 +81,51 @@ struct StoreReviewRecoveryReceiptTests {
         let finishing = StoreReviewRecoveryReceipt(source: source)
         try await advance(finishing, candidate: candidate, prepared: prepared)
         let stageGate = AsyncGate()
-        try finishing.start(.staging(admission)) {
+        try finishing.startStaging(admission: admission) {
             await stageGate.waitIgnoringCancellation()
-            return .staged(.success(staged))
+            return staged
         }
         let promotion = try finishing.joinOwnedOperation()
         await staged.attempt.events.append(.message("mailbox continuity"))
         await stageGate.open()
         _ = try await promotion.value
-        let active = try finishing.finish(staged)
+        #expect(throws: ReviewAttemptContractFailure.self) { try finishing.finishCommitted() }
+        try finishing.startCommit { exactStaged in
+            #expect(exactStaged === staged)
+        }
+        guard case .committed(let committed) = try await finishing.joinOwnedOperation().value else {
+            Issue.record("Commit completion was not retained."); return
+        }
+        #expect(committed === staged)
+        let active = try finishing.finishCommitted()
         #expect(active.matches(.init(attempt: staged.attempt, admission: admission)))
         #expect(active.matches(.init(attempt: .init(run: recoveredRun), admission: admission)) == false)
         #expect(try await active.attempt.events.next() == .message("mailbox continuity"))
-        #expect(throws: ReviewAttemptContractFailure.self) { try finishing.finish(staged) }
+        #expect(throws: ReviewAttemptContractFailure.self) { try finishing.finishCommitted() }
 
         let cancellationRun = CodexReviewBackendModel.Review.Run(
             attemptID: "cancelled-destination", threadID: run.threadID
         )
-        let cancellationAdmission = try await activeAdmission(for: cancellationRun)
-        let cancelledStage = StagedReviewRecovery(
+        let failedCommitAdmission = try await activeAdmission(for: cancellationRun)
+        let failedCommitStage = StagedReviewRecovery(
             receipt: prepared.receipt, destinationGeneration: .init(rawValue: 2),
-            attempt: .init(run: cancellationRun), admission: cancellationAdmission
+            attempt: .init(run: cancellationRun), admission: failedCommitAdmission
         )
-        let cancelledDestination = StoreReviewRecoveryReceipt(source: source)
-        try await advance(cancelledDestination, candidate: candidate, prepared: prepared)
-        try cancelledDestination.start(.staging(cancellationAdmission)) { .staged(.success(cancelledStage)) }
-        _ = try await cancelledDestination.joinOwnedOperation().value
-        await cancelledDestination.cancelOwnedOperation(.mcpClient(message: "Stop")).value
-        #expect(await cancellationAdmission.permitsRecoveryPublication(of: cancellationRun) == false)
-        guard case .staged(let cancelledTarget) = try cancelledDestination.suppress() else {
-            Issue.record("Cancelled destination discard target was lost."); return
+        let failedCommit = StoreReviewRecoveryReceipt(source: source)
+        try await advance(failedCommit, candidate: candidate, prepared: prepared)
+        try failedCommit.startStaging(admission: failedCommitAdmission) { failedCommitStage }
+        _ = try await failedCommit.joinOwnedOperation().value
+        try failedCommit.startCommit { exactStaged in
+            #expect(exactStaged === failedCommitStage)
+            throw ReviewAttemptContractFailure(message: "commit failed")
         }
-        #expect(cancelledTarget === cancelledStage)
+        await #expect(throws: ReviewAttemptContractFailure.self) {
+            try await failedCommit.joinOwnedOperation().value
+        }
+        guard case .staged(let failedCommitTarget) = try failedCommit.suppress() else {
+            Issue.record("Failed commit discard target was lost."); return
+        }
+        #expect(failedCommitTarget === failedCommitStage)
 
         let inFlightAdmission = try await activeAdmission(for: cancellationRun)
         let inFlightStage = StagedReviewRecovery(
@@ -112,37 +135,73 @@ struct StoreReviewRecoveryReceiptTests {
         let inFlight = StoreReviewRecoveryReceipt(source: source)
         try await advance(inFlight, candidate: candidate, prepared: prepared)
         let inFlightGate = AsyncGate()
-        try inFlight.start(.staging(inFlightAdmission)) {
+        try inFlight.startStaging(admission: inFlightAdmission) {
             await inFlightGate.waitIgnoringCancellation()
-            return .staged(.success(inFlightStage))
+            return inFlightStage
         }
         let inFlightJoin = try inFlight.joinOwnedOperation()
-        await inFlight.cancelOwnedOperation(.mcpClient(message: "Stop")).value
+        let firstCancellation = ReviewCancellation.mcpClient(message: "First stop")
+        await inFlight.cancelOwnedOperation(firstCancellation).value
+        await inFlight.cancelOwnedOperation(.system(message: "Second stop")).value
+        #expect(await inFlightAdmission.cancellationRequest() == firstCancellation)
         await inFlightGate.open()
-        await #expect(throws: ReviewAttemptContractFailure.self) { try await inFlightJoin.value }
+        await #expect(throws: CancellationError.self) { try await inFlightJoin.value }
         guard case .staged(let inFlightTarget) = try inFlight.suppress() else {
             Issue.record("In-flight destination discard target was lost."); return
         }
         #expect(inFlightTarget === inFlightStage)
 
+        let committedRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "committed-after-cancel", threadID: run.threadID
+        )
+        let committedAdmission = try await activeAdmission(for: committedRun)
+        let committedStage = StagedReviewRecovery(
+            receipt: prepared.receipt, destinationGeneration: .init(rawValue: 2),
+            attempt: .init(run: committedRun), admission: committedAdmission
+        )
+        let committedReceipt = StoreReviewRecoveryReceipt(source: source)
+        try await advance(committedReceipt, candidate: candidate, prepared: prepared)
+        try committedReceipt.startStaging(admission: committedAdmission) { committedStage }
+        _ = try await committedReceipt.joinOwnedOperation().value
+        let commitLinearized = AsyncGate()
+        let releaseCommit = AsyncGate()
+        try committedReceipt.startCommit { exactStaged in
+            #expect(exactStaged === committedStage)
+            await commitLinearized.open()
+            await releaseCommit.waitIgnoringCancellation()
+        }
+        let commitJoin = try committedReceipt.joinOwnedOperation()
+        await commitLinearized.wait()
+        let afterCommitCancellation = ReviewCancellation.system(message: "Stop after commit")
+        await committedReceipt.cancelOwnedOperation(afterCommitCancellation).value
+        await releaseCommit.open()
+        guard case .committed(let exactCommitted) = try await commitJoin.value else {
+            Issue.record("Linearized commit was not retained."); return
+        }
+        #expect(exactCommitted === committedStage)
+        let committedActive = try committedReceipt.finishCommitted()
+        #expect(committedActive.matches(.init(
+            attempt: committedStage.attempt,
+            admission: committedAdmission
+        )))
+        #expect(await committedAdmission.cancellationRequest() == afterCommitCancellation)
+
         var cancelled: StoreReviewRecoveryReceipt? = .init(source: source)
         weak let released = cancelled
-        try cancelled?.start(.disposition) {
-            .disposition(.success(.replacement(candidate)))
-        }
+        try cancelled?.startDisposition { .replacement(candidate) }
         _ = try await cancelled?.joinOwnedOperation().value
         let gate = AsyncGate()
-        try cancelled?.start(.preparation) {
+        try cancelled?.startPreparation {
             await gate.waitIgnoringCancellation()
-            return .prepared(.success(prepared))
+            return prepared
         }
         var cancellationJoin = try cancelled?.joinOwnedOperation()
         await cancelled?.cancelOwnedOperation(.mcpClient(message: "Stop")).value
         await gate.open()
         await #expect(throws: CancellationError.self) { try await cancellationJoin?.value }
         cancellationJoin = nil
-        #expect(throws: ReviewAttemptContractFailure.self) {
-            try cancelled?.start(.staging(inactive.admission)) { .staged(.success(inactive)) }
+        #expect(throws: CancellationError.self) {
+            try cancelled?.startStaging(admission: inactive.admission) { inactive }
         }
         guard case .prepared(let cancelledTarget) = try cancelled?.suppress() else {
             Issue.record("Cancelled prepared target was lost."); return
@@ -155,9 +214,9 @@ struct StoreReviewRecoveryReceiptTests {
         _ receipt: StoreReviewRecoveryReceipt, candidate: ReviewRecoveryCandidate,
         prepared: PreparedReviewRecovery
     ) async throws {
-        try receipt.start(.disposition) { .disposition(.success(.replacement(candidate))) }
+        try receipt.startDisposition { .replacement(candidate) }
         _ = try await receipt.joinOwnedOperation().value
-        try receipt.start(.preparation) { .prepared(.success(prepared)) }
+        try receipt.startPreparation { prepared }
         _ = try await receipt.joinOwnedOperation().value
     }
     private func fixture() async throws -> (
