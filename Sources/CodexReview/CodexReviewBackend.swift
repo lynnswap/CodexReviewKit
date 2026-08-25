@@ -27,10 +27,6 @@ package protocol CodexReviewBackend: Sendable {
         _ candidate: ReviewRecoveryCandidate
     ) async throws -> ReviewRecoveryHandoff
     func resumeReviewRecovery(
-        _ token: CodexReviewBackendModel.Review.RecoveryToken,
-        request: CodexReviewBackendModel.Review.Start
-    ) async throws -> BackendReviewAttempt
-    func resumeReviewRecovery(
         _ handoff: ReviewRecoveryHandoff,
         request: CodexReviewBackendModel.Review.Start,
         admission: ReviewStartAdmission
