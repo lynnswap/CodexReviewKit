@@ -103,6 +103,38 @@ struct MCPHTTPNetworkResourceOwnerTests {
         #expect(owner.snapshot().isClosed)
     }
 
+    @Test func connectionAdmissionCloseRejectsDomainWork() async throws {
+        let owner = MCPHTTPNetworkResourceOwner(generationID: 14)
+        let resource = TestingConnectionResource()
+        let connection = try #require(owner.admitConnection(resource))
+        let admitted = try #require(connection.admitRequest())
+
+        connection.closeAdmission()
+        #expect(admitted.operation.startDomainWork {} == nil)
+        admitted.lease.acknowledgeCompletion()
+        let closing = owner.beginClosing(.serverStop)
+        resource.acknowledgeClose()
+        await closing.waitUntilClosed()
+
+        #expect(owner.snapshot().isClosed)
+    }
+
+    @Test func finalRequestKeepsItsDomainAdmissionUntilConnectionClose() async throws {
+        let owner = MCPHTTPNetworkResourceOwner(generationID: 15)
+        let resource = TestingConnectionResource()
+        let connection = try #require(owner.admitConnection(resource))
+        let admitted = try #require(connection.admitRequest(finalForConnection: true))
+
+        let task = try #require(admitted.operation.startDomainWork {})
+        try await task.value
+        admitted.lease.acknowledgeCompletion()
+
+        let closing = owner.beginClosing(.serverStop)
+        resource.acknowledgeClose()
+        await closing.waitUntilClosed()
+        #expect(owner.snapshot().isClosed)
+    }
+
     @Test func responseAndHTTPCompletionStillJoinDomainAcknowledgement() async throws {
         let owner = MCPHTTPNetworkResourceOwner(generationID: 11)
         let resource = TestingConnectionResource()
