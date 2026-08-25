@@ -121,7 +121,7 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         }
     }
 
-    package final class DomainWorkLease: @unchecked Sendable {
+    private final class DomainWorkLease: @unchecked Sendable {
         fileprivate let id = UUID()
         private weak var operation: RequestOperation?
 
@@ -129,26 +129,18 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             self.operation = operation
         }
 
-        deinit {
-            operation?.abandonUninstalledDomainWork(id: id)
-        }
-
-        package func install<Success: Sendable, Failure: Error>(
+        func install<Success: Sendable, Failure: Error>(
             _ task: Task<Success, Failure>
         ) {
             operation?.installDomainWork(id: id) { task.cancel() }
         }
 
-        package func waitUntilStartIsAllowed() async -> Bool {
+        func waitUntilStartIsAllowed() async -> Bool {
             guard let operation else { return false }
             return await operation.waitUntilDomainWorkCanStart(id: id)
         }
 
-        package func signalCancellation() {
-            operation?.cancelDomainWork(id: id)
-        }
-
-        package func acknowledgeCompletion() {
+        func acknowledgeCompletion() {
             operation?.acknowledgeDomainWork(id: id)
         }
     }
@@ -164,7 +156,6 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         private struct DomainWorkState {
             var cancellation: (@Sendable () -> Void)?
             var cancellationWasRequested = false
-            var completionWasAcknowledged = false
             var startWasRequested = false
             var startWaiter: CheckedContinuation<Bool, Never>?
         }
@@ -228,7 +219,9 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             finishIfPossible()
         }
 
-        package func reserveDomainWork() -> DomainWorkLease? {
+        package func startDomainWork<Success: Sendable>(
+            _ work: @escaping @Sendable () async throws -> Success
+        ) -> Task<Success, any Error>? {
             lock.lock()
             guard domainAdmissionClosed == false, terminalCause == nil, didClose == false else {
                 lock.unlock()
@@ -237,7 +230,16 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             let lease = DomainWorkLease(operation: self)
             domainWork[lease.id] = .init()
             lock.unlock()
-            return lease
+            let task = Task<Success, any Error> {
+                defer { lease.acknowledgeCompletion() }
+                guard await lease.waitUntilStartIsAllowed() else {
+                    throw CancellationError()
+                }
+                try Task.checkCancellation()
+                return try await work()
+            }
+            lease.install(task)
+            return task
         }
 
         package func beginResponse() -> Bool {
@@ -371,20 +373,14 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             }
             work.cancellation = cancellation
             shouldCancel = terminalCause != nil || work.cancellationWasRequested
-            let didComplete = work.completionWasAcknowledged
             if work.startWasRequested {
                 waiter = work.startWaiter
                 work.startWaiter = nil
             }
-            if didComplete {
-                domainWork.removeValue(forKey: id)
-            } else {
-                domainWork[id] = work
-            }
+            domainWork[id] = work
             lock.unlock()
             if shouldCancel { cancellation() }
             waiter?.resume(returning: shouldCancel == false)
-            if didComplete { finishIfPossible() }
         }
 
         fileprivate func waitUntilDomainWorkCanStart(id: UUID) async -> Bool {
@@ -411,47 +407,13 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             }
         }
 
-        fileprivate func cancelDomainWork(id: UUID) {
-            lock.lock()
-            guard var work = domainWork[id] else {
-                lock.unlock()
-                return
-            }
-            work.cancellationWasRequested = true
-            let cancellation = work.cancellation
-            domainWork[id] = work
-            lock.unlock()
-            cancellation?()
-        }
-
         fileprivate func acknowledgeDomainWork(id: UUID) {
             lock.lock()
-            guard var work = domainWork[id], work.completionWasAcknowledged == false else {
+            guard domainWork.removeValue(forKey: id) != nil else {
                 lock.unlock()
                 preconditionFailure("A domain WorkLease is acknowledged exactly once by its task owner.")
             }
-            work.completionWasAcknowledged = true
-            let wasInstalled = work.cancellation != nil
-            if wasInstalled {
-                domainWork.removeValue(forKey: id)
-            } else {
-                domainWork[id] = work
-            }
             lock.unlock()
-            if wasInstalled { finishIfPossible() }
-        }
-
-        fileprivate func abandonUninstalledDomainWork(id: UUID) {
-            var waiter: CheckedContinuation<Bool, Never>?
-            lock.lock()
-            guard let work = domainWork[id], work.cancellation == nil else {
-                lock.unlock()
-                return
-            }
-            domainWork.removeValue(forKey: id)
-            waiter = work.startWaiter
-            lock.unlock()
-            waiter?.resume(returning: false)
             finishIfPossible()
         }
 
