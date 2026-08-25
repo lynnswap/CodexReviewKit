@@ -755,7 +755,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         let session = await reviewEventSession(for: run, admittedBy: operationID)
         await session.requestCancellation(message: reason.message)
         do {
-            _ = try await sendTurnInterrupt(for: run)
+            try await sendTurnInterrupt(for: run)
             await finishReviewEventStream(
                 threadID: run.threadID,
                 cancellationMessage: reason.message,
@@ -1262,14 +1262,6 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         noteReviewThreadIDForCleanup(interruption.threadID, canonicalThreadID: run.threadID)
     }
 
-    private func markInterruptionTurnAbandoned(
-        _ interruption: AppServerReviewInterruption,
-        canonicalThreadID: String
-    ) {
-        markTurnAbandoned(interruption.turnID)
-        noteReviewThreadIDForCleanup(interruption.threadID, canonicalThreadID: canonicalThreadID)
-    }
-
     private func markTurnAbandoned(_ turnID: String?) {
         guard let turnID = turnID?.nilIfEmpty else {
             return
@@ -1331,18 +1323,16 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     private func sendTurnInterrupt(
-        for run: CodexReviewBackendModel.Review.Run,
-        willInterruptActiveTurn: (@Sendable (AppServerReviewInterruption) async -> Void)? = nil
-    ) async throws -> AppServerReviewInterruption {
+        for run: CodexReviewBackendModel.Review.Run
+    ) async throws {
         if let control = controlsByThreadID[run.threadID],
-           let interruption = try await control.interrupt(willInterruptActiveTurn: willInterruptActiveTurn) {
-            return interruption
+           try await control.interrupt() != nil {
+            return
         }
         let threadID = appServerTurnThreadID(for: run)
         let _: EmptyResponse = try await client.send(AppServerAPI.Turn.Interrupt.Request(
             params: .init(threadID: threadID, turnID: run.turnID ?? "")
         ))
-        return .init(threadID: threadID, turnID: run.turnID ?? "")
     }
 
     private func cleanupThreadIDs(for run: CodexReviewBackendModel.Review.Run) -> [String] {
