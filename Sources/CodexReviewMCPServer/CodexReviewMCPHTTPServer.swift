@@ -281,12 +281,59 @@ package actor CodexReviewMCPHTTPServer {
         )
     }
 
-    private struct SessionContext {
-        let server: Server
+    private struct StartingSessionFailure: Swift.Error, @unchecked Sendable {
+        let primary: any Swift.Error
+        let server: Server?
+    }
+
+    private typealias StartingSessionResult = Result<Server, StartingSessionFailure>
+
+    private final class StartingSession: @unchecked Sendable {
+        let id = UUID()
+        let task: Task<StartingSessionResult, Never>
+
+        init(task: Task<StartingSessionResult, Never>) {
+            self.task = task
+        }
+    }
+
+    private final class MCPSemanticSession: @unchecked Sendable {
+        struct Identity: Hashable, Sendable {
+            let generationID: UInt64
+            let sessionID: String
+            let ordinal: UInt64
+        }
+
+        struct Runtime: Sendable {
+            let server: Server
+            let transport: StatefulHTTPServerTransport
+        }
+
+        enum Phase {
+            case initializing(StartingSession)
+            case active(Runtime)
+        }
+
+        let identity: Identity
         let transport: StatefulHTTPServerTransport
         let createdAt: Date
+        var phase: Phase
         var lastAccessedAt: Date
         var activeRequestCount: Int
+
+        init(
+            identity: Identity,
+            transport: StatefulHTTPServerTransport,
+            starting: StartingSession,
+            now: Date
+        ) {
+            self.identity = identity
+            self.transport = transport
+            self.createdAt = now
+            self.phase = .initializing(starting)
+            self.lastAccessedAt = now
+            self.activeRequestCount = 1
+        }
     }
 
     private struct FixedSessionIDGenerator: SessionIDGenerator {
@@ -301,7 +348,8 @@ package actor CodexReviewMCPHTTPServer {
     private let configuration: CodexReviewMCPHTTPServer.Configuration
     private var lifecycleState: LifecycleState = .stopped(.success(()))
     private var nextGenerationID: UInt64 = 0
-    private var sessions: [String: SessionContext] = [:]
+    private var nextSessionOrdinal: UInt64 = 0
+    private var sessions: [String: MCPSemanticSession] = [:]
     private let startCompletionGate = MCPHTTPLifecycleCompletionGate()
     private let joinedStartCompletionGate = MCPHTTPLifecycleCompletionGate()
     private let stopCompletionGate = MCPHTTPLifecycleCompletionGate()
@@ -309,6 +357,7 @@ package actor CodexReviewMCPHTTPServer {
     private let writerCompletionGate = MCPHTTPLifecycleCompletionGate()
     private let responseEndAcknowledgementGate = MCPHTTPLifecycleCompletionGate()
     private let responseEndWriteGate = MCPHTTPLifecycleCompletionGate()
+    private let sessionStartCompletionGate = MCPHTTPLifecycleCompletionGate()
     private let responseBackpressureProbe = MCPHTTPResponseBackpressureProbe()
     private var eventLoopGroupShutdownCount = 0
     private var nextListenerCloseFailureForTesting: LifecycleError.Failure?
@@ -321,6 +370,8 @@ package actor CodexReviewMCPHTTPServer {
     private var stopStoppingJoinWaiters: [CheckedContinuation<Void, Never>] = []
     private var didStartJoinStartingGeneration = false
     private var startStartingJoinWaiters: [CheckedContinuation<Void, Never>] = []
+    private var didBeginClosingInitializingSession = false
+    private var initializingSessionCloseWaiters: [CheckedContinuation<Void, Never>] = []
 
     package init(
         adapter: CodexReviewMCPServer,
@@ -788,6 +839,36 @@ package actor CodexReviewMCPHTTPServer {
         await startCompletionGate.release()
     }
 
+    package func holdNextSessionStartCompletionForTesting() async {
+        didBeginClosingInitializingSession = false
+        await sessionStartCompletionGate.holdNextCompletion()
+    }
+
+    package func waitUntilSessionStartCompletionIsHeldForTesting() async {
+        await sessionStartCompletionGate.waitUntilHolding()
+    }
+
+    package func releaseSessionStartCompletionForTesting() async {
+        await sessionStartCompletionGate.release()
+    }
+
+    package func waitUntilInitializingSessionCloseBeginsForTesting() async {
+        if didBeginClosingInitializingSession {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            if didBeginClosingInitializingSession {
+                continuation.resume()
+            } else {
+                initializingSessionCloseWaiters.append(continuation)
+            }
+        }
+    }
+
+    package func sessionCountForTesting() -> Int {
+        sessions.count
+    }
+
     package func waitUntilStartingGenerationAdmissionIsClosedForTesting() async {
         if lastStartingAdmissionClosedGenerationID != nil {
             return
@@ -1056,7 +1137,13 @@ package actor CodexReviewMCPHTTPServer {
     ) async -> TrackedHTTPResponse {
         let sessionID = request.header(HTTPHeaderName.sessionID)
 
-        if let sessionID, var session = sessions[sessionID] {
+        if let sessionID, let session = sessions[sessionID] {
+            guard case .active = session.phase else {
+                return .init(response: .error(
+                    statusCode: 404,
+                    .invalidRequest("Not Found: Session not found or expired")
+                ))
+            }
             guard let request = Self.ownedRequest(
                 request,
                 operation: operation,
@@ -1069,15 +1156,14 @@ package actor CodexReviewMCPHTTPServer {
             }
             session.lastAccessedAt = Date()
             session.activeRequestCount += 1
-            sessions[sessionID] = session
             let response = await session.transport.handleRequest(request)
             let (trackedResponse, didFinishRequest) = trackActiveRequest(
                 response,
-                sessionID: sessionID,
+                session: session,
                 responseSourceKind: Self.responseSourceKind(for: request)
             )
             if didFinishRequest, request.method.uppercased() == "DELETE", trackedResponse.response.statusCode == 200 {
-                await closeSession(sessionID)
+                await closeSession(session)
             }
             return trackedResponse
         }
@@ -1115,52 +1201,110 @@ package actor CodexReviewMCPHTTPServer {
                 .internalError("MCP request ownership conflict.")
             ))
         }
+        guard case .running(let generation) = lifecycleState,
+              generation.admissionClosed == false,
+              generation.id == networkResources.generationID,
+              generation.networkResources === networkResources else {
+            return .init(response: .error(
+                statusCode: 503,
+                .internalError("MCP server generation is not accepting sessions.")
+            ))
+        }
         let clientSession = MCPClientSessionState()
         let transport = StatefulHTTPServerTransport(
             sessionIDGenerator: FixedSessionIDGenerator(sessionID: sessionID),
             validationPipeline: makeValidationPipeline(),
             retryInterval: configuration.retryInterval
         )
-
-        do {
+        let adapter = adapter
+        let boundedReviewWaitDuration = configuration.boundedReviewWaitDuration
+        let sessionStartCompletionGate = sessionStartCompletionGate
+        let startTask = Task<StartingSessionResult, Never> {
             let server = await makeMCPProtocolServer(
                 adapter: adapter,
                 defaultSessionID: sessionID,
                 clientSession: clientSession,
-                boundedReviewWaitDuration: configuration.boundedReviewWaitDuration,
+                boundedReviewWaitDuration: boundedReviewWaitDuration,
                 networkResources: networkResources
             )
-            try await server.start(transport: transport) { clientInfo, _ in
-                await clientSession.update(clientInfo: clientInfo)
+            do {
+                try Task.checkCancellation()
+                try await server.start(transport: transport) { clientInfo, _ in
+                    await clientSession.update(clientInfo: clientInfo)
+                }
+                await sessionStartCompletionGate.waitIfNeeded()
+                try Task.checkCancellation()
+                return .success(server)
+            } catch {
+                return .failure(.init(primary: error, server: server))
             }
-            sessions[sessionID] = SessionContext(
-                server: server,
-                transport: transport,
-                createdAt: Date(),
-                lastAccessedAt: Date(),
-                activeRequestCount: 1
-            )
+        }
+        let starting = StartingSession(task: startTask)
+        nextSessionOrdinal &+= 1
+        let session = MCPSemanticSession(
+            identity: .init(
+                generationID: generation.id,
+                sessionID: sessionID,
+                ordinal: nextSessionOrdinal
+            ),
+            transport: transport,
+            starting: starting,
+            now: Date()
+        )
+        sessions[sessionID] = session
 
+        switch await startTask.value {
+        case .success(let server):
+            guard publishSessionStart(
+                server,
+                session: session,
+                starting: starting,
+                generation: generation
+            ) else {
+                return .init(response: .error(
+                    statusCode: 503,
+                    .internalError("MCP session initialization was cancelled.")
+                ))
+            }
             let response = await transport.handleRequest(request)
             let (trackedResponse, didFinishRequest) = trackActiveRequest(
                 response,
-                sessionID: sessionID,
+                session: session,
                 responseSourceKind: Self.responseSourceKind(for: request)
             )
             if didFinishRequest, case .error = trackedResponse.response {
-                sessions.removeValue(forKey: sessionID)
-                await transport.disconnect()
+                await closeSession(session)
             }
             return trackedResponse
-        } catch {
-            await transport.disconnect()
+
+        case .failure(let failure):
+            await closeSession(session)
             return .init(
                 response: .error(
                     statusCode: 500,
-                    .internalError("Failed to create MCP session: \(error.localizedDescription)")
+                    .internalError("Failed to create MCP session: \(failure.primary.localizedDescription)")
                 )
             )
         }
+    }
+
+    private func publishSessionStart(
+        _ server: Server,
+        session: MCPSemanticSession,
+        starting: StartingSession,
+        generation: RunningGeneration
+    ) -> Bool {
+        guard sessions[session.identity.sessionID] === session,
+              case .initializing(let currentStart) = session.phase,
+              currentStart === starting,
+              case .running(let currentGeneration) = lifecycleState,
+              currentGeneration === generation,
+              generation.admissionClosed == false,
+              generation.networkResources.generationID == session.identity.generationID else {
+            return false
+        }
+        session.phase = .active(.init(server: server, transport: session.transport))
+        return true
     }
 
     package static func ownedRequest(
@@ -1180,24 +1324,51 @@ package actor CodexReviewMCPHTTPServer {
         )
     }
 
-    private func closeSession(_ sessionID: String) async {
-        guard let session = sessions.removeValue(forKey: sessionID) else {
+    private func closeSession(_ session: MCPSemanticSession) async {
+        let sessionID = session.identity.sessionID
+        guard sessions[sessionID] === session else {
             return
         }
-        await session.transport.disconnect()
+        sessions.removeValue(forKey: sessionID)
+        let server: Server?
+        switch session.phase {
+        case .initializing(let starting):
+            didBeginClosingInitializingSession = true
+            let waiters = initializingSessionCloseWaiters
+            initializingSessionCloseWaiters.removeAll(keepingCapacity: false)
+            for waiter in waiters {
+                waiter.resume()
+            }
+            starting.task.cancel()
+            await session.transport.disconnect()
+            switch await starting.task.value {
+            case .success(let startedServer):
+                server = startedServer
+            case .failure(let failure):
+                server = failure.server
+            }
+        case .active(let runtime):
+            await runtime.transport.disconnect()
+            server = runtime.server
+        }
+        if let server {
+            await server.waitUntilCompleted()
+            await server.stop()
+        }
         await adapter.closeSession(sessionID)
         logger.info("Closed MCP HTTP session \(sessionID, privacy: .public)")
     }
 
     private func trackActiveRequest(
         _ response: HTTPResponse,
-        sessionID: String,
+        session: MCPSemanticSession,
         responseSourceKind: MCPHTTPResponseSourceKind
     ) -> (response: TrackedHTTPResponse, didFinishRequest: Bool) {
         switch response {
         case .stream(let source, _):
-            let completion = ActiveRequestCompletion { [weak self] in
-                await self?.finishActiveRequest(sessionID: sessionID)
+            let completion = ActiveRequestCompletion { [weak self, weak session] in
+                guard let self, let session else { return }
+                await self.finishActiveRequest(in: session)
             }
             return (
                 .init(
@@ -1212,22 +1383,24 @@ package actor CodexReviewMCPHTTPServer {
             )
 
         default:
-            finishActiveRequest(sessionID: sessionID)
+            finishActiveRequest(in: session)
             return (.init(response: response), true)
         }
     }
 
-    private func finishActiveRequest(sessionID: String) {
-        if var session = sessions[sessionID] {
-            session.lastAccessedAt = Date()
-            session.activeRequestCount = max(0, session.activeRequestCount - 1)
-            sessions[sessionID] = session
+    private func finishActiveRequest(in session: MCPSemanticSession) {
+        guard sessions[session.identity.sessionID] === session else {
+            return
         }
+        session.lastAccessedAt = Date()
+        session.activeRequestCount = max(0, session.activeRequestCount - 1)
     }
 
     private func closeAllSessions() async {
-        for sessionID in sessions.keys {
-            await closeSession(sessionID)
+        for session in sessions.values.sorted(by: {
+            $0.identity.ordinal < $1.identity.ordinal
+        }) {
+            await closeSession(session)
         }
     }
 
@@ -1250,30 +1423,28 @@ package actor CodexReviewMCPHTTPServer {
     }
 
     private func closeExpiredSessions(now: Date) async {
-        var expiredSessionIDs: [String] = []
-        for (sessionID, context) in sessions {
-            guard now.timeIntervalSince(context.lastAccessedAt) > configuration.sessionTimeout else {
+        var expiredSessions: [MCPSemanticSession] = []
+        for session in sessions.values {
+            guard case .active = session.phase,
+                  session.activeRequestCount == 0,
+                  now.timeIntervalSince(session.lastAccessedAt) > configuration.sessionTimeout else {
                 continue
             }
-            if context.activeRequestCount > 0 {
-                continue
-            }
-            if await adapter.hasActiveReviews(in: sessionID) {
-                if var session = sessions[sessionID] {
+            if await adapter.hasActiveReviews(in: session.identity.sessionID) {
+                if sessions[session.identity.sessionID] === session {
                     session.lastAccessedAt = Date()
-                    sessions[sessionID] = session
                 }
                 continue
             }
-            if let current = sessions[sessionID],
-               current.activeRequestCount == 0,
-               now.timeIntervalSince(current.lastAccessedAt) > configuration.sessionTimeout
-            {
-                expiredSessionIDs.append(sessionID)
+            if sessions[session.identity.sessionID] === session,
+               case .active = session.phase,
+               session.activeRequestCount == 0,
+               now.timeIntervalSince(session.lastAccessedAt) > configuration.sessionTimeout {
+                expiredSessions.append(session)
             }
         }
-        for sessionID in expiredSessionIDs {
-            await closeSession(sessionID)
+        for session in expiredSessions {
+            await closeSession(session)
         }
     }
 

@@ -195,6 +195,58 @@ struct CodexReviewMCPHTTPServerTests {
         try await server.stop()
     }
 
+    @Test func initializingSessionCannotPublishAfterItsGenerationStartsStopping() async throws {
+        let server = makeHTTPServer()
+        try await server.start()
+        let endpoint = await server.url
+        await server.holdNextSessionStartCompletionForTesting()
+        let initializeBody = try makeJSONBody([
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": [
+                "protocolVersion": "2025-11-25",
+                "capabilities": [:],
+                "clientInfo": [
+                    "name": "CodexReviewKitTests",
+                    "version": "0.0.0",
+                ],
+            ],
+        ])
+        let initialization = Task { () -> Int? in
+            do {
+                var request = URLRequest(url: endpoint)
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.setValue(
+                    "text/event-stream, application/json",
+                    forHTTPHeaderField: "Accept"
+                )
+                request.httpBody = initializeBody
+                let (_, response) = try await URLSession.shared.data(for: request)
+                return (response as? HTTPURLResponse)?.statusCode
+            } catch {
+                return nil
+            }
+        }
+
+        await server.waitUntilSessionStartCompletionIsHeldForTesting()
+        #expect(await server.sessionCountForTesting() == 1)
+        let stop = Task { try await server.stop() }
+        await server.waitUntilInitializingSessionCloseBeginsForTesting()
+        #expect(await server.eventLoopGroupShutdownCountForTesting() == 0)
+
+        await server.releaseSessionStartCompletionForTesting()
+        _ = await initialization.value
+        try await stop.value
+        #expect(await server.sessionCountForTesting() == 0)
+        #expect(await server.currentGenerationIDForTesting() == nil)
+
+        try await server.start()
+        #expect(await server.sessionCountForTesting() == 0)
+        try await server.stop()
+    }
+
     @Test func listenerGenerationConcurrentStopAndRestartJoinOneTeardown() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
