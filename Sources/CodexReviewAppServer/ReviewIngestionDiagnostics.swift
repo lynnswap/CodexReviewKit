@@ -13,13 +13,10 @@ package struct ReviewIngestionDiagnosticRecord: Equatable, Sendable {
         case schemaValidation
         case payloadDecoding
         case routing
-        case terminalReduction
-        case eventNormalization
     }
 
     package enum Disposition: String, Equatable, Sendable {
         case ignored
-        case attemptFailed
         case connectionFailed
     }
 
