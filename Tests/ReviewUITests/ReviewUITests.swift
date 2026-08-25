@@ -1751,24 +1751,33 @@ struct ReviewUITests {
     }
 
     @Test func cancellingRunningJobFromSidebarMarksJobCancelled() async throws {
-        let startedAt = Date(timeIntervalSince1970: 200)
-        let job = makeJob(
-            id: "job-running",
-            cwd: "/tmp/workspace-alpha",
-            startedAt: startedAt,
-            status: .running,
-            targetSummary: "Uncommitted changes",
-            summary: "Running review."
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-running" })
         )
-        let store = CodexReviewStore.makePreviewStore()
-        store.loadForTesting(
-            serverState: .running,
-            content: makeSidebarContent(from: [job])
-        )
+        let review = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/workspace-alpha", target: .uncommittedChanges)
+            )
+        }
+        try #require(await StoreSnapshotProbe(store: store).waitUntilRunAttempt(
+            "attempt-1",
+            jobID: "job-running"
+        ) != nil)
+        let job = try #require(store.job(id: "job-running"))
+        let startedAt = job.core.lifecycle.startedAt
         let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
-        await viewController.sidebarViewControllerForTesting.cancelJobForTesting(job)
+        let cancellation = Task { @MainActor in
+            await viewController.sidebarViewControllerForTesting.cancelJobForTesting(job)
+        }
+        try await backend.waitForInterruptReview(timeout: .seconds(2))
+        await backend.yield(.cancelled("Cancelled by user from Review Monitor."))
+        await cancellation.value
+        _ = try await review.value
 
         #expect(job.core.lifecycle.status == .cancelled)
         #expect(job.core.output.summary == "Cancelled by user from Review Monitor.")
@@ -1777,22 +1786,31 @@ struct ReviewUITests {
         #expect(job.core.lifecycle.cancellation?.message == "Cancelled by user from Review Monitor.")
         #expect(job.core.lifecycle.startedAt == startedAt)
         #expect(job.core.lifecycle.endedAt != nil)
+        await store.cancelAndDrainReviewWorkersForTesting()
     }
 
-    @Test func cancellationFailureUpdatesJobErrorState() async {
-        let job = makeJob(
-            id: "job-running",
-            cwd: "/tmp/workspace-alpha",
-            status: .running,
-            targetSummary: "Uncommitted changes",
-            summary: "Running review."
+    @Test func cancellationFailureUpdatesJobErrorState() async throws {
+        let backend = FakeCodexReviewBackend()
+        await backend.rejectInterrupts(message: "Cancellation failed.")
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-running" })
         )
-        let store = CodexReviewStore.makeTestingStore(backend: FailingCancellationBackend())
-        store.loadForTesting(
-            serverState: .running,
-            content: makeSidebarContent(from: [job])
+        let review = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/workspace-alpha", target: .uncommittedChanges)
+            )
+        }
+        try #require(await StoreSnapshotProbe(store: store).waitUntilRunAttempt(
+            "attempt-1",
+            jobID: "job-running"
+        ) != nil)
+        let job = try #require(store.job(id: "job-running"))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store,
+            uiState: ReviewMonitorUIState(auth: store.auth)
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         await viewController.sidebarViewControllerForTesting.cancelJobForTesting(job)
@@ -1801,6 +1819,10 @@ struct ReviewUITests {
         #expect(job.core.output.summary == "Failed to cancel review: Cancellation failed.")
         #expect(job.core.lifecycle.errorMessage == "Cancellation failed.")
         #expect(job.core.lifecycle.endedAt == nil)
+
+        await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
+        _ = try await review.value
+        await store.cancelAndDrainReviewWorkersForTesting()
     }
 
     @Test func sidebarContextMenuPresentationRestoresResponderStateAfterClosing() {
@@ -6861,27 +6883,6 @@ final class AuthActionBackend: PreviewCodexReviewStoreBackend {
     func switchAccountCallCount() -> Int {
         switchCalls
     }
-}
-
-@MainActor
-final class FailingCancellationBackend: PreviewCodexReviewStoreBackend {
-    init() {
-        super.init(
-            seed: .init(
-                shouldAutoStartEmbeddedServer: false
-            )
-        )
-    }
-
-    override func stop(store _: CodexReviewStore) async {
-    }
-
-    override func waitUntilStopped() async {}
-
-    override func interruptReview(_: CodexReviewBackendModel.Review.Run, reason _: CodexReviewBackendModel.CancellationReason) async throws {
-        throw CodexReviewAPI.Error.io("Cancellation failed.")
-    }
-
 }
 
 @MainActor

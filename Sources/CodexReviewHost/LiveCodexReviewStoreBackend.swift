@@ -12,11 +12,16 @@ private let defaultExternalURLOpener: ExternalURLOpener = { url in
     _ = NSWorkspace.shared.open(url)
 }
 
-private actor RuntimeShutdownCleanupRace {
-    private var result: Bool?
-    private var continuation: CheckedContinuation<Bool, Never>?
+private enum RuntimeShutdownCleanupOutcome<Value: Sendable>: Sendable {
+    case completed(Value)
+    case timedOut
+}
 
-    func finish(_ value: Bool) {
+private actor RuntimeShutdownCleanupRace<Value: Sendable> {
+    private var result: RuntimeShutdownCleanupOutcome<Value>?
+    private var continuation: CheckedContinuation<RuntimeShutdownCleanupOutcome<Value>, Never>?
+
+    func finish(_ value: RuntimeShutdownCleanupOutcome<Value>) {
         guard result == nil else {
             return
         }
@@ -25,7 +30,7 @@ private actor RuntimeShutdownCleanupRace {
         continuation = nil
     }
 
-    func wait() async -> Bool {
+    func wait() async -> RuntimeShutdownCleanupOutcome<Value> {
         if let result {
             return result
         }
@@ -39,14 +44,14 @@ private actor RuntimeShutdownCleanupRace {
     }
 }
 
-private func runRuntimeShutdownCleanup(
+private func runRuntimeShutdownCleanup<Value: Sendable>(
     timeout: Duration,
-    operation: @escaping @Sendable () async -> Void
-) async -> Bool {
-    let race = RuntimeShutdownCleanupRace()
+    operation: @escaping @Sendable () async -> Value
+) async -> RuntimeShutdownCleanupOutcome<Value> {
+    let race = RuntimeShutdownCleanupRace<Value>()
     let operationTask = Task {
-        await operation()
-        await race.finish(true)
+        let value = await operation()
+        await race.finish(.completed(value))
     }
     let timeoutTask = Task {
         do {
@@ -54,12 +59,13 @@ private func runRuntimeShutdownCleanup(
         } catch {
             return
         }
-        await race.finish(false)
+        await race.finish(.timedOut)
     }
     let result = await race.wait()
-    if result {
+    switch result {
+    case .completed:
         timeoutTask.cancel()
-    } else {
+    case .timedOut:
         operationTask.cancel()
     }
     return result
@@ -1039,19 +1045,58 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         reason: ReviewCancellation,
         timeoutWarning: String
     ) async {
-        store.recordActiveReviewCancellationRequestsForRuntimeStop(reason: reason)
-        let didInterrupt = await runRuntimeShutdownCleanup(timeout: shutdownCleanupTimeout) {
-            await appServerBackend.interruptActiveReviewsForShutdown(reason: .init(message: reason.message))
+        let workerJobIDs = store.reviewWorkerJobIDsForRuntimeStop
+        let cancellationCleanup = await runRuntimeShutdownCleanup(
+            timeout: shutdownCleanupTimeout
+        ) {
+            await store.requestActiveReviewCancellationsForRuntimeStop(reason: reason)
+        }
+        let cancellationJobIDs: [String]
+        let didRequestCancellation: Bool
+        let cancellationTimedOut: Bool
+        switch cancellationCleanup {
+        case .completed(let outcome):
+            cancellationJobIDs = outcome.jobIDs
+            didRequestCancellation = outcome.firstFailure == nil
+            cancellationTimedOut = false
+            if let failure = outcome.firstFailure {
+                logger.error(
+                    "Failed to request active review cancellation before runtime teardown: \(failure.localizedDescription, privacy: .public)"
+                )
+            }
+        case .timedOut:
+            cancellationJobIDs = []
+            didRequestCancellation = false
+            cancellationTimedOut = true
+        }
+        if didRequestCancellation == false {
+            let lifecycle = appServerBackend.runtimeOwnerLifecycleHandle
+            await lifecycle.closeAdmission()
+            do {
+                try await lifecycle.closeAndWait()
+            } catch {
+                logger.error(
+                    "Failed to force-close app-server during review cancellation fallback: \(error.localizedDescription, privacy: .public)"
+                )
+            }
         }
         let locallyCancelledJobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
-            reason: reason,
-            cancelWorkers: false
+            reason: reason
         )
-        store.cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
+        let currentWorkerJobIDs = store.reviewWorkerJobIDsForRuntimeStop
+        await store.cancelAndDetachReviewWorkersForRuntimeStop(
+            jobIDs: Array(Set(
+                workerJobIDs
+                    + cancellationJobIDs
+                    + locallyCancelledJobIDs
+                    + currentWorkerJobIDs
+            )),
+            reason: reason
+        )
         let didDrainReviewWorkers = await store.drainReviewWorkersForRuntimeStop(
             timeout: shutdownCleanupTimeout
         )
-        if didInterrupt == false || didDrainReviewWorkers == false {
+        if cancellationTimedOut || didDrainReviewWorkers == false {
             logger.warning("\(timeoutWarning, privacy: .public)")
         }
     }

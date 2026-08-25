@@ -116,6 +116,7 @@ package enum ReviewStartAdmissionOperation: String, Equatable, Sendable {
     case recordRecoveryRollbackAcknowledged
     case recordRecoveryRollbackRejected
     case interruptActiveRun
+    case inspectRecordedActiveTerminal
     case recoverActiveRun
     case recordInterruptRequestAcknowledged
     case recordCanonicalTerminal
@@ -805,6 +806,13 @@ package actor ReviewStartAdmission {
              .finishing, .recovering, .finishingRecovery, .terminal:
             return nil
         }
+    }
+
+    package func hasRecordedActiveTerminal(
+        for run: CodexReviewBackendModel.Review.Run
+    ) throws -> Bool {
+        _ = try requireActiveRun(run, operation: .inspectRecordedActiveTerminal)
+        return activeTerminalSource != nil
     }
 
     package func currentPhase() -> Phase {

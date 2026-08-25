@@ -27,6 +27,11 @@ private actor RuntimeStopDetachedReviewWorkerDrainRace {
     }
 }
 
+package struct ReviewRuntimeCancellationRequestOutcome: Sendable {
+    package let jobIDs: [String]
+    package let firstFailure: ReviewRuntimeCloseFailure?
+}
+
 extension CodexReviewStore {
     package func recordCancellationRequest(
         _ cancellation: ReviewCancellation,
@@ -158,20 +163,31 @@ extension CodexReviewStore {
 
     package func requestActiveReviewCancellationsForRuntimeStop(
         reason: ReviewCancellation = .system(message: "Review runtime stopped.")
-    ) async -> [String] {
+    ) async -> ReviewRuntimeCancellationRequestOutcome {
         let activeJobIDs = orderedJobs
             .filter { $0.isTerminal == false }
             .map(\.id)
+        var firstFailure: ReviewRuntimeCloseFailure?
         for jobID in activeJobIDs {
-            _ = try? await cancelReview(jobID: jobID, cancellation: reason)
+            do {
+                _ = try await cancelReview(jobID: jobID, cancellation: reason)
+            } catch {
+                if firstFailure == nil {
+                    firstFailure = (error as? ReviewRuntimeCloseFailure)
+                        ?? .cleanup(error.localizedDescription)
+                }
+            }
         }
-        return activeJobIDs
+        return .init(jobIDs: activeJobIDs, firstFailure: firstFailure)
+    }
+
+    package var reviewWorkerJobIDsForRuntimeStop: [String] {
+        reviewWorkerTasks.keys.sorted()
     }
 
     @discardableResult
     package func cancelActiveReviewsLocallyForRuntimeStop(
-        reason: ReviewCancellation = .system(message: "Review runtime stopped."),
-        cancelWorkers: Bool = true
+        reason: ReviewCancellation = .system(message: "Review runtime stopped.")
     ) -> [String] {
         let activeJobIDs = orderedJobs
             .filter { $0.isTerminal == false }
@@ -188,22 +204,22 @@ extension CodexReviewStore {
                     cancellation: reason
                 )
             }
-            if cancelWorkers {
-                reviewWorkerTasks[jobID]?.cancel()
-            }
         }
         return activeJobIDs
     }
 
-    package func cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: [String]) {
+    package func cancelAndDetachReviewWorkersForRuntimeStop(
+        jobIDs: [String],
+        reason: ReviewCancellation
+    ) async {
         for jobID in jobIDs {
+            if case .recovering(let receipt) = reviewAttemptOwnerships[jobID] {
+                await receipt.cancelOwnedOperation(reason)
+            }
             if let task = reviewWorkerTasks.removeValue(forKey: jobID) {
                 task.cancel()
                 runtimeStopDetachedReviewWorkerTasks[jobID] = task
             }
-            activeRuns.removeValue(forKey: jobID)
-            reviewRecoveryWaitingJobIDs.remove(jobID)
-            initialReviewStartAdmissions.removeValue(forKey: jobID)
             resumeReviewWaiters(for: jobID)
         }
     }

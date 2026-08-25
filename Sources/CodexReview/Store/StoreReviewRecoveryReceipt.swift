@@ -1,15 +1,22 @@
 package struct StoreReviewActiveAttempt: Sendable {
     package let attempt: BackendReviewAttempt
     package let admission: ReviewStartAdmission
+    package let workerAdmission: ReviewStartAdmission
     package var run: CodexReviewBackendModel.Review.Run { attempt.run }
-    package init(attempt: BackendReviewAttempt, admission: ReviewStartAdmission) {
+    package init(
+        attempt: BackendReviewAttempt,
+        admission: ReviewStartAdmission,
+        workerAdmission: ReviewStartAdmission? = nil
+    ) {
         self.attempt = attempt
         self.admission = admission
+        self.workerAdmission = workerAdmission ?? admission
     }
     package func matches(_ other: Self) -> Bool {
         run == other.run
             && attempt.events === other.attempt.events
             && admission === other.admission
+            && workerAdmission === other.workerAdmission
     }
 }
 
@@ -98,7 +105,9 @@ package final class StoreReviewRecoveryReceipt {
 
     package func startStaging(
         admission: ReviewStartAdmission,
-        _ work: @escaping @MainActor @Sendable () async throws(ReviewRecoveryStagingFailure) -> StagedReviewRecovery
+        _ work: @escaping @MainActor @Sendable (
+            PreparedReviewRecovery
+        ) async throws(ReviewRecoveryStagingFailure) -> StagedReviewRecovery
     ) throws {
         try requireStart("staging")
         guard case .prepared(let prepared) = phase else {
@@ -107,7 +116,7 @@ package final class StoreReviewRecoveryReceipt {
         ownedOperation = .staging(
             prepared,
             admission,
-            Task { @MainActor in try await work() }
+            Task { @MainActor in try await work(prepared) }
         )
     }
 
@@ -124,15 +133,13 @@ package final class StoreReviewRecoveryReceipt {
         )
     }
 
-    package func cancelOwnedOperation(_ requested: ReviewCancellation) -> Task<Void, Never> {
+    package func cancelOwnedOperation(_ requested: ReviewCancellation) async {
         let cancellation = cancellation ?? requested
         self.cancellation = cancellation
         let operation = ownedOperation
         let admission = cancellationAdmission(for: operation)
-        return Task { @MainActor in
-            await admission.recordCancellation(cancellation)
-            operation?.cancel()
-        }
+        await admission.recordCancellation(cancellation)
+        operation?.cancel()
     }
 
     package func joinOwnedOperation() throws -> Task<Completion, any Error> {
@@ -140,6 +147,23 @@ package final class StoreReviewRecoveryReceipt {
         guard let operation = ownedOperation else { throw contractFailure("join operation") }
         joinIsReserved = true
         return Task { @MainActor in try await self.completeJoin(operation) }
+    }
+
+    package func joinOwnedOperationIfPresent() throws -> Task<Completion, any Error>? {
+        guard ownedOperation != nil else { return nil }
+        return try joinOwnedOperation()
+    }
+
+    package func reserveDispositionJoinIfPresent() throws -> Task<Completion, any Error>? {
+        guard joinIsReserved == false,
+              case .disposition = ownedOperation else { return nil }
+        return try joinOwnedOperation()
+    }
+
+    package var isPreparedForStaging: Bool {
+        guard ownedOperation == nil, joinIsReserved == false,
+              case .prepared = phase else { return false }
+        return true
     }
 
     package func suppress() throws -> DiscardTarget? {
@@ -167,7 +191,11 @@ package final class StoreReviewRecoveryReceipt {
             throw contractFailure("finish uncommitted receipt")
         }
         phase = .finished
-        return .init(attempt: staged.attempt, admission: staged.admission)
+        return .init(
+            attempt: staged.attempt,
+            admission: staged.admission,
+            workerAdmission: source.workerAdmission
+        )
     }
 
     private func completeJoin(_ operation: OwnedOperation) async throws -> Completion {

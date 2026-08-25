@@ -6794,11 +6794,13 @@ struct AppServerClientTests {
         #expect(waiterRegistered)
 
         let jobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
-            reason: .system(message: "Review runtime stopped."),
-            cancelWorkers: false
+            reason: .system(message: "Review runtime stopped.")
         )
         #expect(store.reviewTerminalWaiters["job-1"]?.count == 1)
-        store.cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: jobIDs)
+        await store.cancelAndDetachReviewWorkersForRuntimeStop(
+            jobIDs: jobIDs,
+            reason: .system(message: "Review runtime stopped.")
+        )
 
         #expect(store.reviewTerminalWaiters["job-1"] == nil)
         #expect(store.runtimeStopDetachedReviewWorkerTasks["job-1"] != nil)
