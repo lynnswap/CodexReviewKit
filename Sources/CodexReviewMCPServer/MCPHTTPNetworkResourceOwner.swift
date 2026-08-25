@@ -793,6 +793,8 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
     private var state: State = .accepting(.init(connections: [:]))
     private var nextConnectionOrdinal: UInt64 = 0
     private var closeWaiters: [CheckedContinuation<Void, Never>] = []
+    private var didRegisterCloseWaiter = false
+    private var closeWaiterRegistrationWaiters: [CheckedContinuation<Void, Never>] = []
 
     package init(generationID: UInt64) {
         self.generationID = generationID
@@ -926,6 +928,19 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         )
     }
 
+    package func waitUntilCloseWaiterIsRegisteredForTesting() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if didRegisterCloseWaiter {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                closeWaiterRegistrationWaiters.append(continuation)
+                lock.unlock()
+            }
+        }
+    }
+
     package func resolve(_ token: OperationToken, sessionID: String) -> RequestOperation? {
         lock.lock()
         let connection: Connection?
@@ -971,13 +986,20 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
 
     private func waitUntilClosed() async {
         await withCheckedContinuation { continuation in
+            let registrationWaiters: [CheckedContinuation<Void, Never>]
             lock.lock()
             if case .closed = state {
                 lock.unlock()
                 continuation.resume()
             } else {
                 closeWaiters.append(continuation)
+                didRegisterCloseWaiter = true
+                registrationWaiters = closeWaiterRegistrationWaiters
+                closeWaiterRegistrationWaiters.removeAll(keepingCapacity: false)
                 lock.unlock()
+                for waiter in registrationWaiters {
+                    waiter.resume()
+                }
             }
         }
     }
