@@ -6,21 +6,37 @@ import CodexReview
 import CodexReviewTesting
 
 private extension AppServerCodexReviewBackend {
-    func resumeReviewRecovery(
+    func resumeTypedReviewRecovery(
         _ run: CodexReviewBackendModel.Review.Run,
         request: CodexReviewBackendModel.Review.Start,
         reason: CodexReviewBackendModel.CancellationReason
     ) async throws -> BackendReviewAttempt {
         let token = try await beginReviewRecovery(run, reason: reason)
-        return try await resumeReviewRecovery(token, request: request)
+        return try await resumeTypedReviewRecovery(token, request: request)
     }
 
-    func resumeReviewRecovery(
+    func resumeTypedReviewRecovery(
+        _ token: CodexReviewBackendModel.Review.RecoveryToken,
+        request: CodexReviewBackendModel.Review.Start
+    ) async throws -> BackendReviewAttempt {
+        let handoff = try await makeRecoveryHandoffForTesting(token)
+        return try await resumeReviewRecovery(
+            handoff,
+            request: request,
+            admission: ReviewStartAdmission()
+        )
+    }
+
+    func resumeTypedReviewRecovery(
         _ attempt: BackendReviewAttempt,
         request: CodexReviewBackendModel.Review.Start,
         reason: CodexReviewBackendModel.CancellationReason
     ) async throws -> BackendReviewAttempt {
-        try await resumeReviewRecovery(attempt.run, request: request, reason: reason)
+        try await resumeTypedReviewRecovery(
+            attempt.run,
+            request: request,
+            reason: reason
+        )
     }
 
     func interruptReview(_ attempt: BackendReviewAttempt, reason: CodexReviewBackendModel.CancellationReason) async throws {
@@ -37,6 +53,33 @@ private extension AppServerCodexReviewBackend {
     func cleanupReview(_ attempt: BackendReviewAttempt) async throws {
         try await cleanupReview(attempt.run)
     }
+}
+
+private func makeRecoveryHandoffForTesting(
+    _ token: CodexReviewBackendModel.Review.RecoveryToken
+) async throws -> ReviewRecoveryHandoff {
+    let admission = ReviewStartAdmission()
+    let run = token.interruptedRun
+    try await admission.admitThreadStartDispatch()
+    try await admission.recordPreparedThread(run)
+    try await admission.admitReviewStartDispatch(for: run)
+    try await admission.recordActiveRun(run)
+    try await admission.recordCanonicalTerminal(
+        .interrupted(.server(message: "Test recovery")),
+        for: run
+    )
+    guard case .replacement(let candidate) = try await admission.beginRecovery(
+        run,
+        trigger: .recoverableNetworkLoss,
+        request: { _, _ in
+            Issue.record("A terminal test recovery dispatched another interrupt.")
+        }
+    ) else {
+        throw ReviewAttemptContractFailure(
+            message: "Expected the test recovery terminal to produce a replacement."
+        )
+    }
+    return try await candidate.prepareHandoff(token: token)
 }
 
 private extension BackendReviewAttempt {
@@ -2614,7 +2657,7 @@ struct AppServerClientTests {
         let closeCompletion = CompletionProbe()
 
         let recovery = Task {
-            let attempt = try await backend.resumeReviewRecovery(
+            let attempt = try await backend.resumeTypedReviewRecovery(
                 token,
                 request: .init(
                     jobID: "job-1",
@@ -3111,7 +3154,7 @@ struct AppServerClientTests {
             model: "gpt-5"
         )
 
-        let recovered = try await backend.resumeReviewRecovery(
+        let recovered = try await backend.resumeTypedReviewRecovery(
             run,
             request: .init(
                 jobID: "job-1",
@@ -3160,7 +3203,7 @@ struct AppServerClientTests {
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         ))
 
-        let recovered = try await backend.resumeReviewRecovery(
+        let recovered = try await backend.resumeTypedReviewRecovery(
             run,
             request: .init(
                 jobID: "job-1",
@@ -3221,7 +3264,7 @@ struct AppServerClientTests {
         let reason = CodexReviewBackendModel.CancellationReason(message: "Network unavailable; waiting to reconnect.")
 
         let token = try await backend.beginReviewRecovery(currentRun, reason: reason)
-        let recovered = try await backend.resumeReviewRecovery(
+        let recovered = try await backend.resumeTypedReviewRecovery(
             token,
             request: .init(
                 jobID: "job-1",
@@ -3265,7 +3308,7 @@ struct AppServerClientTests {
             model: "gpt-5"
         )
 
-        let recovered = try await backend.resumeReviewRecovery(
+        let recovered = try await backend.resumeTypedReviewRecovery(
             run,
             request: .init(
                 jobID: "job-1",
@@ -3297,7 +3340,7 @@ struct AppServerClientTests {
         let initialEvents = await eventSequence(backend, run)
         defer { withExtendedLifetime(initialEvents) {} }
 
-        let recoveredRun = try await backend.resumeReviewRecovery(
+        let recoveredRun = try await backend.resumeTypedReviewRecovery(
             run,
             request: .init(
                 jobID: "job-1",
@@ -3360,7 +3403,7 @@ struct AppServerClientTests {
         }
         #expect(ignoredInterruptedTurn)
 
-        let recovered = try await backend.resumeReviewRecovery(
+        let recovered = try await backend.resumeTypedReviewRecovery(
             token,
             request: .init(
                 jobID: "job-1",
@@ -3623,7 +3666,7 @@ struct AppServerClientTests {
         let initialEvents = await eventSequence(backend, run)
         defer { withExtendedLifetime(initialEvents) {} }
 
-        async let recovered = backend.resumeReviewRecovery(
+        async let recovered = backend.resumeTypedReviewRecovery(
             run,
             request: CodexReviewBackendModel.Review.Start(
                 jobID: "job-1",
@@ -3667,7 +3710,7 @@ struct AppServerClientTests {
         let initialEvents = await eventSequence(backend, run)
         defer { withExtendedLifetime(initialEvents) {} }
 
-        async let recovered = backend.resumeReviewRecovery(
+        async let recovered = backend.resumeTypedReviewRecovery(
             run,
             request: CodexReviewBackendModel.Review.Start(
                 jobID: "job-1",
@@ -3737,7 +3780,7 @@ struct AppServerClientTests {
         let initialEvents = await eventSequence(backend, run)
         defer { withExtendedLifetime(initialEvents) {} }
 
-        async let recovered = backend.resumeReviewRecovery(
+        async let recovered = backend.resumeTypedReviewRecovery(
             run,
             request: CodexReviewBackendModel.Review.Start(
                 jobID: "job-1",
@@ -3808,7 +3851,7 @@ struct AppServerClientTests {
         let initialEvents = await eventSequence(backend, run)
         defer { withExtendedLifetime(initialEvents) {} }
 
-        async let recovered = backend.resumeReviewRecovery(
+        async let recovered = backend.resumeTypedReviewRecovery(
             run,
             request: CodexReviewBackendModel.Review.Start(
                 jobID: "job-1",
@@ -3900,7 +3943,7 @@ struct AppServerClientTests {
             )
         )
 
-        async let recovered = backend.resumeReviewRecovery(
+        async let recovered = backend.resumeTypedReviewRecovery(
             run,
             request: CodexReviewBackendModel.Review.Start(
                 jobID: "job-1",
@@ -3963,7 +4006,7 @@ struct AppServerClientTests {
             model: "gpt-5"
         )
 
-        let recovered = try await backend.resumeReviewRecovery(
+        let recovered = try await backend.resumeTypedReviewRecovery(
             run,
             request: .init(
                 jobID: "job-1",
