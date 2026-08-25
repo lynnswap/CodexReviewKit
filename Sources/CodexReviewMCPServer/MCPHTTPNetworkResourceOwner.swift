@@ -278,6 +278,18 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             return connection.bindSession(sessionID, to: self)
         }
 
+        package func publishSessionIfActive(
+            for sessionID: String,
+            _ publication: () -> Void
+        ) -> Bool {
+            guard let connection else { return false }
+            return connection.publishSessionIfActive(
+                for: self,
+                sessionID: sessionID,
+                publication
+            )
+        }
+
         package var resourceOwner: MCPHTTPNetworkResourceOwner? {
             connection?.resourceOwner
         }
@@ -320,6 +332,22 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             }
         }
 
+        fileprivate func publishSessionWhileAdmissionIsOpen(
+            sessionID: String,
+            _ publication: () -> Void
+        ) -> Bool {
+            lock.lock()
+            guard case .accepting(let ownedSessionID) = sessionDomainPhase,
+                  ownedSessionID == sessionID,
+                  terminalCause == nil,
+                  didClose == false else {
+                lock.unlock()
+                return false
+            }
+            publication()
+            lock.unlock()
+            return true
+        }
         package func beginResponse() -> Bool {
             lock.lock()
             guard terminalCause == nil,
@@ -676,6 +704,20 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             return owner.bindSession(sessionID, on: self, to: operation)
         }
 
+        fileprivate func publishSessionIfActive(
+            for operation: RequestOperation,
+            sessionID: String,
+            _ publication: () -> Void
+        ) -> Bool {
+            guard let owner else { return false }
+            return owner.publishSessionIfActive(
+                on: self,
+                for: operation,
+                sessionID: sessionID,
+                publication
+            )
+        }
+
         fileprivate func bindSessionWhileDomainAdmissionIsOpen(
             _ sessionID: String,
             to operation: RequestOperation
@@ -699,6 +741,32 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             return didBind
         }
 
+        fileprivate func publishSessionWhileDomainAdmissionIsOpen(
+            for operation: RequestOperation,
+            sessionID: String,
+            _ publication: () -> Void
+        ) -> Bool {
+            lock.lock()
+            switch phase {
+            case .accepting, .admissionClosed:
+                break
+            case .closing, .closed:
+                lock.unlock()
+                return false
+            }
+            guard domainAdmissionClosed == false,
+                  let ownedOperation = requests[operation.id],
+                  ownedOperation === operation else {
+                lock.unlock()
+                return false
+            }
+            let didPublish = operation.publishSessionWhileAdmissionIsOpen(
+                sessionID: sessionID,
+                publication
+            )
+            lock.unlock()
+            return didPublish
+        }
         package func closeAdmission() {
             lock.lock()
             domainAdmissionClosed = true
@@ -946,6 +1014,27 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         return didBind
     }
 
+    fileprivate func publishSessionIfActive(
+        on connection: Connection,
+        for operation: RequestOperation,
+        sessionID: String,
+        _ publication: () -> Void
+    ) -> Bool {
+        lock.lock()
+        guard case .accepting(let current) = state,
+              let ownedConnection = current.connections[connection.id],
+              ownedConnection === connection else {
+            lock.unlock()
+            return false
+        }
+        let didPublish = connection.publishSessionWhileDomainAdmissionIsOpen(
+            for: operation,
+            sessionID: sessionID,
+            publication
+        )
+        lock.unlock()
+        return didPublish
+    }
     package func beginClosing(_ cause: TerminalCause) -> ClosingGeneration {
         let connections: [Connection]
         let effectiveCause: TerminalCause

@@ -248,6 +248,49 @@ struct MCPHTTPNetworkResourceOwnerTests {
         await closing.waitUntilClosed()
     }
 
+    @Test func sessionPublicationLinearizesBeforeGenerationClose() async throws {
+        let owner = MCPHTTPNetworkResourceOwner(generationID: 24)
+        let resource = TestingConnectionResource()
+        let connection = try #require(owner.admitConnection(resource))
+        let admitted = try #require(connection.admitRequest())
+        let sessionID = "session-publish-wins"
+        #expect(admitted.operation.bindSession(sessionID))
+        var publicationCount = 0
+
+        #expect(admitted.operation.publishSessionIfActive(for: sessionID) {
+            publicationCount += 1
+        })
+        let closing = owner.beginClosing(.serverStop)
+        #expect(admitted.operation.publishSessionIfActive(for: sessionID) {
+            publicationCount += 1
+        } == false)
+        #expect(publicationCount == 1)
+
+        admitted.lease.acknowledgeCompletion()
+        resource.acknowledgeClose()
+        await closing.waitUntilClosed()
+    }
+
+    @Test func generationCloseLinearizesBeforeSessionPublication() async throws {
+        let owner = MCPHTTPNetworkResourceOwner(generationID: 25)
+        let resource = TestingConnectionResource()
+        let connection = try #require(owner.admitConnection(resource))
+        let admitted = try #require(connection.admitRequest())
+        let sessionID = "session-close-wins"
+        #expect(admitted.operation.bindSession(sessionID))
+        var publicationCount = 0
+
+        let closing = owner.beginClosing(.serverStop)
+        #expect(admitted.operation.publishSessionIfActive(for: sessionID) {
+            publicationCount += 1
+        } == false)
+        #expect(publicationCount == 0)
+
+        admitted.lease.acknowledgeCompletion()
+        resource.acknowledgeClose()
+        await closing.waitUntilClosed()
+    }
+
     @Test func operationIdentityResolvesOnlyItsBoundSessionAndActiveOwner() async throws {
         let owner = MCPHTTPNetworkResourceOwner(generationID: 16)
         let resource = TestingConnectionResource()
