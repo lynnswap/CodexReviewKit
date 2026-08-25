@@ -218,6 +218,32 @@ struct MCPHTTPNetworkResourceOwnerTests {
         await closing.waitUntilClosed()
     }
 
+    @Test func abandoningUninstalledDomainLeaseReleasesClosingRequest() async throws {
+        let owner = MCPHTTPNetworkResourceOwner(generationID: 14)
+        let resource = TestingConnectionResource()
+        let connection = try #require(owner.admitConnection(resource))
+        let admitted = try #require(connection.admitRequest())
+        var domain = admitted.operation.reserveDomainWork()
+        #expect(domain != nil)
+        #expect(owner.snapshot().connections[0].requests[0].pendingDomainWorkCount == 1)
+
+        admitted.lease.acknowledgeCompletion()
+        let closing = owner.beginClosing(.serverStop)
+        resource.acknowledgeClose()
+        let didClose = CompletionFlag()
+        let waiter = Task {
+            await closing.waitUntilClosed()
+            await didClose.complete()
+        }
+        #expect(await didClose.isCompleted() == false)
+
+        domain = nil
+        await waiter.value
+        #expect(await didClose.isCompleted())
+        #expect(owner.snapshot().isClosed)
+        withExtendedLifetime(domain) {}
+    }
+
     @Test func admissionCloseRejectsLateConnectionsAndRequests() async throws {
         let owner = MCPHTTPNetworkResourceOwner(generationID: 3)
         let acceptedResource = TestingConnectionResource()

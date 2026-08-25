@@ -129,6 +129,10 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             self.operation = operation
         }
 
+        deinit {
+            operation?.abandonUninstalledDomainWork(id: id)
+        }
+
         package func install<Success: Sendable, Failure: Error>(
             _ task: Task<Success, Failure>
         ) {
@@ -435,6 +439,20 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             }
             lock.unlock()
             if wasInstalled { finishIfPossible() }
+        }
+
+        fileprivate func abandonUninstalledDomainWork(id: UUID) {
+            var waiter: CheckedContinuation<Bool, Never>?
+            lock.lock()
+            guard let work = domainWork[id], work.cancellation == nil else {
+                lock.unlock()
+                return
+            }
+            domainWork.removeValue(forKey: id)
+            waiter = work.startWaiter
+            lock.unlock()
+            waiter?.resume(returning: false)
+            finishIfPossible()
         }
 
         fileprivate func snapshot() -> RequestSnapshot {
