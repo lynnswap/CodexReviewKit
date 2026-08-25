@@ -217,6 +217,29 @@ struct MCPHTTPNetworkResourceOwnerTests {
         await closing.waitUntilClosed()
     }
 
+    @Test func operationIdentityResolvesOnlyItsBoundSessionAndActiveOwner() async throws {
+        let owner = MCPHTTPNetworkResourceOwner(generationID: 16)
+        let resource = TestingConnectionResource()
+        let connection = try #require(owner.admitConnection(resource))
+        let admitted = try #require(connection.admitRequest())
+
+        #expect(admitted.operation.bindSession("session-16"))
+        #expect(admitted.operation.bindSession("session-16"))
+        #expect(admitted.operation.bindSession("other-session") == false)
+        let token = try #require(MCPHTTPNetworkResourceOwner.OperationToken(
+            headerValue: admitted.operation.token.headerValue
+        ))
+        #expect(owner.resolve(token, sessionID: "session-16") === admitted.operation)
+        #expect(owner.resolve(token, sessionID: "other-session") == nil)
+        #expect(MCPHTTPNetworkResourceOwner.OperationToken(headerValue: "client-spoof") == nil)
+
+        admitted.lease.acknowledgeCompletion()
+        #expect(owner.resolve(token, sessionID: "session-16") == nil)
+        let closing = owner.beginClosing(.serverStop)
+        resource.acknowledgeClose()
+        await closing.waitUntilClosed()
+    }
+
     @Test func admissionCloseRejectsLateConnectionsAndRequests() async throws {
         let owner = MCPHTTPNetworkResourceOwner(generationID: 3)
         let acceptedResource = TestingConnectionResource()

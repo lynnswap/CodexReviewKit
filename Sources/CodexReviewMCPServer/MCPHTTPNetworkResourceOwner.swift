@@ -25,6 +25,31 @@ private final class NIOHTTPConnectionResource: MCPHTTPConnectionResource, @unche
 }
 
 package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
+    package static let operationTokenHeaderName = "X-CodexReview-Request-Operation"
+
+    package struct OperationToken: Hashable, Sendable {
+        fileprivate let connectionID: UUID
+        fileprivate let requestID: UUID
+
+        package var headerValue: String {
+            "\(connectionID.uuidString.lowercased()):\(requestID.uuidString.lowercased())"
+        }
+
+        package init?(headerValue: String) {
+            let parts = headerValue.split(separator: ":", omittingEmptySubsequences: false)
+            guard parts.count == 2,
+                  let connectionID = UUID(uuidString: String(parts[0])),
+                  let requestID = UUID(uuidString: String(parts[1])) else { return nil }
+            self.connectionID = connectionID
+            self.requestID = requestID
+        }
+
+        fileprivate init(connectionID: UUID, requestID: UUID) {
+            self.connectionID = connectionID
+            self.requestID = requestID
+        }
+    }
+
     package enum TerminalCause: Equatable, Sendable {
         case serverStop
         case peerClosed
@@ -160,7 +185,8 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             var startWaiter: CheckedContinuation<Bool, Never>?
         }
 
-        package let id = UUID()
+        package let id: UUID
+        package let token: OperationToken
         package let admissionOrdinal: UInt64
         private weak var connection: Connection?
         private let lock = NSLock()
@@ -172,9 +198,13 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         private var startWasRequested = false
         private var startWaiter: CheckedContinuation<Bool, Never>?
         private var domainWork: [UUID: DomainWorkState] = [:]
+        private var boundSessionID: String?
         private var closeWaiters: [CheckedContinuation<TerminalCause?, Never>] = []
 
         fileprivate init(admissionOrdinal: UInt64, connection: Connection) {
+            let id = UUID()
+            self.id = id
+            self.token = .init(connectionID: connection.id, requestID: id)
             self.admissionOrdinal = admissionOrdinal
             self.connection = connection
             let leaseID = UUID()
@@ -222,6 +252,18 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         ) -> Task<Success, any Error>? {
             guard let connection else { return nil }
             return connection.startDomainWork(for: self, work)
+        }
+
+        package func bindSession(_ sessionID: String) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard boundSessionID == nil || boundSessionID == sessionID else { return false }
+            boundSessionID = sessionID
+            return true
+        }
+
+        package var resourceOwner: MCPHTTPNetworkResourceOwner? {
+            connection?.resourceOwner
         }
 
         fileprivate func startDomainWorkWhileAdmissionIsOpen<Success: Sendable>(
@@ -416,6 +458,13 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             finishIfPossible()
         }
 
+        fileprivate func belongs(to sessionID: String) -> Bool {
+            lock.lock()
+            let result = boundSessionID == sessionID
+            lock.unlock()
+            return result
+        }
+
         fileprivate func snapshot() -> RequestSnapshot {
             lock.lock()
             let phase: RequestWorkPhase
@@ -563,6 +612,8 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             return owner.startDomainWork(on: self, for: operation, work)
         }
 
+        fileprivate var resourceOwner: MCPHTTPNetworkResourceOwner? { owner }
+
         fileprivate func startDomainWorkWhileGenerationIsAccepting<Success: Sendable>(
             for operation: RequestOperation,
             _ work: @escaping @Sendable () async throws -> Success
@@ -617,6 +668,13 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             if didClose {
                 owner?.connectionDidClose(self)
             }
+        }
+
+        fileprivate func resolve(requestID: UUID) -> RequestOperation? {
+            lock.lock()
+            let operation = requests[requestID]
+            lock.unlock()
+            return operation
         }
 
         fileprivate func snapshot() -> ConnectionSnapshot {
@@ -866,6 +924,21 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
                 $0.admissionOrdinal < $1.admissionOrdinal
             }.map { $0.snapshot() }
         )
+    }
+
+    package func resolve(_ token: OperationToken, sessionID: String) -> RequestOperation? {
+        lock.lock()
+        let connection: Connection?
+        switch state {
+        case .accepting(let state), .admissionClosed(let state), .closing(let state, _):
+            connection = state.connections[token.connectionID]
+        case .closed:
+            connection = nil
+        }
+        lock.unlock()
+        guard let operation = connection?.resolve(requestID: token.requestID),
+              operation.belongs(to: sessionID) else { return nil }
+        return operation
     }
 
     fileprivate func connectionDidClose(_ connection: Connection) {
