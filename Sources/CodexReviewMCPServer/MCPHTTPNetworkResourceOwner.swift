@@ -183,6 +183,20 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             case acknowledged
         }
 
+        private enum SessionDomainPhase {
+            case unbound
+            case accepting(String)
+
+            func belongs(to sessionID: String) -> Bool {
+                switch self {
+                case .unbound:
+                    false
+                case .accepting(let ownedSessionID):
+                    ownedSessionID == sessionID
+                }
+            }
+        }
+
         private struct DomainWorkState {
             var cancellation: (@Sendable () -> Void)?
             var cancellationWasRequested = false
@@ -203,7 +217,7 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         private var startWasRequested = false
         private var startWaiter: CheckedContinuation<Bool, Never>?
         private var domainWork: [UUID: DomainWorkState] = [:]
-        private var boundSessionID: String?
+        private var sessionDomainPhase: SessionDomainPhase = .unbound
         private var closeWaiters: [CheckedContinuation<TerminalCause?, Never>] = []
 
         fileprivate init(admissionOrdinal: UInt64, connection: Connection) {
@@ -260,11 +274,8 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         }
 
         package func bindSession(_ sessionID: String) -> Bool {
-            lock.lock()
-            defer { lock.unlock() }
-            guard boundSessionID == nil || boundSessionID == sessionID else { return false }
-            boundSessionID = sessionID
-            return true
+            guard let connection else { return false }
+            return connection.bindSession(sessionID, to: self)
         }
 
         package var resourceOwner: MCPHTTPNetworkResourceOwner? {
@@ -275,7 +286,9 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             _ work: @escaping @Sendable () async throws -> Success
         ) -> Task<Success, any Error>? {
             lock.lock()
-            guard terminalCause == nil, didClose == false else {
+            guard case .accepting = sessionDomainPhase,
+                  terminalCause == nil,
+                  didClose == false else {
                 lock.unlock()
                 return nil
             }
@@ -292,6 +305,19 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             }
             lease.install(task)
             return task
+        }
+
+        fileprivate func bindSessionWhileAdmissionIsOpen(_ sessionID: String) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard terminalCause == nil, didClose == false else { return false }
+            switch sessionDomainPhase {
+            case .unbound:
+                sessionDomainPhase = .accepting(sessionID)
+                return true
+            case .accepting(let ownedSessionID):
+                return ownedSessionID == sessionID
+            }
         }
 
         package func beginResponse() -> Bool {
@@ -465,7 +491,7 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
 
         fileprivate func belongs(to sessionID: String) -> Bool {
             lock.lock()
-            let result = boundSessionID == sessionID
+            let result = sessionDomainPhase.belongs(to: sessionID)
             lock.unlock()
             return result
         }
@@ -640,6 +666,37 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             let task = operation.startDomainWorkWhileAdmissionIsOpen(work)
             lock.unlock()
             return task
+        }
+
+        fileprivate func bindSession(
+            _ sessionID: String,
+            to operation: RequestOperation
+        ) -> Bool {
+            guard let owner else { return false }
+            return owner.bindSession(sessionID, on: self, to: operation)
+        }
+
+        fileprivate func bindSessionWhileDomainAdmissionIsOpen(
+            _ sessionID: String,
+            to operation: RequestOperation
+        ) -> Bool {
+            lock.lock()
+            switch phase {
+            case .accepting, .admissionClosed:
+                break
+            case .closing, .closed:
+                lock.unlock()
+                return false
+            }
+            guard domainAdmissionClosed == false,
+                  let ownedOperation = requests[operation.id],
+                  ownedOperation === operation else {
+                lock.unlock()
+                return false
+            }
+            let didBind = operation.bindSessionWhileAdmissionIsOpen(sessionID)
+            lock.unlock()
+            return didBind
         }
 
         package func closeAdmission() {
@@ -867,6 +924,26 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         )
         lock.unlock()
         return task
+    }
+
+    fileprivate func bindSession(
+        _ sessionID: String,
+        on connection: Connection,
+        to operation: RequestOperation
+    ) -> Bool {
+        lock.lock()
+        guard case .accepting(let current) = state,
+              let ownedConnection = current.connections[connection.id],
+              ownedConnection === connection else {
+            lock.unlock()
+            return false
+        }
+        let didBind = connection.bindSessionWhileDomainAdmissionIsOpen(
+            sessionID,
+            to: operation
+        )
+        lock.unlock()
+        return didBind
     }
 
     package func beginClosing(_ cause: TerminalCause) -> ClosingGeneration {
