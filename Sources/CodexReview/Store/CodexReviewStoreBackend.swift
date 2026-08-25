@@ -69,14 +69,6 @@ package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend, Sendable {
         _ admission: ReviewInterruptRequestAdmission,
         reason: CodexReviewBackendModel.CancellationReason
     ) async throws
-    func beginReviewRecovery(
-        _ run: CodexReviewBackendModel.Review.Run,
-        reason: CodexReviewBackendModel.CancellationReason
-    ) async throws -> CodexReviewBackendModel.Review.RecoveryToken
-    func resumeReviewRecovery(
-        _ token: CodexReviewBackendModel.Review.RecoveryToken,
-        request: CodexReviewBackendModel.Review.Start
-    ) async throws -> BackendReviewAttempt
     func prepareReviewRecovery(
         _ candidate: ReviewRecoveryCandidate
     ) async throws -> PreparedReviewRecovery
