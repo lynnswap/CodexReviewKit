@@ -822,13 +822,7 @@ struct CodexReviewMCPHTTPServerTests {
         )
 
         let stop = Task { try await server.stop() }
-        #expect(await waitUntil(timeout: .seconds(2)) {
-            guard let snapshot = await server.networkResourceSnapshotForTesting(),
-                  snapshot.phase == .closing(.serverStop) else { return false }
-            return snapshot.connections.flatMap(\.requests).contains {
-                $0.pendingDomainWorkCount == 1 && $0.responseEnd == .closed
-            }
-        })
+        #expect(await server.waitForNetworkCloseWaiterRegistrationForTesting() == .registered)
         let pending = try #require(await server.networkResourceSnapshotForTesting()?
             .connections.flatMap(\.requests).first { $0.pendingDomainWorkCount == 1 })
         #expect(pending.responseEnd == .closed)

@@ -86,6 +86,11 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         case closed
     }
 
+    package enum CloseWaiterRegistration: Equatable, Sendable {
+        case registered
+        case alreadyClosed
+    }
+
     package struct RequestSnapshot: Equatable, Sendable {
         package let id: UUID
         package let admissionOrdinal: UInt64
@@ -793,6 +798,10 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
     private var state: State = .accepting(.init(connections: [:]))
     private var nextConnectionOrdinal: UInt64 = 0
     private var closeWaiters: [CheckedContinuation<Void, Never>] = []
+    private var didRegisterCloseWaiter = false
+    private var closeWaiterRegistrationWaiters: [
+        CheckedContinuation<CloseWaiterRegistration, Never>
+    ] = []
 
     package init(generationID: UInt64) {
         self.generationID = generationID
@@ -926,6 +935,22 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         )
     }
 
+    package func waitForCloseWaiterRegistrationForTesting() async -> CloseWaiterRegistration {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if didRegisterCloseWaiter {
+                lock.unlock()
+                continuation.resume(returning: .registered)
+            } else if case .closed = state {
+                lock.unlock()
+                continuation.resume(returning: .alreadyClosed)
+            } else {
+                closeWaiterRegistrationWaiters.append(continuation)
+                lock.unlock()
+            }
+        }
+    }
+
     package func resolve(_ token: OperationToken, sessionID: String) -> RequestOperation? {
         lock.lock()
         let connection: Connection?
@@ -971,13 +996,28 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
 
     private func waitUntilClosed() async {
         await withCheckedContinuation { continuation in
+            let registration: CloseWaiterRegistration
+            let registrationWaiters: [CheckedContinuation<CloseWaiterRegistration, Never>]
             lock.lock()
             if case .closed = state {
+                registration = .alreadyClosed
+                registrationWaiters = closeWaiterRegistrationWaiters
+                closeWaiterRegistrationWaiters.removeAll(keepingCapacity: false)
                 lock.unlock()
+                for waiter in registrationWaiters {
+                    waiter.resume(returning: registration)
+                }
                 continuation.resume()
             } else {
                 closeWaiters.append(continuation)
+                didRegisterCloseWaiter = true
+                registration = .registered
+                registrationWaiters = closeWaiterRegistrationWaiters
+                closeWaiterRegistrationWaiters.removeAll(keepingCapacity: false)
                 lock.unlock()
+                for waiter in registrationWaiters {
+                    waiter.resume(returning: registration)
+                }
             }
         }
     }

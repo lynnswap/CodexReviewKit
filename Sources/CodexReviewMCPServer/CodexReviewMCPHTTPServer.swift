@@ -906,6 +906,26 @@ package actor CodexReviewMCPHTTPServer {
         }
     }
 
+    package func waitForNetworkCloseWaiterRegistrationForTesting()
+        async -> MCPHTTPNetworkResourceOwner.CloseWaiterRegistration
+    {
+        let networkResources: MCPHTTPNetworkResourceOwner?
+        switch lifecycleState {
+        case .starting(let operation):
+            networkResources = operation.networkResources
+        case .running(let resources):
+            networkResources = resources.networkResources
+        case .stopping(_, let resources?, _):
+            networkResources = resources.networkResources
+        case .stopping, .stopped:
+            networkResources = nil
+        }
+        guard let networkResources else {
+            preconditionFailure("An active MCP generation owns the network close waiter.")
+        }
+        return await networkResources.waitForCloseWaiterRegistrationForTesting()
+    }
+
     package func holdNextFiniteSourceCompletionForTesting() async {
         await finiteSourceCompletionGate.holdNextCompletion()
     }

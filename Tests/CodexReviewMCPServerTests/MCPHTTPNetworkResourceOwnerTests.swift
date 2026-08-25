@@ -6,6 +6,15 @@ import CodexReviewTesting
 
 @Suite("MCP HTTP network resource owner")
 struct MCPHTTPNetworkResourceOwnerTests {
+    @Test func closeWaiterObservationCompletesWhenGenerationIsAlreadyClosed() async {
+        let owner = MCPHTTPNetworkResourceOwner(generationID: 20)
+        let closing = owner.beginClosing(.serverStop)
+
+        await closing.waitUntilClosed()
+
+        #expect(await owner.waitForCloseWaiterRegistrationForTesting() == .alreadyClosed)
+    }
+
     @Test func acceptedConnectionClosesOnlyAfterItsChannelAcknowledges() async throws {
         let owner = MCPHTTPNetworkResourceOwner(generationID: 1)
         let resource = TestingConnectionResource()
