@@ -1,4 +1,5 @@
 import Foundation
+import MCP
 import Testing
 import CodexReviewMCPServer
 import CodexReviewTesting
@@ -235,6 +236,44 @@ struct MCPHTTPNetworkResourceOwnerTests {
 
         admitted.lease.acknowledgeCompletion()
         #expect(owner.resolve(token, sessionID: "session-16") == nil)
+        let closing = owner.beginClosing(.serverStop)
+        resource.acknowledgeClose()
+        await closing.waitUntilClosed()
+    }
+
+    @Test func httpBoundaryReplacesSpoofedIdentityAndBindsTheExactOperation() async throws {
+        let owner = MCPHTTPNetworkResourceOwner(generationID: 17)
+        let resource = TestingConnectionResource()
+        let connection = try #require(owner.admitConnection(resource))
+        let admitted = try #require(connection.admitRequest())
+        let request = HTTPRequest(method: "POST", headers: [
+            "x-cOdExReViEw-ReQuEsT-oPeRaTiOn": "client-spoof",
+            "X-Client": "preserved",
+        ])
+
+        let owned = try #require(CodexReviewMCPHTTPServer.ownedRequest(
+            request,
+            operation: admitted.operation,
+            sessionID: "session-17"
+        ))
+        let identityHeaders = owned.headers.filter {
+            $0.key.lowercased() == MCPHTTPNetworkResourceOwner.operationTokenHeaderName.lowercased()
+        }
+        #expect(identityHeaders.count == 1)
+        #expect(identityHeaders.values.first == admitted.operation.token.headerValue)
+        #expect(owned.header("X-Client") == "preserved")
+        let encodedToken = try #require(identityHeaders.values.first)
+        let token = try #require(MCPHTTPNetworkResourceOwner.OperationToken(
+            headerValue: encodedToken
+        ))
+        #expect(owner.resolve(token, sessionID: "session-17") === admitted.operation)
+        #expect(CodexReviewMCPHTTPServer.ownedRequest(
+            request,
+            operation: admitted.operation,
+            sessionID: "other-session"
+        ) == nil)
+
+        admitted.lease.acknowledgeCompletion()
         let closing = owner.beginClosing(.serverStop)
         resource.acknowledgeClose()
         await closing.waitUntilClosed()
