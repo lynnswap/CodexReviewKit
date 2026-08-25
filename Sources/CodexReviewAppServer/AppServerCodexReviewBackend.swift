@@ -207,6 +207,8 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     private var notificationRouterStartTask: Task<Void, Never>?
     private var notificationRouterTask: Task<Void, Never>?
     private var reviewNotificationSequence = 0
+    private var completedReviewNotificationCount = 0
+    private var reviewNotificationCompletionWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
     private var notificationRouterMetrics = AppServerNotificationRouterMetrics()
     private var reviewStartRequestsInFlight = 0
     private var reviewStartRoutingAttemptIDs: Set<String> = []
@@ -1112,6 +1114,15 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         notificationRouterMetrics
     }
 
+    package func waitForReviewNotificationCompletionForTesting(_ count: Int) async {
+        guard completedReviewNotificationCount < count else {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            reviewNotificationCompletionWaiters.append((count, continuation))
+        }
+    }
+
     package func reviewEventSessionMetricsForTesting(
         threadID: String
     ) async -> AppServerReviewEventSessionMetrics? {
@@ -1431,6 +1442,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
 
     private func routeReviewNotification(_ notification: JSONRPC.Notification) async {
         notificationRouterMetrics.received += 1
+        defer { recordReviewNotificationCompletion() }
         switch CurrentV2ReviewNotificationDecoder.decode(notification) {
         case .standaloneTraffic:
             notificationRouterMetrics.standaloneIgnored += 1
@@ -1494,6 +1506,16 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             return
         case .review(let envelope):
             await routeDecodedReviewNotification(envelope)
+        }
+    }
+
+    private func recordReviewNotificationCompletion() {
+        completedReviewNotificationCount += 1
+        let count = completedReviewNotificationCount
+        let ready = reviewNotificationCompletionWaiters.filter { count >= $0.0 }
+        reviewNotificationCompletionWaiters.removeAll { count >= $0.0 }
+        for (_, waiter) in ready {
+            waiter.resume()
         }
     }
 

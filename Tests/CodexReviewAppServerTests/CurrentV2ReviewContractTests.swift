@@ -1386,7 +1386,7 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         }
 
         try await transport.emitServerNotification(method: fixture.method, params: fixture.params)
-        await diagnostics.waitForCount(1)
+        await backend.waitForReviewNotificationCompletionForTesting(1)
         switch fixture.route {
         case .global:
             #expect(await backend.notificationRouterMetricsForTesting().ignored == 1)
@@ -1435,7 +1435,7 @@ struct CurrentV2ReviewRoutingIntegrationTests {
             ))
             try await transport.emitServerNotification(method: fixture.0, params: fixture.1)
             #expect(try await attempt.events.next() == .failed(fixture.2))
-            _ = await backend.notificationRouterMetricsForTesting()
+            await backend.waitForReviewNotificationCompletionForTesting(1)
             #expect(diagnostics.snapshot().isEmpty)
         }
     }
@@ -2063,41 +2063,14 @@ struct CurrentV2ReviewRoutingIntegrationTests {
 }
 
 private final class ReviewIngestionDiagnosticCapture: ReviewIngestionDiagnosticRecording {
-    private struct State: Sendable {
-        var diagnostics: [ReviewIngestionDiagnosticRecord] = []
-        var waiters: [(Int, CheckedContinuation<Void, Never>)] = []
-    }
-
-    private let state = Mutex(State())
+    private let diagnostics = Mutex<[ReviewIngestionDiagnosticRecord]>([])
 
     func record(_ diagnostic: ReviewIngestionDiagnosticRecord) {
-        let ready = state.withLock { state -> [CheckedContinuation<Void, Never>] in
-            state.diagnostics.append(diagnostic)
-            let count = state.diagnostics.count
-            let ready = state.waiters.filter { count >= $0.0 }.map(\.1)
-            state.waiters.removeAll { count >= $0.0 }
-            return ready
-        }
-        for waiter in ready { waiter.resume() }
+        diagnostics.withLock { $0.append(diagnostic) }
     }
 
     func snapshot() -> [ReviewIngestionDiagnosticRecord] {
-        state.withLock { $0.diagnostics }
-    }
-
-    func waitForCount(_ count: Int) async {
-        await withCheckedContinuation { continuation in
-            let isReady = state.withLock { state -> Bool in
-                if state.diagnostics.count >= count {
-                    return true
-                }
-                state.waiters.append((count, continuation))
-                return false
-            }
-            if isReady {
-                continuation.resume()
-            }
-        }
+        diagnostics.withLock { $0 }
     }
 }
 
