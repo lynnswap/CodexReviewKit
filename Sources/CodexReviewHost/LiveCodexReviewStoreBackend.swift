@@ -359,47 +359,6 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             return route.runtime
         }
 
-        func contains(
-            attemptID: String,
-            runtime: LiveRuntimeLifecycleHandle
-        ) -> Bool {
-            guard let route = routes[attemptID] else { return false }
-            return route.runtime === runtime && route.recovery == nil
-        }
-
-        mutating func move(
-            sourceAttemptID: String,
-            recoveredRun: CodexReviewBackendModel.Review.Run,
-            runtime: LiveRuntimeLifecycleHandle
-        ) throws {
-            let recoveredAttemptID = recoveredRun.attemptID
-            guard let source = routes[sourceAttemptID],
-                  source.runtime === runtime,
-                  source.recovery == nil
-            else {
-                throw ReviewAttemptContractFailure(
-                    message: "Review recovery source route changed before attempt \(recoveredAttemptID) became active."
-                )
-            }
-            guard sourceAttemptID != recoveredAttemptID else {
-                return
-            }
-            if let existing = routes[recoveredAttemptID] {
-                guard existing.runtime === runtime else {
-                    throw ReviewAttemptContractFailure(
-                        message: "Recovered review attempt \(recoveredAttemptID) is already routed to another runtime."
-                    )
-                }
-                throw ReviewAttemptContractFailure(
-                    message: "Recovered review attempt \(recoveredAttemptID) already has a runtime route."
-                )
-            }
-            routes.removeValue(forKey: sourceAttemptID)
-            var recovered = source
-            recovered.run = recoveredRun
-            routes[recoveredAttemptID] = recovered
-        }
-
         mutating func take(
             attemptID: String,
             operation: String
@@ -411,19 +370,6 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             }
             routes.removeValue(forKey: attemptID)
             return route.runtime
-        }
-
-        mutating func removeIfCurrent(
-            attemptID: String,
-            runtime: LiveRuntimeLifecycleHandle
-        ) {
-            guard let route = routes[attemptID],
-                  route.runtime === runtime,
-                  route.recovery == nil
-            else {
-                return
-            }
-            routes.removeValue(forKey: attemptID)
         }
 
         mutating func beginPreparation(
@@ -1755,60 +1701,6 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             ))
         }
         try await runtime.backend.interruptReview(admission, reason: reason)
-    }
-
-    func beginReviewRecovery(
-        _ run: CodexReviewBackendModel.Review.Run,
-        reason: CodexReviewBackendModel.CancellationReason
-    ) async throws -> CodexReviewBackendModel.Review.RecoveryToken {
-        let runtime = try reviewAttemptRuntimeRoutes.runtime(
-            for: run.attemptID,
-            operation: "recovery"
-        )
-        let token = try await runtime.backend.beginReviewRecovery(run, reason: reason)
-        guard reviewAttemptRuntimeRoutes.contains(
-            attemptID: run.attemptID,
-            runtime: runtime
-        ) else {
-            throw ReviewAttemptContractFailure(
-                message: "Review recovery source route changed before attempt \(run.attemptID) was prepared."
-            )
-        }
-        return token
-    }
-
-    func resumeReviewRecovery(
-        _ token: CodexReviewBackendModel.Review.RecoveryToken,
-        request: CodexReviewBackendModel.Review.Start
-    ) async throws -> BackendReviewAttempt {
-        let sourceAttemptID = token.interruptedRun.attemptID
-        let runtime = try reviewAttemptRuntimeRoutes.runtime(
-            for: sourceAttemptID,
-            operation: "recovery resume"
-        )
-        let attempt = try await runtime.backend.resumeReviewRecovery(
-            token,
-            request: request
-        )
-        do {
-            try reviewAttemptRuntimeRoutes.move(
-                sourceAttemptID: sourceAttemptID,
-                recoveredRun: attempt.run,
-                runtime: runtime
-            )
-        } catch {
-            reviewAttemptRuntimeRoutes.removeIfCurrent(
-                attemptID: sourceAttemptID,
-                runtime: runtime
-            )
-            throw await reviewRouteBindingFailure(
-                error,
-                startError: nil,
-                cleanupRun: attempt.run,
-                runtime: runtime
-            )
-        }
-        return attempt
     }
 
     func prepareReviewRecovery(

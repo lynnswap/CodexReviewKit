@@ -1562,20 +1562,6 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         .init(message: "Testing recovery cannot \(operation) without its exact scripted route.")
     }
 
-    package func beginReviewRecovery(
-        _ run: CodexReviewBackendModel.Review.Run,
-        reason: CodexReviewBackendModel.CancellationReason
-    ) async throws -> CodexReviewBackendModel.Review.RecoveryToken {
-        try await reviewBackend.beginReviewRecovery(run, reason: reason)
-    }
-
-    package func resumeReviewRecovery(
-        _ token: CodexReviewBackendModel.Review.RecoveryToken,
-        request: CodexReviewBackendModel.Review.Start
-    ) async throws -> BackendReviewAttempt {
-        try await reviewBackend.resumeReviewRecovery(token, request: request)
-    }
-
     package func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws {
         try await reviewBackend.cleanupReview(run)
     }
