@@ -3194,6 +3194,8 @@ private struct AppServerThreadItem: Decodable, Sendable {
             return []
         case "enteredReviewMode":
             return review.map { [.logEntry(kind: .progress, text: "Reviewing \($0)", groupID: id, replacesGroup: true)] } ?? []
+        case "exitedReviewMode":
+            return exitedReviewModeEvents()
         case "commandExecution":
             return (command?.nilIfEmpty ?? lifecycle?.command).map {
                 [logEntry(
@@ -3264,15 +3266,7 @@ private struct AppServerThreadItem: Decodable, Sendable {
                 [.logEntry(kind: .agentMessage, text: $0, groupID: id, replacesGroup: true)]
             } ?? []
         case "exitedReviewMode":
-            return review.map {
-                [.logEntry(
-                    kind: .agentMessage,
-                    text: $0,
-                    groupID: id,
-                    replacesGroup: true,
-                    metadata: .init(sourceType: "exitedReviewMode")
-                )]
-            } ?? []
+            return exitedReviewModeEvents()
         case "commandExecution":
             if let output = aggregatedOutput?.nilIfEmpty ?? lifecycle?.streamedOutputIfAvailable {
                 var events: [CodexReviewBackendModel.Review.Event] = []
@@ -3355,6 +3349,18 @@ private struct AppServerThreadItem: Decodable, Sendable {
                 type: type
             )
         }
+    }
+
+    private func exitedReviewModeEvents() -> [CodexReviewBackendModel.Review.Event] {
+        review.map {
+            [.logEntry(
+                kind: .agentMessage,
+                text: $0,
+                groupID: id,
+                replacesGroup: true,
+                metadata: .init(sourceType: "exitedReviewMode")
+            )]
+        } ?? []
     }
 
     private func logEntry(
