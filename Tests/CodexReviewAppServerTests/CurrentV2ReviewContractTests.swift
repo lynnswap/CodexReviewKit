@@ -1708,26 +1708,10 @@ struct CurrentV2ReviewRoutingIntegrationTests {
             params: V2ItemNotification(
                 threadID: "thread-review",
                 turnID: "turn-review",
-                item: .init(type: "agentMessage", id: "final", text: "Partial final")
-            )
-        )
-        try await transport.emitServerNotification(
-            method: "item/completed",
-            params: V2ItemNotification(
-                threadID: "thread-review",
-                turnID: "turn-review",
-                item: .init(type: "agentMessage", id: "final", text: "Complete final")
-            )
-        )
-        try await transport.emitServerNotification(
-            method: "item/started",
-            params: V2ItemNotification(
-                threadID: "thread-review",
-                turnID: "turn-review",
                 item: .init(
                     type: "exitedReviewMode",
                     id: "review-result",
-                    review: "Draft canonical review"
+                    review: "Canonical review"
                 )
             )
         )
@@ -1740,12 +1724,28 @@ struct CurrentV2ReviewRoutingIntegrationTests {
             )
         )
         try await transport.emitServerNotification(
+            method: "item/started",
+            params: V2ItemNotification(
+                threadID: "thread-review",
+                turnID: "turn-review",
+                item: .init(type: "agentMessage", id: "final", text: "Canonical review")
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: V2ItemNotification(
+                threadID: "thread-review",
+                turnID: "turn-review",
+                item: .init(type: "agentMessage", id: "final", text: "Canonical review")
+            )
+        )
+        try await transport.emitServerNotification(
             method: "turn/completed",
             params: V2TurnNotification(
                 threadID: "thread-review",
                 turn: .init(
                     id: "turn-review",
-                    items: [.init(type: "agentMessage", id: "final", text: "Complete final")],
+                    items: [.init(type: "agentMessage", id: "final", text: "Canonical review")],
                     itemsView: "summary",
                     status: "completed"
                 )
@@ -1761,7 +1761,7 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         #expect(canonicalReviewEvents == [
             .logEntry(
                 kind: .agentMessage,
-                text: "Draft canonical review",
+                text: "Canonical review",
                 groupID: "review-result",
                 replacesGroup: true,
                 metadata: .init(sourceType: "exitedReviewMode")
@@ -1772,6 +1772,33 @@ struct CurrentV2ReviewRoutingIntegrationTests {
                 groupID: "review-result",
                 replacesGroup: true,
                 metadata: .init(sourceType: "exitedReviewMode")
+            ),
+        ])
+        let companionEvents = normalizedEvents.filter { event in
+            guard case .logEntry(_, _, let groupID, _, _) = event else {
+                return false
+            }
+            return groupID == "final"
+        }
+        #expect(companionEvents == [
+            .logEntry(
+                kind: .agentMessage,
+                text: "Canonical review",
+                groupID: "final",
+                replacesGroup: true
+            ),
+            .logEntry(
+                kind: .agentMessage,
+                text: "Canonical review",
+                groupID: "final",
+                replacesGroup: true
+            ),
+            .logEntry(
+                kind: .agentMessage,
+                text: "",
+                groupID: "final",
+                replacesGroup: true,
+                metadata: .init(sourceType: "suppressedFinalReviewCompanion")
             ),
         ])
         #expect(normalizedEvents.last == .completed(
