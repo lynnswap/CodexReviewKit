@@ -87,6 +87,136 @@ struct MCPHTTPNetworkResourceOwnerTests {
         ))
     }
 
+    @Test func domainWorkCreationIsRejectedAfterAdmissionClose() async throws {
+        let owner = MCPHTTPNetworkResourceOwner(generationID: 10)
+        let resource = TestingConnectionResource()
+        let connection = try #require(owner.admitConnection(resource))
+        let admitted = try #require(connection.admitRequest())
+
+        owner.closeAdmission()
+        #expect(admitted.operation.startDomainWork {} == nil)
+        admitted.lease.acknowledgeCompletion()
+        let closing = owner.beginClosing(.serverStop)
+        resource.acknowledgeClose()
+        await closing.waitUntilClosed()
+
+        #expect(owner.snapshot().isClosed)
+    }
+
+    @Test func connectionAdmissionCloseRejectsDomainWork() async throws {
+        let owner = MCPHTTPNetworkResourceOwner(generationID: 14)
+        let resource = TestingConnectionResource()
+        let connection = try #require(owner.admitConnection(resource))
+        let admitted = try #require(connection.admitRequest())
+
+        connection.closeAdmission()
+        #expect(admitted.operation.startDomainWork {} == nil)
+        admitted.lease.acknowledgeCompletion()
+        let closing = owner.beginClosing(.serverStop)
+        resource.acknowledgeClose()
+        await closing.waitUntilClosed()
+
+        #expect(owner.snapshot().isClosed)
+    }
+
+    @Test func finalRequestKeepsItsDomainAdmissionUntilConnectionClose() async throws {
+        let owner = MCPHTTPNetworkResourceOwner(generationID: 15)
+        let resource = TestingConnectionResource()
+        let connection = try #require(owner.admitConnection(resource))
+        let admitted = try #require(connection.admitRequest(finalForConnection: true))
+
+        let task = try #require(admitted.operation.startDomainWork {})
+        try await task.value
+        admitted.lease.acknowledgeCompletion()
+
+        let closing = owner.beginClosing(.serverStop)
+        resource.acknowledgeClose()
+        await closing.waitUntilClosed()
+        #expect(owner.snapshot().isClosed)
+    }
+
+    @Test func responseAndHTTPCompletionStillJoinDomainAcknowledgement() async throws {
+        let owner = MCPHTTPNetworkResourceOwner(generationID: 11)
+        let resource = TestingConnectionResource()
+        let connection = try #require(owner.admitConnection(resource))
+        let admitted = try #require(connection.admitRequest())
+        let started = AsyncGate()
+        let release = AsyncGate()
+        let domainTask = try #require(admitted.operation.startDomainWork {
+            await started.open()
+            await release.waitIgnoringCancellation()
+        })
+        await started.wait()
+
+        let httpTask = Task {
+            defer { admitted.lease.acknowledgeCompletion() }
+            guard await admitted.lease.waitUntilStartIsAllowed() else { return }
+            #expect(admitted.operation.beginResponse())
+            admitted.operation.acknowledgeResponseEnd()
+        }
+        admitted.lease.install(httpTask)
+        await httpTask.value
+
+        let closing = owner.beginClosing(.serverStop)
+        resource.acknowledgeClose()
+        let didClose = CompletionFlag()
+        let waiter = Task {
+            await closing.waitUntilClosed()
+            await didClose.complete()
+        }
+        #expect(await didClose.isCompleted() == false)
+        #expect(owner.snapshot().connections[0].requests[0].pendingDomainWorkCount == 1)
+
+        await release.open()
+        try await domainTask.value
+        await waiter.value
+        #expect(await didClose.isCompleted())
+        #expect(owner.snapshot().isClosed)
+    }
+
+    @Test func callerCancellationDoesNotAcknowledgeOwnedDomainWork() async throws {
+        let owner = MCPHTTPNetworkResourceOwner(generationID: 12)
+        let resource = TestingConnectionResource()
+        let connection = try #require(owner.admitConnection(resource))
+        let admitted = try #require(connection.admitRequest())
+        let started = AsyncGate()
+        let release = AsyncGate()
+        let observation = StartObservation()
+        let domainTask = try #require(admitted.operation.startDomainWork {
+            await started.open()
+            await release.waitIgnoringCancellation()
+            await observation.record(wasAllowed: true, wasCancelled: Task.isCancelled)
+        })
+        await started.wait()
+
+        domainTask.cancel()
+        #expect(owner.snapshot().connections[0].requests[0].pendingDomainWorkCount == 1)
+        await release.open()
+        try await domainTask.value
+        #expect(await observation.value() == .init(wasAllowed: true, wasCancelled: true))
+
+        let closing = owner.beginClosing(.serverStop)
+        admitted.lease.acknowledgeCompletion()
+        resource.acknowledgeClose()
+        await closing.waitUntilClosed()
+    }
+
+    @Test func domainWorkCompletionAlwaysReleasesReservation() async throws {
+        let owner = MCPHTTPNetworkResourceOwner(generationID: 13)
+        let resource = TestingConnectionResource()
+        let connection = try #require(owner.admitConnection(resource))
+        let admitted = try #require(connection.admitRequest())
+        let task = try #require(admitted.operation.startDomainWork {})
+
+        try await task.value
+        #expect(owner.snapshot().connections[0].requests[0].pendingDomainWorkCount == 0)
+
+        let closing = owner.beginClosing(.serverStop)
+        admitted.lease.acknowledgeCompletion()
+        resource.acknowledgeClose()
+        await closing.waitUntilClosed()
+    }
+
     @Test func admissionCloseRejectsLateConnectionsAndRequests() async throws {
         let owner = MCPHTTPNetworkResourceOwner(generationID: 3)
         let acceptedResource = TestingConnectionResource()

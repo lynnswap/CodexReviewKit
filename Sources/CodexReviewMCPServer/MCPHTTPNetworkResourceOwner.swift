@@ -66,6 +66,7 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         package let admissionOrdinal: UInt64
         package let phase: RequestWorkPhase
         package let responseEnd: ResponseEndPhase
+        package let pendingDomainWorkCount: Int
 
         package var terminalCause: TerminalCause? {
             switch phase {
@@ -120,12 +121,43 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         }
     }
 
+    private final class DomainWorkLease: @unchecked Sendable {
+        fileprivate let id = UUID()
+        private weak var operation: RequestOperation?
+
+        fileprivate init(operation: RequestOperation) {
+            self.operation = operation
+        }
+
+        func install<Success: Sendable, Failure: Error>(
+            _ task: Task<Success, Failure>
+        ) {
+            operation?.installDomainWork(id: id) { task.cancel() }
+        }
+
+        func waitUntilStartIsAllowed() async -> Bool {
+            guard let operation else { return false }
+            return await operation.waitUntilDomainWorkCanStart(id: id)
+        }
+
+        func acknowledgeCompletion() {
+            operation?.acknowledgeDomainWork(id: id)
+        }
+    }
+
     package final class RequestOperation: @unchecked Sendable {
         private enum WorkState {
             case reserved
             case installed(@Sendable () -> Void)
             case running(@Sendable () -> Void)
             case acknowledged
+        }
+
+        private struct DomainWorkState {
+            var cancellation: (@Sendable () -> Void)?
+            var cancellationWasRequested = false
+            var startWasRequested = false
+            var startWaiter: CheckedContinuation<Bool, Never>?
         }
 
         package let id = UUID()
@@ -139,6 +171,7 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         private var didClose = false
         private var startWasRequested = false
         private var startWaiter: CheckedContinuation<Bool, Never>?
+        private var domainWork: [UUID: DomainWorkState] = [:]
         private var closeWaiters: [CheckedContinuation<TerminalCause?, Never>] = []
 
         fileprivate init(admissionOrdinal: UInt64, connection: Connection) {
@@ -153,25 +186,65 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         }
 
         fileprivate func beginClosing(_ cause: TerminalCause) {
-            var cancellation: (@Sendable () -> Void)?
-            var waiter: CheckedContinuation<Bool, Never>?
+            var cancellations: [@Sendable () -> Void] = []
+            var waiters: [CheckedContinuation<Bool, Never>] = []
             lock.lock()
+            for id in Array(domainWork.keys) {
+                domainWork[id]?.cancellationWasRequested = true
+                if let cancellation = domainWork[id]?.cancellation {
+                    cancellations.append(cancellation)
+                    if let waiter = domainWork[id]?.startWaiter {
+                        waiters.append(waiter)
+                        domainWork[id]?.startWaiter = nil
+                    }
+                }
+            }
             if terminalCause == nil, responseEnd != .acknowledged {
                 terminalCause = cause
                 responseEnd = .closed
                 switch workState {
                 case .installed(let cancel), .running(let cancel):
-                    cancellation = cancel
-                    waiter = startWaiter
+                    cancellations.append(cancel)
+                    if let startWaiter { waiters.append(startWaiter) }
                     startWaiter = nil
                 case .reserved, .acknowledged:
                     break
                 }
             }
             lock.unlock()
-            cancellation?()
-            waiter?.resume(returning: false)
+            cancellations.forEach { $0() }
+            waiters.forEach { $0.resume(returning: false) }
             finishIfPossible()
+        }
+
+        package func startDomainWork<Success: Sendable>(
+            _ work: @escaping @Sendable () async throws -> Success
+        ) -> Task<Success, any Error>? {
+            guard let connection else { return nil }
+            return connection.startDomainWork(for: self, work)
+        }
+
+        fileprivate func startDomainWorkWhileAdmissionIsOpen<Success: Sendable>(
+            _ work: @escaping @Sendable () async throws -> Success
+        ) -> Task<Success, any Error>? {
+            lock.lock()
+            guard terminalCause == nil, didClose == false else {
+                lock.unlock()
+                return nil
+            }
+            let lease = DomainWorkLease(operation: self)
+            domainWork[lease.id] = .init()
+            lock.unlock()
+            let task = Task<Success, any Error> {
+                defer { lease.acknowledgeCompletion() }
+                guard await lease.waitUntilStartIsAllowed() else {
+                    throw CancellationError()
+                }
+                try Task.checkCancellation()
+                return try await work()
+            }
+            lease.install(task)
+            return task
         }
 
         package func beginResponse() -> Bool {
@@ -286,6 +359,63 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             lock.unlock()
         }
 
+        fileprivate func installDomainWork(
+            id: UUID,
+            cancellation: @escaping @Sendable () -> Void
+        ) {
+            var waiter: CheckedContinuation<Bool, Never>?
+            var shouldCancel = false
+            lock.lock()
+            guard var work = domainWork[id], work.cancellation == nil else {
+                lock.unlock()
+                preconditionFailure("A domain WorkLease can be installed exactly once.")
+            }
+            work.cancellation = cancellation
+            shouldCancel = terminalCause != nil || work.cancellationWasRequested
+            if work.startWasRequested {
+                waiter = work.startWaiter
+                work.startWaiter = nil
+            }
+            domainWork[id] = work
+            lock.unlock()
+            if shouldCancel { cancellation() }
+            waiter?.resume(returning: shouldCancel == false)
+        }
+
+        fileprivate func waitUntilDomainWorkCanStart(id: UUID) async -> Bool {
+            await withCheckedContinuation { continuation in
+                lock.lock()
+                guard var work = domainWork[id] else {
+                    lock.unlock()
+                    continuation.resume(returning: false)
+                    return
+                }
+                precondition(work.startWasRequested == false, "A domain WorkLease can start exactly once.")
+                work.startWasRequested = true
+                if let cancellation = work.cancellation {
+                    let shouldCancel = terminalCause != nil || work.cancellationWasRequested
+                    domainWork[id] = work
+                    lock.unlock()
+                    if shouldCancel { cancellation() }
+                    continuation.resume(returning: shouldCancel == false)
+                } else {
+                    work.startWaiter = continuation
+                    domainWork[id] = work
+                    lock.unlock()
+                }
+            }
+        }
+
+        fileprivate func acknowledgeDomainWork(id: UUID) {
+            lock.lock()
+            guard domainWork.removeValue(forKey: id) != nil else {
+                lock.unlock()
+                preconditionFailure("A domain WorkLease is acknowledged exactly once by its task owner.")
+            }
+            lock.unlock()
+            finishIfPossible()
+        }
+
         fileprivate func snapshot() -> RequestSnapshot {
             lock.lock()
             let phase: RequestWorkPhase
@@ -301,12 +431,14 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
                 }
             }
             let responseEnd = responseEnd
+            let pendingDomainWorkCount = domainWork.count
             lock.unlock()
             return .init(
                 id: id,
                 admissionOrdinal: admissionOrdinal,
                 phase: phase,
-                responseEnd: responseEnd
+                responseEnd: responseEnd,
+                pendingDomainWorkCount: pendingDomainWorkCount
             )
         }
 
@@ -316,6 +448,7 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             lock.lock()
             guard didClose == false,
                   case .acknowledged = workState,
+                  domainWork.isEmpty,
                   responseEnd == .acknowledged || responseEnd == .closed else {
                 lock.unlock()
                 return
@@ -346,6 +479,7 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         private var phase: ConnectionPhase = .accepting
         private var nextRequestOrdinal: UInt64 = 0
         private var requests: [UUID: RequestOperation] = [:]
+        private var domainAdmissionClosed = false
         private var closeAcknowledged = false
         private var closeAcknowledgementWaiters: [CheckedContinuation<Void, Never>] = []
         private var closeWaiters: [CheckedContinuation<Void, Never>] = []
@@ -421,8 +555,40 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             }
         }
 
+        fileprivate func startDomainWork<Success: Sendable>(
+            for operation: RequestOperation,
+            _ work: @escaping @Sendable () async throws -> Success
+        ) -> Task<Success, any Error>? {
+            guard let owner else { return nil }
+            return owner.startDomainWork(on: self, for: operation, work)
+        }
+
+        fileprivate func startDomainWorkWhileGenerationIsAccepting<Success: Sendable>(
+            for operation: RequestOperation,
+            _ work: @escaping @Sendable () async throws -> Success
+        ) -> Task<Success, any Error>? {
+            lock.lock()
+            switch phase {
+            case .accepting, .admissionClosed:
+                break
+            case .closing, .closed:
+                lock.unlock()
+                return nil
+            }
+            guard domainAdmissionClosed == false,
+                  let ownedOperation = requests[operation.id],
+                  ownedOperation === operation else {
+                lock.unlock()
+                return nil
+            }
+            let task = operation.startDomainWorkWhileAdmissionIsOpen(work)
+            lock.unlock()
+            return task
+        }
+
         package func closeAdmission() {
             lock.lock()
+            domainAdmissionClosed = true
             if phase == .accepting {
                 phase = .admissionClosed
             }
@@ -477,6 +643,7 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             let requests: [RequestOperation]
             var shouldSignalClose = false
             lock.lock()
+            domainAdmissionClosed = true
             switch phase {
             case .accepting, .admissionClosed:
                 phase = .closing(cause)
@@ -499,6 +666,7 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             let requests: [RequestOperation]
             let acknowledgementWaiters: [CheckedContinuation<Void, Never>]
             lock.lock()
+            domainAdmissionClosed = true
             closeAcknowledged = true
             acknowledgementWaiters = closeAcknowledgementWaiters
             closeAcknowledgementWaiters.removeAll(keepingCapacity: false)
@@ -612,6 +780,26 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         for connection in connections {
             connection.closeAdmission()
         }
+    }
+
+    fileprivate func startDomainWork<Success: Sendable>(
+        on connection: Connection,
+        for operation: RequestOperation,
+        _ work: @escaping @Sendable () async throws -> Success
+    ) -> Task<Success, any Error>? {
+        lock.lock()
+        guard case .accepting(let current) = state,
+              let ownedConnection = current.connections[connection.id],
+              ownedConnection === connection else {
+            lock.unlock()
+            return nil
+        }
+        let task = connection.startDomainWorkWhileGenerationIsAccepting(
+            for: operation,
+            work
+        )
+        lock.unlock()
+        return task
     }
 
     package func beginClosing(_ cause: TerminalCause) -> ClosingGeneration {
