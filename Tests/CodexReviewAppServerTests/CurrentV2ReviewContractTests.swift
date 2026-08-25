@@ -1415,10 +1415,10 @@ struct CurrentV2ReviewRoutingIntegrationTests {
     }
 
     @Test func selectedAttemptAndTerminalFailuresRemainOutsideBoundaryCapture() async throws {
-        let fixtures: [(String, BoundaryDiagnosticFixture.Params)] = [
-            ("item/completed", .item(.init(threadID: "thread-selected", turnID: "turn-selected", item: .init(type: "futureItem", id: "item-1")))),
-            ("item/agentMessage/delta", .reviewPayload(.init(threadID: "thread-selected", turnID: "turn-selected", itemID: "item-1", delta: "delta", plan: "invalid"))),
-            ("turn/completed", .turn(.init(threadID: "thread-selected", turn: .init(id: "turn-selected", items: [], itemsView: "notLoaded", status: "completed")))),
+        let fixtures: [(String, BoundaryDiagnosticFixture.Params, String)] = [
+            ("item/completed", .item(.init(threadID: "thread-selected", turnID: "turn-selected", item: .init(type: "futureItem", id: "item-1"))), "Unsupported app-server item type futureItem in item/completed."),
+            ("item/agentMessage/delta", .reviewPayload(.init(threadID: "thread-selected", turnID: "turn-selected", itemID: "item-1", delta: "delta", plan: "invalid")), "Malformed app-server notification item/agentMessage/delta: The data couldn’t be read because it isn’t in the correct format."),
+            ("turn/completed", .turn(.init(threadID: "thread-selected", turn: .init(id: "turn-selected", items: [], itemsView: "notLoaded", status: "completed"))), ReviewIngestionError.missingFinalReview.localizedDescription),
         ]
         for (index, fixture) in fixtures.enumerated() {
             let transport = FakeJSONRPCTransport()
@@ -1434,7 +1434,8 @@ struct CurrentV2ReviewRoutingIntegrationTests {
                 reviewThreadID: "thread-selected"
             ))
             try await transport.emitServerNotification(method: fixture.0, params: fixture.1)
-            _ = try await attempt.events.next()
+            #expect(try await attempt.events.next() == .failed(fixture.2))
+            _ = await backend.notificationRouterMetricsForTesting()
             #expect(diagnostics.snapshot().isEmpty)
         }
     }
