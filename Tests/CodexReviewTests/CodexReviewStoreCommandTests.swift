@@ -3546,10 +3546,7 @@ private func startingAdmission(
 }
 
 private func isLegacyRecoveryCommand(_ command: FakeCodexReviewBackend.Command) -> Bool {
-    switch command {
-    case .beginReviewRecovery, .resumeReviewRecovery: true
-    default: false
-    }
+    if case .beginReviewRecovery = command { true } else { false }
 }
 
 private func isTypedInterruptCommand(_ command: FakeCodexReviewBackend.Command, run: CodexReviewBackendModel.Review.Run, message: String) -> Bool {
