@@ -7,6 +7,7 @@ struct CurrentV2ReviewNotificationEnvelope: Sendable {
     var params: Data
     var threadID: String?
     var turnID: String?
+    var itemType: String?
     var stableReceipt: ReviewStableLifecycleReceipt?
 }
 
@@ -34,8 +35,11 @@ struct ReviewStableLifecycleReceipt: Sendable {
 
 struct CurrentV2ReviewNotificationDecodeFailure: Error, Sendable {
     var method: String
+    var params: Data
     var routedThreadID: String?
     var routedTurnID: String?
+    var itemType: String?
+    var stage: ReviewIngestionDiagnosticRecord.Stage
     var error: ReviewIngestionError
     var isGlobalDiagnostic = false
 
@@ -94,8 +98,11 @@ enum CurrentV2ReviewNotificationDecoder {
         } catch {
             return .failure(.init(
                 method: notification.method,
+                params: notification.params,
                 routedThreadID: nil,
                 routedTurnID: nil,
+                itemType: nil,
+                stage: .paramsDecoding,
                 error: .malformedKnownEvent(
                     method: notification.method,
                     message: error.localizedDescription
@@ -107,6 +114,7 @@ enum CurrentV2ReviewNotificationDecoder {
 
         let threadID = nonemptyString(object["threadId"])
         let turnID = routedTurnID(method: notification.method, object: object)
+        let itemType = itemType(in: object)
         do {
             try validateIdentity(
                 identityRequirement,
@@ -129,6 +137,7 @@ enum CurrentV2ReviewNotificationDecoder {
                 params: notification.params,
                 threadID: threadID,
                 turnID: turnID,
+                itemType: itemType,
                 stableReceipt: receipt
             )
             if identityRequirement == .unscoped
@@ -139,8 +148,11 @@ enum CurrentV2ReviewNotificationDecoder {
         } catch let error as ReviewIngestionError {
             return .failure(.init(
                 method: notification.method,
+                params: notification.params,
                 routedThreadID: threadID,
                 routedTurnID: turnID,
+                itemType: ingestionItemType(error: error, fallback: itemType),
+                stage: .schemaValidation,
                 error: error,
                 isGlobalDiagnostic: isGlobalDiagnostic(
                     identityRequirement: identityRequirement,
@@ -151,8 +163,11 @@ enum CurrentV2ReviewNotificationDecoder {
         } catch {
             return .failure(.init(
                 method: notification.method,
+                params: notification.params,
                 routedThreadID: threadID,
                 routedTurnID: turnID,
+                itemType: itemType,
+                stage: .schemaValidation,
                 error: .malformedKnownEvent(
                     method: notification.method,
                     message: error.localizedDescription
@@ -173,6 +188,20 @@ enum CurrentV2ReviewNotificationDecoder {
         }
         return identityRequirement == .unscoped
             || (identityRequirement == .optionalThread && threadID == nil)
+    }
+
+    private static func itemType(in object: [String: Any]) -> String? {
+        (object["item"] as? [String: Any]).flatMap { nonemptyString($0["type"]) }
+    }
+
+    private static func ingestionItemType(
+        error: ReviewIngestionError,
+        fallback: String?
+    ) -> String? {
+        if case .unsupportedItemType(_, let type) = error {
+            return type
+        }
+        return fallback
     }
 
     private static func validateIdentity(

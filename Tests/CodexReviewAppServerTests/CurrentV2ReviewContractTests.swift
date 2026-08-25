@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import Testing
 @testable import CodexReviewAppServer
 import CodexReview
@@ -1358,7 +1359,11 @@ struct CurrentV2ReviewRoutingIntegrationTests {
 
     @Test func malformedUnscopedDiagnosticIsBoundedAndConnectionContinues() async throws {
         let transport = FakeJSONRPCTransport()
-        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let diagnostics = ReviewIngestionDiagnosticCapture()
+        let backend = AppServerCodexReviewBackend(
+            client: .init(transport: transport),
+            ingestionDiagnosticRecorder: diagnostics
+        )
         let attempt = await backend.reviewAttemptForTesting(.init(
             attemptID: "attempt-1",
             threadID: "thread-review",
@@ -1375,10 +1380,33 @@ struct CurrentV2ReviewRoutingIntegrationTests {
             review: "No findings."
         )
 
-        #expect(try await collectEvents(from: attempt.events).last == .completed(
+        let events = try await collectEvents(from: attempt.events)
+        #expect(events.last == .completed(
             summary: "Succeeded.",
             result: "No findings."
         ))
+        #expect(events.contains { event in
+            if case .logEntry(.diagnostic, let text, _, _, _) = event {
+                return text.contains("configWarning") || text.contains("Malformed")
+            }
+            return false
+        } == false)
+        let captured = diagnostics.snapshot()
+        #expect(captured.count == 1)
+        let diagnostic = try #require(captured.first)
+        #expect(diagnostic.method == "configWarning")
+        #expect(diagnostic.threadID == nil)
+        #expect(diagnostic.turnID == nil)
+        #expect(diagnostic.itemType == nil)
+        #expect(diagnostic.stage == .schemaValidation)
+        guard case .malformedKnownEvent(let method, _) = diagnostic.error else {
+            Issue.record("Expected malformed-known-event diagnostic")
+            return
+        }
+        #expect(method == "configWarning")
+        #expect(diagnostic.disposition == .ignored)
+        let rawObject = try JSONSerialization.jsonObject(with: diagnostic.rawParams) as? NSDictionary
+        #expect(rawObject == ["message": "wrong field for configWarning"] as NSDictionary)
         #expect(await backend.notificationRouterMetricsForTesting().ignored == 1)
         #expect(await transport.isClosedForTesting() == false)
     }
@@ -1832,7 +1860,11 @@ struct CurrentV2ReviewRoutingIntegrationTests {
 
     @Test func conflictingActiveRoutingClosesTheConnectionAndFailsAffectedAttempts() async throws {
         let transport = FakeJSONRPCTransport()
-        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let diagnostics = ReviewIngestionDiagnosticCapture()
+        let backend = AppServerCodexReviewBackend(
+            client: .init(transport: transport),
+            ingestionDiagnosticRecorder: diagnostics
+        )
         let first = await backend.reviewAttemptForTesting(.init(
             attemptID: "attempt-1",
             threadID: "shared-thread",
@@ -1847,12 +1879,11 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         ))
 
         try await transport.emitServerNotification(
-            method: "item/agentMessage/delta",
-            params: V2DeltaNotification(
+            method: "item/completed",
+            params: V2ItemNotification(
                 threadID: "shared-thread",
                 turnID: "turn-1",
-                itemID: "message",
-                delta: "ambiguous"
+                item: .init(type: "futureItem", id: "item-1")
             )
         )
 
@@ -1863,6 +1894,14 @@ struct CurrentV2ReviewRoutingIntegrationTests {
             _ = try await second.events.next()
         }
         #expect(await backend.notificationRouterMetricsForTesting().connectionFailures == 1)
+        let diagnostic = try #require(diagnostics.snapshot().first)
+        #expect(diagnostic.method == "item/completed")
+        #expect(diagnostic.threadID == "shared-thread")
+        #expect(diagnostic.turnID == "turn-1")
+        #expect(diagnostic.itemType == "futureItem")
+        #expect(diagnostic.stage == .routing)
+        #expect(diagnostic.error == .conflictingActiveRouting(threadID: "shared-thread"))
+        #expect(diagnostic.disposition == .connectionFailed)
         #expect(await transport.isClosedForTesting())
     }
 
@@ -1976,6 +2015,18 @@ struct CurrentV2ReviewRoutingIntegrationTests {
             }
             return text
         }
+    }
+}
+
+private final class ReviewIngestionDiagnosticCapture: ReviewIngestionDiagnosticRecording {
+    private let diagnostics = Mutex<[ReviewIngestionDiagnosticRecord]>([])
+
+    func record(_ diagnostic: ReviewIngestionDiagnosticRecord) {
+        diagnostics.withLock { $0.append(diagnostic) }
+    }
+
+    func snapshot() -> [ReviewIngestionDiagnosticRecord] {
+        diagnostics.withLock { $0 }
     }
 }
 
