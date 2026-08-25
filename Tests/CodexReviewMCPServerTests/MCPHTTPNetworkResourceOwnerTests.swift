@@ -134,6 +134,7 @@ struct MCPHTTPNetworkResourceOwnerTests {
         let resource = TestingConnectionResource()
         let connection = try #require(owner.admitConnection(resource))
         let admitted = try #require(connection.admitRequest(finalForConnection: true))
+        #expect(admitted.operation.bindSession("session-final-connection"))
 
         let task = try #require(admitted.operation.startDomainWork {})
         try await task.value
@@ -150,6 +151,7 @@ struct MCPHTTPNetworkResourceOwnerTests {
         let resource = TestingConnectionResource()
         let connection = try #require(owner.admitConnection(resource))
         let admitted = try #require(connection.admitRequest())
+        #expect(admitted.operation.bindSession("session-response-join"))
         let started = AsyncGate()
         let release = AsyncGate()
         let domainTask = try #require(admitted.operation.startDomainWork {
@@ -189,6 +191,7 @@ struct MCPHTTPNetworkResourceOwnerTests {
         let resource = TestingConnectionResource()
         let connection = try #require(owner.admitConnection(resource))
         let admitted = try #require(connection.admitRequest())
+        #expect(admitted.operation.bindSession("session-caller-cancel"))
         let started = AsyncGate()
         let release = AsyncGate()
         let observation = StartObservation()
@@ -216,6 +219,7 @@ struct MCPHTTPNetworkResourceOwnerTests {
         let resource = TestingConnectionResource()
         let connection = try #require(owner.admitConnection(resource))
         let admitted = try #require(connection.admitRequest())
+        #expect(admitted.operation.bindSession("session-domain-completion"))
         let task = try #require(admitted.operation.startDomainWork {})
 
         try await task.value
@@ -223,6 +227,23 @@ struct MCPHTTPNetworkResourceOwnerTests {
 
         let closing = owner.beginClosing(.serverStop)
         admitted.lease.acknowledgeCompletion()
+        resource.acknowledgeClose()
+        await closing.waitUntilClosed()
+    }
+
+    @Test func domainWorkRequiresAnExactSessionBinding() async throws {
+        let owner = MCPHTTPNetworkResourceOwner(generationID: 23)
+        let resource = TestingConnectionResource()
+        let connection = try #require(owner.admitConnection(resource))
+        let admitted = try #require(connection.admitRequest())
+
+        #expect(admitted.operation.startDomainWork {} == nil)
+        #expect(admitted.operation.bindSession("session-bound"))
+        let task = try #require(admitted.operation.startDomainWork {})
+        try await task.value
+
+        admitted.lease.acknowledgeCompletion()
+        let closing = owner.beginClosing(.serverStop)
         resource.acknowledgeClose()
         await closing.waitUntilClosed()
     }
@@ -245,6 +266,7 @@ struct MCPHTTPNetworkResourceOwnerTests {
 
         admitted.lease.acknowledgeCompletion()
         #expect(owner.resolve(token, sessionID: "session-16") == nil)
+        #expect(admitted.operation.bindSession("session-16") == false)
         let closing = owner.beginClosing(.serverStop)
         resource.acknowledgeClose()
         await closing.waitUntilClosed()
