@@ -1350,8 +1350,10 @@ extension CodexReviewStore {
     ) {
         switch terminal {
         case .completed:
+            clearPendingCancellationProjection(for: job)
             markReviewFailed(job, message: ReviewIngestionError.missingFinalReview.localizedDescription)
         case .failed(let message):
+            clearPendingCancellationProjection(for: job)
             markReviewFailed(job, message: message)
         case .interrupted(let cause):
             if case .requested(let cancellation) = cause {
@@ -1361,6 +1363,7 @@ extension CodexReviewStore {
                     cancellation: cancellation
                 )
             } else {
+                clearPendingCancellationProjection(for: job)
                 markReviewInterrupted(job, cause: cause)
             }
         }

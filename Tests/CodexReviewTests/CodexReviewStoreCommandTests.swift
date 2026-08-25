@@ -2664,6 +2664,62 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func recoveryProductTerminalClearsStalePendingCancellation() async throws {
+        let initialRun = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1",
+            model: "gpt-5"
+        )
+        let backend = FakeCodexReviewBackend(nextRun: initialRun)
+        let interruptGate = AsyncGate()
+        await backend.holdInterruptReview(with: interruptGate)
+        let networkMonitor = ManualCodexReviewNetworkMonitor()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" }),
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: .init(sleep: { _ in })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+            try #require(await StoreSnapshotProbe(store: store).waitUntilRunAttempt(
+                initialRun.attemptID,
+                jobID: "job-1"
+            ) != nil)
+
+            networkMonitor.yield(.init(status: .unsatisfied))
+            try await backend.waitForInterruptReview(timeout: .seconds(2))
+            guard case .recovering(let receipt) = store.reviewAttemptOwnerships["job-1"] else {
+                Issue.record("Review did not publish its exact recovery receipt.")
+                return
+            }
+            let job = try #require(store.job(id: "job-1"))
+            store.recordCancellationRequest(.mcpClient(message: "Stop"), for: job)
+            await backend.finishEvents(
+                throwing: ReviewAttemptStreamFailure.process(.process("Process exited.")),
+                for: initialRun
+            )
+            try #require(await waitUntil {
+                if case .finishingRecovery = await receipt.source.admission.currentPhase() {
+                    true
+                } else {
+                    false
+                }
+            })
+            await interruptGate.open()
+            let read = try await result
+
+            #expect(read.core.lifecycle.status == .failed)
+            #expect(read.core.lifecycle.terminal == .interrupted(.previousProcessExit))
+            #expect(read.core.lifecycle.cancellation == nil)
+            #expect(job.cancellationRequested == false)
+        }
+    }
+
     @Test func reviewStreamCancellationCleansBackendRunWithoutInterruptingAgain() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
