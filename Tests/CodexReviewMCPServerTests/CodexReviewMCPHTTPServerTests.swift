@@ -793,12 +793,23 @@ struct CodexReviewMCPHTTPServerTests {
         )) { server in
             let endpoint = await server.url
             let sessionID = try await initializeSession(endpoint: endpoint)
-            _ = try await postJSONRPCData(
-                endpoint: endpoint,
-                sessionID: sessionID,
-                bodyData: makeToolsListBody(id: 29)
-            )
-            #expect(await server.sessionActiveRequestCountForTesting(sessionID: sessionID) == 0)
+            await server.holdNextWriterCompletionForTesting()
+            await server.holdNextSessionRequestRetirementForTesting()
+            let response = Task {
+                try await postJSONRPCData(
+                    endpoint: endpoint,
+                    sessionID: sessionID,
+                    bodyData: makeToolsListBody(id: 29)
+                )
+            }
+            await server.waitUntilWriterCompletionIsHeldForTesting()
+            #expect(await server.sessionRequestLeaseCountForTesting(sessionID: sessionID) == 1)
+
+            await server.releaseWriterCompletionForTesting()
+            await server.waitUntilSessionRequestRetirementIsHeldForTesting()
+            #expect(await server.sessionRequestLeaseCountForTesting(sessionID: sessionID) == 0)
+            await server.releaseSessionRequestRetirementForTesting()
+            _ = try await response.value
         }
     }
 
@@ -819,10 +830,10 @@ struct CodexReviewMCPHTTPServerTests {
             headers: [("Accept", "text/event-stream, application/json")]
         ))
         _ = try await connection.readResponseHead()
-        #expect(await server.sessionActiveRequestCountForTesting(sessionID: sessionID) == 1)
+        #expect(await server.sessionRequestLeaseCountForTesting(sessionID: sessionID) == 1)
         connection.reset()
         #expect(await waitUntil(timeout: .seconds(2)) {
-            await server.sessionActiveRequestCountForTesting(sessionID: sessionID) == 0
+            await server.sessionRequestLeaseCountForTesting(sessionID: sessionID) == 0
         })
         try await server.stop()
     }
@@ -2025,12 +2036,12 @@ struct CodexReviewMCPHTTPServerTests {
 
             try await openAndCloseRawEventStream(endpoint: endpoint, sessionID: sessionID)
             let streamReleased = await waitUntil(timeout: .seconds(2)) {
-                await server.sessionActiveRequestCountForTesting(sessionID: sessionID) == 0
+                await server.sessionRequestLeaseCountForTesting(sessionID: sessionID) == 0
             }
             #expect(streamReleased)
 
             await server.runSessionCleanupForTesting(now: .distantFuture)
-            #expect(await server.sessionActiveRequestCountForTesting(sessionID: sessionID) == nil)
+            #expect(await server.sessionRequestLeaseCountForTesting(sessionID: sessionID) == nil)
         }
     }
 
