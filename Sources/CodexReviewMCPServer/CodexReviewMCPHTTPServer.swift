@@ -1030,10 +1030,23 @@ package actor CodexReviewMCPHTTPServer {
         )
     }
 
-    fileprivate func handleTrackedHTTPRequest(_ request: HTTPRequest) async -> TrackedHTTPResponse {
+    fileprivate func handleTrackedHTTPRequest(
+        _ request: HTTPRequest,
+        operation: MCPHTTPNetworkResourceOwner.RequestOperation
+    ) async -> TrackedHTTPResponse {
         let sessionID = request.header(HTTPHeaderName.sessionID)
 
         if let sessionID, var session = sessions[sessionID] {
+            guard let request = Self.ownedRequest(
+                request,
+                operation: operation,
+                sessionID: sessionID
+            ) else {
+                return .init(response: .error(
+                    statusCode: 500,
+                    .internalError("MCP request ownership conflict.")
+                ))
+            }
             session.lastAccessedAt = Date()
             session.activeRequestCount += 1
             sessions[sessionID] = session
@@ -1053,7 +1066,7 @@ package actor CodexReviewMCPHTTPServer {
            let body = request.body,
            Self.isInitializeRequest(body)
         {
-            return await createSessionAndHandle(request)
+            return await createSessionAndHandle(request, operation: operation)
         }
 
         if sessionID != nil {
@@ -1067,8 +1080,21 @@ package actor CodexReviewMCPHTTPServer {
         )
     }
 
-    private func createSessionAndHandle(_ request: HTTPRequest) async -> TrackedHTTPResponse {
+    private func createSessionAndHandle(
+        _ request: HTTPRequest,
+        operation: MCPHTTPNetworkResourceOwner.RequestOperation
+    ) async -> TrackedHTTPResponse {
         let sessionID = UUID().uuidString
+        guard let request = Self.ownedRequest(
+            request,
+            operation: operation,
+            sessionID: sessionID
+        ) else {
+            return .init(response: .error(
+                statusCode: 500,
+                .internalError("MCP request ownership conflict.")
+            ))
+        }
         let clientSession = MCPClientSessionState()
         let transport = StatefulHTTPServerTransport(
             sessionIDGenerator: FixedSessionIDGenerator(sessionID: sessionID),
@@ -1114,6 +1140,23 @@ package actor CodexReviewMCPHTTPServer {
                 )
             )
         }
+    }
+
+    package static func ownedRequest(
+        _ request: HTTPRequest,
+        operation: MCPHTTPNetworkResourceOwner.RequestOperation,
+        sessionID: String
+    ) -> HTTPRequest? {
+        guard operation.bindSession(sessionID) else { return nil }
+        let internalName = MCPHTTPNetworkResourceOwner.operationTokenHeaderName.lowercased()
+        var headers = request.headers.filter { $0.key.lowercased() != internalName }
+        headers[MCPHTTPNetworkResourceOwner.operationTokenHeaderName] = operation.token.headerValue
+        return HTTPRequest(
+            method: request.method,
+            headers: headers,
+            body: request.body,
+            path: request.path
+        )
     }
 
     private func closeSession(_ sessionID: String) async {
@@ -1905,7 +1948,7 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
         }
 
         let request = makeHTTPRequest(head: head, body: body)
-        let response = await server.handleTrackedHTTPRequest(request)
+        let response = await server.handleTrackedHTTPRequest(request, operation: operation)
         await writeResponse(
             response,
             version: head.version,
