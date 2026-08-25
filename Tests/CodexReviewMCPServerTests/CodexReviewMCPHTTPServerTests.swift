@@ -247,6 +247,31 @@ struct CodexReviewMCPHTTPServerTests {
         try await server.stop()
     }
 
+    @Test func initializingSessionCannotPublishAfterRunningAdmissionCloses() async throws {
+        let server = makeHTTPServer()
+        try await server.start()
+        let endpoint = await server.url
+        await server.holdNextSessionStartCompletionForTesting()
+        let connection = try await RawHTTPConnection.connect(to: endpoint)
+        try await connection.send(rawHTTPRequest(
+            endpoint: endpoint,
+            sessionID: nil,
+            body: makeInitializeBody(id: 70)
+        ))
+        await server.waitUntilSessionStartCompletionIsHeldForTesting()
+        #expect(await server.sessionCountForTesting() == 1)
+
+        await server.closeAdmission()
+        await server.releaseSessionStartCompletionForTesting()
+        await server.waitUntilInitializingSessionCloseBeginsForTesting()
+        #expect(try await connection.readResponseHead().contains(" 503 "))
+        connection.close()
+
+        #expect(await server.sessionCountForTesting() == 0)
+        #expect(await server.currentGenerationIDForTesting() != nil)
+        try await server.stop()
+    }
+
     @Test func listenerGenerationConcurrentStopAndRestartJoinOneTeardown() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
@@ -2250,6 +2275,22 @@ struct CodexReviewMCPHTTPServerTests {
 
     private func makeJSONBody(_ body: [String: Any]) throws -> Data {
         try JSONSerialization.data(withJSONObject: body)
+    }
+
+    private func makeInitializeBody(id: Int) throws -> Data {
+        try makeJSONBody([
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "initialize",
+            "params": [
+                "protocolVersion": "2025-11-25",
+                "capabilities": [:],
+                "clientInfo": [
+                    "name": "CodexReviewKitTests",
+                    "version": "0.0.0",
+                ],
+            ],
+        ])
     }
 
     private func makeToolsListBody(id: Int) throws -> Data {

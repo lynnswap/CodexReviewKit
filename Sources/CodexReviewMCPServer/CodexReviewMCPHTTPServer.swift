@@ -290,9 +290,9 @@ package actor CodexReviewMCPHTTPServer {
 
     private final class StartingSession: @unchecked Sendable {
         let id = UUID()
-        let task: Task<StartingSessionResult, Never>
+        let task: Task<StartingSessionResult, any Swift.Error>
 
-        init(task: Task<StartingSessionResult, Never>) {
+        init(task: Task<StartingSessionResult, any Swift.Error>) {
             self.task = task
         }
     }
@@ -316,6 +316,7 @@ package actor CodexReviewMCPHTTPServer {
 
         let identity: Identity
         let transport: StatefulHTTPServerTransport
+        let initialOperation: MCPHTTPNetworkResourceOwner.RequestOperation
         let createdAt: Date
         var phase: Phase
         var lastAccessedAt: Date
@@ -325,10 +326,12 @@ package actor CodexReviewMCPHTTPServer {
             identity: Identity,
             transport: StatefulHTTPServerTransport,
             starting: StartingSession,
+            initialOperation: MCPHTTPNetworkResourceOwner.RequestOperation,
             now: Date
         ) {
             self.identity = identity
             self.transport = transport
+            self.initialOperation = initialOperation
             self.createdAt = now
             self.phase = .initializing(starting)
             self.lastAccessedAt = now
@@ -1219,7 +1222,8 @@ package actor CodexReviewMCPHTTPServer {
         let adapter = adapter
         let boundedReviewWaitDuration = configuration.boundedReviewWaitDuration
         let sessionStartCompletionGate = sessionStartCompletionGate
-        let startTask = Task<StartingSessionResult, Never> {
+        guard let startTask = operation.startDomainWork({
+            () async throws -> StartingSessionResult in
             let server = await makeMCPProtocolServer(
                 adapter: adapter,
                 defaultSessionID: sessionID,
@@ -1238,6 +1242,11 @@ package actor CodexReviewMCPHTTPServer {
             } catch {
                 return .failure(.init(primary: error, server: server))
             }
+        }) else {
+            return .init(response: .error(
+                statusCode: 503,
+                .internalError("MCP session initialization was cancelled.")
+            ))
         }
         let starting = StartingSession(task: startTask)
         nextSessionOrdinal &+= 1
@@ -1249,18 +1258,28 @@ package actor CodexReviewMCPHTTPServer {
             ),
             transport: transport,
             starting: starting,
+            initialOperation: operation,
             now: Date()
         )
         sessions[sessionID] = session
+        observeInitialRequest(for: session)
 
-        switch await startTask.value {
+        let startResult: StartingSessionResult
+        do {
+            startResult = try await startTask.value
+        } catch {
+            startResult = .failure(.init(primary: error, server: nil))
+        }
+        switch startResult {
         case .success(let server):
             guard publishSessionStart(
                 server,
                 session: session,
                 starting: starting,
-                generation: generation
+                generation: generation,
+                operation: operation
             ) else {
+                await closeSession(session)
                 return .init(response: .error(
                     statusCode: 503,
                     .internalError("MCP session initialization was cancelled.")
@@ -1292,7 +1311,8 @@ package actor CodexReviewMCPHTTPServer {
         _ server: Server,
         session: MCPSemanticSession,
         starting: StartingSession,
-        generation: RunningGeneration
+        generation: RunningGeneration,
+        operation: MCPHTTPNetworkResourceOwner.RequestOperation
     ) -> Bool {
         guard sessions[session.identity.sessionID] === session,
               case .initializing(let currentStart) = session.phase,
@@ -1303,8 +1323,19 @@ package actor CodexReviewMCPHTTPServer {
               generation.networkResources.generationID == session.identity.generationID else {
             return false
         }
-        session.phase = .active(.init(server: server, transport: session.transport))
-        return true
+        return operation.publishSessionIfActive(
+            for: session.identity.sessionID
+        ) {
+            session.phase = .active(.init(server: server, transport: session.transport))
+        }
+    }
+
+    private func observeInitialRequest(for session: MCPSemanticSession) {
+        Task { [weak self, weak session] in
+            let terminalCause = await session?.initialOperation.waitUntilClosed()
+            guard let self, let session, terminalCause != nil else { return }
+            await self.closeSession(session)
+        }
     }
 
     package static func ownedRequest(
@@ -1341,11 +1372,15 @@ package actor CodexReviewMCPHTTPServer {
             }
             starting.task.cancel()
             await session.transport.disconnect()
-            switch await starting.task.value {
-            case .success(let startedServer):
-                server = startedServer
-            case .failure(let failure):
-                server = failure.server
+            do {
+                switch try await starting.task.value {
+                case .success(let startedServer):
+                    server = startedServer
+                case .failure(let failure):
+                    server = failure.server
+                }
+            } catch {
+                server = nil
             }
         case .active(let runtime):
             await runtime.transport.disconnect()
