@@ -16,7 +16,6 @@ private enum MCPHTTPResponseSourceKind: Sendable {
 private struct TrackedHTTPResponse {
     struct StreamLifecycle: Sendable {
         let source: AsyncThrowingStream<Data, Swift.Error>
-        let completion: ActiveRequestCompletion
         let kind: MCPHTTPResponseSourceKind
     }
 
@@ -314,13 +313,31 @@ package actor CodexReviewMCPHTTPServer {
             case active(Runtime)
         }
 
+        enum RequestRole: Sendable {
+            case initialize
+            case regular
+        }
+
+        final class RequestLease: @unchecked Sendable {
+            let operation: MCPHTTPNetworkResourceOwner.RequestOperation
+            let role: RequestRole
+
+            init(
+                operation: MCPHTTPNetworkResourceOwner.RequestOperation,
+                role: RequestRole
+            ) {
+                self.operation = operation
+                self.role = role
+            }
+        }
+
         let identity: Identity
         let transport: StatefulHTTPServerTransport
-        let initialOperation: MCPHTTPNetworkResourceOwner.RequestOperation
         let createdAt: Date
         var phase: Phase
         var lastAccessedAt: Date
-        var activeRequestCount: Int
+        let initialRequestLease: RequestLease
+        private(set) var requestLeases: [UUID: RequestLease] = [:]
 
         init(
             identity: Identity,
@@ -331,11 +348,35 @@ package actor CodexReviewMCPHTTPServer {
         ) {
             self.identity = identity
             self.transport = transport
-            self.initialOperation = initialOperation
             self.createdAt = now
             self.phase = .initializing(starting)
             self.lastAccessedAt = now
-            self.activeRequestCount = 1
+            let lease = RequestLease(operation: initialOperation, role: .initialize)
+            self.initialRequestLease = lease
+            requestLeases[initialOperation.id] = lease
+        }
+
+        func admitRequest(
+            operation: MCPHTTPNetworkResourceOwner.RequestOperation,
+            role: RequestRole,
+            now: Date
+        ) -> RequestLease? {
+            guard case .active = phase else {
+                return nil
+            }
+            let lease = RequestLease(operation: operation, role: role)
+            requestLeases[operation.id] = lease
+            lastAccessedAt = now
+            return lease
+        }
+
+        func finishRequest(_ lease: RequestLease, now: Date) -> Bool {
+            guard requestLeases[lease.operation.id] === lease else {
+                return false
+            }
+            requestLeases.removeValue(forKey: lease.operation.id)
+            lastAccessedAt = now
+            return true
         }
     }
 
@@ -361,6 +402,7 @@ package actor CodexReviewMCPHTTPServer {
     private let responseEndAcknowledgementGate = MCPHTTPLifecycleCompletionGate()
     private let responseEndWriteGate = MCPHTTPLifecycleCompletionGate()
     private let sessionStartCompletionGate = MCPHTTPLifecycleCompletionGate()
+    private let sessionRequestRetirementGate = MCPHTTPLifecycleCompletionGate()
     private let responseBackpressureProbe = MCPHTTPResponseBackpressureProbe()
     private var eventLoopGroupShutdownCount = 0
     private var nextListenerCloseFailureForTesting: LifecycleError.Failure?
@@ -855,6 +897,18 @@ package actor CodexReviewMCPHTTPServer {
         await sessionStartCompletionGate.release()
     }
 
+    package func holdNextSessionRequestRetirementForTesting() async {
+        await sessionRequestRetirementGate.holdNextCompletion()
+    }
+
+    package func waitUntilSessionRequestRetirementIsHeldForTesting() async {
+        await sessionRequestRetirementGate.waitUntilHolding()
+    }
+
+    package func releaseSessionRequestRetirementForTesting() async {
+        await sessionRequestRetirementGate.release()
+    }
+
     package func waitUntilInitializingSessionCloseBeginsForTesting() async {
         if didBeginClosingInitializingSession {
             return
@@ -1157,12 +1211,20 @@ package actor CodexReviewMCPHTTPServer {
                     .internalError("MCP request ownership conflict.")
                 ))
             }
-            session.lastAccessedAt = Date()
-            session.activeRequestCount += 1
+            guard let lease = session.admitRequest(
+                operation: operation,
+                role: .regular,
+                now: Date()
+            ) else {
+                return .init(response: .error(
+                    statusCode: 404,
+                    .invalidRequest("Not Found: Session not found or expired")
+                ))
+            }
+            observeSessionRequest(lease, in: session)
             let response = await session.transport.handleRequest(request)
-            let (trackedResponse, didFinishRequest) = trackActiveRequest(
+            let (trackedResponse, didFinishRequest) = trackResponse(
                 response,
-                session: session,
                 responseSourceKind: Self.responseSourceKind(for: request)
             )
             if didFinishRequest, request.method.uppercased() == "DELETE", trackedResponse.response.statusCode == 200 {
@@ -1262,7 +1324,7 @@ package actor CodexReviewMCPHTTPServer {
             now: Date()
         )
         sessions[sessionID] = session
-        observeInitialRequest(for: session)
+        observeSessionRequest(session.initialRequestLease, in: session)
 
         let startResult: StartingSessionResult
         do {
@@ -1286,9 +1348,8 @@ package actor CodexReviewMCPHTTPServer {
                 ))
             }
             let response = await transport.handleRequest(request)
-            let (trackedResponse, didFinishRequest) = trackActiveRequest(
+            let (trackedResponse, didFinishRequest) = trackResponse(
                 response,
-                session: session,
                 responseSourceKind: Self.responseSourceKind(for: request)
             )
             if didFinishRequest, case .error = trackedResponse.response {
@@ -1327,14 +1388,6 @@ package actor CodexReviewMCPHTTPServer {
             for: session.identity.sessionID
         ) {
             session.phase = .active(.init(server: server, transport: session.transport))
-        }
-    }
-
-    private func observeInitialRequest(for session: MCPSemanticSession) {
-        Task { [weak self, weak session] in
-            let terminalCause = await session?.initialOperation.waitUntilClosed()
-            guard let self, let session, terminalCause != nil else { return }
-            await self.closeSession(session)
         }
     }
 
@@ -1394,23 +1447,17 @@ package actor CodexReviewMCPHTTPServer {
         logger.info("Closed MCP HTTP session \(sessionID, privacy: .public)")
     }
 
-    private func trackActiveRequest(
+    private func trackResponse(
         _ response: HTTPResponse,
-        session: MCPSemanticSession,
         responseSourceKind: MCPHTTPResponseSourceKind
     ) -> (response: TrackedHTTPResponse, didFinishRequest: Bool) {
         switch response {
         case .stream(let source, _):
-            let completion = ActiveRequestCompletion { [weak self, weak session] in
-                guard let self, let session else { return }
-                await self.finishActiveRequest(in: session)
-            }
             return (
                 .init(
                     response: response,
                     streamLifecycle: .init(
                         source: source,
-                        completion: completion,
                         kind: responseSourceKind
                     )
                 ),
@@ -1418,17 +1465,38 @@ package actor CodexReviewMCPHTTPServer {
             )
 
         default:
-            finishActiveRequest(in: session)
             return (.init(response: response), true)
         }
     }
 
-    private func finishActiveRequest(in session: MCPSemanticSession) {
-        guard sessions[session.identity.sessionID] === session else {
+    private func observeSessionRequest(
+        _ lease: MCPSemanticSession.RequestLease,
+        in session: MCPSemanticSession
+    ) {
+        Task { [weak self, weak session] in
+            let terminalCause = await lease.operation.waitUntilClosed()
+            guard let self, let session else { return }
+            await self.finishSessionRequest(
+                lease,
+                terminalCause: terminalCause,
+                in: session
+            )
+        }
+    }
+
+    private func finishSessionRequest(
+        _ lease: MCPSemanticSession.RequestLease,
+        terminalCause: MCPHTTPNetworkResourceOwner.TerminalCause?,
+        in session: MCPSemanticSession
+    ) async {
+        guard sessions[session.identity.sessionID] === session,
+              session.finishRequest(lease, now: Date()) else {
             return
         }
-        session.lastAccessedAt = Date()
-        session.activeRequestCount = max(0, session.activeRequestCount - 1)
+        await sessionRequestRetirementGate.waitIfNeeded()
+        if lease.role == .initialize, terminalCause != nil {
+            await closeSession(session)
+        }
     }
 
     private func closeAllSessions() async {
@@ -1453,15 +1521,15 @@ package actor CodexReviewMCPHTTPServer {
         await closeExpiredSessions(now: now)
     }
 
-    package func sessionActiveRequestCountForTesting(sessionID: String) -> Int? {
-        sessions[sessionID]?.activeRequestCount
+    package func sessionRequestLeaseCountForTesting(sessionID: String) -> Int? {
+        sessions[sessionID]?.requestLeases.count
     }
 
     private func closeExpiredSessions(now: Date) async {
         var expiredSessions: [MCPSemanticSession] = []
         for session in sessions.values {
             guard case .active = session.phase,
-                  session.activeRequestCount == 0,
+                  session.requestLeases.isEmpty,
                   now.timeIntervalSince(session.lastAccessedAt) > configuration.sessionTimeout else {
                 continue
             }
@@ -1473,7 +1541,7 @@ package actor CodexReviewMCPHTTPServer {
             }
             if sessions[session.identity.sessionID] === session,
                case .active = session.phase,
-               session.activeRequestCount == 0,
+               session.requestLeases.isEmpty,
                now.timeIntervalSince(session.lastAccessedAt) > configuration.sessionTimeout {
                 expiredSessions.append(session)
             }
@@ -1567,28 +1635,6 @@ package actor CodexReviewMCPHTTPServer {
             unbracketed = trimmed
         }
         return ["127.0.0.1", "localhost", "::1", "0.0.0.0", "::"].contains(unbracketed)
-    }
-}
-
-private final class ActiveRequestCompletion: @unchecked Sendable {
-    private let lock = NSLock()
-    private let onFinish: @Sendable () async -> Void
-    private var didFinish = false
-
-    init(onFinish: @escaping @Sendable () async -> Void) {
-        self.onFinish = onFinish
-    }
-
-    func finishAndWait() async {
-        let shouldFinish = lock.withLock {
-            guard didFinish == false else {
-                return false
-            }
-            didFinish = true
-            return true
-        }
-        guard shouldFinish else { return }
-        await onFinish()
     }
 }
 
@@ -2334,7 +2380,6 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
                     } catch {
                         events.finishSource(.sourceFailed(error.localizedDescription))
                     }
-                    await lifecycle.completion.finishAndWait()
                     return .source
                 }
                 if let heartbeatInterval {
