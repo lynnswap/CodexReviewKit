@@ -2757,11 +2757,63 @@ struct CodexReviewStoreCommandTests {
             }
             try await backend.waitForStartReview(timeout: .seconds(2))
             task.cancel()
+            try await backend.waitForInterruptReview(timeout: .seconds(2))
+            await backend.yield(.cancelled("Cancellation requested."))
             let read = try await task.value
 
             #expect(read.core.lifecycle.status == .cancelled)
             let commands = await backend.recordedCommands()
             #expect(commands.contains { isTypedInterruptCommand($0, run: .init(threadID: "thread-1", turnID: "turn-1", reviewThreadID: "review-thread-1"), message: "Cancellation requested.") })
+        }
+    }
+
+    @Test func reviewStartTaskCancellationPreservesActiveInterruptRejection() async throws {
+        let run = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1"
+        )
+        let backend = FakeCodexReviewBackend(nextRun: run)
+        await backend.rejectInterrupts(message: "Interrupt failed")
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            let review = Task { @MainActor in
+                try await store.startReview(
+                    sessionID: "session-1",
+                    request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+                )
+            }
+            try #require(await StoreSnapshotProbe(store: store).waitUntilRunAttempt(
+                run.attemptID,
+                jobID: "job-1"
+            ) != nil)
+
+            review.cancel()
+            await #expect(throws: ReviewInterruptRequestFailure.self) {
+                try await review.value
+            }
+            let running = try store.readReview(jobID: "job-1")
+
+            #expect(running.core.lifecycle.status == .running)
+            #expect(running.core.lifecycle.cancellation == nil)
+            #expect(running.core.output.summary == "Failed to cancel review: Interrupt failed")
+            #expect(running.cancellable)
+            #expect(store.reviewAttemptOwnerships["job-1"]?.run == run)
+            #expect(store.reviewWorkerTasks["job-1"] != nil)
+
+            await backend.yield(
+                .completed(summary: "Succeeded.", result: "natural review"),
+                for: run
+            )
+            let final = try await store.awaitReview(
+                sessionID: "session-1",
+                jobID: "job-1",
+                timeout: .seconds(1)
+            )
+            #expect(final.core.lifecycle.status == .succeeded)
         }
     }
 

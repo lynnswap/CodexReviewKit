@@ -48,23 +48,17 @@ extension CodexReviewStore {
         request: CodexReviewAPI.Start.Request,
         waitTimeout: Duration?
     ) async throws -> CodexReviewAPI.Read.Result {
-        let (jobID, workerAdmission) = try beginReview(
-            sessionID: sessionID,
-            request: request
-        )
+        let jobID = try beginReview(sessionID: sessionID, request: request)
         guard let waitTimeout else {
-            return try await withTaskCancellationHandler {
-                _ = try await awaitReview(sessionID: sessionID, jobID: jobID)
-                await reviewWorkerTasks[jobID]?.value
-                return try readReview(sessionID: sessionID, jobID: jobID)
-            } onCancel: {
-                Task { @MainActor [weak self] in
-                    await self?.cancelReviewWorkerForCallerCancellation(
-                        jobID: jobID,
-                        workerAdmission: workerAdmission
-                    )
-                }
+            _ = try await awaitReview(sessionID: sessionID, jobID: jobID)
+            if Task.isCancelled, storeWorkRegistry.acceptsNewWork {
+                _ = try await performCancelReview(
+                    jobID: jobID,
+                    cancellation: .system()
+                )
             }
+            await reviewWorkerTasks[jobID]?.value
+            return try readReview(sessionID: sessionID, jobID: jobID)
         }
         let workerTask = reviewWorkerTasks[jobID]
         _ = try await awaitReview(
@@ -97,7 +91,7 @@ extension CodexReviewStore {
     private func beginReview(
         sessionID: String,
         request: CodexReviewAPI.Start.Request
-    ) throws -> (jobID: String, workerAdmission: ReviewStartAdmission) {
+    ) throws -> String {
         guard closedSessions.contains(sessionID) == false else {
             throw CodexReviewAPI.Error.invalidArguments("Review session \(sessionID) is closed.")
         }
@@ -131,32 +125,7 @@ extension CodexReviewStore {
         reviewAttemptOwnerships[jobID] = .starting(admission)
         reviewWorkerTasks[jobID]?.cancel()
         reviewWorkerTasks[jobID] = workerTask
-        return (jobID, admission)
-    }
-
-    private func cancelReviewWorkerForCallerCancellation(
-        jobID: String,
-        workerAdmission: ReviewStartAdmission
-    ) async {
-        guard let ownership = reviewAttemptOwnerships[jobID],
-              ownership.workerAdmission === workerAdmission else {
-            return
-        }
-        guard let job = job(id: jobID), job.isTerminal == false else {
-            return
-        }
-        let cancellation = authoritativeCancellation(
-            for: job,
-            requested: .system()
-        )
-        recordCancellationRequest(cancellation, for: job)
-        if case .recovering(let receipt) = ownership {
-            await receipt.cancelOwnedOperation(cancellation)
-        }
-        guard reviewAttemptOwnerships[jobID]?.workerAdmission === workerAdmission else {
-            return
-        }
-        reviewWorkerTasks[jobID]?.cancel()
+        return jobID
     }
 
     private func makeReviewWorker(
@@ -863,11 +832,11 @@ extension CodexReviewStore {
             await admission.recordCancellation(requestedCancellation)
             let startupCancellation = await admission.cancellationRequest()
                 ?? requestedCancellation
-            try completeCancellationLocally(
-                jobID: job.id,
-                sessionID: job.sessionID,
-                cancellation: startupCancellation
+            try completeCancellationAfterRegisteredWorkSuspension(
+                for: job,
+                requested: startupCancellation
             )
+            reviewWorkerTasks[jobID]?.cancel()
         }
         return .init(
             jobID: job.id,
