@@ -279,6 +279,99 @@ struct MCPHTTPNetworkResourceOwnerTests {
         await closing.waitUntilClosed()
     }
 
+    @Test func domainBridgeClassifiesIdentityAdmissionAndDomainErrors() async throws {
+        let owner = MCPHTTPNetworkResourceOwner(generationID: 18)
+        let resource = TestingConnectionResource()
+        let connection = try #require(owner.admitConnection(resource))
+        let admitted = try #require(connection.admitRequest())
+        let sessionID = "session-18"
+        #expect(admitted.operation.bindSession(sessionID))
+        let ownedRequest = HTTPRequest(
+            method: "POST",
+            headers: [
+                MCPHTTPNetworkResourceOwner.operationTokenHeaderName:
+                    admitted.operation.token.headerValue,
+            ]
+        )
+
+        await #expect(throws: DomainBridgeFailure.expected) {
+            try await performMCPDomainWork(
+                networkResources: owner,
+                sessionID: sessionID,
+                httpContext: ownedRequest
+            ) { throw DomainBridgeFailure.expected }
+        }
+        #expect(owner.snapshot().connections[0].requests[0].pendingDomainWorkCount == 0)
+        await #expect(throws: MCPError.self) {
+            try await performMCPDomainWork(
+                networkResources: owner,
+                sessionID: sessionID,
+                httpContext: nil
+            ) {}
+        }
+        await #expect(throws: MCPError.self) {
+            try await performMCPDomainWork(
+                networkResources: owner,
+                sessionID: "other-session",
+                httpContext: ownedRequest
+            ) {}
+        }
+
+        owner.closeAdmission()
+        await #expect(throws: CancellationError.self) {
+            try await performMCPDomainWork(
+                networkResources: owner,
+                sessionID: sessionID,
+                httpContext: nil
+            ) {}
+        }
+        let closing = owner.beginClosing(.serverStop)
+        admitted.lease.acknowledgeCompletion()
+        resource.acknowledgeClose()
+        await closing.waitUntilClosed()
+    }
+
+    @Test func domainBridgeCancellationSignalsChildAndAwaitsItsAcknowledgement() async throws {
+        let owner = MCPHTTPNetworkResourceOwner(generationID: 19)
+        let resource = TestingConnectionResource()
+        let connection = try #require(owner.admitConnection(resource))
+        let admitted = try #require(connection.admitRequest())
+        let sessionID = "session-19"
+        #expect(admitted.operation.bindSession(sessionID))
+        let request = HTTPRequest(method: "POST", headers: [
+            MCPHTTPNetworkResourceOwner.operationTokenHeaderName:
+                admitted.operation.token.headerValue,
+        ])
+        let started = AsyncGate()
+        let release = AsyncGate()
+        let childSawCancellation = CompletionFlag()
+        let caller = Task {
+            try await performMCPDomainWork(
+                networkResources: owner,
+                sessionID: sessionID,
+                httpContext: request
+            ) {
+                await started.open()
+                await release.waitIgnoringCancellation()
+                if Task.isCancelled { await childSawCancellation.complete() }
+                throw DomainBridgeFailure.expected
+            }
+        }
+        await started.wait()
+
+        caller.cancel()
+        #expect(owner.snapshot().connections[0].requests[0].pendingDomainWorkCount == 1)
+        await release.open()
+        await #expect(throws: CancellationError.self) { try await caller.value }
+        #expect(await childSawCancellation.isCompleted())
+        #expect(owner.snapshot().connections[0].requests[0].pendingDomainWorkCount == 0)
+
+        let closing = owner.beginClosing(.serverStop)
+        admitted.lease.acknowledgeCompletion()
+        resource.acknowledgeClose()
+        await closing.waitUntilClosed()
+    }
+
     @Test func admissionCloseRejectsLateConnectionsAndRequests() async throws {
         let owner = MCPHTTPNetworkResourceOwner(generationID: 3)
         let acceptedResource = TestingConnectionResource()
@@ -420,6 +513,10 @@ struct MCPHTTPNetworkResourceOwnerTests {
         secondResource.acknowledgeClose()
         await secondClosing.waitUntilClosed()
     }
+}
+
+private enum DomainBridgeFailure: Error {
+    case expected
 }
 
 private final class TestingConnectionResource: MCPHTTPConnectionResource, @unchecked Sendable {
