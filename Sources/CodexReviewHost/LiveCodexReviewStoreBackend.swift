@@ -12,25 +12,16 @@ private let defaultExternalURLOpener: ExternalURLOpener = { url in
     _ = NSWorkspace.shared.open(url)
 }
 
-private enum RuntimeShutdownCleanupOutcome: Sendable {
-    case completed
-    case failed(String)
+private enum RuntimeShutdownCleanupOutcome<Value: Sendable>: Sendable {
+    case completed(Value)
     case timedOut
-
-    var completedSuccessfully: Bool {
-        if case .completed = self { true } else { false }
-    }
-
-    var timedOut: Bool {
-        if case .timedOut = self { true } else { false }
-    }
 }
 
-private actor RuntimeShutdownCleanupRace {
-    private var result: RuntimeShutdownCleanupOutcome?
-    private var continuation: CheckedContinuation<RuntimeShutdownCleanupOutcome, Never>?
+private actor RuntimeShutdownCleanupRace<Value: Sendable> {
+    private var result: RuntimeShutdownCleanupOutcome<Value>?
+    private var continuation: CheckedContinuation<RuntimeShutdownCleanupOutcome<Value>, Never>?
 
-    func finish(_ value: RuntimeShutdownCleanupOutcome) {
+    func finish(_ value: RuntimeShutdownCleanupOutcome<Value>) {
         guard result == nil else {
             return
         }
@@ -39,7 +30,7 @@ private actor RuntimeShutdownCleanupRace {
         continuation = nil
     }
 
-    func wait() async -> RuntimeShutdownCleanupOutcome {
+    func wait() async -> RuntimeShutdownCleanupOutcome<Value> {
         if let result {
             return result
         }
@@ -53,18 +44,14 @@ private actor RuntimeShutdownCleanupRace {
     }
 }
 
-private func runRuntimeShutdownCleanup(
+private func runRuntimeShutdownCleanup<Value: Sendable>(
     timeout: Duration,
-    operation: @escaping @Sendable () async throws -> Void
-) async -> RuntimeShutdownCleanupOutcome {
-    let race = RuntimeShutdownCleanupRace()
+    operation: @escaping @Sendable () async -> Value
+) async -> RuntimeShutdownCleanupOutcome<Value> {
+    let race = RuntimeShutdownCleanupRace<Value>()
     let operationTask = Task {
-        do {
-            try await operation()
-            await race.finish(.completed)
-        } catch {
-            await race.finish(.failed(error.localizedDescription))
-        }
+        let value = await operation()
+        await race.finish(.completed(value))
     }
     let timeoutTask = Task {
         do {
@@ -76,7 +63,7 @@ private func runRuntimeShutdownCleanup(
     }
     let result = await race.wait()
     switch result {
-    case .completed, .failed:
+    case .completed:
         timeoutTask.cancel()
     case .timedOut:
         operationTask.cancel()
@@ -1059,20 +1046,30 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         timeoutWarning: String
     ) async {
         let workerJobIDs = store.reviewWorkerJobIDsForRuntimeStop
-        let cancellationOutcome = await runRuntimeShutdownCleanup(
+        let cancellationCleanup = await runRuntimeShutdownCleanup(
             timeout: shutdownCleanupTimeout
         ) {
-            let outcome = await store.requestActiveReviewCancellationsForRuntimeStop(reason: reason)
+            await store.requestActiveReviewCancellationsForRuntimeStop(reason: reason)
+        }
+        let cancellationJobIDs: [String]
+        let didRequestCancellation: Bool
+        let cancellationTimedOut: Bool
+        switch cancellationCleanup {
+        case .completed(let outcome):
+            cancellationJobIDs = outcome.jobIDs
+            didRequestCancellation = outcome.firstFailure == nil
+            cancellationTimedOut = false
             if let failure = outcome.firstFailure {
-                throw failure
+                logger.error(
+                    "Failed to request active review cancellation before runtime teardown: \(failure.localizedDescription, privacy: .public)"
+                )
             }
+        case .timedOut:
+            cancellationJobIDs = []
+            didRequestCancellation = false
+            cancellationTimedOut = true
         }
-        if case .failed(let message) = cancellationOutcome {
-            logger.error(
-                "Failed to request active review cancellation before runtime teardown: \(message, privacy: .public)"
-            )
-        }
-        if cancellationOutcome.completedSuccessfully == false {
+        if didRequestCancellation == false {
             let lifecycle = appServerBackend.runtimeOwnerLifecycleHandle
             await lifecycle.closeAdmission()
             do {
@@ -1083,17 +1080,23 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 )
             }
         }
-        store.cancelActiveReviewsLocallyForRuntimeStop(
+        let locallyCancelledJobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
             reason: reason
         )
+        let currentWorkerJobIDs = store.reviewWorkerJobIDsForRuntimeStop
         await store.cancelAndDetachReviewWorkersForRuntimeStop(
-            jobIDs: workerJobIDs,
+            jobIDs: Array(Set(
+                workerJobIDs
+                    + cancellationJobIDs
+                    + locallyCancelledJobIDs
+                    + currentWorkerJobIDs
+            )),
             reason: reason
         )
         let didDrainReviewWorkers = await store.drainReviewWorkersForRuntimeStop(
             timeout: shutdownCleanupTimeout
         )
-        if cancellationOutcome.timedOut || didDrainReviewWorkers == false {
+        if cancellationTimedOut || didDrainReviewWorkers == false {
             logger.warning("\(timeoutWarning, privacy: .public)")
         }
     }
