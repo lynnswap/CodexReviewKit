@@ -57,22 +57,11 @@ Returns:
 Notes:
 
 - `review_start` is the primary client flow. Codex clients wait for terminal completion. Claude Code clients wait up to 540 seconds; if the job is still running, call `review_await` with the returned `jobId`.
-- ReviewMonitor resolves the reported review model in this order:
-  1. `~/.codex_review/config.toml` `review_model`
-  2. the effective dedicated Codex config in `~/.codex_review/config.toml` `review_model`
-  3. backend-reported `thread/start.model`
-  4. the effective dedicated Codex config in `~/.codex_review/config.toml` `model` only as a pre-thread-start fallback when the backend does not report a model
+- ReviewMonitor starts a job with its effective settings model. After thread
+  creation, it reports `thread/start.model` when available and otherwise keeps
+  that requested model.
 - Use `review_read` to fetch paged, ordered `logs`. `rawLogText` is the
   diagnostic/raw projection and is not a full log transcript.
-
-If you are unsure how to build the `target` object, read:
-
-- `codex-review://help/tools/review_start`
-- `codex-review://help/tools/review_await`
-- `codex-review://help/targets/uncommittedChanges`
-- `codex-review://help/targets/baseBranch`
-- `codex-review://help/targets/commit`
-- `codex-review://help/targets/custom`
 
 ### `review_await`
 
@@ -96,7 +85,11 @@ with the same `jobId`.
 Reads the current or final state of a review job owned by the current MCP session.
 This is optional for normal clients because `review_start` already returns the final summary.
 
-Optional inputs:
+Inputs:
+
+- `jobId` or `jobID`
+
+Optional paging inputs:
 
 - `logOffset` 0-based log page offset. If omitted, `review_read` returns the
   latest page.
