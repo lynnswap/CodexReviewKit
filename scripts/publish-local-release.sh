@@ -8,6 +8,7 @@ Usage: scripts/publish-local-release.sh <tag> --signing-identity <developer-id-i
 Builds, Developer ID signs, notarizes, and uploads the CodexReviewMonitor DMG, then pushes the release tag.
 The dispatched release verification workflow publishes the draft release only after remote tests pass.
 Passing --allow-dirty creates a local-only signed/notarized archive and never pushes a tag or GitHub release.
+Create the notary profile first with: xcrun notarytool store-credentials <profile>
 EOF
 }
 

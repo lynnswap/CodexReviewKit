@@ -56,29 +56,8 @@ separate from CodexReviewMonitor's dedicated runtime home at `~/.codex_review`.
 
 ## More Detail
 
-- [Architecture](Docs/architecture.md): package boundaries, runtime flow, and
-  test responsibilities.
+- [Architecture](Docs/architecture.md): ownership boundaries and runtime flow.
 - [MCP reference](Docs/mcp.md): tool schemas, discovery resources, session
   behavior, and runtime files.
-
-## Local Release
-
-Public macOS archives are built locally so Developer ID certificates and notary
-credentials stay out of CI. The local script signs, notarizes, staples, pushes
-the tag from `main`, creates the draft release asset, and then explicitly
-dispatches the release verification workflow for that tag. The workflow runs
-tests with read-only repository access and publishes the draft release only
-after verification succeeds.
-
-```bash
-scripts/publish-local-release.sh \
-  v0.0.2 \
-  --signing-identity "Developer ID Application: Your Team (TEAMID)" \
-  --notary-profile "codex-reviewkit"
-```
-
-Create the `notarytool` profile in the local Keychain before publishing:
-
-```bash
-xcrun notarytool store-credentials codex-reviewkit
-```
+- Run `scripts/publish-local-release.sh --help` for the maintainer-owned local
+  release workflow.
