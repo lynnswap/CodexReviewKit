@@ -903,7 +903,6 @@ struct CodexReviewStoreCommandTests {
                 }
             }
             #expect(attemptedRecovery == false)
-            #expect(await backend.recordedCommands().contains(where: isLegacyRecoveryCommand) == false)
 
             await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
             let read = try await result
@@ -949,7 +948,7 @@ struct CodexReviewStoreCommandTests {
             }
             await interruptGate.open()
             try #require(terminalWasRecorded)
-            try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
+            try await backend.waitForPrepareReviewRecovery(timeout: .seconds(2))
 
             let running = try store.readReview(jobID: "job-1")
             #expect(running.core.lifecycle.status == .running)
@@ -1058,7 +1057,6 @@ struct CodexReviewStoreCommandTests {
             #expect(final.core.lifecycle.status == .succeeded)
             #expect(final.core.run.turnID == "turn-2")
             #expect(final.core.output.lastAgentMessage == "recovered review")
-            #expect(await backend.recordedCommands().contains(where: isLegacyRecoveryCommand) == false)
             let logText = try store.readReview(jobID: "job-1").logs.map(\.text).joined(separator: "\n")
             #expect(logText.contains("completed review text") == false)
         }
@@ -1118,7 +1116,6 @@ struct CodexReviewStoreCommandTests {
             #expect(read.core.lifecycle.status == .succeeded)
             #expect(read.core.run.turnID == "turn-2")
             #expect(read.core.output.lastAgentMessage == "recovered review")
-            #expect(await backend.recordedCommands().contains(where: isLegacyRecoveryCommand) == false)
             let logText = try store.readReview(jobID: "job-1").logs.map(\.text).joined(separator: "\n")
             #expect(logText.contains("completed during settle") == false)
         }
@@ -1293,7 +1290,6 @@ struct CodexReviewStoreCommandTests {
 
             networkMonitor.yield(.satisfied())
             try await backend.waitForResumeReviewRecovery(timeout: .seconds(2))
-            #expect(await backend.recordedCommands().contains(where: isLegacyRecoveryCommand) == false)
 
             try #require(await waitForRunAttemptActivation(store: store, run: recoveredRun))
             await backend.yield(.completed(summary: "Succeeded.", result: "recovered review"), for: recoveredRun)
@@ -1600,7 +1596,6 @@ struct CodexReviewStoreCommandTests {
             #expect(read.core.run.turnID == "turn-1")
 
             let commands = await backend.recordedCommands()
-            #expect(commands.contains(where: isLegacyRecoveryCommand) == false)
             #expect(commands.contains(.cleanupReview(initialRun)))
         }
     }
@@ -2390,7 +2385,6 @@ struct CodexReviewStoreCommandTests {
             #expect(await backend.recordedCommands().contains {
                 if case .interruptReviewAdmission = $0 { true } else { false }
             } == false)
-            #expect(await backend.recordedCommands().contains(where: isLegacyRecoveryCommand) == false)
         }
     }
 
@@ -2651,7 +2645,7 @@ struct CodexReviewStoreCommandTests {
             #expect(failedBeforeOutageConfirmed == false)
 
             await debounceGate.open()
-            try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
+            try await backend.waitForPrepareReviewRecovery(timeout: .seconds(2))
             networkMonitor.yield(.satisfied())
             try await backend.waitForResumeReviewRecovery(timeout: .seconds(2))
             try #require(await waitForRunAttemptActivation(store: store, run: recoveredRun))
@@ -3545,10 +3539,6 @@ private func startingAdmission(
     return admission
 }
 
-private func isLegacyRecoveryCommand(_ command: FakeCodexReviewBackend.Command) -> Bool {
-    if case .beginReviewRecovery = command { true } else { false }
-}
-
 private func isTypedInterruptCommand(_ command: FakeCodexReviewBackend.Command, run: CodexReviewBackendModel.Review.Run, message: String) -> Bool {
     if case .interruptReviewAdmission(let admission, let reason) = command { admission.run == run && reason.message == message } else { false }
 }
@@ -3574,7 +3564,7 @@ private func resolveTypedRecoveryDisposition(
         Issue.record("Store did not publish the recovery receipt."); return
     }
     await backend.yield(.cancelled("Network recovery"), for: receipt.source.run)
-    try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
+    try await backend.waitForPrepareReviewRecovery(timeout: .seconds(2))
 }
 
 @MainActor

@@ -838,33 +838,6 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         try result.get()
     }
 
-    package func beginReviewRecovery(
-        _ run: CodexReviewBackendModel.Review.Run,
-        reason _: CodexReviewBackendModel.CancellationReason
-    ) async throws -> CodexReviewBackendModel.Review.RecoveryToken {
-        let operationID = try admitReviewOperation()
-        defer { finishReviewOperation(operationID) }
-
-        _ = try await client.initialize()
-        await ensureNotificationRouterStarted(for: operationID)
-        markTurnAbandoned(run.turnID)
-        let interruption = try await sendTurnInterrupt(for: run) { retryInterruption in
-            await self.markInterruptionTurnAbandoned(retryInterruption, canonicalThreadID: run.threadID)
-        }
-        markAttemptAbandoned(run, interruption: interruption)
-        if let session = unregisterReviewEventSession(for: run) {
-            await session.abandon()
-            let metrics = await session.metricsSnapshot()
-            for threadID in await session.cleanupThreadIDs() {
-                completedReviewEventSessionMetricsByThreadID[threadID] = metrics
-            }
-        }
-        return CodexReviewBackendModel.Review.RecoveryToken(
-            interruptedRun: run,
-            rollbackThreadID: interruption.threadID
-        )
-    }
-
     package func prepareReviewRecovery(
         _ candidate: ReviewRecoveryCandidate
     ) async throws -> ReviewRecoveryHandoff {
