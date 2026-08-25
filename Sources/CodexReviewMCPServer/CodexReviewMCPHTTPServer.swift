@@ -1089,7 +1089,7 @@ package actor CodexReviewMCPHTTPServer {
             request,
             operation: operation,
             sessionID: sessionID
-        ) else {
+        ), let networkResources = operation.resourceOwner else {
             return .init(response: .error(
                 statusCode: 500,
                 .internalError("MCP request ownership conflict.")
@@ -1107,7 +1107,8 @@ package actor CodexReviewMCPHTTPServer {
                 adapter: adapter,
                 defaultSessionID: sessionID,
                 clientSession: clientSession,
-                boundedReviewWaitDuration: configuration.boundedReviewWaitDuration
+                boundedReviewWaitDuration: configuration.boundedReviewWaitDuration,
+                networkResources: networkResources
             )
             try await server.start(transport: transport) { clientInfo, _ in
                 await clientSession.update(clientInfo: clientInfo)

@@ -778,6 +778,68 @@ struct CodexReviewMCPHTTPServerTests {
         #expect(await server.eventLoopGroupShutdownCountForTesting() == 1)
     }
 
+    @Test func sanitizedIdentityJoinsCancelledFiniteDomainWorkBeforeShutdown() async throws {
+        let backend = FakeCodexReviewBackend()
+        let domainRelease = AsyncGate()
+        await backend.holdStartReviewIgnoringCancellation(with: domainRelease)
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-domain" })
+        )
+        let server = CodexReviewMCPHTTPServer(
+            adapter: CodexReviewMCPServer(store: store),
+            configuration: .init(host: "127.0.0.1", port: 0)
+        )
+        try await server.start()
+        let endpoint = await server.url
+        let sessionID = try await initializeSession(endpoint: endpoint)
+
+        let tools = try decodeSSEJSON(from: try await postJSONRPCData(
+            endpoint: endpoint,
+            sessionID: sessionID,
+            bodyData: makeToolsListBody(id: 40),
+            headers: [MCPHTTPNetworkResourceOwner.operationTokenHeaderName: "client-spoof"]
+        ))
+        #expect((tools["result"] as? [String: Any])?["tools"] != nil)
+
+        let response = Task {
+            try await postJSONRPCData(
+                endpoint: endpoint,
+                sessionID: sessionID,
+                bodyData: makeReviewStartBody(id: 41)
+            )
+        }
+        await backend.waitForStartReview()
+        _ = try await postJSONRPCData(
+            endpoint: endpoint,
+            sessionID: sessionID,
+            bodyData: try makeJSONBody([
+                "jsonrpc": "2.0",
+                "method": "notifications/cancelled",
+                "params": ["requestId": 41, "reason": "cancel finite POST"],
+            ]),
+            expectedStatusCode: 202
+        )
+
+        let stop = Task { try await server.stop() }
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            guard let snapshot = await server.networkResourceSnapshotForTesting(),
+                  snapshot.phase == .closing(.serverStop) else { return false }
+            return snapshot.connections.flatMap(\.requests).contains {
+                $0.pendingDomainWorkCount == 1 && $0.responseEnd == .closed
+            }
+        })
+        let pending = try #require(await server.networkResourceSnapshotForTesting()?
+            .connections.flatMap(\.requests).first { $0.pendingDomainWorkCount == 1 })
+        #expect(pending.responseEnd == .closed)
+        #expect(await server.eventLoopGroupShutdownCountForTesting() == 0)
+
+        await domainRelease.open()
+        _ = try? await response.value
+        try await stop.value
+        #expect(await server.eventLoopGroupShutdownCountForTesting() == 1)
+    }
+
     @Test func heldPhysicalBodyWriteAllowsOneSourceRead() async throws {
         let server = makeHTTPServer()
         try await server.start()
@@ -2217,7 +2279,9 @@ struct CodexReviewMCPHTTPServerTests {
     private nonisolated func postJSONRPCData(
         endpoint: URL,
         sessionID: String?,
-        bodyData: Data
+        bodyData: Data,
+        headers: [String: String] = [:],
+        expectedStatusCode: Int = 200
     ) async throws -> Data {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
@@ -2226,10 +2290,13 @@ struct CodexReviewMCPHTTPServerTests {
         if let sessionID {
             request.setValue(sessionID, forHTTPHeaderField: "MCP-Session-Id")
         }
+        for (name, value) in headers {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
         request.httpBody = bodyData
         let (data, response) = try await URLSession.shared.data(for: request)
         let httpResponse = try #require(response as? HTTPURLResponse)
-        #expect(httpResponse.statusCode == 200)
+        #expect(httpResponse.statusCode == expectedStatusCode)
         return data
     }
 

@@ -1,6 +1,9 @@
 import Foundation
 import MCP
+import OSLog
 import CodexReview
+
+private let protocolServerLogger = Logger(subsystem: "CodexReviewKit", category: "mcp-protocol")
 
 package actor MCPClientSessionState {
     private var clientInfo: Client.Info?
@@ -32,9 +35,10 @@ package actor MCPClientSessionState {
 @MainActor
 package func makeMCPProtocolServer(
     adapter: CodexReviewMCPServer,
-    defaultSessionID: String? = nil,
+    defaultSessionID: String,
     clientSession: MCPClientSessionState = .init(),
-    boundedReviewWaitDuration: Duration = .seconds(540)
+    boundedReviewWaitDuration: Duration = .seconds(540),
+    networkResources: MCPHTTPNetworkResourceOwner
 ) async -> Server {
     let server = Server(
         name: "codex_review",
@@ -45,7 +49,10 @@ package func makeMCPProtocolServer(
         )
     )
 
-    await server.withMethodHandler(ListTools.self) { _ in
+    await server.withMethodHandler(ListTools.self, handler: ownedMCPDomainHandler(
+        networkResources: networkResources,
+        sessionID: defaultSessionID
+    ) { _ in
         let tools = await adapter.tools.map { descriptor in
             Tool(
                 name: descriptor.name.rawValue,
@@ -54,9 +61,12 @@ package func makeMCPProtocolServer(
             )
         }
         return .init(tools: tools)
-    }
+    })
 
-    await server.withMethodHandler(CallTool.self) { params in
+    await server.withMethodHandler(CallTool.self, handler: ownedMCPDomainHandler(
+        networkResources: networkResources,
+        sessionID: defaultSessionID
+    ) { params in
         guard let tool = CodexReviewMCP.Tool.Name(rawValue: params.name) else {
             return .init(
                 content: [.text(text: "Unknown tool: \(params.name)", annotations: nil, _meta: nil)],
@@ -76,29 +86,96 @@ package func makeMCPProtocolServer(
             )
             let response = try await adapter.handle(request)
             return try toolResult(tool: tool, response: response)
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             return .init(
                 content: [.text(text: error.localizedDescription, annotations: nil, _meta: nil)],
                 isError: true
             )
         }
-    }
+    })
 
-    await server.withMethodHandler(ListResources.self) { _ in
+    await server.withMethodHandler(ListResources.self, handler: ownedMCPDomainHandler(
+        networkResources: networkResources,
+        sessionID: defaultSessionID
+    ) { _ in
         .init(resources: helpResources.map(\.resource))
-    }
+    })
 
-    await server.withMethodHandler(ReadResource.self) { params in
+    await server.withMethodHandler(ReadResource.self, handler: ownedMCPDomainHandler(
+        networkResources: networkResources,
+        sessionID: defaultSessionID
+    ) { params in
         let content = helpResources.first { $0.uri == params.uri }?.content
             ?? "Resource not found: \(params.uri)"
         return .init(contents: [.text(content, uri: params.uri, mimeType: "text/markdown")])
-    }
+    })
 
-    await server.withMethodHandler(ListResourceTemplates.self) { _ in
+    await server.withMethodHandler(ListResourceTemplates.self, handler: ownedMCPDomainHandler(
+        networkResources: networkResources,
+        sessionID: defaultSessionID
+    ) { _ in
         .init(templates: helpResourceTemplates)
-    }
+    })
 
     return server
+}
+
+private func ownedMCPDomainHandler<Parameters: Sendable, Result: Sendable>(
+    networkResources: MCPHTTPNetworkResourceOwner,
+    sessionID: String,
+    handler: @escaping @Sendable (Parameters) async throws -> Result
+) -> @Sendable (Parameters) async throws -> Result {
+    { [weak networkResources] parameters in
+        guard let networkResources else { throw CancellationError() }
+        return try await performMCPDomainWork(
+            networkResources: networkResources,
+            sessionID: sessionID,
+            httpContext: Server.currentHandlerContext?.httpContext
+        ) { try await handler(parameters) }
+    }
+}
+
+package func performMCPDomainWork<Success: Sendable>(
+    networkResources: MCPHTTPNetworkResourceOwner,
+    sessionID: String,
+    httpContext: HTTPRequest?,
+    operation: @escaping @Sendable () async throws -> Success
+) async throws -> Success {
+    guard let encodedToken = httpContext?.header(
+        MCPHTTPNetworkResourceOwner.operationTokenHeaderName
+    ), let token = MCPHTTPNetworkResourceOwner.OperationToken(headerValue: encodedToken),
+       let requestOperation = networkResources.resolve(token, sessionID: sessionID) else {
+        return try unavailableMCPDomainWork(networkResources)
+    }
+    guard let task = requestOperation.startDomainWork(operation) else {
+        throw CancellationError()
+    }
+    return try await withTaskCancellationHandler {
+        do {
+            let value = try await task.value
+            try Task.checkCancellation()
+            return value
+        } catch {
+            try Task.checkCancellation()
+            throw error
+        }
+    } onCancel: {
+        task.cancel()
+    }
+}
+
+private func unavailableMCPDomainWork<Success>(
+    _ networkResources: MCPHTTPNetworkResourceOwner
+) throws -> Success {
+    switch networkResources.snapshot().phase {
+    case .accepting:
+        protocolServerLogger.error("An accepting MCP request had no valid internal operation identity.")
+        throw MCPError.internalError("MCP request ownership could not be resolved.")
+    case .admissionClosed, .closing, .closed:
+        throw CancellationError()
+    }
 }
 
 private func schema(for tool: CodexReviewMCP.Tool.Name) -> Value {
