@@ -1225,6 +1225,32 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         #expect(await transport.isClosedForTesting() == false)
     }
 
+    @Test func exitedReviewModeStartedWithoutReviewFailsItsSelectedAttempt() async throws {
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let attempt = await backend.reviewAttemptForTesting(.init(
+            attemptID: "attempt-1",
+            threadID: "thread-review",
+            turnID: "turn-review",
+            reviewThreadID: "thread-review"
+        ))
+
+        try await transport.emitServerNotification(
+            method: "item/started",
+            params: V2ItemNotification(
+                threadID: "thread-review",
+                turnID: "turn-review",
+                item: .init(type: "exitedReviewMode", id: "result")
+            )
+        )
+
+        #expect(try await attempt.events.next() == .failed(
+            "Malformed app-server notification item/started: review must be a string"
+        ))
+        #expect(await backend.notificationRouterMetricsForTesting().attemptFailures == 1)
+        #expect(await transport.isClosedForTesting() == false)
+    }
+
     @Test func unsupportedItemFailsOnlyItsSelectedAttempt() async throws {
         let transport = FakeJSONRPCTransport()
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
@@ -1682,15 +1708,11 @@ struct CurrentV2ReviewRoutingIntegrationTests {
             params: V2ItemNotification(
                 threadID: "thread-review",
                 turnID: "turn-review",
-                item: .init(type: "agentMessage", id: "final", text: "Partial final")
-            )
-        )
-        try await transport.emitServerNotification(
-            method: "item/completed",
-            params: V2ItemNotification(
-                threadID: "thread-review",
-                turnID: "turn-review",
-                item: .init(type: "agentMessage", id: "final", text: "Complete final")
+                item: .init(
+                    type: "exitedReviewMode",
+                    id: "review-result",
+                    review: "Canonical review"
+                )
             )
         )
         try await transport.emitServerNotification(
@@ -1702,27 +1724,87 @@ struct CurrentV2ReviewRoutingIntegrationTests {
             )
         )
         try await transport.emitServerNotification(
+            method: "item/started",
+            params: V2ItemNotification(
+                threadID: "thread-review",
+                turnID: "turn-review",
+                item: .init(type: "agentMessage", id: "final", text: "Canonical review")
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: V2ItemNotification(
+                threadID: "thread-review",
+                turnID: "turn-review",
+                item: .init(type: "agentMessage", id: "final", text: "Canonical review")
+            )
+        )
+        try await transport.emitServerNotification(
             method: "turn/completed",
             params: V2TurnNotification(
                 threadID: "thread-review",
                 turn: .init(
                     id: "turn-review",
-                    items: [.init(type: "agentMessage", id: "final", text: "Complete final")],
+                    items: [.init(type: "agentMessage", id: "final", text: "Canonical review")],
                     itemsView: "summary",
                     status: "completed"
                 )
             )
         )
         let normalizedEvents = try await collectEvents(from: attempt.events)
-        #expect(normalizedEvents.contains { event in
-            guard case .logEntry(let kind, _, let groupID, let replacesGroup, let metadata) = event else {
+        let canonicalReviewEvents = normalizedEvents.filter { event in
+            guard case .logEntry(_, _, _, _, let metadata) = event else {
                 return false
             }
-            return kind == .agentMessage
-                && groupID == "review-result"
-                && replacesGroup
-                && metadata?.sourceType == "exitedReviewMode"
-        })
+            return metadata?.sourceType == "exitedReviewMode"
+        }
+        #expect(canonicalReviewEvents == [
+            .logEntry(
+                kind: .agentMessage,
+                text: "Canonical review",
+                groupID: "review-result",
+                replacesGroup: true,
+                metadata: .init(sourceType: "exitedReviewMode")
+            ),
+            .logEntry(
+                kind: .agentMessage,
+                text: "Canonical review",
+                groupID: "review-result",
+                replacesGroup: true,
+                metadata: .init(sourceType: "exitedReviewMode")
+            ),
+        ])
+        let companionEvents = normalizedEvents.filter { event in
+            guard case .logEntry(_, _, let groupID, _, _) = event else {
+                return false
+            }
+            return groupID == "final"
+        }
+        #expect(companionEvents == [
+            .logEntry(
+                kind: .agentMessage,
+                text: "Canonical review",
+                groupID: "final",
+                replacesGroup: true
+            ),
+            .logEntry(
+                kind: .agentMessage,
+                text: "Canonical review",
+                groupID: "final",
+                replacesGroup: true
+            ),
+            .logEntry(
+                kind: .agentMessage,
+                text: "",
+                groupID: "final",
+                replacesGroup: true,
+                metadata: .init(sourceType: "suppressedFinalReviewCompanion")
+            ),
+        ])
+        #expect(normalizedEvents.last == .completed(
+            summary: "Succeeded.",
+            result: "Canonical review"
+        ))
 
         let storeReviewBackend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
@@ -1744,6 +1826,8 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         #expect(visibleAgentRows.map(\.text) == ["Non-final message", "Canonical review"])
         #expect(visibleAgentRows.contains { $0.groupID == "final" } == false)
         #expect(result.core.lifecycle.terminal == .completed)
+        #expect(result.core.output.lastAgentMessage == "Canonical review")
+        #expect(result.core.output.hasFinalReview)
     }
 
     @Test func conflictingActiveRoutingClosesTheConnectionAndFailsAffectedAttempts() async throws {
