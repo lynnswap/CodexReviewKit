@@ -129,9 +129,13 @@ package struct CodexExecutableResolver: Sendable {
         }
         if let shellURL = search.shellURL(environment["SHELL"]) {
             let source = CodexExecutableResolutionError.Source.shell(shellURL.path)
+            // Shell startup belongs to the OS account even when a GUI process has
+            // no HOME or inherits an app-specific value.
+            var shellEnvironment = environment
+            shellEnvironment["HOME"] = configuration.homeDirectory.path
             switch await configuration.shellPathDiscovery.discover(
                 shellURL: shellURL,
-                environment: environment
+                environment: shellEnvironment
             ) {
             case .output(let output):
                 if let rawPath = Self.shellCandidate(from: output) {

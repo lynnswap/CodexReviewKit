@@ -26,7 +26,34 @@ struct CodexExecutableResolverTests {
 
         #expect(resolved.path == "/shell/bin/codex")
         #expect(await recorder.invocations() == [
-            .init(shellPath: "/bin/zsh", path: "/app/bin")
+            .init(shellPath: "/bin/zsh", path: "/app/bin", home: "/home")
+        ])
+    }
+
+    @Test func shellDiscoveryUsesAccountHomeWhenProcessHomeIsMissingOrUnrelated() async throws {
+        let recorder = ShellDiscoveryRecorder(outcome: .output(markedShellOutput(
+            candidate: "/shell/bin/codex"
+        )))
+        let resolver = makeResolver(
+            executables: ["/shell/bin/codex"],
+            shellPathDiscovery: .init { shellURL, environment in
+                await recorder.discover(shellURL: shellURL, environment: environment)
+            }
+        )
+
+        for environment in [
+            ["PATH": "/app/bin", "SHELL": "/bin/zsh"],
+            ["PATH": "/app/bin", "SHELL": "/bin/zsh", "HOME": "/unrelated"],
+        ] {
+            #expect(try await resolver.resolve(
+                configuredPath: nil,
+                environment: environment
+            ).path == "/shell/bin/codex")
+        }
+
+        #expect(await recorder.invocations() == [
+            .init(shellPath: "/bin/zsh", path: "/app/bin", home: "/home"),
+            .init(shellPath: "/bin/zsh", path: "/app/bin", home: "/home"),
         ])
     }
 
@@ -144,7 +171,7 @@ struct CodexExecutableResolverTests {
         try Data("#!/bin/sh\nexit 0\n".utf8).write(to: codex)
         #expect(chmod(codex.path, S_IRWXU) == 0)
         let startup = root.appendingPathComponent(".zshrc")
-        try Data("print startup-noise\nexport PATH=\"\(bin.path):$PATH\"\n".utf8).write(to: startup)
+        try Data("printf startup-noise\nexport PATH=\"\(bin.path):$PATH\"\n".utf8).write(to: startup)
         let resolver = CodexExecutableResolver(configuration: .init(
             homeDirectory: root,
             applicationDirectories: [],
@@ -153,17 +180,15 @@ struct CodexExecutableResolverTests {
             shellPathDiscovery: .live(timeout: .seconds(1))
         ))
 
-        let resolved = try await resolver.resolve(
-            configuredPath: nil,
-            environment: [
-                "HOME": root.path,
-                "PATH": "/usr/bin:/bin",
-                "SHELL": "/bin/zsh",
-                "ZDOTDIR": root.path,
-            ]
-        )
-
-        #expect(resolved == codex)
+        for environment in [
+            ["PATH": "/usr/bin:/bin", "SHELL": "/bin/zsh"],
+            ["HOME": "/unrelated", "PATH": "/usr/bin:/bin", "SHELL": "/bin/zsh"],
+        ] {
+            #expect(try await resolver.resolve(
+                configuredPath: nil,
+                environment: environment
+            ) == codex)
+        }
     }
 
     @Test func liveZshDiscoveryTerminatesHungStartupAtTimeout() async throws {
@@ -419,6 +444,7 @@ private actor ShellDiscoveryRecorder {
     struct Invocation: Equatable, Sendable {
         var shellPath: String
         var path: String?
+        var home: String?
     }
 
     private let outcome: CodexShellPathDiscovery.Outcome
@@ -432,7 +458,11 @@ private actor ShellDiscoveryRecorder {
         shellURL: URL,
         environment: [String: String]
     ) -> CodexShellPathDiscovery.Outcome {
-        recordedInvocations.append(.init(shellPath: shellURL.path, path: environment["PATH"]))
+        recordedInvocations.append(.init(
+            shellPath: shellURL.path,
+            path: environment["PATH"],
+            home: environment["HOME"]
+        ))
         return outcome
     }
 

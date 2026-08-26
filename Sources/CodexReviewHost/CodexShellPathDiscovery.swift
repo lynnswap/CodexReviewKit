@@ -42,7 +42,7 @@ enum CodexShellProbeMarkers {
 }
 
 private enum ShellProbe {
-    static let command = "printf '%s\\n' '\(CodexShellProbeMarkers.begin)'; command -v codex || :; printf '%s\\n' '\(CodexShellProbeMarkers.end)'"
+    static let command = "printf '\\n%s\\n' '\(CodexShellProbeMarkers.begin)'; command -v codex || :; printf '%s\\n' '\(CodexShellProbeMarkers.end)'"
     private static let terminationGrace: Duration = .milliseconds(100)
 
     static func run(
