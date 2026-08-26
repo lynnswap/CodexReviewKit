@@ -1861,9 +1861,20 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         _ run: CodexReviewBackendModel.Review.Run,
         using runtime: LiveRuntimeLifecycleHandle
     ) async throws {
+        let result: Result<Void, any Error>
         do {
             try await runtime.backend.cleanupReview(run)
-        } catch let invalidation as AppServerCleanupTransportInvalidation {
+            result = .success(())
+        } catch {
+            result = .failure(error)
+        }
+
+        // The backend call has fully unwound, including its admitted-operation
+        // retirement, before runtime teardown/replacement is requested.
+        guard case .failure(let error) = result else {
+            return
+        }
+        if let invalidation = error as? AppServerCleanupTransportInvalidation {
             await invalidateRuntimeAfterCleanupFailure(
                 runtime,
                 cause: invalidation.failure.localizedDescription
@@ -1872,7 +1883,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 throw CancellationError()
             }
             throw invalidation.failure
-        } catch let failure as ReviewRuntimeCloseFailure {
+        }
+        if let failure = error as? ReviewRuntimeCloseFailure {
             if case .connection = failure {
                 await invalidateRuntimeAfterCleanupFailure(
                     runtime,
@@ -1881,6 +1893,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             }
             throw failure
         }
+        throw error
     }
 
     private func invalidateRuntimeAfterCleanupFailure(
