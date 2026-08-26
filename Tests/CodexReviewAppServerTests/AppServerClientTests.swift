@@ -4814,7 +4814,7 @@ struct AppServerClientTests {
         #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "final review text"))
     }
 
-    @Test func backendKeepsReviewResponseTurnWhenAuxiliaryTurnStarts() async throws {
+    @Test func backendKeepsCanonicalReviewIdentityWhileInterruptingActiveTurn() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
@@ -4868,7 +4868,7 @@ struct AppServerClientTests {
             AppServerAPI.Turn.Interrupt.Params.self,
             from: try #require(await transport.recordedRequests().last?.params)
         )
-        #expect(params.turnID == "review-turn")
+        #expect(params.turnID == "active-turn")
     }
 
     @Test func backendMapsReviewItemAndDiagnosticNotificationsToLogEntries() async throws {
