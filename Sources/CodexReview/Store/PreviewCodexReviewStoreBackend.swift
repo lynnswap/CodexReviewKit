@@ -145,6 +145,16 @@ package class PreviewCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     package func interruptReview(_: CodexReviewBackendModel.Review.Run, reason _: CodexReviewBackendModel.CancellationReason) async throws {}
 
+    package func interruptReview(
+        _: ReviewInterruptRequestAdmission,
+        reason _: CodexReviewBackendModel.CancellationReason
+    ) async throws {
+        throw ReviewInterruptRequestFailure(outcome: .rejected(
+            code: nil,
+            message: "Typed review interrupt admission is not installed."
+        ))
+    }
+
     package func cleanupReview(_: CodexReviewBackendModel.Review.Run) async {}
 
     fileprivate static let previewUnavailableMessage = "Embedded server is unavailable in preview mode."

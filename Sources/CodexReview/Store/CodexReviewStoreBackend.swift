@@ -108,16 +108,6 @@ extension CodexReviewStoreBackend {
         handle _: any RuntimeLifecycleHandle
     ) async {}
 
-    package func interruptReview(
-        _: ReviewInterruptRequestAdmission,
-        reason _: CodexReviewBackendModel.CancellationReason
-    ) async throws {
-        throw ReviewInterruptRequestFailure(outcome: .rejected(
-            code: nil,
-            message: "Typed review interrupt admission is not installed."
-        ))
-    }
-
     package func prepareReviewRecovery(
         _: ReviewRecoveryCandidate
     ) async throws -> PreparedReviewRecovery {
