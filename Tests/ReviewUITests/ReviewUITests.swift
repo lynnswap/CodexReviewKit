@@ -4184,6 +4184,9 @@ struct ReviewUITests {
         #expect(emptySnapshot.title == nil)
         #expect(emptySnapshot.summary == nil)
         #expect(emptySnapshot.log.isEmpty)
+        try await waitForCondition {
+            window.title.isEmpty && window.subtitle.isEmpty
+        }
         #expect(window.title == "")
         #expect(window.subtitle == "")
         job.updateStateForTesting(summary: "Deselected summary")
