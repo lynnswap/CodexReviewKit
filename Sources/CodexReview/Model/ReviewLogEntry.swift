@@ -1,6 +1,12 @@
 import Foundation
 
 public struct ReviewLogEntry: Codable, Identifiable, Sendable, Hashable {
+    /// Selects whether an entry belongs in product-facing output or developer diagnostics.
+    public enum Audience: String, Codable, Sendable, Hashable {
+        case product
+        case developer
+    }
+
     public struct Metadata: Codable, Sendable, Hashable {
         public struct CommandAction: Codable, Sendable, Hashable {
             public enum Kind: String, Codable, Sendable, Hashable {
@@ -120,6 +126,7 @@ public struct ReviewLogEntry: Codable, Identifiable, Sendable, Hashable {
     public let replacesGroup: Bool
     public let text: String
     public let metadata: Metadata?
+    public package(set) var audience: Audience
     public let timestamp: Date
 
     public init(
@@ -129,6 +136,7 @@ public struct ReviewLogEntry: Codable, Identifiable, Sendable, Hashable {
         replacesGroup: Bool = false,
         text: String,
         metadata: Metadata? = nil,
+        audience: Audience = .product,
         timestamp: Date = Date()
     ) {
         self.id = id
@@ -137,7 +145,44 @@ public struct ReviewLogEntry: Codable, Identifiable, Sendable, Hashable {
         self.replacesGroup = replacesGroup
         self.text = text
         self.metadata = metadata
+        self.audience = audience
         self.timestamp = timestamp
     }
 
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case kind
+        case groupID
+        case replacesGroup
+        case text
+        case metadata
+        case audience
+        case timestamp
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        kind = try container.decode(Kind.self, forKey: .kind)
+        groupID = try container.decodeIfPresent(String.self, forKey: .groupID)
+        replacesGroup = try container.decode(Bool.self, forKey: .replacesGroup)
+        text = try container.decode(String.self, forKey: .text)
+        metadata = try container.decodeIfPresent(Metadata.self, forKey: .metadata)
+        audience = try container.decodeIfPresent(Audience.self, forKey: .audience) ?? .product
+        timestamp = try container.decode(Date.self, forKey: .timestamp)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(kind, forKey: .kind)
+        try container.encodeIfPresent(groupID, forKey: .groupID)
+        try container.encode(replacesGroup, forKey: .replacesGroup)
+        try container.encode(text, forKey: .text)
+        try container.encodeIfPresent(metadata, forKey: .metadata)
+        if audience != .product {
+            try container.encode(audience, forKey: .audience)
+        }
+        try container.encode(timestamp, forKey: .timestamp)
+    }
 }

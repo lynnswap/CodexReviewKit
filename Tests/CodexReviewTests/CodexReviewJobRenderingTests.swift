@@ -5,6 +5,95 @@ import Testing
 @Suite("Codex review job rendering")
 @MainActor
 struct CodexReviewJobRenderingTests {
+    @Test func reviewLogEntryAudienceDefaultsAndDecodesLegacyPayloadsAsProduct() throws {
+        let product = ReviewLogEntry(kind: .diagnostic, text: "Product diagnostic")
+        #expect(product.audience == .product)
+
+        var developer = product
+        developer.audience = .developer
+        #expect(product.audience == .product)
+        #expect(developer.audience == .developer)
+
+        let productObject = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(product)) as? [String: Any]
+        )
+        #expect(Set(productObject.keys) == [
+            "id",
+            "kind",
+            "replacesGroup",
+            "text",
+            "timestamp",
+        ])
+
+        let encoded = try JSONEncoder().encode(developer)
+        let developerObject = try #require(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        #expect(developerObject["audience"] as? String == "developer")
+        #expect(try JSONDecoder().decode(
+            ReviewLogEntry.self,
+            from: encoded
+        ).audience == .developer)
+
+        var legacyObject = developerObject
+        legacyObject.removeValue(forKey: "audience")
+        let legacyPayload = try JSONSerialization.data(withJSONObject: legacyObject)
+
+        #expect(try JSONDecoder().decode(
+            ReviewLogEntry.self,
+            from: legacyPayload
+        ).audience == .product)
+    }
+
+    @Test func productProjectionsHideDeveloperEntriesWhileRawDiagnosticsAndCapRetainThem() {
+        let developerDiagnostic = "Developer cleanup detail"
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-audience-projections",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .failed,
+            summary: "Failed",
+            logEntries: [
+                .init(
+                    kind: .agentMessage,
+                    groupID: "shared-review",
+                    text: "Developer review",
+                    audience: .developer
+                ),
+                .init(kind: .agentMessage, groupID: "shared-review", text: "Product review"),
+                .init(kind: .progress, text: "Product activity"),
+                .init(kind: .error, text: "Product error"),
+                .init(kind: .diagnostic, text: "Product diagnostic"),
+                .init(kind: .progress, text: "Developer activity", audience: .developer),
+                .init(kind: .diagnostic, text: developerDiagnostic, audience: .developer),
+            ]
+        )
+
+        #expect(job.logEntries.count == 7)
+        #expect(job.logText == """
+        Product review
+
+        Product activity
+
+        Product error
+
+        Product diagnostic
+        """)
+        #expect(job.reviewOutputText == "Product review")
+        #expect(job.activityLogText == "Product activity")
+        #expect(job.rawLogText == """
+        Product diagnostic
+        Developer cleanup detail
+        """)
+        #expect(job.diagnosticText == """
+        Product error
+
+        Product diagnostic
+        Developer cleanup detail
+        """)
+        #expect(job.cappedLogBytes >= developerDiagnostic.utf8.count)
+    }
+
     @Test func cancellationRequestedSetterProjectsOnlyThePendingReceipt() throws {
         let job = CodexReviewJob.makeForTesting(
             id: "job-cancellation-projection",

@@ -906,12 +906,14 @@ extension ReviewMonitorLog {
 struct Projection: Sendable {
     private struct GroupKey: Hashable, Sendable {
         var kind: ReviewLogEntry.Kind
+        var audience: ReviewLogEntry.Audience
         var groupID: String
     }
 
     private struct RenderedBlock: Sendable {
         var id: ReviewMonitorLog.BlockID
         var kind: ReviewLogEntry.Kind
+        var audience: ReviewLogEntry.Audience
         var groupID: String?
         var text: String
         var metadata: ReviewLogEntry.Metadata?
@@ -920,6 +922,7 @@ struct Projection: Sendable {
     private struct EntrySignature: Equatable, Sendable {
         var id: UUID
         var kind: ReviewLogEntry.Kind
+        var audience: ReviewLogEntry.Audience
         var groupID: String?
         var replacesGroup: Bool
         var textUTF16Length: Int
@@ -939,6 +942,7 @@ struct Projection: Sendable {
             }
             self.id = entry.id
             self.kind = entry.kind
+            self.audience = entry.audience
             self.groupID = entry.groupID
             self.replacesGroup = entry.replacesGroup
             self.textUTF16Length = ReviewMonitorLog.Projection.utf16Length(entry.text)
@@ -1187,6 +1191,7 @@ struct Projection: Sendable {
                 state.blocks.append(.init(
                     id: ReviewMonitorLog.Projection.blockID(for: entry),
                     kind: entry.kind,
+                    audience: entry.audience,
                     groupID: entry.groupID,
                     text: entry.text,
                     metadata: entry.metadata
@@ -1231,8 +1236,16 @@ struct Projection: Sendable {
                         blocks[blockIndex].metadata = metadata
                     }
                     let newText = blocks[blockIndex].text
-                    let wasVisible = ReviewMonitorLog.Projection.isVisible(kind: entry.kind, text: oldText)
-                    let isVisible = ReviewMonitorLog.Projection.isVisible(kind: entry.kind, text: newText)
+                    let wasVisible = ReviewMonitorLog.Projection.isVisible(
+                        kind: entry.kind,
+                        audience: entry.audience,
+                        text: oldText
+                    )
+                    let isVisible = ReviewMonitorLog.Projection.isVisible(
+                        kind: entry.kind,
+                        audience: entry.audience,
+                        text: newText
+                    )
                     if wasVisible,
                        isVisible,
                        ReviewMonitorLog.Projection.requiresBlockRerenderOnDelta(kind: entry.kind) {
@@ -1294,6 +1307,7 @@ struct Projection: Sendable {
             let block = RenderedBlock(
                 id: ReviewMonitorLog.Projection.blockID(for: entry),
                 kind: entry.kind,
+                audience: entry.audience,
                 groupID: entry.groupID,
                 text: entry.text,
                 metadata: entry.metadata
@@ -1327,6 +1341,7 @@ struct Projection: Sendable {
         ) -> ReviewMonitorLog.Append? {
             guard ReviewMonitorLog.Projection.isVisible(
                 kind: block.kind,
+                audience: block.audience,
                 text: block.text
             ) else {
                 return nil
@@ -1343,10 +1358,12 @@ struct Projection: Sendable {
         ) -> ReviewMonitorLog.Append? {
             let wasVisible = ReviewMonitorLog.Projection.isVisible(
                 kind: block.kind,
+                audience: block.audience,
                 text: oldText
             )
             let isVisible = ReviewMonitorLog.Projection.isVisible(
                 kind: block.kind,
+                audience: block.audience,
                 text: newText
             )
 
@@ -1603,7 +1620,8 @@ struct Projection: Sendable {
 
     private static func blockID(for entry: ReviewLogEntry) -> ReviewMonitorLog.BlockID {
         if let key = mergeKey(for: entry) {
-            return ReviewMonitorLog.BlockID("\(key.kind.rawValue):\(key.groupID)")
+            let prefix = key.audience == .product ? "" : "\(key.audience.rawValue):"
+            return ReviewMonitorLog.BlockID("\(prefix)\(key.kind.rawValue):\(key.groupID)")
         }
         return ReviewMonitorLog.BlockID(entry.id.uuidString)
     }
@@ -1617,13 +1635,20 @@ struct Projection: Sendable {
 
         switch entry.kind {
         case .agentMessage, .command, .commandOutput, .plan, .reasoning, .reasoningSummary, .rawReasoning, .contextCompaction:
-            return GroupKey(kind: entry.kind, groupID: groupID)
+            return GroupKey(kind: entry.kind, audience: entry.audience, groupID: groupID)
         case .todoList, .toolCall, .diagnostic, .error, .progress, .event:
             return nil
         }
     }
 
-    private static func isVisible(kind: ReviewLogEntry.Kind, text: String) -> Bool {
+    private static func isVisible(
+        kind: ReviewLogEntry.Kind,
+        audience: ReviewLogEntry.Audience,
+        text: String
+    ) -> Bool {
+        guard audience == .product else {
+            return false
+        }
         guard displayedKinds.contains(kind) else {
             return false
         }

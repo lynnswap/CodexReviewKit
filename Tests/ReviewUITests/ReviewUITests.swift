@@ -3268,6 +3268,38 @@ struct ReviewUITests {
         #expect(transport.logCommandOutputPanelUsesTextKit2ForTesting == false)
     }
 
+    @Test func detailPaneHidesDeveloperDiagnosticsWithoutHidingProductFailures() async throws {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-developer-diagnostic",
+            cwd: "/tmp/workspace-alpha",
+            targetSummary: "Uncommitted changes",
+            status: .failed,
+            summary: "Review failed.",
+            logEntries: [
+                .init(kind: .error, text: "Product failure"),
+                .init(kind: .diagnostic, text: "Developer cleanup detail", audience: .developer),
+                .init(kind: .diagnostic, text: "Product diagnostic"),
+            ]
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            content: makeSidebarContent(from: [job])
+        )
+        let backend = makeWindowHarness(store: store)
+        let window = backend.window
+        defer { window.close() }
+        let viewController = backend.viewController
+        let transport = viewController.transportViewControllerForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+
+        _ = try await awaitTransportRender(transport)
+
+        #expect(transport.displayedLogForTesting.contains("Product failure"))
+        #expect(transport.displayedLogForTesting.contains("Product diagnostic"))
+        #expect(transport.displayedLogForTesting.contains("Developer cleanup detail") == false)
+    }
+
     @Test func contextCompactionMarkerRendersAsVisibleLogTextWithoutCommandPanel() async throws {
         let job = CodexReviewJob.makeForTesting(
             id: "job-context-compaction-marker",

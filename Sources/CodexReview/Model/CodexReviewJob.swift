@@ -11,11 +11,13 @@ public final class CodexReviewJob: Identifiable, Hashable {
 
     private struct GroupKey: Hashable {
         var kind: ReviewLogEntry.Kind
+        var audience: ReviewLogEntry.Audience
         var groupID: String
     }
 
     private struct RenderedBlock {
         var kind: ReviewLogEntry.Kind
+        var audience: ReviewLogEntry.Audience
         var groupID: String?
         var text: String
     }
@@ -163,6 +165,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
 
                 state.blocks.append(.init(
                     kind: entry.kind,
+                    audience: entry.audience,
                     groupID: entry.groupID,
                     text: entry.text
                 ))
@@ -208,6 +211,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
             let blockIndex = blocks.count
             let block = RenderedBlock(
                 kind: entry.kind,
+                audience: entry.audience,
                 groupID: entry.groupID,
                 text: entry.text
             )
@@ -249,7 +253,8 @@ public final class CodexReviewJob: Identifiable, Hashable {
                 block: block,
                 blockIndex: index,
                 visibleKinds: CodexReviewJob.cappedLogKinds,
-                includeEmptyDiagnostic: false
+                includeEmptyDiagnostic: false,
+                includeDeveloperAudience: true
             )
             if block.kind == .diagnostic {
                 _ = rawProjection.appendSection(block.text, at: index)
@@ -293,7 +298,8 @@ public final class CodexReviewJob: Identifiable, Hashable {
                 block: block,
                 blockIndex: blockIndex,
                 visibleKinds: CodexReviewJob.cappedLogKinds,
-                includeEmptyDiagnostic: false
+                includeEmptyDiagnostic: false,
+                includeDeveloperAudience: true
             )
             if block.kind == .diagnostic {
                 _ = rawProjection.appendSection(block.text, at: blockIndex)
@@ -310,6 +316,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
             _ = Self.updateTailProjection(
                 &logProjection,
                 kind: block.kind,
+                audience: block.audience,
                 oldText: oldText,
                 newText: newText,
                 blockIndex: blockIndex,
@@ -320,6 +327,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
             _ = Self.updateTailProjection(
                 &reviewOutputProjection,
                 kind: block.kind,
+                audience: block.audience,
                 oldText: oldText,
                 newText: newText,
                 blockIndex: blockIndex,
@@ -330,6 +338,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
             _ = Self.updateTailProjection(
                 &activityProjection,
                 kind: block.kind,
+                audience: block.audience,
                 oldText: oldText,
                 newText: newText,
                 blockIndex: blockIndex,
@@ -340,6 +349,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
             _ = Self.updateTailProjection(
                 &errorProjection,
                 kind: block.kind,
+                audience: block.audience,
                 oldText: oldText,
                 newText: newText,
                 blockIndex: blockIndex,
@@ -350,36 +360,44 @@ public final class CodexReviewJob: Identifiable, Hashable {
             _ = Self.updateTailProjection(
                 &cappedProjection,
                 kind: block.kind,
+                audience: block.audience,
                 oldText: oldText,
                 newText: newText,
                 blockIndex: blockIndex,
                 delta: delta,
                 visibleKinds: CodexReviewJob.cappedLogKinds,
-                includeEmptyDiagnostic: false
+                includeEmptyDiagnostic: false,
+                includeDeveloperAudience: true
             )
         }
 
         private static func updateTailProjection(
             _ projection: inout ProjectionAccumulator,
             kind: ReviewLogEntry.Kind,
+            audience: ReviewLogEntry.Audience,
             oldText: String,
             newText: String,
             blockIndex: Int,
             delta: String,
             visibleKinds: Set<ReviewLogEntry.Kind>,
-            includeEmptyDiagnostic: Bool
+            includeEmptyDiagnostic: Bool,
+            includeDeveloperAudience: Bool = false
         ) -> String? {
             let wasVisible = CodexReviewJob.isVisibleInRenderedProjection(
                 kind: kind,
+                audience: audience,
                 text: oldText,
                 visibleKinds: visibleKinds,
-                includeEmptyDiagnostic: includeEmptyDiagnostic
+                includeEmptyDiagnostic: includeEmptyDiagnostic,
+                includeDeveloperAudience: includeDeveloperAudience
             )
             let isVisible = CodexReviewJob.isVisibleInRenderedProjection(
                 kind: kind,
+                audience: audience,
                 text: newText,
                 visibleKinds: visibleKinds,
-                includeEmptyDiagnostic: includeEmptyDiagnostic
+                includeEmptyDiagnostic: includeEmptyDiagnostic,
+                includeDeveloperAudience: includeDeveloperAudience
             )
 
             switch (wasVisible, isVisible) {
@@ -400,13 +418,16 @@ public final class CodexReviewJob: Identifiable, Hashable {
             block: RenderedBlock,
             blockIndex: Int,
             visibleKinds: Set<ReviewLogEntry.Kind>,
-            includeEmptyDiagnostic: Bool
+            includeEmptyDiagnostic: Bool,
+            includeDeveloperAudience: Bool = false
         ) -> String? {
             guard CodexReviewJob.isVisibleInRenderedProjection(
                 kind: block.kind,
+                audience: block.audience,
                 text: block.text,
                 visibleKinds: visibleKinds,
-                includeEmptyDiagnostic: includeEmptyDiagnostic
+                includeEmptyDiagnostic: includeEmptyDiagnostic,
+                includeDeveloperAudience: includeDeveloperAudience
             ) else {
                 return nil
             }
@@ -593,6 +614,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
                 replacesGroup: entry.replacesGroup,
                 text: truncatedText,
                 metadata: entry.metadata,
+                audience: entry.audience,
                 timestamp: entry.timestamp
             )
         }
@@ -729,6 +751,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
             replacesGroup: entry.replacesGroup,
             text: truncatedText,
             metadata: entry.metadata,
+            audience: entry.audience,
             timestamp: entry.timestamp
         )
         return trimmedEntries
@@ -785,7 +808,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
 
         switch entry.kind {
         case .agentMessage, .command, .commandOutput, .plan, .reasoning, .reasoningSummary, .rawReasoning, .contextCompaction:
-            return GroupKey(kind: entry.kind, groupID: groupID)
+            return GroupKey(kind: entry.kind, audience: entry.audience, groupID: groupID)
         case .todoList, .toolCall, .diagnostic, .error, .progress, .event:
             return nil
         }
@@ -821,10 +844,15 @@ public final class CodexReviewJob: Identifiable, Hashable {
 
     private nonisolated static func isVisibleInRenderedProjection(
         kind: ReviewLogEntry.Kind,
+        audience: ReviewLogEntry.Audience,
         text: String,
         visibleKinds: Set<ReviewLogEntry.Kind>,
-        includeEmptyDiagnostic: Bool
+        includeEmptyDiagnostic: Bool,
+        includeDeveloperAudience: Bool = false
     ) -> Bool {
+        guard includeDeveloperAudience || audience == .product else {
+            return false
+        }
         guard visibleKinds.contains(kind) else {
             return false
         }
@@ -950,6 +978,7 @@ private extension ReviewLogEntry {
                 resultText: metadata?.resultText,
                 errorText: metadata?.errorText
             ),
+            audience: audience,
             timestamp: completedAt
         )
     }
