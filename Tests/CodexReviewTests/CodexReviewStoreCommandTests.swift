@@ -2995,6 +2995,79 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func staleReportFailureCannotClearSameValueSuccessorReceipt() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-1",
+            sessionID: "session-1",
+            cwd: "/tmp/project",
+            targetSummary: "Review",
+            status: .running,
+            summary: "Running"
+        )
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [.init(cwd: job.cwd)],
+            jobs: [job]
+        )
+        let cancellation = ReviewCancellation.mcpClient(message: "Same cancellation")
+        let first = try #require(store.recordCancellationRequest(cancellation, for: job))
+        let admission = ReviewStartAdmission()
+        let preparedRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-1",
+            threadID: "thread-1",
+            reviewThreadID: "thread-1"
+        )
+        let activeRun = CodexReviewBackendModel.Review.Run(
+            attemptID: preparedRun.attemptID,
+            threadID: preparedRun.threadID,
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1"
+        )
+        try await admission.admitThreadStartDispatch()
+        try await admission.recordPreparedThread(preparedRun)
+        try await admission.admitReviewStartDispatch(for: preparedRun)
+        try await admission.recordActiveRun(activeRun)
+        let rejection = ReviewInterruptRequestFailure(
+            outcome: .rejected(code: nil, message: "First request was rejected")
+        )
+        await #expect(throws: rejection) {
+            try await admission.interrupt(
+                activeRun,
+                cancellation: first.cancellation,
+                request: { _, _ in throw rejection }
+            )
+        }
+
+        let successor = try #require(store.recordCancellationRequest(cancellation, for: job))
+        let successorDispatched = AsyncGate()
+        let successorRequest = Task {
+            try await admission.interrupt(
+                activeRun,
+                cancellation: successor.cancellation,
+                request: { _, _ in await successorDispatched.open() }
+            )
+        }
+        await successorDispatched.wait()
+
+        #expect(successor.id != first.id)
+        try store.recordCancellationFailure(
+            jobID: job.id,
+            sessionID: job.sessionID,
+            receipt: first,
+            message: "First request was rejected"
+        )
+
+        #expect(job.pendingCancellationRequest?.id == successor.id)
+        #expect(job.core.lifecycle.cancellation == cancellation)
+        #expect(job.core.output.summary == cancellation.message)
+        try await admission.recordCanonicalTerminal(.completed, for: activeRun)
+        _ = try await successorRequest.value
+    }
+
     @Test func canonicalCompletionWinsPendingCancellationAndClearsRequestState() async throws {
         let backend = FakeCodexReviewBackend()
         let interruptGate = AsyncGate()

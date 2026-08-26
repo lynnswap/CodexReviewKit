@@ -42,13 +42,9 @@ extension CodexReviewStore {
         guard job.isTerminal == false else {
             return nil
         }
-        if let current = job.pendingCancellationRequest {
-            switch (current.rejectionDisposition, rejectionDisposition) {
-            case (.preserveRuntimeStopIntent, _), (.reportFailure, .reportFailure):
-                return current
-            case (.reportFailure, .preserveRuntimeStopIntent):
-                break
-            }
+        if let current = job.pendingCancellationRequest,
+           current.rejectionDisposition == .preserveRuntimeStopIntent {
+            return current
         }
         guard nextCancellationRequestOrdinal < UInt64.max else {
             preconditionFailure("CodexReviewStore cancellation request ordinal exhausted.")
