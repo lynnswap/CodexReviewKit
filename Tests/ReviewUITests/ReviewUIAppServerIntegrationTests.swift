@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Synchronization
 import Testing
@@ -203,6 +204,7 @@ extension ReviewUITests {
             ),
             for: "review/start"
         )
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         try await transport.enqueue(
             AppServerAPI.Thread.Unsubscribe.Response(status: .unsubscribed),
             for: "thread/unsubscribe"
@@ -237,6 +239,167 @@ extension ReviewUITests {
         #expect(requestMethods.contains("thread/backgroundTerminals/clean"))
         #expect(requestMethods.contains("thread/unsubscribe"))
         #expect(requestMethods.contains("thread/delete"))
+        let interruptRequest = try #require(
+            await transport.recordedRequests().first { $0.method == "turn/interrupt" }
+        )
+        let interruptParams = try JSONDecoder().decode(
+            AppServerAPI.Turn.Interrupt.Params.self,
+            from: interruptRequest.params
+        )
+        #expect(interruptParams.threadID == "thread-review")
+        #expect(interruptParams.turnID == "turn-review")
+        #expect(await transport.isClosedForTesting())
+        #expect(store.reviewWorkerTasks["job-1"] == nil)
+        #expect(await backend.reviewEventSessionCountForTesting() == 0)
+        #expect(await backend.notificationRouterIsRunningForTesting() == false)
+    }
+
+    @Test func sidebarCancellationUsesAppServerInterruptAndRendersTerminalState() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(
+            AppServerAPI.Thread.Start.Response(threadID: "thread-review", model: "gpt-5"),
+            for: "thread/start"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Review.Start.Response(
+                turnID: "turn-review",
+                reviewThreadID: "thread-review"
+            ),
+            for: "review/start"
+        )
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        try await transport.enqueue(
+            AppServerAPI.Thread.Unsubscribe.Response(status: .unsubscribed),
+            for: "thread/unsubscribe"
+        )
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let store = CodexReviewStore.makeTestingStore(
+            backend: ReviewUIAppServerStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        let review = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+
+        try await withReviewUIAppServerCleanup(
+            store: store,
+            backend: backend,
+            reviewTask: review
+        ) {
+            try #require(await StoreSnapshotProbe(store: store).waitUntil { snapshot in
+                snapshot.job("job-1")?.activeRun?.turnID == "turn-review"
+            } != nil)
+            let job = try #require(store.job(id: "job-1"))
+            let harness = makeWindowHarness(store: store)
+            defer { harness.window.close() }
+            let sidebar = harness.viewController.sidebarViewControllerForTesting
+            let contentPane = harness.viewController.transportViewControllerForTesting
+            sidebar.selectJobForTesting(job)
+            _ = try await awaitTransportRender(contentPane)
+
+            try await transport.emitServerNotification(
+                method: "item/completed",
+                params: ReviewUIV2ItemNotification(
+                    threadID: "thread-review",
+                    turnID: "turn-review",
+                    item: .init(
+                        type: "agentMessage",
+                        id: "partial-review",
+                        text: "Partial review before cancellation."
+                    )
+                )
+            )
+            _ = try await awaitTransportRender(contentPane) { snapshot in
+                snapshot.log.contains("Partial review before cancellation.")
+            }
+
+            var cancellationActionWasAvailable = false
+            var cancellationActionWasSent = false
+            sidebar.presentContextMenuForTesting(for: job) { menu in
+                guard let item = menu.items.first,
+                      item.title == "Cancel",
+                      item.isEnabled,
+                      let action = item.action
+                else {
+                    return
+                }
+                cancellationActionWasAvailable = true
+                cancellationActionWasSent = NSApplication.shared.sendAction(
+                    action,
+                    to: item.target,
+                    from: item
+                )
+            }
+            #expect(cancellationActionWasAvailable)
+            #expect(cancellationActionWasSent)
+
+            try await withTestTimeout {
+                while await transport.recordedRequests().contains(where: {
+                    $0.method == "turn/interrupt"
+                }) == false {
+                    try Task.checkCancellation()
+                    await Task.yield()
+                }
+            }
+            let interruptRequest = try #require(
+                await transport.recordedRequests().first { $0.method == "turn/interrupt" }
+            )
+            let interruptParams = try JSONDecoder().decode(
+                AppServerAPI.Turn.Interrupt.Params.self,
+                from: interruptRequest.params
+            )
+            #expect(interruptParams.threadID == "thread-review")
+            #expect(interruptParams.turnID == "turn-review")
+
+            try await transport.emitServerNotification(
+                method: "turn/completed",
+                params: ReviewUIV2TurnNotification(
+                    threadID: "thread-review",
+                    turn: .init(
+                        id: "turn-review",
+                        items: [],
+                        itemsView: "notLoaded",
+                        status: "interrupted"
+                    )
+                )
+            )
+
+            let result = try await review.value
+            let rendered = try await awaitTransportRender(contentPane)
+            let expectedCancellation = ReviewCancellation.userInterface()
+            #expect(result.core.lifecycle.status == .cancelled)
+            #expect(result.core.lifecycle.terminal == .interrupted(
+                .requested(expectedCancellation)
+            ))
+            #expect(result.core.lifecycle.cancellation == expectedCancellation)
+            #expect(result.core.output.summary == expectedCancellation.message)
+            #expect(job.core.lifecycle.status == .cancelled)
+            #expect(job.core.lifecycle.errorMessage == expectedCancellation.message)
+            #expect(job.logEntries.contains { $0.kind == .error } == false)
+            #expect(rendered.log.contains("Partial review before cancellation."))
+            try await waitForCondition {
+                store.reviewWorkerTasks["job-1"] == nil
+            }
+            #expect(await backend.reviewEventSessionCountForTesting() == 0)
+
+            var terminalCancelItemIsDisabled = false
+            sidebar.presentContextMenuForTesting(for: job) { menu in
+                terminalCancelItemIsDisabled = menu.items.first.map {
+                    $0.title == "Cancel" && $0.isEnabled == false
+                } ?? false
+            }
+            #expect(terminalCancelItemIsDisabled)
+
+            let requestMethods = await transport.recordedRequests().map(\.method)
+            #expect(requestMethods.filter { $0 == "turn/interrupt" }.count == 1)
+            #expect(requestMethods.contains("thread/backgroundTerminals/clean"))
+            #expect(requestMethods.contains("thread/unsubscribe"))
+            #expect(requestMethods.contains("thread/delete"))
+        }
         #expect(await transport.isClosedForTesting())
         #expect(store.reviewWorkerTasks["job-1"] == nil)
         #expect(await backend.reviewEventSessionCountForTesting() == 0)
@@ -291,6 +454,20 @@ private final class ReviewUIAppServerStoreBackend: PreviewCodexReviewStoreBacken
         admission: ReviewStartAdmission
     ) async throws -> BackendReviewAttempt {
         try await reviewBackend.startReview(request, admission: admission)
+    }
+
+    override func interruptReview(
+        _ run: CodexReviewBackendModel.Review.Run,
+        reason: CodexReviewBackendModel.CancellationReason
+    ) async throws {
+        try await reviewBackend.interruptReview(run, reason: reason)
+    }
+
+    override func interruptReview(
+        _ admission: ReviewInterruptRequestAdmission,
+        reason: CodexReviewBackendModel.CancellationReason
+    ) async throws {
+        try await reviewBackend.interruptReview(admission, reason: reason)
     }
 
     override func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async {
