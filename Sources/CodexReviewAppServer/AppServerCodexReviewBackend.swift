@@ -906,8 +906,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         }
         try await admission.recordRecoveryRollbackAcknowledged(for: interruptedRun)
 
-        let control = controlsByThreadID[interruptedRun.threadID]
-            ?? AppServerReviewControl(client: client)
+        let control = AppServerReviewControl(client: client)
         controlsByThreadID[interruptedRun.threadID] = control
         let attemptID = makeAppServerReviewAttemptID()
         let provisionalRun = CodexReviewBackendModel.Review.Run(

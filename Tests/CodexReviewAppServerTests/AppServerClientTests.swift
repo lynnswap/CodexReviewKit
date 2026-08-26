@@ -1329,7 +1329,7 @@ struct AppServerClientTests {
         #expect(await transport.recordedRequests().count == 2)
     }
 
-    @Test func successfulFirstInterruptDoesNotOverwriteNewerPhase() async throws {
+    @Test func successfulInterruptRedispatchesNewerActiveTurnBeforeReturning() async throws {
         let transport = FakeJSONRPCTransport()
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
@@ -1349,12 +1349,9 @@ struct AppServerClientTests {
 
         #expect(try await interrupt.value == .sent(.init(
             threadID: "thread-1",
-            turnID: "turn-old"
-        )))
-        #expect(try await control.interruptOutcome() == .sent(.init(
-            threadID: "thread-1",
             turnID: "turn-newer"
         )))
+        #expect(try await control.interruptOutcome() == .superseded)
         let requests = await transport.recordedRequests()
         let turns = try requests.map {
             try JSONDecoder().decode(
@@ -1365,7 +1362,7 @@ struct AppServerClientTests {
         #expect(turns == ["turn-old", "turn-newer"])
     }
 
-    @Test func successfulRetryDoesNotOverwriteNewerPhase() async throws {
+    @Test func successfulMismatchRetryRedispatchesNewerActiveTurnBeforeReturning() async throws {
         let transport = FakeJSONRPCTransport()
         await transport.enqueueFailure(
             .responseError(
@@ -1393,12 +1390,9 @@ struct AppServerClientTests {
 
         #expect(try await interrupt.value == .sent(.init(
             threadID: "thread-1",
-            turnID: "turn-new"
-        )))
-        #expect(try await control.interruptOutcome() == .sent(.init(
-            threadID: "thread-1",
             turnID: "turn-newer"
         )))
+        #expect(try await control.interruptOutcome() == .superseded)
         let requests = await transport.recordedRequests()
         let turns = try requests.map {
             try JSONDecoder().decode(
@@ -3488,6 +3482,93 @@ struct AppServerClientTests {
         let restartParams = try JSONDecoder().decode(AppServerAPI.Review.Start.Params.self, from: restart.params)
         #expect(restartParams.threadID == "thread-1")
         #expect(restartParams.target == .baseBranch("main"))
+    }
+
+    @Test func recoveredAttemptUsesFreshControlForTypedCancellation() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(
+            AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"),
+            for: "thread/start"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Review.Start.Response(
+                turnID: "turn-1",
+                reviewThreadID: "thread-1"
+            ),
+            for: "review/start"
+        )
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        try await transport.enqueue(EmptyResponse(), for: "thread/rollback")
+        try await transport.enqueue(
+            AppServerAPI.Review.Start.Response(
+                turnID: "turn-2",
+                reviewThreadID: "thread-1"
+            ),
+            for: "review/start"
+        )
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let started = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        ))
+        let recoveryReason = CodexReviewBackendModel.CancellationReason(
+            message: "Network unavailable; waiting to reconnect."
+        )
+        let handoff = try await backend.prepareTypedReviewRecovery(
+            started.run,
+            reason: recoveryReason
+        )
+        let recoveryAdmission = ReviewStartAdmission()
+        let recovered = try await backend.resumeReviewRecovery(
+            handoff,
+            request: .init(
+                jobID: "job-1",
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
+                model: "gpt-5"
+            ),
+            admission: recoveryAdmission
+        )
+        let cancellation = ReviewCancellation.mcpClient(message: "Stop replacement")
+
+        let interruption = Task {
+            try await recoveryAdmission.interrupt(
+                recovered.run,
+                cancellation: cancellation,
+                request: { requestAdmission, reason in
+                    try await backend.interruptReview(
+                        requestAdmission,
+                        reason: reason
+                    )
+                }
+            )
+        }
+        await transport.waitForRequestCount(7)
+        try await recoveryAdmission.recordCanonicalTerminal(
+            .interrupted(.server(message: cancellation.message)),
+            for: recovered.run
+        )
+        let resolution = try await interruption.value
+
+        #expect(resolution.run == recovered.run)
+        #expect(resolution.terminal == .canonical(
+            .interrupted(.requested(cancellation))
+        ))
+        let interruptions = try await transport.recordedRequests()
+            .filter { $0.method == "turn/interrupt" }
+            .map {
+                try JSONDecoder().decode(
+                    AppServerAPI.Turn.Interrupt.Params.self,
+                    from: $0.params
+                )
+            }
+        #expect(interruptions == [
+            .init(threadID: "thread-1", turnID: "turn-1"),
+            .init(threadID: "thread-1", turnID: "turn-2"),
+        ])
     }
 
     @Test func backendRecoverReviewUsesDetachedReviewThreadBeforeStartedNotification() async throws {
