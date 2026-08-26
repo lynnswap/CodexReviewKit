@@ -1222,6 +1222,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                 "thread/backgroundTerminals/clean for \(run.threadID): \(timeout.localizedDescription)"
             )
             shouldStopNetworkCleanup = true
+            runtimeWasInvalidated = true
         } catch {
             failureMessages.append(
                 "thread/backgroundTerminals/clean for \(run.threadID): \(error.localizedDescription)"
@@ -1245,6 +1246,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                     "thread/unsubscribe for \(run.threadID): \(timeout.localizedDescription)"
                 )
                 shouldStopNetworkCleanup = true
+                runtimeWasInvalidated = true
             } catch {
                 failureMessages.append(
                     "thread/unsubscribe for \(run.threadID): \(error.localizedDescription)"
@@ -1271,6 +1273,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                         "thread/delete for \(threadID): \(timeout.localizedDescription)"
                     )
                     shouldStopNetworkCleanup = true
+                    runtimeWasInvalidated = true
                     break
                 } catch {
                     failureMessages.append(

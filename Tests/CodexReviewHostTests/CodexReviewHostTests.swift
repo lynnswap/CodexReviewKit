@@ -506,6 +506,7 @@ struct CodexReviewHostTests {
 
     @Test func liveCleanupTransportInvalidationTearsDownActiveRuntime() async throws {
         let transport = FakeJSONRPCTransport()
+        let replacementTransport = FakeJSONRPCTransport()
         try await enqueueRuntimeStartResponses(transport)
         try await enqueueLiveRouteReviewStartResponses(
             transport,
@@ -513,10 +514,19 @@ struct CodexReviewHostTests {
             turnID: "turn-1",
             reviewThreadID: "review-thread-1"
         )
+        try await enqueueRuntimeStartResponses(replacementTransport)
+        try await enqueueLiveRouteReviewStartResponses(
+            replacementTransport,
+            threadID: "replacement-thread",
+            turnID: "replacement-turn",
+            reviewThreadID: "replacement-review-thread"
+        )
+        try await enqueueReviewCleanupResponses(replacementTransport)
+        var transports = [transport, replacementTransport]
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": try temporaryHome().path],
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
-            transport: transport
+            transportFactory: { _ in transports.removeFirst() }
         )
         await store.start()
         let attempt = try await store.backend.startReview(
@@ -531,13 +541,16 @@ struct CodexReviewHostTests {
             try await store.backend.cleanupReview(attempt.run)
         }
 
+        #expect(await transport.isClosedForTesting())
         #expect(store.liveReviewAttemptRouteCountForTesting == 0)
-        await store.waitUntilStopped()
-        #expect(store.serverState == .failed(
-            "Review runtime stopped unexpectedly: App-server connection close failed: "
-                + "thread/backgroundTerminals/clean for route-thread: JSON-RPC transport is closed."
-        ))
-        #expect(store.serverURL == nil)
+        #expect(store.serverState == .running)
+        let replacementAttempt = try await store.backend.startReview(
+            makeLiveRouteReviewStartRequest(jobID: "job-replacement"),
+            admission: ReviewStartAdmission()
+        )
+        try await store.backend.cleanupReview(replacementAttempt.run)
+        #expect(store.liveReviewAttemptRouteCountForTesting == 0)
+        await store.stop()
     }
 
     @Test func liveCompatibilityOutcomeUnknownStartDoesNotRetainLowerCleanupRoute() async throws {
