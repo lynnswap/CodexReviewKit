@@ -29,7 +29,7 @@ private struct AppServerCleanupRequestTimeout: LocalizedError, Sendable {
     }
 }
 
-private struct AppServerCleanupRequestFailure: LocalizedError, Sendable {
+private struct AppServerCleanupRequestRaceFailure: LocalizedError, Sendable {
     let message: String
 
     var errorDescription: String? {
@@ -1114,9 +1114,16 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         let race = AppServerCleanupRequestRace<Request.Response>()
         let sendTask = Task { [client] in
             do {
-                await race.resolve(.success(try await client.send(request)))
+                await race.resolve(.success(try await client.sendCleanupRequest(request)))
             } catch is CancellationError {
                 await race.resolve(.cancelled)
+            } catch let failure as AppServerCleanupRequestFailure {
+                switch failure.stage {
+                case .transport:
+                    await race.resolve(.transportInvalidated(failure.localizedDescription))
+                case .responseDecoding:
+                    await race.resolve(.failure(failure.localizedDescription))
+                }
             } catch let error as JSONRPC.Error {
                 switch error {
                 case .closed, .invalidMessage, .transportTerminated:
@@ -1158,7 +1165,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             timeoutTask.cancel()
             await timeoutTask.value
             await sendTask.value
-            throw AppServerCleanupRequestFailure(message: message)
+            throw AppServerCleanupRequestRaceFailure(message: message)
         case .transportInvalidated(let message):
             timeoutTask.cancel()
             await timeoutTask.value

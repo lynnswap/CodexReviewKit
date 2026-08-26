@@ -514,6 +514,10 @@ struct CodexReviewHostTests {
             turnID: "turn-1",
             reviewThreadID: "review-thread-1"
         )
+        await transport.enqueueTransportFailure(
+            message: "raw cleanup I/O failed",
+            for: "thread/backgroundTerminals/clean"
+        )
         try await enqueueRuntimeStartResponses(replacementTransport)
         try await enqueueLiveRouteReviewStartResponses(
             replacementTransport,
@@ -533,10 +537,9 @@ struct CodexReviewHostTests {
             makeLiveRouteReviewStartRequest(jobID: "job-cleanup-invalidation"),
             admission: ReviewStartAdmission()
         )
-        await transport.close()
-
         await #expect(throws: ReviewRuntimeCloseFailure.connection(
-            "thread/backgroundTerminals/clean for route-thread: JSON-RPC transport is closed."
+            "thread/backgroundTerminals/clean for route-thread: "
+                + "App-server cleanup request failed during transport: raw cleanup I/O failed"
         )) {
             try await store.backend.cleanupReview(attempt.run)
         }
