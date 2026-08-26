@@ -1906,10 +1906,7 @@ struct CodexReviewStoreCommandTests {
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
         }
-        try #require(await StoreSnapshotProbe(store: store).waitUntilRunAttempt(
-            "attempt-1",
-            jobID: "job-1"
-        ) != nil)
+        try #require(await StoreSnapshotProbe(store: store).waitUntilRunAttempt("attempt-1", jobID: "job-1") != nil)
         guard case .active(let active)? = store.reviewAttemptOwnerships["job-1"] else { Issue.record("Expected an active review attempt."); return }
         let reason = ReviewCancellation.system(message: "Store work owner closed.")
         let job = try #require(store.job(id: "job-1"))
@@ -1918,9 +1915,12 @@ struct CodexReviewStoreCommandTests {
         let final = try await review.value
         let resolution = try #require(await active.admission.activeTerminalResolution())
         let receipt = try #require(resolution.cancellationRequestReceipt)
+        let crossJobReceipt = ReviewCancellationRequestReceipt(id: .init(jobID: "job-2", ordinal: receipt.id.ordinal + 1), cancellation: reason, rejectionDisposition: .preserveRuntimeStopIntent)
 
         #expect(final.core.lifecycle.status == .cancelled && final.core.lifecycle.cancellation == reason)
         #expect(receipt.id.jobID == firstReceipt.id.jobID && receipt.id.ordinal == firstReceipt.id.ordinal + 1 && receipt.cancellation == reason && receipt.rejectionDisposition == .preserveRuntimeStopIntent)
+        #expect(latestCleanupCancellationRequest(firstReceipt, receipt) == receipt && latestCleanupCancellationRequest(firstReceipt, nil) == firstReceipt)
+        #expect(latestCleanupCancellationRequest(receipt, firstReceipt) == receipt && latestCleanupCancellationRequest(firstReceipt, firstReceipt) == firstReceipt && latestCleanupCancellationRequest(firstReceipt, crossJobReceipt) == firstReceipt)
         #expect(await backend.recordedCommands().contains(.cleanupReview(active.run)) && store.reviewWorkerTasks["job-1"] == nil && store.storeWorkRegistry.activeOrdinals.isEmpty)
     }
 

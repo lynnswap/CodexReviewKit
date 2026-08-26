@@ -433,13 +433,6 @@ extension CodexReviewStore {
 
         var requestReceipt: ReviewCancellationRequestReceipt? { switch self { case .semantic: nil; case .receipt(let receipt): receipt } }
 
-        static func latestReceipt(_ captured: ReviewCancellationRequestReceipt?, _ current: ReviewCancellationRequestReceipt?) -> ReviewCancellationRequestReceipt? {
-            guard let current else { return captured }
-            guard let captured else { return current }
-            guard captured.id.jobID == current.id.jobID, current.id.ordinal > captured.id.ordinal,
-                  captured.rejectionDisposition == .reportFailure else { return captured }
-            return current
-        }
     }
 
     private func interruptActiveAttempt(
@@ -540,7 +533,7 @@ extension CodexReviewStore {
         cancellationRequest capturedCancellationRequest: ReviewCancellationRequestReceipt?,
         inputs: ReviewWorkerInputs?
     ) async -> ReviewRuntimeCloseFailure? {
-        let cancellationRequest = ActiveAttemptCancellation.latestReceipt(capturedCancellationRequest, job.pendingCancellationRequest)
+        let cancellationRequest = latestCleanupCancellationRequest(capturedCancellationRequest, job.pendingCancellationRequest)
         if let unpublishedAttempt {
             let failure = await cleanupReviewFailure(unpublishedAttempt.run)
             let starting = StoreReviewAttemptOwnership.starting(workerAdmission)
@@ -1728,6 +1721,14 @@ extension CodexReviewStore {
     private func nextWorkspaceSortOrder() -> Double {
         (workspaces.map(\.sortOrder).max() ?? -1) + 1
     }
+}
+
+package func latestCleanupCancellationRequest(_ captured: ReviewCancellationRequestReceipt?, _ current: ReviewCancellationRequestReceipt?) -> ReviewCancellationRequestReceipt? {
+    guard let current else { return captured }
+    guard let captured else { return current }
+    guard captured.id.jobID == current.id.jobID, current.id.ordinal > captured.id.ordinal,
+          captured.rejectionDisposition == .reportFailure else { return captured }
+    return current
 }
 
 private struct ReviewReadLogGroupKey: Hashable {
