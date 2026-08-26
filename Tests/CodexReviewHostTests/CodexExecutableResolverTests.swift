@@ -176,6 +176,7 @@ struct CodexExecutableResolverTests {
             homeDirectory: root,
             applicationDirectories: [],
             fallbackBinDirectories: [],
+            loginShellURL: URL(fileURLWithPath: "/bin/zsh"),
             fileSystem: .live,
             shellPathDiscovery: .live(timeout: .seconds(1))
         ))
@@ -191,37 +192,69 @@ struct CodexExecutableResolverTests {
         }
     }
 
-    @Test func liveZshDiscoveryTerminatesHungStartupAtTimeout() async throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("codex-shell-timeout-\(UUID().uuidString)", isDirectory: true)
+    @Test func liveZshDiscoveryIgnoresCodexAlias() async throws {
+        let root = try temporaryShellHome(prefix: "codex-shell-zsh-alias")
         defer { try? FileManager.default.removeItem(at: root) }
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let childPIDURL = root.appendingPathComponent("child.pid")
-        try Data("""
-            /bin/sh -c 'trap "" TERM; while :; do /bin/sleep 1; done' &
-            print $! > "\(childPIDURL.path)"
-            wait
-            """.utf8).write(to: root.appendingPathComponent(".zshrc"))
-        let clock = ContinuousClock()
-        let start = clock.now
-
-        let outcome = await CodexShellPathDiscovery.live(timeout: .milliseconds(50)).discover(
-            shellURL: URL(fileURLWithPath: "/bin/zsh"),
-            environment: [
-                "HOME": root.path,
-                "PATH": "/usr/bin:/bin",
-                "ZDOTDIR": root.path,
-            ]
+        let codex = try writeCodexExecutable(in: root)
+        try Data("alias codex='/alias/codex'\nexport PATH=\"\(codex.deletingLastPathComponent().path):$PATH\"\n".utf8)
+            .write(to: root.appendingPathComponent(".zshrc"))
+        let resolver = makeLiveResolver(
+            homeDirectory: root,
+            loginShellURL: URL(fileURLWithPath: "/bin/zsh")
         )
 
-        #expect(outcome == .timedOut)
-        #expect(clock.now - start < .seconds(1))
-        let childPID = try #require(Int32(
-            String(contentsOf: childPIDURL, encoding: .utf8)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        ))
-        #expect(Darwin.kill(childPID, 0) == -1)
-        #expect(errno == ESRCH)
+        #expect(try await resolver.resolve(
+            configuredPath: nil,
+            environment: ["PATH": "/usr/bin:/bin", "SHELL": "/bin/zsh"]
+        ) == codex)
+    }
+
+    @Test func liveBashDiscoveryUsesAccountLoginShellAndIgnoresCodexFunction() async throws {
+        let root = try temporaryShellHome(prefix: "codex-shell-bash-function")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let codex = try writeCodexExecutable(in: root)
+        try Data("function codex { return 0; }\nexport PATH=\"\(codex.deletingLastPathComponent().path):$PATH\"\n".utf8)
+            .write(to: root.appendingPathComponent(".bash_profile"))
+        let resolver = makeLiveResolver(
+            homeDirectory: root,
+            loginShellURL: URL(fileURLWithPath: "/bin/bash")
+        )
+
+        #expect(try await resolver.resolve(
+            configuredPath: nil,
+            environment: ["PATH": "/usr/bin:/bin"]
+        ) == codex)
+    }
+
+    @Test func liveZshDiscoveryLoadsTerminalGuardedPath() async throws {
+        let root = try temporaryShellHome(prefix: "codex-shell-terminal-guard")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let codex = try writeCodexExecutable(in: root)
+        try Data("if [ -t 0 ] && [ -t 1 ]; then export PATH=\"\(codex.deletingLastPathComponent().path):$PATH\"; fi\n".utf8)
+            .write(to: root.appendingPathComponent(".zshrc"))
+        let resolver = makeLiveResolver(
+            homeDirectory: root,
+            loginShellURL: URL(fileURLWithPath: "/bin/zsh")
+        )
+
+        #expect(try await resolver.resolve(
+            configuredPath: nil,
+            environment: ["PATH": "/usr/bin:/bin", "SHELL": "/bin/zsh"]
+        ) == codex)
+    }
+
+    @Test func liveZshDiscoveryTerminatesHungStartupAtTimeout() async throws {
+        try await expectHungShellStartupTerminates(
+            shellPath: "/bin/zsh",
+            startupFile: ".zshrc"
+        )
+    }
+
+    @Test func liveBashDiscoveryTerminatesHungStartupAtTimeout() async throws {
+        try await expectHungShellStartupTerminates(
+            shellPath: "/bin/bash",
+            startupFile: ".bash_profile"
+        )
     }
 
     @Test func liveZshDiscoveryPreservesClosedStandardDescriptors() throws {
@@ -389,6 +422,72 @@ struct CodexExecutableResolverTests {
     }
 }
 
+private func temporaryShellHome(prefix: String) throws -> URL {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("\(prefix)-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    return root
+}
+
+private func expectHungShellStartupTerminates(
+    shellPath: String,
+    startupFile: String
+) async throws {
+    let root = try temporaryShellHome(prefix: "codex-shell-timeout")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let childPIDURL = root.appendingPathComponent("child.pid")
+    try Data("""
+        /bin/sh -c 'trap "" TERM; while :; do /bin/sleep 1; done' &
+        printf '%s\n' "$!" > "\(childPIDURL.path)"
+        wait
+        """.utf8).write(to: root.appendingPathComponent(startupFile))
+    let clock = ContinuousClock()
+    let start = clock.now
+
+    let outcome = await CodexShellPathDiscovery.live(timeout: .milliseconds(50)).discover(
+        shellURL: URL(fileURLWithPath: shellPath),
+        environment: [
+            "HOME": root.path,
+            "PATH": "/usr/bin:/bin",
+            "ZDOTDIR": root.path,
+        ]
+    )
+
+    #expect(outcome == .timedOut)
+    #expect(clock.now - start < .seconds(1))
+    let childPID = try #require(Int32(
+        String(contentsOf: childPIDURL, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    ))
+    #expect(Darwin.kill(childPID, 0) == -1)
+    #expect(errno == ESRCH)
+}
+
+private func writeCodexExecutable(in homeDirectory: URL) throws -> URL {
+    let bin = homeDirectory.appendingPathComponent("managed-bin", isDirectory: true)
+    try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+    let codex = bin.appendingPathComponent("codex")
+    try Data("#!/bin/sh\nexit 0\n".utf8).write(to: codex)
+    guard chmod(codex.path, S_IRWXU) == 0 else {
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+    return codex
+}
+
+private func makeLiveResolver(
+    homeDirectory: URL,
+    loginShellURL: URL
+) -> CodexExecutableResolver {
+    CodexExecutableResolver(configuration: .init(
+        homeDirectory: homeDirectory,
+        applicationDirectories: [],
+        fallbackBinDirectories: [],
+        loginShellURL: loginShellURL,
+        fileSystem: .live,
+        shellPathDiscovery: .live(timeout: .seconds(1))
+    ))
+}
+
 final class ShellProbeClosedStdioHarnessTests: XCTestCase {
     static let enabledKey = "CODEX_REVIEW_RUN_CLOSED_STDIO_HARNESS"
     static let homeKey = "CODEX_REVIEW_CLOSED_STDIO_HOME"
@@ -476,6 +575,7 @@ func makeResolver(
     directories: Set<String> = [],
     bundleIDs: [String: String] = [:],
     canonical: [String: String] = [:],
+    loginShellURL: URL? = URL(fileURLWithPath: "/bin/zsh"),
     shellPathDiscovery: CodexShellPathDiscovery = .init { _, _ in .failed("not configured for test") }
 ) -> CodexExecutableResolver {
     let fileSystem = CodexExecutableResolver.FileSystem(
@@ -494,6 +594,7 @@ func makeResolver(
             URL(fileURLWithPath: "/brew", isDirectory: true),
             URL(fileURLWithPath: "/system", isDirectory: true),
         ],
+        loginShellURL: loginShellURL,
         fileSystem: fileSystem,
         shellPathDiscovery: shellPathDiscovery
     ))

@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 package struct CodexExecutableResolutionError: LocalizedError, Equatable, Sendable {
@@ -67,18 +68,21 @@ package struct CodexExecutableResolver: Sendable {
         package var homeDirectory: URL
         package var applicationDirectories: [URL]
         package var fallbackBinDirectories: [URL]
+        package var loginShellURL: URL?
         package var fileSystem: FileSystem
         package var shellPathDiscovery: CodexShellPathDiscovery
         package init(
             homeDirectory: URL,
             applicationDirectories: [URL],
             fallbackBinDirectories: [URL],
+            loginShellURL: URL?,
             fileSystem: FileSystem,
             shellPathDiscovery: CodexShellPathDiscovery
         ) {
             self.homeDirectory = homeDirectory
             self.applicationDirectories = applicationDirectories
             self.fallbackBinDirectories = fallbackBinDirectories
+            self.loginShellURL = loginShellURL
             self.fileSystem = fileSystem
             self.shellPathDiscovery = shellPathDiscovery
         }
@@ -93,9 +97,44 @@ package struct CodexExecutableResolver: Sendable {
                 fallbackBinDirectories: [
                     "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin",
                 ].map { URL(fileURLWithPath: $0, isDirectory: true) },
+                loginShellURL: Self.currentAccountLoginShellURL(),
                 fileSystem: .live,
                 shellPathDiscovery: .live()
             )
+        }
+
+        private static func currentAccountLoginShellURL() -> URL? {
+            let recommendedSize = sysconf(_SC_GETPW_R_SIZE_MAX)
+            var bufferSize = recommendedSize > 0 ? Int(recommendedSize) : 4_096
+            while bufferSize <= 1_048_576 {
+                var entry = passwd()
+                var result: UnsafeMutablePointer<passwd>?
+                var shellPath: String?
+                var buffer = [CChar](repeating: 0, count: bufferSize)
+                let status = buffer.withUnsafeMutableBufferPointer { buffer in
+                    let status = getpwuid_r(
+                        getuid(),
+                        &entry,
+                        buffer.baseAddress,
+                        buffer.count,
+                        &result
+                    )
+                    if status == 0, result != nil, let shell = entry.pw_shell {
+                        shellPath = String(cString: shell)
+                    }
+                    return status
+                }
+                if status == ERANGE {
+                    bufferSize *= 2
+                    continue
+                }
+                guard status == 0,
+                      let shellPath,
+                      shellPath.hasPrefix("/")
+                else { return nil }
+                return URL(fileURLWithPath: shellPath)
+            }
+            return nil
         }
     }
 
@@ -201,7 +240,19 @@ package struct CodexExecutableResolver: Sendable {
         var seen: Set<String> = []
         var trace: [CodexExecutableResolutionError.Trace] = []
         mutating func shellURL(_ value: String?) -> URL? {
-            let rawValue = value ?? "/bin/zsh"
+            let rawValue: String
+            if let value {
+                rawValue = value
+            } else if let loginShellURL = configuration.loginShellURL {
+                rawValue = loginShellURL.path
+            } else {
+                trace.append(.init(
+                    source: .shell("(missing)"),
+                    candidate: "codex",
+                    reason: "SHELL is missing and the account login shell is unavailable"
+                ))
+                return nil
+            }
             let path = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let source = CodexExecutableResolutionError.Source.shell(rawValue)
             guard path.hasPrefix("/") else {

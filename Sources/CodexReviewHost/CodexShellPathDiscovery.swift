@@ -42,7 +42,6 @@ enum CodexShellProbeMarkers {
 }
 
 private enum ShellProbe {
-    static let command = "printf '\\n%s\\n' '\(CodexShellProbeMarkers.begin)'; command -v codex || :; printf '%s\\n' '\(CodexShellProbeMarkers.end)'"
     private static let terminationGrace: Duration = .milliseconds(100)
 
     static func run(
@@ -54,9 +53,9 @@ private enum ShellProbe {
             return .failed("unsupported shell")
         }
 
-        let launch: ShellProbeProcess.Launch
+        let process: ShellProbeProcess
         do {
-            launch = try ShellProbeProcess.launch(
+            process = try ShellProbeProcess.launch(
                 executableURL: shellURL,
                 arguments: arguments,
                 environment: environment
@@ -64,21 +63,18 @@ private enum ShellProbe {
         } catch {
             return .failed(error.localizedDescription)
         }
-        let collector = BoundedPipeCollector(fileHandle: launch.stdout.fileHandleForReading)
-        collector.start()
-
-        guard let status = launch.process.wait(timeout: timeout) else {
-            launch.process.terminateProcessGroup(grace: terminationGrace)
-            _ = launch.process.wait(timeout: terminationGrace)
-            _ = collector.stop()
+        guard let status = process.wait(timeout: timeout) else {
+            process.terminateProcessGroup(grace: terminationGrace)
+            _ = process.wait(timeout: terminationGrace)
+            _ = process.stopCollectingOutput()
             return .timedOut
         }
 
         // Startup files can leave background work behind after the shell exits.
         // The probe owns the process group and never transfers those children.
-        launch.process.terminateProcessGroup(grace: terminationGrace)
-        collector.waitForEnd(timeout: terminationGrace.timeInterval)
-        let data = collector.stop()
+        process.terminateProcessGroup(grace: terminationGrace)
+        process.waitForOutputEnd(timeout: terminationGrace.timeInterval)
+        let data = process.stopCollectingOutput()
         guard status == 0 else {
             return .failed("shell exited with wait status \(status)")
         }
@@ -86,30 +82,64 @@ private enum ShellProbe {
     }
 
     private static func arguments(for shellURL: URL) -> [String]? {
+        let lookup: String
         switch shellURL.lastPathComponent {
-        case "zsh", "bash":
-            // A login and interactive shell matches the startup files that commonly
-            // install version-manager and user-bin PATH entries in Terminal.
-            return ["-l", "-i", "-c", command]
-        default:
-            return nil
+        case "zsh": lookup = "builtin whence -p codex || :"
+        case "bash": lookup = "builtin type -P codex || :"
+        default: return nil
         }
+        // A login and interactive shell matches the startup files that commonly
+        // install version-manager and user-bin PATH entries in Terminal. Keep
+        // monitor mode off so startup background work remains in the process
+        // group whose complete termination this probe owns.
+        let command = "printf '\\n%s\\n' '\(CodexShellProbeMarkers.begin)'; \(lookup); printf '%s\\n' '\(CodexShellProbeMarkers.end)'"
+        return ["-l", "-i", "+m", "-c", command]
+    }
+}
+
+private struct PseudoTerminal {
+    var primaryFileHandle: FileHandle
+    var replicaDescriptor: Int32
+
+    static func open() throws -> Self {
+        var primaryDescriptor: Int32 = -1
+        var replicaDescriptor: Int32 = -1
+        var windowSize = winsize(
+            ws_row: 24,
+            ws_col: 80,
+            ws_xpixel: 0,
+            ws_ypixel: 0
+        )
+        guard openpty(
+            &primaryDescriptor,
+            &replicaDescriptor,
+            nil,
+            nil,
+            &windowSize
+        ) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        return .init(
+            primaryFileHandle: FileHandle(
+                fileDescriptor: primaryDescriptor,
+                closeOnDealloc: true
+            ),
+            replicaDescriptor: replicaDescriptor
+        )
     }
 }
 
 private final class ShellProbeProcess: @unchecked Sendable {
-    struct Launch {
-        var process: ShellProbeProcess
-        var stdout: Pipe
-    }
-
     private let processIdentifier: pid_t
+    private let outputCollector: BoundedOutputCollector
     private let completion = DispatchSemaphore(value: 0)
     private let statusLock = NSLock()
     private var waitStatus: Int32?
 
-    private init(processIdentifier: pid_t) {
+    private init(processIdentifier: pid_t, outputFileHandle: FileHandle) {
         self.processIdentifier = processIdentifier
+        outputCollector = BoundedOutputCollector(fileHandle: outputFileHandle)
+        outputCollector.start()
         DispatchQueue.global(qos: .utility).async { [self] in
             var status: Int32 = 0
             var result: pid_t
@@ -127,21 +157,13 @@ private final class ShellProbeProcess: @unchecked Sendable {
         executableURL: URL,
         arguments: [String],
         environment: [String: String]
-    ) throws -> Launch {
-        let stdout = Pipe()
-        let nullDescriptor = Darwin.open("/dev/null", O_RDWR)
-        guard nullDescriptor >= 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
-        defer { Darwin.close(nullDescriptor) }
+    ) throws -> ShellProbeProcess {
+        let terminal = try PseudoTerminal.open()
+        defer { Darwin.close(terminal.replicaDescriptor) }
         var duplicatedDescriptors: [Int32] = []
         defer { duplicatedDescriptors.forEach { Darwin.close($0) } }
-        let stdoutDescriptor = try childSourceDescriptor(
-            stdout.fileHandleForWriting.fileDescriptor,
-            duplicatedDescriptors: &duplicatedDescriptors
-        )
-        let childNullDescriptor = try childSourceDescriptor(
-            nullDescriptor,
+        let childTerminalDescriptor = try childSourceDescriptor(
+            terminal.replicaDescriptor,
             duplicatedDescriptors: &duplicatedDescriptors
         )
         var fileActions: posix_spawn_file_actions_t?
@@ -155,29 +177,31 @@ private final class ShellProbeProcess: @unchecked Sendable {
 
         try check(posix_spawn_file_actions_adddup2(
             &fileActions,
-            childNullDescriptor,
+            childTerminalDescriptor,
             STDIN_FILENO
         ))
         try check(posix_spawn_file_actions_adddup2(
             &fileActions,
-            stdoutDescriptor,
+            childTerminalDescriptor,
             STDOUT_FILENO
         ))
         try check(posix_spawn_file_actions_adddup2(
             &fileActions,
-            childNullDescriptor,
+            childTerminalDescriptor,
             STDERR_FILENO
         ))
         let ownedDescriptors = Set([
-            childNullDescriptor,
-            stdout.fileHandleForReading.fileDescriptor,
-            stdoutDescriptor,
+            childTerminalDescriptor,
+            terminal.primaryFileHandle.fileDescriptor,
         ]).filter { $0 > STDERR_FILENO }
         for fileDescriptor in ownedDescriptors {
             try check(posix_spawn_file_actions_addclose(&fileActions, fileDescriptor))
         }
-        try check(posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP)))
-        try check(posix_spawnattr_setpgroup(&attributes, 0))
+        // A new session drops the parent's controlling terminal while the PTY
+        // descriptors still satisfy terminal-gated startup files. Together with
+        // monitor mode disabled at shell launch, this keeps startup children in
+        // the process group owned by this probe.
+        try check(posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETSID)))
 
         let executablePath = executableURL.path
         let argv = [executablePath] + arguments
@@ -198,11 +222,20 @@ private final class ShellProbeProcess: @unchecked Sendable {
             }
         }
         guard result == 0 else {
-            try? stdout.fileHandleForWriting.close()
             throw POSIXError(POSIXErrorCode(rawValue: result) ?? .EINVAL)
         }
-        try? stdout.fileHandleForWriting.close()
-        return .init(process: .init(processIdentifier: processIdentifier), stdout: stdout)
+        return .init(
+            processIdentifier: processIdentifier,
+            outputFileHandle: terminal.primaryFileHandle
+        )
+    }
+
+    func waitForOutputEnd(timeout: DispatchTimeInterval) {
+        outputCollector.waitForEnd(timeout: timeout)
+    }
+
+    func stopCollectingOutput() -> Data {
+        outputCollector.stop()
     }
 
     func wait(timeout: Duration) -> Int32? {
@@ -276,7 +309,7 @@ private final class ShellProbeProcess: @unchecked Sendable {
     }
 }
 
-private final class BoundedPipeCollector: @unchecked Sendable {
+private final class BoundedOutputCollector: @unchecked Sendable {
     private static let byteLimit = 64 * 1024
 
     private let fileHandle: FileHandle
