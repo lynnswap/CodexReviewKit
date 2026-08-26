@@ -50,11 +50,12 @@ struct ReviewInterruptAdmissionTests {
         let requestGate = AsyncGate()
         let requestFinished = InterruptInvocationCounter()
         let cancellation = ReviewCancellation.system(message: "Stop runtime")
+        let receipt = makeReceipt(1, cancellation, .preserveRuntimeStopIntent)
 
         let interruption = Task {
             try await admission.interrupt(
                 run,
-                cancellation: cancellation,
+                cancellationRequest: receipt,
                 request: { _, _ in
                     await requestStarted.open()
                     await requestGate.waitIgnoringCancellation()
@@ -78,51 +79,45 @@ struct ReviewInterruptAdmissionTests {
 
         #expect(await requestFinished.count() == 1)
         #expect(resolution.terminal == .canonical(.completed))
+        #expect(resolution.cancellationRequestReceipt?.id == receipt.id)
     }
 
-    @Test func duplicateCallersJoinTheFirstCancellationAndRequestResult() async throws {
+    @Test func reportReceiptHighWaterRejectsInverseArrivalAndAdmitsNewerRetry() async throws {
         let (admission, run) = try await makeActiveInterruptAdmission()
-        let requestStarted = AsyncGate()
-        let requestGate = AsyncGate()
         let requestCount = InterruptInvocationCounter()
-        let firstCancellation = ReviewCancellation.mcpClient(message: "Stop from MCP")
+        let retryStarted = AsyncGate()
+        let cancellation = ReviewCancellation.mcpClient(message: "Same cancellation")
+        let rejection = ReviewInterruptRequestFailure(outcome: .rejected(code: -32_000, message: "No active turn"))
+        let receipts = (delayed: makeReceipt(1, cancellation), rejected: makeReceipt(2, cancellation), retry: makeReceipt(3, cancellation))
+        let crossJobReceipt = ReviewCancellationRequestReceipt(id: .init(jobID: "job-2", ordinal: 4), cancellation: cancellation, rejectionDisposition: .reportFailure)
 
-        let first = Task {
-            try await admission.interrupt(
-                run,
-                cancellation: firstCancellation,
-                request: { _, _ in
-                    await requestCount.record()
-                    await requestStarted.open()
-                    await requestGate.waitIgnoringCancellation()
-                }
-            )
+        await #expect(throws: rejection) {
+            try await admission.interrupt(run, cancellationRequest: receipts.rejected) { _, _ in
+                await requestCount.record()
+                throw rejection
+            }
         }
-        await requestStarted.wait()
-        let second = Task {
-            try await admission.interrupt(
-                run,
-                cancellation: .system(message: "Stop from runtime"),
-                request: { _, _ in
-                    Issue.record("A duplicate caller dispatched another interrupt request.")
-                }
-            )
+        let receiptlessRejection = ReviewInterruptRequestFailure(outcome: .rejected(code: -32_001, message: "Receiptless retry rejected"))
+        await #expect(throws: receiptlessRejection) {
+            try await admission.interrupt(run, cancellation: .system(message: "Receiptless retry")) { _, _ in
+                await requestCount.record()
+                throw receiptlessRejection
+            }
         }
+        for blockedReceipt in [receipts.delayed, receipts.rejected, crossJobReceipt] {
+            await #expect(throws: rejection) {
+                try await admission.interrupt(run, cancellationRequest: blockedReceipt) { _, _ in Issue.record("A blocked report receipt dispatched another request.") }
+            }
+        }
+        let retry = Task {
+            try await admission.interrupt(run, cancellationRequest: receipts.retry) { _, _ in await requestCount.record(); await retryStarted.open() }
+        }
+        await admission.waitForCancellationRequestReceipt(receipts.retry.id)
+        await retryStarted.wait()
+        let terminal = try await admission.recordCanonicalTerminal(.completed, for: run)
 
-        try await admission.recordCanonicalTerminal(
-            .interrupted(.server(message: nil)),
-            for: run
-        )
-        await requestGate.open()
-
-        let firstResolution = try await first.value
-        let secondResolution = try await second.value
-        #expect(firstResolution == secondResolution)
-        #expect(firstResolution.cancellation == firstCancellation)
-        #expect(firstResolution.terminal == .canonical(
-            .interrupted(.requested(firstCancellation))
-        ))
-        #expect(await requestCount.count() == 1)
+        _ = try await retry.value
+        #expect(await requestCount.count() == 3 && terminal.cancellationRequestReceipt?.id == receipts.retry.id)
     }
 
     @Test func explicitRejectionReturnsToActiveAndAllowsAReasonedRetry() async throws {
@@ -130,11 +125,12 @@ struct ReviewInterruptAdmissionTests {
         let rejection = ReviewInterruptRequestFailure(
             outcome: .rejected(code: -32_000, message: "No active turn")
         )
+        let firstReceipt = makeReceipt(1, .mcpClient(message: "First stop"))
 
         await #expect(throws: rejection) {
             try await admission.interrupt(
                 run,
-                cancellation: .mcpClient(message: "First stop"),
+                cancellationRequest: firstReceipt,
                 request: { _, _ in throw rejection }
             )
         }
@@ -301,6 +297,48 @@ struct ReviewInterruptAdmissionTests {
         #expect(await admission.activeTerminalResolution()?.terminal == .canonical(.completed))
     }
 
+    @Test func registeredRuntimeReceiptIsCapturedByFollowingStreamTerminal() async throws {
+        let (admission, run) = try await makeActiveInterruptAdmission()
+        let cancellation = ReviewCancellation.system(message: "Runtime stopped")
+        let receipt = makeReceipt(1, cancellation, .preserveRuntimeStopIntent)
+        let failure = ReviewAttemptStreamFailure.workerContract(.init(
+            message: "Buffered stream terminal"
+        ))
+
+        let registration = await admission.registerCancellationRequest(receipt)
+        let resolution = try await admission.recordStreamTerminal(failure, for: run)
+
+        #expect(registration.receipt == receipt)
+        #expect(registration.disposition == .adopted)
+        #expect(await admission.registerCancellationRequest(receipt).disposition == .alreadyRegistered)
+        #expect(resolution == .init(
+            run: run,
+            cancellation: cancellation,
+            cancellationRequestReceipt: receipt,
+            terminal: .stream(failure)
+        ))
+    }
+
+    @Test func runtimeReceiptRegisteredAfterStreamTerminalCannotRelabelSnapshot() async throws {
+        let (admission, run) = try await makeActiveInterruptAdmission()
+        let failure = ReviewAttemptStreamFailure.workerContract(.init(
+            message: "Buffered stream terminal"
+        ))
+        let terminal = try await admission.recordStreamTerminal(failure, for: run)
+        let receipt = makeReceipt(
+            1,
+            .system(message: "Late runtime stop"),
+            .preserveRuntimeStopIntent
+        )
+
+        let registration = await admission.registerCancellationRequest(receipt)
+
+        #expect(registration.receipt == receipt)
+        #expect(registration.disposition == .terminal)
+        #expect(await admission.activeTerminalResolution() == terminal)
+        #expect(await admission.cancellationRequest() == nil)
+    }
+
     private func resolveCanonicalTerminal(
         _ terminal: ReviewTerminalRecord
     ) async throws -> ReviewInterruptResolution {
@@ -329,6 +367,14 @@ private actor InterruptInvocationCounter {
     func count() -> Int {
         value
     }
+}
+
+private func makeReceipt(
+    _ ordinal: UInt64,
+    _ cancellation: ReviewCancellation,
+    _ disposition: ReviewCancellationRequestReceipt.RejectionDisposition = .reportFailure
+) -> ReviewCancellationRequestReceipt {
+    .init(id: .init(jobID: "job-1", ordinal: ordinal), cancellation: cancellation, rejectionDisposition: disposition)
 }
 
 private func makeActiveInterruptAdmission() async throws -> (

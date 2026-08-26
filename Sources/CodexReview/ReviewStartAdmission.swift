@@ -46,17 +46,20 @@ package enum ReviewInterruptTerminal: Equatable, Sendable {
 package struct ReviewInterruptResolution: Equatable, Sendable {
     package var run: CodexReviewBackendModel.Review.Run
     package var cancellation: ReviewCancellation?
+    package var cancellationRequestReceipt: ReviewCancellationRequestReceipt?
     package var terminal: ReviewInterruptTerminal
     package var requestFailure: ReviewInterruptRequestFailure?
 
     package init(
         run: CodexReviewBackendModel.Review.Run,
         cancellation: ReviewCancellation?,
+        cancellationRequestReceipt: ReviewCancellationRequestReceipt? = nil,
         terminal: ReviewInterruptTerminal,
         requestFailure: ReviewInterruptRequestFailure? = nil
     ) {
         self.run = run
         self.cancellation = cancellation
+        self.cancellationRequestReceipt = cancellationRequestReceipt
         self.terminal = terminal
         self.requestFailure = requestFailure
     }
@@ -177,6 +180,38 @@ package struct ReviewStartAdmissionContractFailure: LocalizedError, Equatable, S
 /// A dispatched request stays outcome-unknown until its response, an explicit
 /// rejection, or a typed terminal resolves it.
 package actor ReviewStartAdmission {
+    package struct CancellationRequestRegistration: Equatable, Sendable {
+        package enum Disposition: Equatable, Sendable {
+            case adopted
+            case alreadyRegistered
+            case superseded
+            case terminal
+        }
+
+        package let receipt: ReviewCancellationRequestReceipt
+        package let disposition: Disposition
+
+        fileprivate init(
+            receipt: ReviewCancellationRequestReceipt,
+            disposition: Disposition
+        ) {
+            self.receipt = receipt
+            self.disposition = disposition
+        }
+    }
+
+    private enum InterruptCancellation {
+        case semantic(ReviewCancellation)
+        case receipt(ReviewCancellationRequestReceipt)
+
+        var cancellation: ReviewCancellation {
+            switch self {
+            case .semantic(let cancellation): cancellation
+            case .receipt(let receipt): receipt.cancellation
+            }
+        }
+    }
+
     package enum RequestDispatch: Equatable, Sendable {
         case notSent
         case outcomeUnknown
@@ -242,6 +277,10 @@ package actor ReviewStartAdmission {
     private let outcomeUnknownIsCallerOwned: Bool
     private var phase: Phase = .preparingThread(.notSent)
     private var requestedCancellation: ReviewCancellation?
+    private var effectiveCancellationRequestReceipt: ReviewCancellationRequestReceipt?
+    private var cancellationRequestHighWater: (receipt: ReviewCancellationRequestReceipt, reportRejection: ReviewInterruptRequestFailure?)?
+    private var cancellationRequestReceiptWaiters: [ReviewCancellationRequestReceipt.ID: [CheckedContinuation<Void, Never>]] = [:]
+    private var preservedInterruptRequestFailure: ReviewInterruptRequestFailure?
     private var interruptionTask: Task<ReviewInterruptResolution, any Error>?
     private var recoveryTask: Task<ReviewRecoveryDisposition, any Error>?
     private var activeTerminalWaiters: [CheckedContinuation<ReviewInterruptTerminal, Never>] = []
@@ -273,6 +312,27 @@ package actor ReviewStartAdmission {
              .finishingRecovery:
             requestedCancellation = cancellation
         }
+    }
+
+    @discardableResult
+    package func registerCancellationRequest(
+        _ receipt: ReviewCancellationRequestReceipt
+    ) -> CancellationRequestRegistration {
+        if effectiveCancellationRequestReceipt?.id == receipt.id {
+            return .init(receipt: receipt, disposition: .alreadyRegistered)
+        }
+        switch phase {
+        case .finishing, .finishingRecovery, .terminal:
+            return .init(receipt: receipt, disposition: .terminal)
+        case .preparingThread, .startingReview, .rollingBackRecovery,
+             .active, .interrupting, .recovering:
+            break
+        }
+        guard shouldAdoptCancellationRequestReceipt(receipt) else {
+            return .init(receipt: receipt, disposition: .superseded)
+        }
+        recordJoinedCancellation(.receipt(receipt))
+        return .init(receipt: receipt, disposition: .adopted)
     }
 
     package func admitThreadStartDispatch() throws {
@@ -590,19 +650,41 @@ package actor ReviewStartAdmission {
             CodexReviewBackendModel.CancellationReason
         ) async throws -> Void
     ) async throws -> ReviewInterruptResolution {
+        try await interrupt(
+            run,
+            admittedCancellation: .semantic(cancellation),
+            request: request
+        )
+    }
+
+    package func interrupt(
+        _ run: CodexReviewBackendModel.Review.Run,
+        cancellationRequest receipt: ReviewCancellationRequestReceipt,
+        request: @escaping @Sendable (
+            ReviewInterruptRequestAdmission,
+            CodexReviewBackendModel.CancellationReason
+        ) async throws -> Void
+    ) async throws -> ReviewInterruptResolution {
+        try await interrupt(
+            run,
+            admittedCancellation: .receipt(receipt),
+            request: request
+        )
+    }
+
+    private func interrupt(
+        _ run: CodexReviewBackendModel.Review.Run,
+        admittedCancellation: InterruptCancellation,
+        request: @escaping @Sendable (
+            ReviewInterruptRequestAdmission,
+            CodexReviewBackendModel.CancellationReason
+        ) async throws -> Void
+    ) async throws -> ReviewInterruptResolution {
+        let cancellation = admittedCancellation.cancellation
         let currentRun = try requireActiveRun(
             run,
             operation: .interruptActiveRun
         )
-        if let recoveryTask {
-            recordJoinedCancellation(cancellation)
-            return try checkedInterruptResolution(
-                interruptResolution(
-                    for: try await recoveryTask.value,
-                    cancellation: requestedCancellation ?? cancellation
-                )
-            )
-        }
         if case .terminal(.recovery(let disposition)) = phase {
             return try checkedInterruptResolution(
                 interruptResolution(
@@ -611,18 +693,34 @@ package actor ReviewStartAdmission {
                 )
             )
         }
-        if let interruptionTask {
-            return try await interruptionTask.value
-        }
         if case .terminal(.active(let resolution)) = phase {
             return try checkedInterruptResolution(resolution)
+        }
+        if case .receipt(let receipt) = admittedCancellation, let rejection = cancellationRequestHighWater?.reportRejection, activeTerminalSource == nil, shouldAdoptCancellationRequestReceipt(receipt) == false { throw rejection }
+        if let recoveryTask {
+            recordJoinedCancellation(admittedCancellation)
+            return try checkedInterruptResolution(
+                interruptResolution(
+                    for: try await recoveryTask.value,
+                    cancellation: requestedCancellation ?? cancellation
+                )
+            )
+        }
+        if let interruptionTask {
+            recordJoinedCancellation(admittedCancellation)
+            return try await interruptionTask.value
+        }
+        if let preservedInterruptRequestFailure {
+            recordJoinedCancellation(admittedCancellation)
+            throw preservedInterruptRequestFailure
         }
         guard case .active = phase else {
             throw contractFailure(.wrongPhase(operation: .interruptActiveRun))
         }
         _ = try interruptRequestAdmission(for: currentRun)
 
-        let acceptedCancellation = requestedCancellation ?? cancellation
+        let acceptedCancellation = admitCancellation(admittedCancellation)
+        preservedInterruptRequestFailure = nil
         requestedCancellation = acceptedCancellation
         phase = .interrupting(
             run: currentRun,
@@ -695,11 +793,14 @@ package actor ReviewStartAdmission {
         return try await task.value
     }
 
+    @discardableResult
     package func recordCanonicalTerminal(
         _ terminal: ReviewTerminalRecord,
-        for run: CodexReviewBackendModel.Review.Run
-    ) throws {
+        for run: CodexReviewBackendModel.Review.Run,
+        cancellationRequest: ReviewCancellationRequestReceipt? = nil
+    ) throws -> ReviewInterruptResolution {
         _ = try requireActiveRun(run, operation: .recordCanonicalTerminal)
+        adoptTerminalCancellationRequest(cancellationRequest)
         let normalizedTerminal: ReviewTerminalRecord
         if case .interrupted = terminal,
            let cancellation = terminalInterruptionCancellation {
@@ -707,34 +808,38 @@ package actor ReviewStartAdmission {
         } else {
             normalizedTerminal = terminal
         }
-        try recordActiveTerminal(
+        return try recordActiveTerminal(
             .canonical(normalizedTerminal),
             for: run,
             operation: .recordCanonicalTerminal
         )
     }
 
+    @discardableResult
     package func recordConnectionTerminal(
         _ failure: ReviewRuntimeCloseFailure,
         for run: CodexReviewBackendModel.Review.Run
-    ) throws {
+    ) throws -> ReviewInterruptResolution {
         guard case .connection = failure else {
             throw contractFailure(.connectionTerminalRequiresConnectionFailure(failure))
         }
         _ = try requireActiveRun(run, operation: .recordActiveConnectionTerminal)
-        try recordActiveTerminal(
+        return try recordActiveTerminal(
             .connection(failure),
             for: run,
             operation: .recordActiveConnectionTerminal
         )
     }
 
+    @discardableResult
     package func recordStreamTerminal(
         _ failure: ReviewAttemptStreamFailure,
-        for run: CodexReviewBackendModel.Review.Run
-    ) throws {
+        for run: CodexReviewBackendModel.Review.Run,
+        cancellationRequest: ReviewCancellationRequestReceipt? = nil
+    ) throws -> ReviewInterruptResolution {
         _ = try requireActiveRun(run, operation: .recordActiveStreamTerminal)
-        try recordActiveTerminal(
+        adoptTerminalCancellationRequest(cancellationRequest)
+        return try recordActiveTerminal(
             .stream(failure),
             for: run,
             operation: .recordActiveStreamTerminal
@@ -790,6 +895,11 @@ package actor ReviewStartAdmission {
         case .preparingThread, .startingReview, .active, .terminal:
             requestedCancellation
         }
+    }
+
+    package func waitForCancellationRequestReceipt(_ id: ReviewCancellationRequestReceipt.ID) async {
+        if effectiveCancellationRequestReceipt?.id == id { return }
+        await withCheckedContinuation { cancellationRequestReceiptWaiters[id, default: []].append($0) }
     }
 
     package func activeTerminalResolution() -> ReviewInterruptResolution? {
@@ -852,7 +962,8 @@ package actor ReviewStartAdmission {
         )
         let resolution = ReviewInterruptResolution(
             run: run,
-            cancellation: cancellation,
+            cancellation: terminalInterruptionCancellation ?? cancellation,
+            cancellationRequestReceipt: effectiveCancellationRequestReceipt,
             terminal: barrier.terminal,
             requestFailure: barrier.requestFailure
         )
@@ -939,7 +1050,15 @@ package actor ReviewStartAdmission {
                  .finishingRecovery, .terminal:
                 break
             }
-            requestedCancellation = nil
+            if effectiveCancellationRequestReceipt?.rejectionDisposition == .reportFailure
+                || effectiveCancellationRequestReceipt == nil {
+                if effectiveCancellationRequestReceipt?.rejectionDisposition == .reportFailure { cancellationRequestHighWater?.reportRejection = failure }
+                requestedCancellation = nil
+                effectiveCancellationRequestReceipt = nil
+                preservedInterruptRequestFailure = nil
+            } else {
+                preservedInterruptRequestFailure = failure
+            }
             phase = .active(run)
             throw failure
         }
@@ -970,15 +1089,18 @@ package actor ReviewStartAdmission {
         _ terminal: ReviewInterruptTerminal,
         for run: CodexReviewBackendModel.Review.Run,
         operation: ReviewStartAdmissionOperation
-    ) throws {
+    ) throws -> ReviewInterruptResolution {
+        let snapshot = ReviewInterruptResolution(
+            run: run,
+            cancellation: terminalInterruptionCancellation,
+            cancellationRequestReceipt: effectiveCancellationRequestReceipt,
+            terminal: terminal,
+            requestFailure: preservedInterruptRequestFailure
+        )
         switch phase {
         case .active:
-            let resolution = ReviewInterruptResolution(
-                run: run,
-                cancellation: nil,
-                terminal: terminal
-            )
-            phase = .terminal(.active(resolution))
+            phase = .terminal(.active(snapshot))
+            preservedInterruptRequestFailure = nil
         case .interrupting(_, let cancellation, let request):
             phase = .finishing(
                 run: run,
@@ -1016,6 +1138,7 @@ package actor ReviewStartAdmission {
                     received: terminal
                 )
             }
+            return resolution
         case .terminal(.recovery(let disposition)):
             let currentTerminal = interruptTerminal(
                 from: disposition.resolved.terminal
@@ -1029,9 +1152,14 @@ package actor ReviewStartAdmission {
                     received: normalizedReceived
                 )
             }
+            return interruptResolution(
+                for: disposition,
+                cancellation: requestedCancellation
+            )
         case .preparingThread, .startingReview, .rollingBackRecovery, .terminal:
             throw contractFailure(.wrongPhase(operation: operation))
         }
+        return snapshot
     }
 
     private func beginInterruptRequestDispatch(
@@ -1205,10 +1333,68 @@ package actor ReviewStartAdmission {
         return resolution
     }
 
-    private func recordJoinedCancellation(_ cancellation: ReviewCancellation) {
-        if requestedCancellation == nil {
-            requestedCancellation = cancellation
+    private func admitCancellation(
+        _ admitted: InterruptCancellation
+    ) -> ReviewCancellation {
+        switch admitted {
+        case .semantic(let cancellation):
+            return requestedCancellation ?? cancellation
+        case .receipt(let receipt):
+            setEffectiveCancellationRequestReceipt(receipt)
+            if receipt.rejectionDisposition == .preserveRuntimeStopIntent {
+                return receipt.cancellation
+            }
+            return requestedCancellation ?? receipt.cancellation
         }
+    }
+
+    private func recordJoinedCancellation(_ admitted: InterruptCancellation) {
+        switch admitted {
+        case .semantic(let cancellation):
+            if requestedCancellation == nil {
+                requestedCancellation = cancellation
+            }
+        case .receipt(let receipt):
+            if effectiveCancellationRequestReceipt?.id == receipt.id { return }
+            guard shouldAdoptCancellationRequestReceipt(receipt) else { return }
+            switch phase {
+            case .finishing, .finishingRecovery, .terminal:
+                // A recorded terminal already owns its exact cancellation pair;
+                // a later receipt joins that result but cannot relabel it.
+                return
+            case .interrupting(let run, _, let request):
+                setEffectiveCancellationRequestReceipt(receipt)
+                requestedCancellation = receipt.cancellation
+                phase = .interrupting(
+                    run: run,
+                    cancellation: receipt.cancellation,
+                    request: request
+                )
+            case .preparingThread, .startingReview, .rollingBackRecovery,
+                 .active, .recovering:
+                setEffectiveCancellationRequestReceipt(receipt)
+                requestedCancellation = receipt.cancellation
+            }
+        }
+    }
+
+    private func shouldAdoptCancellationRequestReceipt(_ receipt: ReviewCancellationRequestReceipt) -> Bool {
+        guard let current = cancellationRequestHighWater?.receipt else { return true }
+        guard current.id.jobID == receipt.id.jobID,
+              receipt.id.ordinal > current.id.ordinal else { return false }
+        return current.rejectionDisposition == .reportFailure
+            || receipt.rejectionDisposition == .preserveRuntimeStopIntent
+    }
+
+    private func adoptTerminalCancellationRequest(_ receipt: ReviewCancellationRequestReceipt?) {
+        guard let receipt else { return }
+        recordJoinedCancellation(.receipt(receipt))
+    }
+
+    private func setEffectiveCancellationRequestReceipt(_ receipt: ReviewCancellationRequestReceipt) {
+        effectiveCancellationRequestReceipt = receipt
+        cancellationRequestHighWater = (receipt, nil)
+        cancellationRequestReceiptWaiters.removeValue(forKey: receipt.id)?.forEach { $0.resume() }
     }
 
     private func resolvedAttempt(
@@ -1229,6 +1415,7 @@ package actor ReviewStartAdmission {
         return .init(
             run: resolved.run,
             cancellation: cancellation,
+            cancellationRequestReceipt: effectiveCancellationRequestReceipt,
             terminal: interruptTerminal(from: resolved.terminal),
             requestFailure: resolved.requestFailure
         )
@@ -1398,8 +1585,9 @@ package actor ReviewStartAdmission {
             resolution.cancellation
         case .recovering, .finishingRecovery:
             nil
-        case .preparingThread, .startingReview, .rollingBackRecovery,
-             .active, .terminal:
+        case .active:
+            requestedCancellation
+        case .preparingThread, .startingReview, .rollingBackRecovery, .terminal:
             nil
         }
     }
