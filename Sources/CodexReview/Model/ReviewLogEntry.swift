@@ -1,10 +1,26 @@
 import Foundation
 
 public struct ReviewLogEntry: Codable, Identifiable, Sendable, Hashable {
-    /// Selects whether an entry belongs in product-facing output or developer diagnostics.
-    public enum Audience: String, Codable, Sendable, Hashable {
+    package enum Audience: String, Codable, Sendable, Hashable {
         case product
         case developer
+    }
+
+    @propertyWrapper
+    package struct AudienceMetadata: Codable, Sendable, Hashable {
+        package var wrappedValue: Audience
+
+        package init(wrappedValue: Audience) {
+            self.wrappedValue = wrappedValue
+        }
+
+        package init(from decoder: Decoder) throws {
+            wrappedValue = try Audience(from: decoder)
+        }
+
+        package func encode(to encoder: Encoder) throws {
+            try wrappedValue.encode(to: encoder)
+        }
     }
 
     public struct Metadata: Codable, Sendable, Hashable {
@@ -126,7 +142,7 @@ public struct ReviewLogEntry: Codable, Identifiable, Sendable, Hashable {
     public let replacesGroup: Bool
     public let text: String
     public let metadata: Metadata?
-    public package(set) var audience: Audience
+    @AudienceMetadata package var audience: Audience
     public let timestamp: Date
 
     public init(
@@ -136,7 +152,28 @@ public struct ReviewLogEntry: Codable, Identifiable, Sendable, Hashable {
         replacesGroup: Bool = false,
         text: String,
         metadata: Metadata? = nil,
-        audience: Audience = .product,
+        timestamp: Date = Date()
+    ) {
+        self.init(
+            id: id,
+            kind: kind,
+            groupID: groupID,
+            replacesGroup: replacesGroup,
+            text: text,
+            metadata: metadata,
+            audience: .product,
+            timestamp: timestamp
+        )
+    }
+
+    package init(
+        id: UUID = UUID(),
+        kind: Kind,
+        groupID: String? = nil,
+        replacesGroup: Bool = false,
+        text: String,
+        metadata: Metadata? = nil,
+        audience: Audience,
         timestamp: Date = Date()
     ) {
         self.id = id
@@ -149,40 +186,27 @@ public struct ReviewLogEntry: Codable, Identifiable, Sendable, Hashable {
         self.timestamp = timestamp
     }
 
-    private enum CodingKeys: String, CodingKey {
-        case id
-        case kind
-        case groupID
-        case replacesGroup
-        case text
-        case metadata
-        case audience
-        case timestamp
-    }
+}
 
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        id = try container.decode(UUID.self, forKey: .id)
-        kind = try container.decode(Kind.self, forKey: .kind)
-        groupID = try container.decodeIfPresent(String.self, forKey: .groupID)
-        replacesGroup = try container.decode(Bool.self, forKey: .replacesGroup)
-        text = try container.decode(String.self, forKey: .text)
-        metadata = try container.decodeIfPresent(Metadata.self, forKey: .metadata)
-        audience = try container.decodeIfPresent(Audience.self, forKey: .audience) ?? .product
-        timestamp = try container.decode(Date.self, forKey: .timestamp)
+package extension KeyedDecodingContainer {
+    func decode(
+        _ type: ReviewLogEntry.AudienceMetadata.Type,
+        forKey key: Key
+    ) throws -> ReviewLogEntry.AudienceMetadata {
+        let audience = try decodeIfPresent(ReviewLogEntry.Audience.self, forKey: key)
+            ?? .product
+        return .init(wrappedValue: audience)
     }
+}
 
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(id, forKey: .id)
-        try container.encode(kind, forKey: .kind)
-        try container.encodeIfPresent(groupID, forKey: .groupID)
-        try container.encode(replacesGroup, forKey: .replacesGroup)
-        try container.encode(text, forKey: .text)
-        try container.encodeIfPresent(metadata, forKey: .metadata)
-        if audience != .product {
-            try container.encode(audience, forKey: .audience)
+package extension KeyedEncodingContainer {
+    mutating func encode(
+        _ value: ReviewLogEntry.AudienceMetadata,
+        forKey key: Key
+    ) throws {
+        guard value.wrappedValue == .developer else {
+            return
         }
-        try container.encode(timestamp, forKey: .timestamp)
+        try encode(value.wrappedValue, forKey: key)
     }
 }
