@@ -94,6 +94,53 @@ struct CodexReviewJobRenderingTests {
         #expect(job.cappedLogBytes >= developerDiagnostic.utf8.count)
     }
 
+    @Test func activeCommandCleanupKeepsProductAndDeveloperGroupsIndependent() throws {
+        let productStartedAt = Date(timeIntervalSince1970: 100)
+        let developerCompletedAt = Date(timeIntervalSince1970: 101)
+        let terminalDate = Date(timeIntervalSince1970: 102)
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-command-audience",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(
+                    kind: .command,
+                    groupID: "shared-command",
+                    text: "$ product command",
+                    metadata: .init(
+                        sourceType: "commandExecution",
+                        status: "inProgress",
+                        startedAt: productStartedAt,
+                        commandStatus: "inProgress"
+                    )
+                ),
+                .init(
+                    kind: .command,
+                    groupID: "shared-command",
+                    text: "$ developer command",
+                    metadata: .init(
+                        sourceType: "commandExecution",
+                        status: "completed",
+                        completedAt: developerCompletedAt,
+                        commandStatus: "completed"
+                    ),
+                    audience: .developer
+                ),
+            ]
+        )
+
+        job.closeActiveCommandLogEntries(status: "completed", completedAt: terminalDate)
+
+        #expect(job.logEntries.count == 3)
+        let replacement = try #require(job.logEntries.last)
+        #expect(replacement.audience == .product)
+        #expect(replacement.replacesGroup)
+        #expect(replacement.metadata?.commandStatus == "completed")
+        #expect(replacement.metadata?.completedAt == terminalDate)
+    }
+
     @Test func cancellationRequestedSetterProjectsOnlyThePendingReceipt() throws {
         let job = CodexReviewJob.makeForTesting(
             id: "job-cancellation-projection",

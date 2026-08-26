@@ -819,21 +819,21 @@ public final class CodexReviewJob: Identifiable, Hashable {
         status: String,
         completedAt: Date
     ) -> [ReviewLogEntry] {
-        var latestCommandByGroupID: [String: ReviewLogEntry] = [:]
-        var orderedGroupIDs: [String] = []
+        var latestCommandByKey: [GroupKey: ReviewLogEntry] = [:]
+        var orderedKeys: [GroupKey] = []
 
         for entry in entries where entry.kind == .command {
-            guard let groupID = entry.groupID?.nilIfEmpty else {
+            guard let key = mergeKey(for: entry) else {
                 continue
             }
-            if latestCommandByGroupID[groupID] == nil {
-                orderedGroupIDs.append(groupID)
+            if latestCommandByKey[key] == nil {
+                orderedKeys.append(key)
             }
-            latestCommandByGroupID[groupID] = entry
+            latestCommandByKey[key] = entry
         }
 
-        return orderedGroupIDs.compactMap { groupID in
-            guard let entry = latestCommandByGroupID[groupID],
+        return orderedKeys.compactMap { key in
+            guard let entry = latestCommandByKey[key],
                   entry.isActiveCommandEntry
             else {
                 return nil
