@@ -26,7 +26,12 @@ struct CodexExecutableResolverTests {
 
         #expect(resolved.path == "/shell/bin/codex")
         #expect(await recorder.invocations() == [
-            .init(shellPath: "/bin/zsh", path: "/app/bin", home: "/home")
+            .init(
+                shellPath: "/bin/zsh",
+                path: "/app/bin",
+                home: "/home",
+                term: "xterm-256color"
+            )
         ])
     }
 
@@ -52,8 +57,35 @@ struct CodexExecutableResolverTests {
         }
 
         #expect(await recorder.invocations() == [
-            .init(shellPath: "/bin/zsh", path: "/app/bin", home: "/home"),
-            .init(shellPath: "/bin/zsh", path: "/app/bin", home: "/home"),
+            .init(shellPath: "/bin/zsh", path: "/app/bin", home: "/home", term: "xterm-256color"),
+            .init(shellPath: "/bin/zsh", path: "/app/bin", home: "/home", term: "xterm-256color"),
+        ])
+    }
+
+    @Test func shellDiscoverySeedsEmptyAndPreservesExistingTerminalType() async throws {
+        let recorder = ShellDiscoveryRecorder(outcome: .output(markedShellOutput(
+            candidate: "/shell/bin/codex"
+        )))
+        let resolver = makeResolver(
+            executables: ["/shell/bin/codex"],
+            shellPathDiscovery: .init { shellURL, environment in
+                await recorder.discover(shellURL: shellURL, environment: environment)
+            }
+        )
+
+        for term in ["", "screen-256color"] {
+            #expect(try await resolver.resolve(
+                configuredPath: nil,
+                environment: [
+                    "PATH": "/app/bin",
+                    "SHELL": "/bin/zsh",
+                    "TERM": term,
+                ]
+            ).path == "/shell/bin/codex")
+        }
+        #expect(await recorder.invocations().map(\.term) == [
+            "xterm-256color",
+            "screen-256color",
         ])
     }
 
@@ -241,6 +273,20 @@ struct CodexExecutableResolverTests {
             configuredPath: nil,
             environment: ["PATH": "/usr/bin:/bin", "SHELL": "/bin/zsh"]
         ) == codex)
+    }
+
+    @Test func liveZshDiscoverySeedsTerminalTypeWhenMissing() async throws {
+        try await expectMissingTermLoadsShellPath(
+            shellPath: "/bin/zsh",
+            startupFile: ".zshrc"
+        )
+    }
+
+    @Test func liveBashDiscoverySeedsTerminalTypeWhenMissing() async throws {
+        try await expectMissingTermLoadsShellPath(
+            shellPath: "/bin/bash",
+            startupFile: ".bash_profile"
+        )
     }
 
     @Test func liveZshDiscoveryTerminatesHungStartupAtTimeout() async throws {
@@ -463,6 +509,26 @@ private func expectHungShellStartupTerminates(
     #expect(errno == ESRCH)
 }
 
+private func expectMissingTermLoadsShellPath(
+    shellPath: String,
+    startupFile: String
+) async throws {
+    let root = try temporaryShellHome(prefix: "codex-shell-term")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let codex = try writeCodexExecutable(in: root)
+    try Data("if [ \"$TERM\" = xterm-256color ]; then export PATH=\"\(codex.deletingLastPathComponent().path):$PATH\"; fi\n".utf8)
+        .write(to: root.appendingPathComponent(startupFile))
+    let resolver = makeLiveResolver(
+        homeDirectory: root,
+        loginShellURL: URL(fileURLWithPath: shellPath)
+    )
+
+    #expect(try await resolver.resolve(
+        configuredPath: nil,
+        environment: ["PATH": "/usr/bin:/bin", "SHELL": shellPath]
+    ) == codex)
+}
+
 private func writeCodexExecutable(in homeDirectory: URL) throws -> URL {
     let bin = homeDirectory.appendingPathComponent("managed-bin", isDirectory: true)
     try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
@@ -544,6 +610,7 @@ private actor ShellDiscoveryRecorder {
         var shellPath: String
         var path: String?
         var home: String?
+        var term: String?
     }
 
     private let outcome: CodexShellPathDiscovery.Outcome
@@ -560,7 +627,8 @@ private actor ShellDiscoveryRecorder {
         recordedInvocations.append(.init(
             shellPath: shellURL.path,
             path: environment["PATH"],
-            home: environment["HOME"]
+            home: environment["HOME"],
+            term: environment["TERM"]
         ))
         return outcome
     }

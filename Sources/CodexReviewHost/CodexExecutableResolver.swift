@@ -23,6 +23,8 @@ package struct CodexExecutableResolutionError: LocalizedError, Equatable, Sendab
 }
 
 package struct CodexExecutableResolver: Sendable {
+    private static let shellProbeTerminalType = "xterm-256color"
+
     package struct FileSystem: Sendable {
         package var canonicalURL: @Sendable (URL) -> URL
         package var isExecutableRegularFile: @Sendable (URL) -> Bool
@@ -172,6 +174,12 @@ package struct CodexExecutableResolver: Sendable {
             // no HOME or inherits an app-specific value.
             var shellEnvironment = environment
             shellEnvironment["HOME"] = configuration.homeDirectory.path
+            if shellEnvironment["TERM"]?.isEmpty != false {
+                // macOS ships this Terminal-compatible terminfo entry. The probe
+                // uses a PTY with the matching 80x24 geometry; keep any inherited
+                // terminal identity when the launching environment supplies one.
+                shellEnvironment["TERM"] = Self.shellProbeTerminalType
+            }
             switch await configuration.shellPathDiscovery.discover(
                 shellURL: shellURL,
                 environment: shellEnvironment
