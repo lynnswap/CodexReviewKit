@@ -67,7 +67,7 @@ public final class CodexReviewStore {
         backend.seed.shouldAutoStartEmbeddedServer
     }
     package var runtimeTeardownFinalState: ReviewRuntimeTeardownIntent.FinalState? {
-        guard case .tearingDown(_, _, let finalIntent, _) = runtimeState else {
+        guard case .tearingDown(_, _, let finalIntent, _, _) = runtimeState else {
             return nil
         }
         return finalIntent.finalState
@@ -140,7 +140,7 @@ public final class CodexReviewStore {
         switch runtimeState {
         case .acquiring(_, _, let task),
              .replacing(_, let task),
-             .tearingDown(_, _, _, let task):
+             .tearingDown(_, _, _, _, let task):
             task.cancel()
         case .stopped, .running, .failed:
             break
@@ -236,7 +236,7 @@ public final class CodexReviewStore {
                 retiringRuntime: runtime,
                 retainedMCP: mcp
             )
-        case .failed(let sourceGeneration, let retainedMCP?):
+        case .failed(let sourceGeneration, let retainedMCP?, _):
             return admitRuntimeReplacement(
                 sourceGeneration: sourceGeneration,
                 retiringRuntime: nil,
@@ -252,19 +252,34 @@ public final class CodexReviewStore {
                 ),
                 sourceCloseReceiptOwner: nil
             )
-        case .tearingDown(let sourceGeneration, _, _, let task):
+        case .tearingDown(
+            let sourceGeneration,
+            _,
+            _,
+            let failureIncident,
+            let task
+        ):
             return .init(
                 task: admitRuntimeAcquisition(
                     generation: sourceGeneration.successor(),
+                    context: .init(failureIncident: failureIncident),
                     predecessor: task
                 ),
                 sourceCloseReceiptOwner: nil
             )
         case .stopped(let sourceGeneration),
-             .failed(let sourceGeneration, nil):
+             .failed(let sourceGeneration, nil, nil):
             return .init(
                 task: admitRuntimeAcquisition(
                     generation: sourceGeneration.successor()
+                ),
+                sourceCloseReceiptOwner: nil
+            )
+        case .failed(let sourceGeneration, nil, let failureIncident?):
+            return .init(
+                task: admitRuntimeAcquisition(
+                    generation: sourceGeneration.successor(),
+                    context: .init(failureIncident: failureIncident)
                 ),
                 sourceCloseReceiptOwner: nil
             )
@@ -288,32 +303,151 @@ public final class CodexReviewStore {
         _ = admitRuntimeTeardown(intent: intent)
     }
 
+    @discardableResult
     package func requestRuntimeFailure(
         handle: any RuntimeLifecycleHandle,
         cause: String
-    ) {
-        let ownsHandle: Bool
+    ) -> Bool {
+        let failureIncident: ReviewRuntimeFailureIncident
         switch runtimeState {
-        case .running(_, let runtime, _):
-            ownsHandle = runtime.handle === handle
+        case .running(let generation, let runtime, _)
+            where runtime.handle === handle:
+            failureIncident = .init(
+                sourceHandle: handle,
+                sourceGeneration: generation
+            )
         case .replacing(let replacement, _):
-            ownsHandle = replacement.ownsPublishedRuntime(handle: handle)
-        case .stopped, .acquiring, .tearingDown, .failed:
-            ownsHandle = false
+            guard replacement.ownsPublishedRuntime(handle: handle) else {
+                return false
+            }
+            failureIncident = .init(
+                sourceHandle: handle,
+                sourceGeneration: replacement.replacementGeneration
+            )
+        case .stopped, .acquiring, .running, .tearingDown, .failed:
+            return false
         }
-        guard ownsHandle else {
-            return
+        _ = admitRuntimeTeardown(
+            intent: .unexpectedFailure(cause),
+            failureIncident: failureIncident
+        )
+        return true
+    }
+
+    package func requestRuntimeCleanupRecovery(
+        sourceHandle: any RuntimeLifecycleHandle,
+        sourceGeneration: ReviewRuntimeGeneration,
+        cause: String
+    ) -> ReviewRuntimeCleanupRecoveryAdmission {
+        switch runtimeState {
+        case .running(let generation, let runtime, _)
+            where runtime.handle === sourceHandle && generation == sourceGeneration:
+            let incident = ReviewRuntimeFailureIncident(
+                sourceHandle: sourceHandle,
+                sourceGeneration: sourceGeneration
+            )
+            let teardown = admitRuntimeTeardown(
+                intent: .unexpectedFailure(cause),
+                failureIncident: incident
+            )
+            return admitCleanupRecoverySuccessor(
+                incident: incident,
+                generation: runtimeState.generation.successor(),
+                predecessor: teardown
+            )
+
+        case .replacing(let replacement, _)
+            where replacement.replacementGeneration == sourceGeneration
+                && replacement.ownsPublishedRuntime(handle: sourceHandle):
+            let incident = ReviewRuntimeFailureIncident(
+                sourceHandle: sourceHandle,
+                sourceGeneration: sourceGeneration
+            )
+            let teardown = admitRuntimeTeardown(
+                intent: .unexpectedFailure(cause),
+                failureIncident: incident
+            )
+            return admitCleanupRecoverySuccessor(
+                incident: incident,
+                generation: runtimeState.generation.successor(),
+                predecessor: teardown
+            )
+
+        case .tearingDown(
+            let generation,
+            _,
+            let finalIntent,
+            let incident?,
+            let teardown
+        ) where incident.matches(
+            sourceHandle: sourceHandle,
+            sourceGeneration: sourceGeneration
+        ):
+            guard finalIntent != .explicitStop else {
+                return .suppressed(.explicitStop)
+            }
+            return admitCleanupRecoverySuccessor(
+                incident: incident,
+                generation: generation.successor(),
+                predecessor: teardown
+            )
+
+        case .failed(let generation, nil, let incident?)
+            where incident.matches(
+                sourceHandle: sourceHandle,
+                sourceGeneration: sourceGeneration
+            ):
+            return admitCleanupRecoverySuccessor(
+                incident: incident,
+                generation: generation.successor(),
+                predecessor: nil
+            )
+
+        case .acquiring(let generation, let context, _):
+            guard let incident = context.failureIncident,
+                  incident.matches(
+                    sourceHandle: sourceHandle,
+                    sourceGeneration: sourceGeneration
+                  )
+            else {
+                return .suppressed(.staleSource)
+            }
+            guard generation.rawValue > sourceGeneration.rawValue else {
+                return .suppressed(.staleSource)
+            }
+            return incident.joinedSuccessorAdmission()
+
+        case .stopped, .running, .replacing, .tearingDown, .failed:
+            return .suppressed(.staleSource)
         }
-        _ = admitRuntimeTeardown(intent: .unexpectedFailure(cause))
+    }
+
+    private func admitCleanupRecoverySuccessor(
+        incident: ReviewRuntimeFailureIncident,
+        generation: ReviewRuntimeGeneration,
+        predecessor: Task<Void, Never>?
+    ) -> ReviewRuntimeCleanupRecoveryAdmission {
+        let admission = incident.admitSuccessor(generation: generation)
+        guard case .admitted = admission else {
+            return admission
+        }
+        _ = admitRuntimeAcquisition(
+            generation: generation,
+            context: .init(failureIncident: incident),
+            predecessor: predecessor
+        )
+        return admission
     }
 
     private func admitRuntimeTeardown(
-        intent: ReviewRuntimeTeardownIntent
+        intent: ReviewRuntimeTeardownIntent,
+        failureIncident requestedFailureIncident: ReviewRuntimeFailureIncident? = nil
     ) -> Task<Void, Never> {
         if case .tearingDown(
             let currentGeneration,
             let cleanupIntent,
             let finalIntent,
+            let failureIncident,
             let currentTask
         ) = runtimeState {
             guard intent.supersedesConcurrentFinalState,
@@ -330,12 +464,16 @@ public final class CodexReviewStore {
                 generation: generation,
                 cleanupIntent: cleanupIntent,
                 finalIntent: intent,
+                failureIncident: failureIncident,
                 task: task
             )
             return task
         }
 
         let previousState = runtimeState
+        let failureIncident = requestedFailureIncident
+            ?? failureIncident(in: previousState)
+            ?? makeFailureIncident(for: previousState)
         closePublishedRuntimeAdmission(in: previousState)
         let generation = previousState.generation.successor()
         if case .replacing(let replacement, _) = previousState {
@@ -359,6 +497,7 @@ public final class CodexReviewStore {
             generation: generation,
             cleanupIntent: intent,
             finalIntent: intent,
+            failureIncident: failureIncident,
             task: task
         )
         return task
@@ -404,10 +543,10 @@ public final class CodexReviewStore {
                 admissionAlreadyClosed: true
             )
 
-        case .tearingDown(_, _, _, let task):
+        case .tearingDown(_, _, _, _, let task):
             await task.value
 
-        case .failed(_, let retainedMCP):
+        case .failed(_, let retainedMCP, _):
             if retainedMCP != nil {
                 await stopMCPServer()
             }
@@ -424,6 +563,7 @@ public final class CodexReviewStore {
             let currentGeneration,
             _,
             let finalIntent,
+            let failureIncident,
             _
         ) = runtimeState,
               currentGeneration == generation
@@ -435,7 +575,11 @@ public final class CodexReviewStore {
             runtimeState = .stopped(generation)
             transitionToStopped()
         case .failed(let message):
-            runtimeState = .failed(generation: generation, retainedMCP: nil)
+            runtimeState = .failed(
+                generation: generation,
+                retainedMCP: nil,
+                failureIncident: failureIncident
+            )
             transitionToFailed(message)
         }
     }
@@ -504,7 +648,7 @@ public final class CodexReviewStore {
     }
 
     public func waitUntilStopped() async {
-        if case .tearingDown(_, _, _, let task) = runtimeState {
+        if case .tearingDown(_, _, _, _, let task) = runtimeState {
             await task.value
         }
         await backend.waitUntilStopped()
@@ -637,6 +781,7 @@ public final class CodexReviewStore {
         context: RuntimeAcquisitionContext = .init(),
         predecessor: Task<Void, Never>? = nil
     ) -> Task<Void, Never> {
+        _ = context.failureIncident?.admitSuccessor(generation: generation)
         if predecessor == nil {
             serverState = .starting
             serverURL = nil
@@ -794,7 +939,12 @@ public final class CodexReviewStore {
             guard wasIntentionallyCancelled == false else {
                 return
             }
-            runtimeState = .failed(generation: generation, retainedMCP: nil)
+            context.failureIncident?.finishSuccessor(generation: generation)
+            runtimeState = .failed(
+                generation: generation,
+                retainedMCP: nil,
+                failureIncident: context.failureIncident
+            )
             transitionToFailed(error.localizedDescription)
         }
     }
@@ -921,7 +1071,8 @@ public final class CodexReviewStore {
             }
             runtimeState = .failed(
                 generation: replacement.replacementGeneration,
-                retainedMCP: replacement.retainedMCP
+                retainedMCP: replacement.retainedMCP,
+                failureIncident: nil
             )
             serverURL = replacement.retainedMCP.serverURL
             serverState = .failed(error.localizedDescription)
@@ -1030,6 +1181,32 @@ public final class CodexReviewStore {
         case .stopped, .acquiring, .tearingDown, .failed:
             break
         }
+    }
+
+    private func failureIncident(
+        in state: ReviewStoreRuntimeState
+    ) -> ReviewRuntimeFailureIncident? {
+        switch state {
+        case .acquiring(_, let context, _):
+            context.failureIncident
+        case .tearingDown(_, _, _, let failureIncident, _),
+             .failed(_, _, let failureIncident):
+            failureIncident
+        case .stopped, .running, .replacing:
+            nil
+        }
+    }
+
+    private func makeFailureIncident(
+        for state: ReviewStoreRuntimeState
+    ) -> ReviewRuntimeFailureIncident? {
+        guard case .running(let generation, let runtime, _) = state else {
+            return nil
+        }
+        return .init(
+            sourceHandle: runtime.handle,
+            sourceGeneration: generation
+        )
     }
 
     private func stopMCPServer() async {
