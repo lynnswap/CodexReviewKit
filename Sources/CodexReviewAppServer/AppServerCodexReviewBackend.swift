@@ -1150,6 +1150,16 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         await notificationRouterTask?.value
     }
 
+    package func holdNextReviewEventSessionTerminalCommitForTesting(
+        _ run: CodexReviewBackendModel.Review.Run,
+        operation: @escaping @Sendable () async -> Void
+    ) async {
+        guard let session = reviewEventSessionsByAttemptID[run.attemptID] else {
+            preconditionFailure("Review event session must exist before holding terminal commit.")
+        }
+        await session.holdNextTerminalCommitForTesting(operation: operation)
+    }
+
     package func reviewEventSessionCountForTesting() -> Int {
         reviewEventSessionsByAttemptID.count
     }
@@ -1965,6 +1975,17 @@ private actor AppServerReviewEventSession {
         }
     }
 
+    private enum TerminalCommitState {
+        case open
+        case awaitingCancellationAcceptance(ReviewAttemptTerminal)
+        case finalizing
+        case finished
+
+        var acceptsIngress: Bool {
+            if case .open = self { true } else { false }
+        }
+    }
+
     private static let commandTimeoutExitCode = 124
     private static let longCommandDurationWarningMs = 100_000
     private static let streamedLogFlushIntervalNanoseconds: UInt64 = 20_000_000
@@ -1981,9 +2002,9 @@ private actor AppServerReviewEventSession {
     private var streamedLogFlushTask: Task<Void, Never>?
     private var cancellationRequests = CancellationRequests()
     private var requestedCancellationArtifacts: RequestedCancellationArtifacts?
-    private var deferredTerminalAwaitingCancellationAcceptance: ReviewAttemptTerminal?
+    private var terminalCommitState = TerminalCommitState.open
+    private var terminalCommitTestingOperation: (@Sendable () async -> Void)?
     private let createdAt = Date()
-    private var finished = false
     private var isRunFinalized: Bool
     private var isDrainingStartupNotifications = false
     private var pendingStartupNotifications: [AppServerRoutedReviewNotification] = []
@@ -2060,17 +2081,17 @@ private actor AppServerReviewEventSession {
         guard cancellationRequests.hasIntent == false else {
             return
         }
-        if let terminal = deferredTerminalAwaitingCancellationAcceptance {
-            deferredTerminalAwaitingCancellationAcceptance = nil
-            await finalizeTerminal(terminal)
-        } else {
+        if case .awaitingCancellationAcceptance(let terminal) = terminalCommitState,
+           beginTerminalCommit() {
+            await commitTerminal(terminal)
+        } else if terminalCommitState.acceptsIngress {
             await emitPrecedingEvents(drainRequestedCancellationProductEvents())
         }
     }
 
     func receive(_ notification: AppServerRoutedReviewNotification) async {
         metrics.routed += 1
-        guard finished == false else {
+        guard terminalCommitState.acceptsIngress else {
             metrics.ignored += 1
             return
         }
@@ -2086,6 +2107,9 @@ private actor AppServerReviewEventSession {
         cancellationMessage: String?,
         buffersMissingContinuation _: Bool = false
     ) async {
+        guard terminalCommitState.acceptsIngress else {
+            return
+        }
         var precedingEvents = drainPendingStreamedLogEvents()
         if cancellationMessage == nil {
             cancelPendingStreamedLogFlush()
@@ -2100,41 +2124,41 @@ private actor AppServerReviewEventSession {
     }
 
     func finish(throwing failure: ReviewAttemptStreamFailure?) async {
-        guard finished == false else {
-            return
-        }
-        guard deferredTerminalAwaitingCancellationAcceptance == nil else {
+        switch terminalCommitState {
+        case .awaitingCancellationAcceptance, .finalizing:
             cancelPendingStreamedLogFlush()
             pendingStartupNotifications.removeAll(keepingCapacity: true)
             return
+        case .finished:
+            return
+        case .open:
+            terminalCommitState = .finalizing
         }
         let precedingEvents = drainPendingStreamedLogEvents()
             + drainRequestedCancellationProductEvents()
-        finished = true
         cancelPendingStreamedLogFlush()
         commandLifecycleByItemID.removeAll(keepingCapacity: true)
         pendingStartupNotifications.removeAll(keepingCapacity: true)
-        deferredTerminalAwaitingCancellationAcceptance = nil
         await emitPrecedingEvents(precedingEvents)
         if let failure {
             await mailbox.fail(failure)
         } else {
             await mailbox.finish()
         }
+        terminalCommitState = .finished
     }
 
     func abandon() async {
-        guard finished == false else {
+        if case .finished = terminalCommitState {
             return
         }
-        finished = true
+        terminalCommitState = .finished
         cancelPendingStreamedLogFlush()
         commandLifecycleByItemID.removeAll(keepingCapacity: true)
         pendingStreamedLogEntries.removeAll(keepingCapacity: true)
         pendingStreamedLogIndexByKey.removeAll(keepingCapacity: true)
         pendingStartupNotifications.removeAll(keepingCapacity: true)
         requestedCancellationArtifacts = nil
-        deferredTerminalAwaitingCancellationAcceptance = nil
         await mailbox.abandon()
     }
 
@@ -2148,23 +2172,31 @@ private actor AppServerReviewEventSession {
 
     func detach(subscriptionID _: Int) {}
 
+    func holdNextTerminalCommitForTesting(
+        operation: @escaping @Sendable () async -> Void
+    ) {
+        precondition(terminalCommitTestingOperation == nil)
+        terminalCommitTestingOperation = operation
+    }
+
     private func finish(
         precedingEvents: [CodexReviewBackendModel.Review.Event],
         cancellationMessage: String?
     ) async {
-        guard finished == false else {
+        guard terminalCommitState.acceptsIngress else {
             return
         }
+        terminalCommitState = .finalizing
         cancelPendingStreamedLogFlush()
         pendingStartupNotifications.removeAll(keepingCapacity: true)
         await emitPrecedingEvents(precedingEvents)
         if let cancellationMessage {
-            await finalizeTerminal(.interrupted(message: cancellationMessage))
+            await commitTerminal(.interrupted(message: cancellationMessage))
         } else {
             await emitPrecedingEvents(drainRequestedCancellationProductEvents())
             await mailbox.finish()
+            terminalCommitState = .finished
         }
-        finished = true
     }
 
     private func drainStartupNotifications() async {
@@ -2175,8 +2207,7 @@ private actor AppServerReviewEventSession {
         defer {
             isDrainingStartupNotifications = false
         }
-        while finished == false,
-              deferredTerminalAwaitingCancellationAcceptance == nil,
+        while terminalCommitState.acceptsIngress,
               pendingStartupNotifications.isEmpty == false {
             let notification = pendingStartupNotifications.removeFirst()
             await process(notification)
@@ -2184,7 +2215,7 @@ private actor AppServerReviewEventSession {
     }
 
     private func process(_ notification: AppServerRoutedReviewNotification) async {
-        guard deferredTerminalAwaitingCancellationAcceptance == nil else {
+        guard terminalCommitState.acceptsIngress else {
             metrics.ignored += 1
             return
         }
@@ -2306,9 +2337,9 @@ private actor AppServerReviewEventSession {
 
         if let terminal {
             if cancellationRequests.isAwaitingAcceptance {
-                deferredTerminalAwaitingCancellationAcceptance = terminal
-            } else {
-                await finalizeTerminal(terminal)
+                terminalCommitState = .awaitingCancellationAcceptance(terminal)
+            } else if beginTerminalCommit() {
+                await commitTerminal(terminal)
             }
         } else if decoded.events.isEmpty,
                   notification.method != "turn/started" {
@@ -2447,16 +2478,34 @@ private actor AppServerReviewEventSession {
 
     private func resolveDeferredTerminalIfPossible() async {
         guard cancellationRequests.isAwaitingAcceptance == false,
-              let terminal = deferredTerminalAwaitingCancellationAcceptance
+              case .awaitingCancellationAcceptance(let terminal) = terminalCommitState,
+              beginTerminalCommit()
         else {
             return
         }
-        deferredTerminalAwaitingCancellationAcceptance = nil
-        await finalizeTerminal(terminal)
+        await commitTerminal(terminal)
     }
 
-    private func finalizeTerminal(_ terminal: ReviewAttemptTerminal) async {
+    private func beginTerminalCommit() -> Bool {
+        switch terminalCommitState {
+        case .open, .awaitingCancellationAcceptance:
+            terminalCommitState = .finalizing
+            return true
+        case .finalizing, .finished:
+            return false
+        }
+    }
+
+    private func commitTerminal(_ terminal: ReviewAttemptTerminal) async {
+        guard case .finalizing = terminalCommitState else {
+            return
+        }
+        if let operation = terminalCommitTestingOperation {
+            terminalCommitTestingOperation = nil
+            await operation()
+        }
         if await flushPendingStreamedLog() {
+            terminalCommitState = .finished
             return
         }
         let resolved = resolveRequestedCancellationArtifacts(for: terminal)
@@ -2469,7 +2518,7 @@ private actor AppServerReviewEventSession {
         commandLifecycleByItemID.removeAll(keepingCapacity: true)
         pendingStartupNotifications.removeAll(keepingCapacity: true)
         await emitTerminal(resolved.terminal)
-        finished = true
+        terminalCommitState = .finished
     }
 
     private func recordActiveInterruptTurn(
@@ -2486,9 +2535,7 @@ private actor AppServerReviewEventSession {
 
     func receiveGlobalDiagnostic(_ notification: AppServerRoutedReviewNotification) async {
         metrics.routed += 1
-        guard finished == false,
-              deferredTerminalAwaitingCancellationAcceptance == nil
-        else {
+        guard terminalCommitState.acceptsIngress else {
             metrics.ignored += 1
             return
         }
@@ -2510,17 +2557,18 @@ private actor AppServerReviewEventSession {
     }
 
     func failAttempt(_ error: ReviewIngestionError) async {
-        guard finished == false else {
+        guard terminalCommitState.acceptsIngress else {
+            metrics.ignored += 1
             return
         }
+        terminalCommitState = .finalizing
         let precedingEvents = drainPendingStreamedLogEvents()
             + drainRequestedCancellationProductEvents()
         cancelPendingStreamedLogFlush()
         pendingStartupNotifications.removeAll(keepingCapacity: true)
-        deferredTerminalAwaitingCancellationAcceptance = nil
         await emitPrecedingEvents(precedingEvents)
         await emitTerminal(.failed(message: error.localizedDescription))
-        finished = true
+        terminalCommitState = .finished
     }
 
     private func noteReviewThreadIDForCleanup(_ reviewThreadID: String?) {
@@ -2680,7 +2728,7 @@ private actor AppServerReviewEventSession {
 
     private func flushPendingStreamedLogFromTimer() async {
         streamedLogFlushTask = nil
-        guard deferredTerminalAwaitingCancellationAcceptance == nil else {
+        guard terminalCommitState.acceptsIngress else {
             return
         }
         _ = await flushPendingStreamedLog()

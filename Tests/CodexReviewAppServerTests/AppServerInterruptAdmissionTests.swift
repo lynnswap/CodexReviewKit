@@ -30,6 +30,14 @@ struct AppServerInterruptAdmissionTests {
             terminal: .interrupted(message: "Upstream interrupted")
         )
         try await transport.emitServerNotification(
+            method: "item/completed",
+            params: CancellationArtifactMalformedItemNotification(
+                threadID: "review-thread",
+                turnID: "turn-1",
+                item: .init(type: "agentMessage", text: "Malformed late event")
+            )
+        )
+        try await transport.emitServerNotification(
             method: "thread/status/changed",
             params: CancellationArtifactThreadStatusNotification(
                 threadID: "review-thread",
@@ -40,6 +48,7 @@ struct AppServerInterruptAdmissionTests {
             method: "thread/closed",
             params: CancellationArtifactThreadNotification(threadID: "review-thread")
         )
+        await fixture.backend.waitForReviewNotificationCompletionForTesting(8)
         await responseGate.open()
         await accepted.wait()
         let events = try await collectCancellationArtifactEvents(fixture.attempt)
@@ -156,6 +165,72 @@ struct AppServerInterruptAdmissionTests {
 
         #expect(resolution.terminal == .canonical(.interrupted(.requested(cancellation))))
         assertDeveloperCancellationArtifacts(events)
+        #expect(events.last == .cancelled("Upstream interrupted"))
+        await transport.close()
+    }
+
+    @Test func finalizingTerminalRejectsReentrantIngressUntilMailboxCommit() async throws {
+        let transport = FakeJSONRPCTransport()
+        let responseGate = AsyncGate()
+        let commitEntered = AsyncGate()
+        let releaseCommit = AsyncGate()
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        await transport.hold(method: "turn/interrupt", gate: responseGate)
+        let fixture = try await makeCancellationArtifactFixture(transport)
+        await fixture.backend.holdNextReviewEventSessionTerminalCommitForTesting(
+            fixture.run
+        ) {
+            await commitEntered.open()
+            await releaseCommit.wait()
+        }
+        let accepted = AsyncGate()
+        let cancellation = ReviewCancellation.mcpClient(message: "Stop")
+        let interrupt = Task {
+            try await fixture.admission.interrupt(
+                fixture.run,
+                cancellation: cancellation,
+                request: { requestAdmission, reason in
+                    try await fixture.backend.interruptReview(requestAdmission, reason: reason)
+                    await accepted.open()
+                }
+            )
+        }
+        await transport.waitForRequestCount(4)
+        try await emitCancellationArtifactSequence(
+            transport,
+            terminal: .interrupted(message: "Upstream interrupted")
+        )
+        await fixture.backend.waitForReviewNotificationCompletionForTesting(5)
+        await responseGate.open()
+        await commitEntered.wait()
+
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: CancellationArtifactMalformedItemNotification(
+                threadID: "review-thread",
+                turnID: "turn-1",
+                item: .init(type: "agentMessage", text: "Malformed interposed event")
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "thread/closed",
+            params: CancellationArtifactThreadNotification(threadID: "review-thread")
+        )
+        await fixture.backend.waitForReviewNotificationCompletionForTesting(7)
+        #expect(await fixture.attempt.events.isFinished() == false)
+
+        await releaseCommit.open()
+        await accepted.wait()
+        let events = try await collectCancellationArtifactEvents(fixture.attempt)
+        try await fixture.admission.recordCanonicalTerminal(
+            .interrupted(.server(message: "Upstream interrupted")),
+            for: fixture.run
+        )
+        let resolution = try await interrupt.value
+
+        #expect(resolution.terminal == .canonical(.interrupted(.requested(cancellation))))
+        assertDeveloperCancellationArtifacts(events)
+        #expect(events.contains { if case .failed = $0 { true } else { false } } == false)
         #expect(events.last == .cancelled("Upstream interrupted"))
         await transport.close()
     }
@@ -1094,6 +1169,25 @@ private struct CancellationArtifactThreadStatusNotification: Encodable, Sendable
     enum CodingKeys: String, CodingKey {
         case threadID = "threadId"
         case status
+    }
+}
+
+private struct CancellationArtifactMalformedItemNotification: Encodable, Sendable {
+    struct Item: Encodable, Sendable {
+        var type: String
+        var text: String
+    }
+
+    var threadID: String
+    var turnID: String
+    var item: Item
+    var completedAtMs = 5
+
+    enum CodingKeys: String, CodingKey {
+        case threadID = "threadId"
+        case turnID = "turnId"
+        case item
+        case completedAtMs
     }
 }
 
