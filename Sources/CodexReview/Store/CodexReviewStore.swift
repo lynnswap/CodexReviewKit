@@ -7,9 +7,9 @@ private let runtimeLifecycleLogger = Logger(
     category: "runtime-lifecycle"
 )
 
-private struct ReviewRuntimeCancellationAdmissionRegistration: Sendable {
-    var admission: ReviewStartAdmission
-    var receipt: ReviewCancellationRequestReceipt
+private struct ReviewRuntimeCancellationRegistration: Sendable {
+    let jobID: String
+    let receipt: ReviewCancellationRequestReceipt
 }
 
 package enum StoreReviewAttemptOwnership {
@@ -518,18 +518,16 @@ public final class CodexReviewStore {
         reason: ReviewCancellation
     ) async -> ReviewStoreWorkDrainResult {
         let reviewWorkerJobIDs: [String]
-        let cancellationRegistrations: [ReviewRuntimeCancellationAdmissionRegistration]
+        let cancellationRegistrations: [ReviewRuntimeCancellationRegistration]
         if storeWorkRegistryStatus == .open {
             reviewWorkerJobIDs = recordActiveReviewCancellationRequestsForRuntimeStop(
                 reason: reason
             )
             cancellationRegistrations = reviewWorkerJobIDs.compactMap { jobID in
-                guard let receipt = job(id: jobID)?.pendingCancellationRequest,
-                      let admission = reviewAttemptOwnerships[jobID]?.workerAdmission
-                else {
+                guard let receipt = job(id: jobID)?.pendingCancellationRequest else {
                     return nil
                 }
-                return .init(admission: admission, receipt: receipt)
+                return .init(jobID: jobID, receipt: receipt)
             }
         } else {
             reviewWorkerJobIDs = []
@@ -537,16 +535,20 @@ public final class CodexReviewStore {
         }
         let operation = storeWorkRegistry.beginClosing { [self] in
             accountRateLimitAutoRefreshDriver?.closeAdmission()
-        } beforeTaskCancellation: {
+        } beforeTaskCancellation: { [self] in
             for registration in cancellationRegistrations {
-                await registration.admission.registerCancellationRequest(
-                    registration.receipt
-                )
-            }
-        }
-        for jobID in reviewWorkerJobIDs {
-            if case .recovering(let receipt) = reviewAttemptOwnerships[jobID] {
-                await receipt.cancelOwnedOperation(reason)
+                switch reviewAttemptOwnerships[registration.jobID] {
+                case .starting(let admission):
+                    await admission.registerCancellationRequest(registration.receipt)
+                case .active(let active):
+                    await active.admission.registerCancellationRequest(registration.receipt)
+                case .recovering(let recoveryReceipt):
+                    await recoveryReceipt.cancelOwnedOperation(
+                        cancellationRequest: registration.receipt
+                    )
+                case nil:
+                    break
+                }
             }
         }
         let result = await operation.task.value

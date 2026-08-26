@@ -142,6 +142,16 @@ package final class StoreReviewRecoveryReceipt {
         operation?.cancel()
     }
 
+    package func cancelOwnedOperation(
+        cancellationRequest receipt: ReviewCancellationRequestReceipt
+    ) async {
+        let operation = ownedOperation
+        let admission = cancellationAdmission(for: operation)
+        await admission.registerCancellationRequest(receipt)
+        cancellation = cancellation ?? receipt.cancellation
+        operation?.cancel()
+    }
+
     package func joinOwnedOperation() throws -> Task<Completion, any Error> {
         guard joinIsReserved == false else { throw contractFailure("join concurrent operation") }
         guard let operation = ownedOperation else { throw contractFailure("join operation") }

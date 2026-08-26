@@ -1366,6 +1366,73 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func registeredCloseRegistersRuntimeReceiptWithRecoveredActiveAdmission() async throws {
+        let initialRun = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1",
+            model: "gpt-5"
+        )
+        let recoveredRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-recovered",
+            threadID: "thread-1",
+            turnID: "turn-2",
+            reviewThreadID: "review-thread-1",
+            model: "gpt-5"
+        )
+        let backend = FakeCodexReviewBackend(nextRun: initialRun)
+        await backend.setNextRecoveredRun(recoveredRun)
+        let networkMonitor = ManualCodexReviewNetworkMonitor()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" }),
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: .init(sleep: { _ in })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+            networkMonitor.yield(.init(status: .unsatisfied))
+            try await resolveTypedRecoveryDisposition(backend: backend, store: store)
+            networkMonitor.yield(.satisfied())
+            try await backend.waitForResumeReviewRecovery(timeout: .seconds(2))
+            try #require(await waitForRunAttemptActivation(store: store, run: recoveredRun))
+            guard case .active(let recovered) = store.reviewAttemptOwnerships["job-1"] else {
+                Issue.record("Recovered review did not publish its destination attempt.")
+                return
+            }
+            #expect(recovered.admission !== recovered.workerAdmission)
+            let sourceTerminal = await recovered.workerAdmission.activeTerminalResolution()
+            let workerTask = try #require(store.reviewWorkerTasks["job-1"])
+            let cleanupGate = AsyncGate()
+            await backend.holdCleanupReview(with: cleanupGate)
+            let reason = ReviewCancellation.system(message: "Store work owner closed.")
+            let runtimeReceipt = ReviewCancellationRequestReceipt(
+                id: .init(jobID: "job-1", ordinal: 1),
+                cancellation: reason,
+                rejectionDisposition: .preserveRuntimeStopIntent
+            )
+
+            let close = Task { @MainActor in
+                await store.closeRegisteredStoreWork(reason: reason)
+            }
+            await recovered.admission.waitForCancellationRequestReceipt(runtimeReceipt.id)
+
+            #expect(workerTask.isCancelled)
+            #expect(await recovered.workerAdmission.activeTerminalResolution() == sourceTerminal)
+            await cleanupGate.open()
+            #expect(await close.value == .success)
+            let final = try await result
+            let terminal = try #require(await recovered.admission.activeTerminalResolution())
+
+            #expect(final.core.lifecycle.status == .cancelled)
+            #expect(final.core.lifecycle.cancellation == reason)
+            #expect(terminal.cancellationRequestReceipt?.id == runtimeReceipt.id)
+        }
+    }
+
     @Test func networkRecoveryClearsAbandonedAttemptOutputBeforeRecoveredCompletion() async throws {
         let initialRun = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
@@ -1684,6 +1751,11 @@ struct CodexReviewStoreCommandTests {
             try await resolveTypedRecoveryDisposition(backend: reviewBackend, store: store)
             networkMonitor.yield(.satisfied())
             await storeBackend.waitForReviewRecoveryStage()
+            guard case .recovering(let recoveryReceipt) = store.reviewAttemptOwnerships["job-1"] else {
+                Issue.record("Review did not retain its recovery receipt during staging.")
+                return
+            }
+            let sourceTerminal = await recoveryReceipt.source.admission.activeTerminalResolution()
             let reason = ReviewCancellation.system(message: "Store work owner closed.")
             let close = Task { @MainActor in
                 await store.closeRegisteredStoreWork(reason: reason)
@@ -1692,8 +1764,15 @@ struct CodexReviewStoreCommandTests {
             let stageAdmission = try #require(storeBackend.reviewRecoveryCommands.compactMap { command in
                 if case .stage(_, _, let admission) = command { admission } else { nil }
             }.last)
+            let runtimeReceipt = ReviewCancellationRequestReceipt(
+                id: .init(jobID: "job-1", ordinal: 1),
+                cancellation: reason,
+                rejectionDisposition: .preserveRuntimeStopIntent
+            )
 
+            await stageAdmission.waitForCancellationRequestReceipt(runtimeReceipt.id)
             #expect(await stageAdmission.cancellationRequest() == reason)
+            #expect(await recoveryReceipt.source.admission.activeTerminalResolution() == sourceTerminal)
             await stageGate.open()
             #expect(await close.value == .success)
             let result = try await review.value
@@ -1741,6 +1820,11 @@ struct CodexReviewStoreCommandTests {
             try await resolveTypedRecoveryDisposition(backend: reviewBackend, store: store)
             networkMonitor.yield(.satisfied())
             await storeBackend.waitForReviewRecoveryCommit()
+            guard case .recovering(let recoveryReceipt) = store.reviewAttemptOwnerships["job-1"] else {
+                Issue.record("Review did not retain its recovery receipt during commit.")
+                return
+            }
+            let sourceTerminal = await recoveryReceipt.source.admission.activeTerminalResolution()
             let reason = ReviewCancellation.system(message: "Store work owner closed.")
             let close = Task { @MainActor in
                 await store.closeRegisteredStoreWork(reason: reason)
@@ -1749,8 +1833,15 @@ struct CodexReviewStoreCommandTests {
             let committedAdmission = try #require(storeBackend.reviewRecoveryCommands.compactMap { command in
                 if case .commit(let staged) = command { staged.admission } else { nil }
             }.last)
+            let runtimeReceipt = ReviewCancellationRequestReceipt(
+                id: .init(jobID: "job-1", ordinal: 1),
+                cancellation: reason,
+                rejectionDisposition: .preserveRuntimeStopIntent
+            )
 
+            await committedAdmission.waitForCancellationRequestReceipt(runtimeReceipt.id)
             #expect(await committedAdmission.cancellationRequest() == reason)
+            #expect(await recoveryReceipt.source.admission.activeTerminalResolution() == sourceTerminal)
             await commitGate.open()
             #expect(await close.value == .success)
             let result = try await review.value
