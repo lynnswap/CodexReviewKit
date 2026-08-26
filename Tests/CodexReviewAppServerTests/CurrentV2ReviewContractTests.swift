@@ -1317,10 +1317,10 @@ struct CurrentV2ReviewRoutingIntegrationTests {
             reviewThreadID: "thread-2"
         ))
 
-        let malformedParams = MalformedV2ItemNotification(
+        let malformedParams = V2ItemNotification(
             threadID: "thread-1",
             turnID: "turn-1",
-            item: .init(type: "exitedReviewMode", review: "missing item id")
+            item: .init(type: "sleep", id: "sleep-1")
         )
         try await transport.emitServerNotification(
             method: "item/completed",
@@ -1343,7 +1343,7 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         )
 
         #expect(try await failedAttempt.events.next() == .failed(
-            "Malformed app-server notification item/completed: id must be a nonempty string"
+            "Malformed app-server notification item/completed: durationMs must be an integer"
         ))
         #expect(try await collectEvents(from: healthyAttempt.events).last == .completed(
             summary: "Succeeded.",
@@ -1357,11 +1357,11 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         #expect(diagnostic.method == "item/completed")
         #expect(diagnostic.threadID == "thread-1")
         #expect(diagnostic.turnID == "turn-1")
-        #expect(diagnostic.itemType == "exitedReviewMode")
+        #expect(diagnostic.itemType == "sleep")
         #expect(diagnostic.stage == .schemaValidation)
         #expect(diagnostic.error == .malformedKnownEvent(
             method: "item/completed",
-            message: "id must be a nonempty string"
+            message: "durationMs must be an integer"
         ))
         #expect(diagnostic.disposition == .attemptFailed)
         #expect(try canonicalJSON(diagnostic.rawParams) == canonicalJSON(
