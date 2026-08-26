@@ -1020,12 +1020,8 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     private var scriptedReviewRecoveryRoute: ScriptedReviewRecoveryRoute?
     private var reviewRecoveryStageGate: AsyncGate?
     private var reviewRecoveryStageStartedGate = AsyncGate()
-    private var reviewRecoveryStageCancellationGate = AsyncGate()
-    private var reviewRecoveryStageCancellationReceipt: ReviewCancellationRequestReceipt?
     private var reviewRecoveryCommitGate: AsyncGate?
     private var reviewRecoveryCommitStartedGate = AsyncGate()
-    private var reviewRecoveryCommitCancellationGate = AsyncGate()
-    private var reviewRecoveryCommitCancellationReceipt: ReviewCancellationRequestReceipt?
 
     package init(
         reviewBackend: FakeCodexReviewBackend,
@@ -1060,35 +1056,19 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     package func holdReviewRecoveryStage(with gate: AsyncGate) {
         reviewRecoveryStageGate = gate
         reviewRecoveryStageStartedGate = AsyncGate()
-        reviewRecoveryStageCancellationGate = AsyncGate()
-        reviewRecoveryStageCancellationReceipt = nil
     }
 
     package func waitForReviewRecoveryStage() async {
         await reviewRecoveryStageStartedGate.wait()
     }
 
-    package func waitForReviewRecoveryStageCancellation()
-        async -> ReviewCancellationRequestReceipt? {
-        await reviewRecoveryStageCancellationGate.wait()
-        return reviewRecoveryStageCancellationReceipt
-    }
-
     package func holdReviewRecoveryCommit(with gate: AsyncGate) {
         reviewRecoveryCommitGate = gate
         reviewRecoveryCommitStartedGate = AsyncGate()
-        reviewRecoveryCommitCancellationGate = AsyncGate()
-        reviewRecoveryCommitCancellationReceipt = nil
     }
 
     package func waitForReviewRecoveryCommit() async {
         await reviewRecoveryCommitStartedGate.wait()
-    }
-
-    package func waitForReviewRecoveryCommitCancellation()
-        async -> ReviewCancellationRequestReceipt? {
-        await reviewRecoveryCommitCancellationGate.wait()
-        return reviewRecoveryCommitCancellationReceipt
     }
 
     package func holdRuntimePreparation(with gate: AsyncGate) {
@@ -1415,15 +1395,7 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         scriptedReviewRecoveryRoute = .staging
         reviewRecoveryCommands.append(.stage(prepared, destinationGeneration, admission))
         await reviewRecoveryStageStartedGate.open()
-        if let reviewRecoveryStageGate {
-            await reviewRecoveryStageGate.wait()
-            if Task.isCancelled {
-                reviewRecoveryStageCancellationReceipt =
-                    await admission.effectiveCancellationRequestReceiptSnapshot()
-                await reviewRecoveryStageCancellationGate.open()
-                await reviewRecoveryStageGate.waitIgnoringCancellation()
-            }
-        }
+        await reviewRecoveryStageGate?.waitIgnoringCancellation()
         reviewRecoveryStageGate = nil
         do {
             let attempt = try await reviewBackend.resumeReviewRecovery(
@@ -1465,15 +1437,7 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         scriptedReviewRecoveryRoute = nil
         reviewRecoveryCommands.append(.commit(staged))
         await reviewRecoveryCommitStartedGate.open()
-        if let reviewRecoveryCommitGate {
-            await reviewRecoveryCommitGate.wait()
-            if Task.isCancelled {
-                reviewRecoveryCommitCancellationReceipt =
-                    await staged.admission.effectiveCancellationRequestReceiptSnapshot()
-                await reviewRecoveryCommitCancellationGate.open()
-                await reviewRecoveryCommitGate.waitIgnoringCancellation()
-            }
-        }
+        await reviewRecoveryCommitGate?.waitIgnoringCancellation()
         reviewRecoveryCommitGate = nil
     }
 

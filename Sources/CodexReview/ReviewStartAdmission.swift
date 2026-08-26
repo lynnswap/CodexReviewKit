@@ -180,6 +180,26 @@ package struct ReviewStartAdmissionContractFailure: LocalizedError, Equatable, S
 /// A dispatched request stays outcome-unknown until its response, an explicit
 /// rejection, or a typed terminal resolves it.
 package actor ReviewStartAdmission {
+    package struct CancellationRequestRegistration: Equatable, Sendable {
+        package enum Disposition: Equatable, Sendable {
+            case adopted
+            case alreadyRegistered
+            case superseded
+            case terminal
+        }
+
+        package let receipt: ReviewCancellationRequestReceipt
+        package let disposition: Disposition
+
+        fileprivate init(
+            receipt: ReviewCancellationRequestReceipt,
+            disposition: Disposition
+        ) {
+            self.receipt = receipt
+            self.disposition = disposition
+        }
+    }
+
     private enum InterruptCancellation {
         case semantic(ReviewCancellation)
         case receipt(ReviewCancellationRequestReceipt)
@@ -294,15 +314,25 @@ package actor ReviewStartAdmission {
         }
     }
 
+    @discardableResult
     package func registerCancellationRequest(
         _ receipt: ReviewCancellationRequestReceipt
-    ) {
+    ) -> CancellationRequestRegistration {
+        if effectiveCancellationRequestReceipt?.id == receipt.id {
+            return .init(receipt: receipt, disposition: .alreadyRegistered)
+        }
+        switch phase {
+        case .finishing, .finishingRecovery, .terminal:
+            return .init(receipt: receipt, disposition: .terminal)
+        case .preparingThread, .startingReview, .rollingBackRecovery,
+             .active, .interrupting, .recovering:
+            break
+        }
+        guard shouldAdoptCancellationRequestReceipt(receipt) else {
+            return .init(receipt: receipt, disposition: .superseded)
+        }
         recordJoinedCancellation(.receipt(receipt))
-    }
-
-    package func effectiveCancellationRequestReceiptSnapshot()
-        -> ReviewCancellationRequestReceipt? {
-        effectiveCancellationRequestReceipt
+        return .init(receipt: receipt, disposition: .adopted)
     }
 
     package func admitThreadStartDispatch() throws {

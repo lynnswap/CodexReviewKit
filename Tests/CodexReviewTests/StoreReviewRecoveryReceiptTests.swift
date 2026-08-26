@@ -58,11 +58,10 @@ struct StoreReviewRecoveryReceiptTests {
             await receipt.cancelOwnedOperation(cancellationRequest: cancellationRequest)
         }
         await preparationCancelled.wait()
+        let registration = await cancel.value
 
-        let observedReceipt =
-            await source.admission.effectiveCancellationRequestReceiptSnapshot()
-        #expect(observedReceipt?.id == cancellationRequest.id)
-        await cancel.value
+        #expect(registration.receipt == cancellationRequest)
+        #expect(registration.disposition == .adopted)
         #expect(await source.admission.cancellationRequest() == cancellation)
         await preparationGate.open()
         await #expect(throws: CancellationError.self) {

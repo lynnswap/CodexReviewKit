@@ -305,9 +305,12 @@ struct ReviewInterruptAdmissionTests {
             message: "Buffered stream terminal"
         ))
 
-        await admission.registerCancellationRequest(receipt)
+        let registration = await admission.registerCancellationRequest(receipt)
         let resolution = try await admission.recordStreamTerminal(failure, for: run)
 
+        #expect(registration.receipt == receipt)
+        #expect(registration.disposition == .adopted)
+        #expect(await admission.registerCancellationRequest(receipt).disposition == .alreadyRegistered)
         #expect(resolution == .init(
             run: run,
             cancellation: cancellation,
@@ -328,8 +331,10 @@ struct ReviewInterruptAdmissionTests {
             .preserveRuntimeStopIntent
         )
 
-        await admission.registerCancellationRequest(receipt)
+        let registration = await admission.registerCancellationRequest(receipt)
 
+        #expect(registration.receipt == receipt)
+        #expect(registration.disposition == .terminal)
         #expect(await admission.activeTerminalResolution() == terminal)
         #expect(await admission.cancellationRequest() == nil)
     }

@@ -142,13 +142,21 @@ package final class StoreReviewRecoveryReceipt {
         operation?.cancel()
     }
 
+    @discardableResult
     package func cancelOwnedOperation(
         cancellationRequest receipt: ReviewCancellationRequestReceipt
-    ) async {
+    ) async -> ReviewStartAdmission.CancellationRequestRegistration {
         let operation = ownedOperation
         let admission = cancellationAdmission(for: operation)
-        await admission.registerCancellationRequest(receipt)
-        cancellation = cancellation ?? receipt.cancellation
+        let registration = await admission.registerCancellationRequest(receipt)
+        cancelOwnedOperation(after: registration)
+        return registration
+    }
+
+    private func cancelOwnedOperation(
+        after registration: ReviewStartAdmission.CancellationRequestRegistration
+    ) {
+        cancellation = cancellation ?? registration.receipt.cancellation
         ownedOperation?.cancel()
     }
 
