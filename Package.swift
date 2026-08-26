@@ -139,6 +139,7 @@ let package = Package(
             name: "ReviewUITests",
             dependencies: [
                 "CodexReview",
+                "CodexReviewAppServer",
                 "CodexReviewTesting",
                 "ReviewUI",
             ],
