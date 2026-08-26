@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import Testing
+import XCTest
 import CodexReviewHost
 
 @Suite("Codex executable resolver")
@@ -198,6 +199,45 @@ struct CodexExecutableResolverTests {
         #expect(errno == ESRCH)
     }
 
+    @Test func liveZshDiscoveryPreservesClosedStandardDescriptors() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-shell-closed-stdio-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bin = root.appendingPathComponent("managed-bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let codex = bin.appendingPathComponent("codex")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: codex)
+        #expect(chmod(codex.path, S_IRWXU) == 0)
+        try Data("export PATH=\"\(bin.path):$PATH\"\n".utf8)
+            .write(to: root.appendingPathComponent(".zshrc"))
+        let resultURL = root.appendingPathComponent("result")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        process.arguments = [
+            "xctest",
+            "-XCTest",
+            "CodexReviewHostTests.ShellProbeClosedStdioHarnessTests/testDiscovery",
+            Bundle(for: ShellProbeClosedStdioHarnessTests.self).bundleURL.path,
+        ]
+        process.environment = ProcessInfo.processInfo.environment.merging([
+            ShellProbeClosedStdioHarnessTests.enabledKey: "1",
+            ShellProbeClosedStdioHarnessTests.homeKey: root.path,
+            ShellProbeClosedStdioHarnessTests.resultKey: resultURL.path,
+        ]) { _, new in new }
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+
+        try process.run()
+        process.waitUntilExit()
+
+        #expect(process.terminationStatus == 0)
+        let result = try String(contentsOf: resultURL, encoding: .utf8)
+        #expect(result.contains("__CODEX_REVIEW_SHELL_PATH_BEGIN__"))
+        #expect(result.contains(codex.path))
+        #expect(result.contains("__CODEX_REVIEW_SHELL_PATH_END__"))
+    }
+
     @Test func explicitAndEnvironmentPrecedence() async throws {
         let resolver = makeResolver(executables: [
             "/explicit", "/commands/app", "/commands/review", "/commands/legacy",
@@ -321,6 +361,43 @@ struct CodexExecutableResolverTests {
             #expect(first?.candidate == "codex")
             #expect(first?.reason == "PATH is missing or empty")
         }
+    }
+}
+
+final class ShellProbeClosedStdioHarnessTests: XCTestCase {
+    static let enabledKey = "CODEX_REVIEW_RUN_CLOSED_STDIO_HARNESS"
+    static let homeKey = "CODEX_REVIEW_CLOSED_STDIO_HOME"
+    static let resultKey = "CODEX_REVIEW_CLOSED_STDIO_RESULT"
+
+    func testDiscovery() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment[Self.enabledKey] == "1" else { return }
+        let homePath = try XCTUnwrap(environment[Self.homeKey])
+        let resultPath = try XCTUnwrap(environment[Self.resultKey])
+
+        Darwin.close(STDIN_FILENO)
+        Darwin.close(STDOUT_FILENO)
+        Darwin.close(STDERR_FILENO)
+        let outcome = await CodexShellPathDiscovery.live(timeout: .seconds(1)).discover(
+            shellURL: URL(fileURLWithPath: "/bin/zsh"),
+            environment: [
+                "HOME": homePath,
+                "PATH": "/usr/bin:/bin",
+                "ZDOTDIR": homePath,
+            ]
+        )
+        let result: String
+        switch outcome {
+        case .output(let output):
+            result = output
+        case .failed(let reason):
+            result = "failed: \(reason)"
+        case .timedOut:
+            result = "timed out"
+        }
+        try Data(result.utf8).write(to: URL(fileURLWithPath: resultPath))
+        XCTAssertTrue(result.contains("__CODEX_REVIEW_SHELL_PATH_BEGIN__"))
+        XCTAssertTrue(result.contains("__CODEX_REVIEW_SHELL_PATH_END__"))
     }
 }
 

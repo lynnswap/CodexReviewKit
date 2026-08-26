@@ -134,6 +134,16 @@ private final class ShellProbeProcess: @unchecked Sendable {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
         defer { Darwin.close(nullDescriptor) }
+        var duplicatedDescriptors: [Int32] = []
+        defer { duplicatedDescriptors.forEach { Darwin.close($0) } }
+        let stdoutDescriptor = try childSourceDescriptor(
+            stdout.fileHandleForWriting.fileDescriptor,
+            duplicatedDescriptors: &duplicatedDescriptors
+        )
+        let childNullDescriptor = try childSourceDescriptor(
+            nullDescriptor,
+            duplicatedDescriptors: &duplicatedDescriptors
+        )
         var fileActions: posix_spawn_file_actions_t?
         var attributes: posix_spawnattr_t?
         try check(posix_spawn_file_actions_init(&fileActions))
@@ -143,18 +153,27 @@ private final class ShellProbeProcess: @unchecked Sendable {
             posix_spawnattr_destroy(&attributes)
         }
 
-        try check(posix_spawn_file_actions_adddup2(&fileActions, nullDescriptor, STDIN_FILENO))
         try check(posix_spawn_file_actions_adddup2(
             &fileActions,
-            stdout.fileHandleForWriting.fileDescriptor,
+            childNullDescriptor,
+            STDIN_FILENO
+        ))
+        try check(posix_spawn_file_actions_adddup2(
+            &fileActions,
+            stdoutDescriptor,
             STDOUT_FILENO
         ))
-        try check(posix_spawn_file_actions_adddup2(&fileActions, nullDescriptor, STDERR_FILENO))
-        for fileDescriptor in [
-            nullDescriptor,
+        try check(posix_spawn_file_actions_adddup2(
+            &fileActions,
+            childNullDescriptor,
+            STDERR_FILENO
+        ))
+        let ownedDescriptors = Set([
+            childNullDescriptor,
             stdout.fileHandleForReading.fileDescriptor,
-            stdout.fileHandleForWriting.fileDescriptor,
-        ] {
+            stdoutDescriptor,
+        ]).filter { $0 > STDERR_FILENO }
+        for fileDescriptor in ownedDescriptors {
             try check(posix_spawn_file_actions_addclose(&fileActions, fileDescriptor))
         }
         try check(posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP)))
@@ -224,6 +243,21 @@ private final class ShellProbeProcess: @unchecked Sendable {
         guard result == 0 else {
             throw POSIXError(POSIXErrorCode(rawValue: result) ?? .EINVAL)
         }
+    }
+
+    private static func childSourceDescriptor(
+        _ descriptor: Int32,
+        duplicatedDescriptors: inout [Int32]
+    ) throws -> Int32 {
+        guard descriptor <= STDERR_FILENO else { return descriptor }
+        // Spawn actions run in order. Keep a source out of the stdio range so an
+        // earlier dup2 or a later close cannot clobber another action's source.
+        let duplicate = Darwin.fcntl(descriptor, F_DUPFD_CLOEXEC, STDERR_FILENO + 1)
+        guard duplicate >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        duplicatedDescriptors.append(duplicate)
+        return duplicate
     }
 
     private static func withCStringArray<R>(
