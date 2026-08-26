@@ -2580,7 +2580,13 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func failedReviewPreservesBufferedEventsBeforeStreamError() async throws {
+    @Test(arguments: [
+        ReviewAttemptStreamFailure.ownerForcedConnectionClose(.connection("Runtime closed")),
+        .workerContract(.init(message: "Missing terminal")),
+    ])
+    func streamTerminalSnapshotIgnoresLateRuntimeReceipt(
+        failure: ReviewAttemptStreamFailure
+    ) async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -2591,12 +2597,28 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
+            try #require(await StoreSnapshotProbe(store: store).waitUntilRunAttempt(
+                "attempt-1",
+                jobID: "job-1"
+            ) != nil)
+            guard case .active(let active) = store.reviewAttemptOwnerships["job-1"] else {
+                Issue.record("Review did not publish its exact active attempt.")
+                return
+            }
             await backend.yield(.message("partial review"))
-            await backend.finishEvents(throwing: StreamClosedError())
+            try await active.admission.recordStreamTerminal(failure, for: active.run)
+            let job = try #require(store.job(id: "job-1"))
+            store.recordCancellationRequest(
+                .system(message: "Late runtime stop"),
+                rejectionDisposition: .preserveRuntimeStopIntent,
+                for: job
+            )
+            await backend.finishEvents(throwing: failure)
             let read = try await result
 
             #expect(read.core.lifecycle.status == .failed)
+            #expect(read.core.lifecycle.cancellation == nil)
+            #expect(job.cancellationRequested == false)
             #expect(read.core.output.lastAgentMessage == "partial review")
             #expect(read.logs.map(\.text).contains("partial review"))
         }
@@ -2968,8 +2990,6 @@ struct CodexReviewStoreCommandTests {
 
             #expect(runtimeOutcome.firstFailure == .cleanup("Interrupt failed"))
             #expect(store.job(id: "job-1")?.pendingCancellationRequest?.id == runtimeReceipt.id)
-            #expect(await active.admission.currentPhase() == .active(run))
-            #expect(await active.admission.cancellationRequest() == cancellation)
             await #expect(throws: ReviewInterruptRequestFailure.self) {
                 try await store.cancelReview(jobID: "job-1", cancellation: cancellation)
             }
@@ -2988,10 +3008,6 @@ struct CodexReviewStoreCommandTests {
             let resolution = try #require(await active.admission.activeTerminalResolution())
             #expect(resolution.cancellation == cancellation)
             #expect(resolution.cancellationRequestReceipt?.id == runtimeReceipt.id)
-            #expect(resolution.requestFailure?.outcome == .rejected(
-                code: nil,
-                message: "Interrupt failed"
-            ))
         }
     }
 
@@ -3037,7 +3053,7 @@ struct CodexReviewStoreCommandTests {
         await #expect(throws: rejection) {
             try await admission.interrupt(
                 activeRun,
-                cancellation: first.cancellation,
+                cancellationRequest: first,
                 request: { _, _ in throw rejection }
             )
         }
@@ -3047,7 +3063,7 @@ struct CodexReviewStoreCommandTests {
         let successorRequest = Task {
             try await admission.interrupt(
                 activeRun,
-                cancellation: successor.cancellation,
+                cancellationRequest: successor,
                 request: { _, _ in await successorDispatched.open() }
             )
         }
@@ -3155,6 +3171,21 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
+            try #require(await StoreSnapshotProbe(store: store).waitUntilRunAttempt("attempt-1", jobID: "job-1") != nil)
+            guard case .active(let active) = store.reviewAttemptOwnerships["job-1"] else {
+                Issue.record("Review did not publish its exact active attempt.")
+                return
+            }
+            try await active.admission.recordCanonicalTerminal(
+                .interrupted(.server(message: "Server stopped")),
+                for: active.run
+            )
+            let job = try #require(store.job(id: "job-1"))
+            store.recordCancellationRequest(
+                .system(message: "Late runtime stop"),
+                rejectionDisposition: .preserveRuntimeStopIntent,
+                for: job
+            )
             await backend.yield(.cancelled("Server stopped"))
             await backend.yield(.completed(summary: "Late success", result: "late review"))
             let read = try await result
@@ -3162,6 +3193,7 @@ struct CodexReviewStoreCommandTests {
             #expect(read.core.lifecycle.status == .failed)
             #expect(read.core.lifecycle.terminal == .interrupted(.server(message: "Server stopped")))
             #expect(read.core.lifecycle.cancellation == nil)
+            #expect(job.cancellationRequested == false)
             #expect(read.core.lifecycle.errorMessage == "Server stopped")
             #expect(read.core.output.lastAgentMessage == nil)
         }

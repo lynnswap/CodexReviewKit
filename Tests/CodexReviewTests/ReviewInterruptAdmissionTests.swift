@@ -86,49 +86,61 @@ struct ReviewInterruptAdmissionTests {
         #expect(resolution.cancellationRequestReceipt?.id == receipt.id)
     }
 
-    @Test func duplicateCallersJoinTheFirstCancellationAndRequestResult() async throws {
+    @Test func joinedReportCallersUseLatestReceiptAndOneRequest() async throws {
         let (admission, run) = try await makeActiveInterruptAdmission()
         let requestStarted = AsyncGate()
         let requestGate = AsyncGate()
         let requestCount = InterruptInvocationCounter()
-        let firstCancellation = ReviewCancellation.mcpClient(message: "Stop from MCP")
+        let cancellation = ReviewCancellation.mcpClient(message: "Same cancellation")
+        let firstReceipt = ReviewCancellationRequestReceipt(
+            id: .init(jobID: "job-1", ordinal: 1),
+            cancellation: cancellation,
+            rejectionDisposition: .reportFailure
+        )
+        let successorReceipt = ReviewCancellationRequestReceipt(
+            id: .init(jobID: "job-1", ordinal: 2),
+            cancellation: cancellation,
+            rejectionDisposition: .reportFailure
+        )
+        let rejection = ReviewInterruptRequestFailure(
+            outcome: .rejected(code: nil, message: "Rejected")
+        )
 
         let first = Task {
             try await admission.interrupt(
                 run,
-                cancellation: firstCancellation,
+                cancellationRequest: firstReceipt,
                 request: { _, _ in
                     await requestCount.record()
                     await requestStarted.open()
                     await requestGate.waitIgnoringCancellation()
+                    throw rejection
                 }
             )
         }
         await requestStarted.wait()
-        let second = Task {
+        let successor = Task {
             try await admission.interrupt(
                 run,
-                cancellation: .system(message: "Stop from runtime"),
+                cancellationRequest: successorReceipt,
                 request: { _, _ in
-                    Issue.record("A duplicate caller dispatched another interrupt request.")
+                    Issue.record("A joined report receipt dispatched a second request.")
                 }
             )
         }
-
-        try await admission.recordCanonicalTerminal(
-            .interrupted(.server(message: nil)),
-            for: run
-        )
+        for _ in 0..<1_000 {
+            if await admission.cancellationRequestReceipt()?.id == successorReceipt.id {
+                break
+            }
+            await Task.yield()
+        }
+        #expect(await admission.cancellationRequestReceipt()?.id == successorReceipt.id)
         await requestGate.open()
 
-        let firstResolution = try await first.value
-        let secondResolution = try await second.value
-        #expect(firstResolution == secondResolution)
-        #expect(firstResolution.cancellation == firstCancellation)
-        #expect(firstResolution.terminal == .canonical(
-            .interrupted(.requested(firstCancellation))
-        ))
+        await #expect(throws: rejection) { try await first.value }
+        await #expect(throws: rejection) { try await successor.value }
         #expect(await requestCount.count() == 1)
+        #expect(await admission.cancellationRequestReceipt() == nil)
     }
 
     @Test func explicitRejectionReturnsToActiveAndAllowsAReasonedRetry() async throws {

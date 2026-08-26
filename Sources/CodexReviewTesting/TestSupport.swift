@@ -1728,11 +1728,10 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
 
     package func close() async {
         closed = true
-        let closeWaiters = closeWaiters
-        self.closeWaiters.removeAll(keepingCapacity: false)
         for waiter in closeWaiters {
             waiter.resume()
         }
+        closeWaiters.removeAll(keepingCapacity: false)
         let requestGates = Array(activeRequestGates.values)
         activeRequestGates.removeAll(keepingCapacity: false)
         for gate in requestGates {
@@ -1798,11 +1797,7 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
             return
         }
         await withCheckedContinuation { continuation in
-            if closed {
-                continuation.resume()
-            } else {
-                closeWaiters.append(continuation)
-            }
+            closeWaiters.append(continuation)
         }
     }
 
