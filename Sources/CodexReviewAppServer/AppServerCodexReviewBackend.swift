@@ -1101,7 +1101,13 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             }
         }
 
-        let outcome = await race.wait()
+        let outcome = await withTaskCancellationHandler {
+            await race.wait()
+        } onCancel: {
+            Task {
+                await race.resolve(.cancelled)
+            }
+        }
         switch outcome {
         case .success(let response):
             timeoutTask.cancel()
@@ -1116,19 +1122,15 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         case .cancelled:
             timeoutTask.cancel()
             await timeoutTask.value
+            sendTask.cancel()
+            _ = await closeClientForCleanupTermination()
             await sendTask.value
             throw CancellationError()
         case .timedOut(let timeout):
             timeoutTask.cancel()
             await timeoutTask.value
             sendTask.cancel()
-            let transportCloseFailure: String?
-            do {
-                try await client.close()
-                transportCloseFailure = nil
-            } catch {
-                transportCloseFailure = error.localizedDescription
-            }
+            let transportCloseFailure = await closeClientForCleanupTermination()
             await sendTask.value
             throw AppServerCleanupRequestTimeout(
                 method: timeout.method,
@@ -1138,11 +1140,26 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         }
     }
 
+    private func closeClientForCleanupTermination() async -> String? {
+        do {
+            try await client.close()
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
     private func performCleanupReview(
         _ run: CodexReviewBackendModel.Review.Run
     ) async throws {
         controlsByThreadID.removeValue(forKey: run.threadID)
         var cleanupThreadIDs = cleanupThreadIDs(for: run)
+        defer {
+            for threadID in cleanupThreadIDs {
+                reviewEventSessionCanonicalThreadIDByThreadID.removeValue(forKey: threadID)
+            }
+            reviewThreadIDsForCleanupByThreadID.removeValue(forKey: run.threadID)
+        }
         let session = unregisterReviewEventSession(for: run)
         reviewStartRoutingAttemptIDs.remove(run.attemptID)
         discardUnmatchedReviewNotificationsIfIdle()
@@ -1155,51 +1172,62 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             }
         }
         var failureMessages: [String] = []
+        var shouldStopNetworkCleanup = false
         do {
             let _: EmptyResponse = try await sendCleanupRequest(AppServerAPI.Thread.BackgroundTerminals.Clean.Request(
                 params: .init(threadID: run.threadID)
             ))
+        } catch is CancellationError {
+            throw CancellationError()
         } catch let timeout as AppServerCleanupRequestTimeout {
-            throw ReviewRuntimeCloseFailure.cleanup(
+            failureMessages.append(
                 "thread/backgroundTerminals/clean for \(run.threadID): \(timeout.localizedDescription)"
             )
+            shouldStopNetworkCleanup = true
         } catch {
             failureMessages.append(
                 "thread/backgroundTerminals/clean for \(run.threadID): \(error.localizedDescription)"
             )
         }
-        do {
-            let _: AppServerAPI.Thread.Unsubscribe.Response = try await sendCleanupRequest(AppServerAPI.Thread.Unsubscribe.Request(
-                params: .init(threadID: run.threadID)
-            ))
-        } catch let timeout as AppServerCleanupRequestTimeout {
-            throw ReviewRuntimeCloseFailure.cleanup(
-                "thread/unsubscribe for \(run.threadID): \(timeout.localizedDescription)"
-            )
-        } catch {
-            failureMessages.append(
-                "thread/unsubscribe for \(run.threadID): \(error.localizedDescription)"
-            )
-        }
-        for threadID in cleanupThreadIDs {
+        if shouldStopNetworkCleanup == false {
             do {
-                let _: EmptyResponse = try await sendCleanupRequest(AppServerAPI.Thread.Delete.Request(
-                    params: .init(threadID: threadID)
+                let _: AppServerAPI.Thread.Unsubscribe.Response = try await sendCleanupRequest(AppServerAPI.Thread.Unsubscribe.Request(
+                    params: .init(threadID: run.threadID)
                 ))
+            } catch is CancellationError {
+                throw CancellationError()
             } catch let timeout as AppServerCleanupRequestTimeout {
-                throw ReviewRuntimeCloseFailure.cleanup(
-                    "thread/delete for \(threadID): \(timeout.localizedDescription)"
+                failureMessages.append(
+                    "thread/unsubscribe for \(run.threadID): \(timeout.localizedDescription)"
                 )
+                shouldStopNetworkCleanup = true
             } catch {
                 failureMessages.append(
-                    "thread/delete for \(threadID): \(error.localizedDescription)"
+                    "thread/unsubscribe for \(run.threadID): \(error.localizedDescription)"
                 )
             }
         }
-        for threadID in cleanupThreadIDs {
-            reviewEventSessionCanonicalThreadIDByThreadID.removeValue(forKey: threadID)
+        if shouldStopNetworkCleanup == false {
+            for threadID in cleanupThreadIDs {
+                do {
+                    let _: EmptyResponse = try await sendCleanupRequest(AppServerAPI.Thread.Delete.Request(
+                        params: .init(threadID: threadID)
+                    ))
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch let timeout as AppServerCleanupRequestTimeout {
+                    failureMessages.append(
+                        "thread/delete for \(threadID): \(timeout.localizedDescription)"
+                    )
+                    shouldStopNetworkCleanup = true
+                    break
+                } catch {
+                    failureMessages.append(
+                        "thread/delete for \(threadID): \(error.localizedDescription)"
+                    )
+                }
+            }
         }
-        reviewThreadIDsForCleanupByThreadID.removeValue(forKey: run.threadID)
         if failureMessages.isEmpty == false {
             throw ReviewRuntimeCloseFailure.cleanup(failureMessages.joined(separator: "; "))
         }

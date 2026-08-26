@@ -273,6 +273,7 @@ extension CodexReviewStore {
         }
         // Cleanup RPCs remain owned by a fresh task so a worker cancelled to wake
         // a pending-outage wait cannot carry cancellation into backend cleanup.
+        let workerWasCancelled = Task.isCancelled
         let cleanupTask = Task { @MainActor [self] in
             await self.cleanupReviewAttemptOwnership(
                 jobID: jobID,
@@ -280,7 +281,8 @@ extension CodexReviewStore {
                 workerAdmission: admission,
                 unpublishedAttempt: unpublishedAttempt,
                 cancellationRequest: cleanupCancellationRequest,
-                inputs: inputs
+                inputs: inputs,
+                workerWasCancelled: workerWasCancelled
             )
         }
         if let cleanupFailure = await cleanupTask.value {
@@ -536,7 +538,8 @@ extension CodexReviewStore {
         workerAdmission: ReviewStartAdmission,
         unpublishedAttempt: StoreReviewActiveAttempt?,
         cancellationRequest capturedCancellationRequest: ReviewCancellationRequestReceipt?,
-        inputs: ReviewWorkerInputs?
+        inputs: ReviewWorkerInputs?,
+        workerWasCancelled: Bool
     ) async -> ReviewRuntimeCloseFailure? {
         let cancellationRequest = latestCleanupCancellationRequest(capturedCancellationRequest, job.pendingCancellationRequest)
         if let unpublishedAttempt {
@@ -562,7 +565,7 @@ extension CodexReviewStore {
             }
         case .active(let active):
             let cancellation = cancellationRequest.map(ActiveAttemptCancellation.receipt)
-                ?? (job.core.lifecycle.cancellation ?? (Task.isCancelled ? .system() : nil)).map(ActiveAttemptCancellation.semantic)
+                ?? (job.core.lifecycle.cancellation ?? (workerWasCancelled ? .system() : nil)).map(ActiveAttemptCancellation.semantic)
             if let cancellation {
                 do {
                     let resolution = try await interruptActiveAttemptAndRecordTerminal(
@@ -581,7 +584,7 @@ extension CodexReviewStore {
         case .recovering(let receipt):
             if let cancellation = cancellationRequest?.cancellation
                 ?? job.core.lifecycle.cancellation
-                ?? (Task.isCancelled ? .system() : nil) {
+                ?? (workerWasCancelled ? .system() : nil) {
                 await receipt.cancelOwnedOperation(cancellation)
             }
             do {

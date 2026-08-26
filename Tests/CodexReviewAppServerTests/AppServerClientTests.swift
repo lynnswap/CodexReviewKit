@@ -6871,6 +6871,36 @@ struct AppServerClientTests {
         #expect(await transport.recordedRequests().map(\.method) == [
             "thread/backgroundTerminals/clean",
         ])
+        #expect(await transport.isClosedForTesting())
+    }
+
+    @Test func cancelledCleanupClosesTransportAndReturnsCancellation() async throws {
+        let transport = FakeJSONRPCTransport()
+        let cleanupGate = AsyncGate()
+        await transport.holdNextIgnoringCancellation(
+            method: "thread/backgroundTerminals/clean",
+            gate: cleanupGate
+        )
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let run = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "thread-1"
+        )
+        let cleanup = Task {
+            try await backend.cleanupReview(run)
+        }
+
+        await transport.waitForRequestCount(1)
+        cleanup.cancel()
+
+        await #expect(throws: CancellationError.self) {
+            try await cleanup.value
+        }
+        #expect(await transport.isClosedForTesting())
+        #expect(await transport.recordedRequests().map(\.method) == [
+            "thread/backgroundTerminals/clean",
+        ])
     }
 
     @Test @MainActor
