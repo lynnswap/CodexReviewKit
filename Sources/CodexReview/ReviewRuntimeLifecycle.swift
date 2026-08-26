@@ -142,6 +142,13 @@ package final class ReviewRuntimeFailureIncident {
                 successorGeneration: generation
             )
         case .admitted(let successorGeneration):
+            if generation.rawValue > successorGeneration.rawValue {
+                successorState = .admitted(generation)
+                return .joined(
+                    sourceGeneration: sourceGeneration,
+                    successorGeneration: generation
+                )
+            }
             return .joined(
                 sourceGeneration: sourceGeneration,
                 successorGeneration: successorGeneration
