@@ -18,9 +18,56 @@ private func makeAppServerReviewAttemptID() -> String {
 private struct AppServerCleanupRequestTimeout: LocalizedError, Sendable {
     let method: String
     let timeout: Duration
+    let transportCloseFailure: String?
 
     var errorDescription: String? {
-        "\(method) cleanup request timed out after \(timeout)."
+        var message = "\(method) cleanup request timed out after \(timeout)."
+        if let transportCloseFailure {
+            message += " Transport close failed: \(transportCloseFailure)"
+        }
+        return message
+    }
+}
+
+private struct AppServerCleanupRequestFailure: LocalizedError, Sendable {
+    let message: String
+
+    var errorDescription: String? {
+        message
+    }
+}
+
+private enum AppServerCleanupRequestOutcome<Response: Sendable>: Sendable {
+    case success(Response)
+    case failure(String)
+    case cancelled
+    case timedOut(AppServerCleanupRequestTimeout)
+}
+
+private actor AppServerCleanupRequestRace<Response: Sendable> {
+    private var outcome: AppServerCleanupRequestOutcome<Response>?
+    private var continuation: CheckedContinuation<AppServerCleanupRequestOutcome<Response>, Never>?
+
+    func resolve(_ outcome: AppServerCleanupRequestOutcome<Response>) {
+        guard self.outcome == nil else {
+            return
+        }
+        self.outcome = outcome
+        continuation?.resume(returning: outcome)
+        continuation = nil
+    }
+
+    func wait() async -> AppServerCleanupRequestOutcome<Response> {
+        if let outcome {
+            return outcome
+        }
+        return await withCheckedContinuation { continuation in
+            if let outcome {
+                continuation.resume(returning: outcome)
+            } else {
+                self.continuation = continuation
+            }
+        }
     }
 }
 
@@ -1031,19 +1078,63 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     private func sendCleanupRequest<Request: AppServerAPI.Request>(
         _ request: Request
     ) async throws -> Request.Response {
-        try await withThrowingTaskGroup(of: Request.Response.self) { group in
-            group.addTask { [client] in
-                try await client.send(request)
+        let race = AppServerCleanupRequestRace<Request.Response>()
+        let sendTask = Task { [client] in
+            do {
+                await race.resolve(.success(try await client.send(request)))
+            } catch is CancellationError {
+                await race.resolve(.cancelled)
+            } catch {
+                await race.resolve(.failure(error.localizedDescription))
             }
-            group.addTask { [cleanupRequestSleep, cleanupRequestTimeout] in
+        }
+        let timeoutTask = Task { [cleanupRequestSleep, cleanupRequestTimeout] in
+            do {
                 try await cleanupRequestSleep(cleanupRequestTimeout)
-                throw AppServerCleanupRequestTimeout(
+                await race.resolve(.timedOut(.init(
                     method: Request.method,
-                    timeout: cleanupRequestTimeout
-                )
+                    timeout: cleanupRequestTimeout,
+                    transportCloseFailure: nil
+                )))
+            } catch {
+                await race.resolve(.cancelled)
             }
-            defer { group.cancelAll() }
-            return try await group.next()!
+        }
+
+        let outcome = await race.wait()
+        switch outcome {
+        case .success(let response):
+            timeoutTask.cancel()
+            await timeoutTask.value
+            await sendTask.value
+            return response
+        case .failure(let message):
+            timeoutTask.cancel()
+            await timeoutTask.value
+            await sendTask.value
+            throw AppServerCleanupRequestFailure(message: message)
+        case .cancelled:
+            timeoutTask.cancel()
+            await timeoutTask.value
+            await sendTask.value
+            throw CancellationError()
+        case .timedOut(let timeout):
+            timeoutTask.cancel()
+            await timeoutTask.value
+            sendTask.cancel()
+            let transportCloseFailure: String?
+            do {
+                try await client.close()
+                transportCloseFailure = nil
+            } catch {
+                transportCloseFailure = error.localizedDescription
+            }
+            await sendTask.value
+            throw AppServerCleanupRequestTimeout(
+                method: timeout.method,
+                timeout: timeout.timeout,
+                transportCloseFailure: transportCloseFailure
+            )
         }
     }
 
@@ -1068,6 +1159,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             let _: EmptyResponse = try await sendCleanupRequest(AppServerAPI.Thread.BackgroundTerminals.Clean.Request(
                 params: .init(threadID: run.threadID)
             ))
+        } catch let timeout as AppServerCleanupRequestTimeout {
+            throw ReviewRuntimeCloseFailure.cleanup(
+                "thread/backgroundTerminals/clean for \(run.threadID): \(timeout.localizedDescription)"
+            )
         } catch {
             failureMessages.append(
                 "thread/backgroundTerminals/clean for \(run.threadID): \(error.localizedDescription)"
@@ -1077,6 +1172,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             let _: AppServerAPI.Thread.Unsubscribe.Response = try await sendCleanupRequest(AppServerAPI.Thread.Unsubscribe.Request(
                 params: .init(threadID: run.threadID)
             ))
+        } catch let timeout as AppServerCleanupRequestTimeout {
+            throw ReviewRuntimeCloseFailure.cleanup(
+                "thread/unsubscribe for \(run.threadID): \(timeout.localizedDescription)"
+            )
         } catch {
             failureMessages.append(
                 "thread/unsubscribe for \(run.threadID): \(error.localizedDescription)"
@@ -1087,6 +1186,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                 let _: EmptyResponse = try await sendCleanupRequest(AppServerAPI.Thread.Delete.Request(
                     params: .init(threadID: threadID)
                 ))
+            } catch let timeout as AppServerCleanupRequestTimeout {
+                throw ReviewRuntimeCloseFailure.cleanup(
+                    "thread/delete for \(threadID): \(timeout.localizedDescription)"
+                )
             } catch {
                 failureMessages.append(
                     "thread/delete for \(threadID): \(error.localizedDescription)"

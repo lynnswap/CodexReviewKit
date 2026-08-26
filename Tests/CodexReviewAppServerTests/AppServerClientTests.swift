@@ -6839,7 +6839,7 @@ struct AppServerClientTests {
         let transport = FakeJSONRPCTransport()
         let cleanupGate = AsyncGate()
         let timeoutGate = AsyncGate()
-        await transport.holdNext(
+        await transport.holdNextIgnoringCancellation(
             method: "thread/backgroundTerminals/clean",
             gate: cleanupGate
         )
@@ -6864,16 +6864,12 @@ struct AppServerClientTests {
 
         await #expect(throws: ReviewRuntimeCloseFailure.cleanup(
             "thread/backgroundTerminals/clean for thread-1: "
-                + "thread/backgroundTerminals/clean cleanup request timed out after 2.0 seconds.; "
-                + "thread/unsubscribe for thread-1: thread/unsubscribe cleanup request timed out after 2.0 seconds.; "
-                + "thread/delete for thread-1: thread/delete cleanup request timed out after 2.0 seconds."
+                + "thread/backgroundTerminals/clean cleanup request timed out after 2.0 seconds."
         )) {
             try await cleanup.value
         }
         #expect(await transport.recordedRequests().map(\.method) == [
             "thread/backgroundTerminals/clean",
-            "thread/unsubscribe",
-            "thread/delete",
         ])
     }
 
