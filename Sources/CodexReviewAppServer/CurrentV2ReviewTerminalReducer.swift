@@ -7,9 +7,29 @@ struct CurrentV2ReviewAttemptIdentity: Equatable, Sendable {
 }
 
 enum CurrentV2ReviewAttemptIngestion: Equatable, Sendable {
-    case accepted(ReviewAttemptTerminal?)
+    case accepted(CurrentV2ReviewTerminalResolution?)
     case duplicate
     case foreignIdentity
+
+    var terminalResolution: CurrentV2ReviewTerminalResolution? {
+        if case .accepted(let resolution) = self {
+            return resolution
+        }
+        return nil
+    }
+}
+
+struct CurrentV2ReviewTerminalResolution: Equatable, Sendable {
+    let terminal: ReviewAttemptTerminal
+    let ingestionError: ReviewIngestionError?
+
+    init(
+        terminal: ReviewAttemptTerminal,
+        ingestionError: ReviewIngestionError? = nil
+    ) {
+        self.terminal = terminal
+        self.ingestionError = ingestionError
+    }
 }
 
 struct CurrentV2ReviewTerminalReducer: Sendable {
@@ -144,27 +164,43 @@ struct CurrentV2ReviewTerminalReducer: Sendable {
         }
     }
 
-    private func resolveTerminal(_ turn: TerminalPayload.Turn) -> ReviewAttemptTerminal {
+    private func resolveTerminal(
+        _ turn: TerminalPayload.Turn
+    ) -> CurrentV2ReviewTerminalResolution {
         switch turn.status {
         case "completed":
             do {
-                return .completed(try finalResult(from: turn))
+                return .init(terminal: .completed(try finalResult(from: turn)))
             } catch let error as ReviewIngestionError {
-                return .failed(message: error.localizedDescription)
+                return .init(
+                    terminal: .failed(message: error.localizedDescription),
+                    ingestionError: error
+                )
             } catch {
-                return .failed(message: error.localizedDescription)
+                let ingestionError = ReviewIngestionError.malformedKnownEvent(
+                    method: "turn/completed",
+                    message: error.localizedDescription
+                )
+                return .init(
+                    terminal: .failed(message: error.localizedDescription),
+                    ingestionError: ingestionError
+                )
             }
         case "interrupted":
-            return .interrupted(message: turn.error?.message)
+            return .init(terminal: .interrupted(message: turn.error?.message))
         case "failed":
-            return .failed(message: turn.error?.message)
+            return .init(terminal: .failed(message: turn.error?.message))
         case "inProgress":
-            return .failed(
-                message: ReviewIngestionError.invalidTerminalStatus(turn.status).localizedDescription
+            let error = ReviewIngestionError.invalidTerminalStatus(turn.status)
+            return .init(
+                terminal: .failed(message: error.localizedDescription),
+                ingestionError: error
             )
         default:
-            return .failed(
-                message: ReviewIngestionError.invalidTerminalStatus(turn.status).localizedDescription
+            let error = ReviewIngestionError.invalidTerminalStatus(turn.status)
+            return .init(
+                terminal: .failed(message: error.localizedDescription),
+                ingestionError: error
             )
         }
     }

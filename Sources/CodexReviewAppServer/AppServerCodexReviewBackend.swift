@@ -402,6 +402,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         let session = AppServerReviewEventSession(
             run: provisionalRun,
             control: control,
+            ingestionDiagnosticRecorder: ingestionDiagnosticRecorder,
             isRunFinalized: false
         )
         registerReviewEventSession(session, for: provisionalRun)
@@ -930,6 +931,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         let session = AppServerReviewEventSession(
             run: provisionalRun,
             control: control,
+            ingestionDiagnosticRecorder: ingestionDiagnosticRecorder,
             isRunFinalized: false
         )
         registerReviewEventSession(session, for: provisionalRun)
@@ -1226,7 +1228,11 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         } else {
             control.recordThreadStarted(threadID: run.threadID)
         }
-        let session = AppServerReviewEventSession(run: run, control: control)
+        let session = AppServerReviewEventSession(
+            run: run,
+            control: control,
+            ingestionDiagnosticRecorder: ingestionDiagnosticRecorder
+        )
         registerReviewEventSession(session, for: run)
         return session
     }
@@ -1591,8 +1597,13 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             )
             if let attemptID = attemptIDs.first,
                let session = reviewEventSessionsByAttemptID[attemptID] {
-                notificationRouterMetrics.attemptFailures += 1
-                await session.failAttempt(ingestionError)
+                let didFailAttempt = await session.failAttempt(ingestionError)
+                recordIngestionDiagnostic(
+                    envelope,
+                    stage: .payloadDecoding,
+                    error: ingestionError,
+                    disposition: recordAttemptFailureDisposition(didFailAttempt)
+                )
             } else {
                 recordIngestionDiagnostic(
                     envelope,
@@ -1645,8 +1656,11 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             if attemptIDs.count == 1,
                let attemptID = attemptIDs.first,
                let session = reviewEventSessionsByAttemptID[attemptID] {
-                notificationRouterMetrics.attemptFailures += 1
-                await session.failAttempt(failure.error)
+                let didFailAttempt = await session.failAttempt(failure.error)
+                recordIngestionDiagnostic(
+                    failure,
+                    disposition: recordAttemptFailureDisposition(didFailAttempt)
+                )
                 return
             }
             if attemptIDs.count > 1 {
@@ -1668,6 +1682,17 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             disposition: .connectionFailed
         )
         await failConnection(failure.error)
+    }
+
+    private func recordAttemptFailureDisposition(
+        _ didFailAttempt: Bool
+    ) -> ReviewIngestionDiagnosticRecord.Disposition {
+        if didFailAttempt {
+            notificationRouterMetrics.attemptFailures += 1
+            return .attemptFailed
+        }
+        notificationRouterMetrics.ignored += 1
+        return .ignored
     }
 
     private func recordIngestionDiagnostic(
@@ -1993,6 +2018,7 @@ private actor AppServerReviewEventSession {
     private var run: CodexReviewBackendModel.Review.Run
     private let control: AppServerReviewControl
     private let mailbox: BackendReviewEventMailbox
+    private let ingestionDiagnosticRecorder: any ReviewIngestionDiagnosticRecording
     private var terminalReducer: CurrentV2ReviewTerminalReducer?
     private var emittedCanonicalStart = false
     private var reviewThreadIDsForCleanup: [String] = []
@@ -2014,11 +2040,13 @@ private actor AppServerReviewEventSession {
         run: CodexReviewBackendModel.Review.Run,
         control: AppServerReviewControl,
         mailbox: BackendReviewEventMailbox = .init(),
+        ingestionDiagnosticRecorder: any ReviewIngestionDiagnosticRecording,
         isRunFinalized: Bool = true
     ) {
         self.run = run
         self.control = control
         self.mailbox = mailbox
+        self.ingestionDiagnosticRecorder = ingestionDiagnosticRecorder
         self.isRunFinalized = isRunFinalized
         self.terminalReducer = Self.makeTerminalReducer(for: run)
         if let reviewThreadID = run.reviewThreadID?.nilIfEmpty,
@@ -2221,7 +2249,10 @@ private actor AppServerReviewEventSession {
         }
         recordActiveInterruptTurn(from: notification)
         guard var terminalReducer else {
-            await failAttempt(.missingRoutingIdentity(method: notification.method))
+            await failAttempt(
+                .missingRoutingIdentity(method: notification.method),
+                diagnosticFor: notification
+            )
             return
         }
         let ingestion: CurrentV2ReviewAttemptIngestion
@@ -2229,13 +2260,14 @@ private actor AppServerReviewEventSession {
             ingestion = try terminalReducer.ingest(notification.envelope)
             self.terminalReducer = terminalReducer
         } catch let error as ReviewIngestionError {
-            await failAttempt(error)
+            await failAttempt(error, diagnosticFor: notification)
             return
         } catch {
-            await failAttempt(.malformedKnownEvent(
+            let ingestionError = ReviewIngestionError.malformedKnownEvent(
                 method: notification.method,
                 message: error.localizedDescription
-            ))
+            )
+            await failAttempt(ingestionError, diagnosticFor: notification)
             return
         }
         switch ingestion {
@@ -2254,22 +2286,17 @@ private actor AppServerReviewEventSession {
                 commandLifecycleByItemID: &decodedCommandLifecycleByItemID
             )
         } catch let error as ReviewIngestionError {
-            await failAttempt(error)
+            _ = await failAttempt(error)
             return
         } catch {
-            await failAttempt(.malformedKnownEvent(
+            _ = await failAttempt(.malformedKnownEvent(
                 method: notification.method,
                 message: error.localizedDescription
             ))
             return
         }
         metrics.decoded += 1
-        let terminal: ReviewAttemptTerminal?
-        if case .accepted(let acceptedTerminal) = ingestion {
-            terminal = acceptedTerminal
-        } else {
-            terminal = nil
-        }
+        let terminalResolution = ingestion.terminalResolution
         if emittedCanonicalStart == false,
            notification.envelope.turnID != nil,
            (notification.method == "turn/started"
@@ -2335,15 +2362,47 @@ private actor AppServerReviewEventSession {
             }
         }
 
-        if let terminal {
-            if cancellationRequests.isAwaitingAcceptance {
-                terminalCommitState = .awaitingCancellationAcceptance(terminal)
-            } else if beginTerminalCommit() {
-                await commitTerminal(terminal)
-            }
+        if let terminalResolution {
+            await acceptTerminalResolution(
+                terminalResolution,
+                diagnosticFor: notification
+            )
         } else if decoded.events.isEmpty,
                   notification.method != "turn/started" {
             metrics.ignored += 1
+        }
+    }
+
+    private func acceptTerminalResolution(
+        _ resolution: CurrentV2ReviewTerminalResolution,
+        diagnosticFor notification: AppServerRoutedReviewNotification
+    ) async {
+        guard terminalCommitState.acceptsIngress else {
+            if let error = resolution.ingestionError {
+                recordIngestionDiagnostic(
+                    notification,
+                    error: error,
+                    disposition: .ignored
+                )
+            }
+            metrics.ignored += 1
+            return
+        }
+
+        if cancellationRequests.isAwaitingAcceptance {
+            terminalCommitState = .awaitingCancellationAcceptance(resolution.terminal)
+        } else {
+            terminalCommitState = .finalizing
+        }
+        if let error = resolution.ingestionError {
+            recordIngestionDiagnostic(
+                notification,
+                error: error,
+                disposition: .attemptFailed
+            )
+        }
+        if case .finalizing = terminalCommitState {
+            await commitTerminal(resolution.terminal)
         }
     }
 
@@ -2556,10 +2615,39 @@ private actor AppServerReviewEventSession {
         }
     }
 
-    func failAttempt(_ error: ReviewIngestionError) async {
+    private func recordIngestionDiagnostic(
+        _ notification: AppServerRoutedReviewNotification,
+        error: ReviewIngestionError,
+        disposition: ReviewIngestionDiagnosticRecord.Disposition
+    ) {
+        ingestionDiagnosticRecorder.record(.init(
+            method: notification.method,
+            threadID: notification.envelope.threadID,
+            turnID: notification.envelope.turnID,
+            itemType: error.diagnosticItemType ?? notification.envelope.itemType,
+            rawParams: notification.envelope.rawParams,
+            stage: .terminalReduction,
+            error: error,
+            disposition: disposition
+        ))
+    }
+
+    private func failAttempt(
+        _ error: ReviewIngestionError,
+        diagnosticFor notification: AppServerRoutedReviewNotification
+    ) async {
+        let didFailAttempt = await failAttempt(error)
+        recordIngestionDiagnostic(
+            notification,
+            error: error,
+            disposition: didFailAttempt ? .attemptFailed : .ignored
+        )
+    }
+
+    func failAttempt(_ error: ReviewIngestionError) async -> Bool {
         guard terminalCommitState.acceptsIngress else {
             metrics.ignored += 1
-            return
+            return false
         }
         terminalCommitState = .finalizing
         let precedingEvents = drainPendingStreamedLogEvents()
@@ -2569,6 +2657,7 @@ private actor AppServerReviewEventSession {
         await emitPrecedingEvents(precedingEvents)
         await emitTerminal(.failed(message: error.localizedDescription))
         terminalCommitState = .finished
+        return true
     }
 
     private func noteReviewThreadIDForCleanup(_ reviewThreadID: String?) {
