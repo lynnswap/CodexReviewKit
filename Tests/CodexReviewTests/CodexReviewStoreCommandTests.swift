@@ -852,17 +852,24 @@ struct CodexReviewStoreCommandTests {
             await backend.holdCleanupReview(with: cleanupGate)
             await backend.failCleanup(message: "cleanup failed")
 
-            async let cancellation = store.cancelReview(
-                jobID: "job-1",
-                cancellation: .mcpClient(message: "Stop")
-            )
+            let cancellationCompletion = StoreCommandTaskCompletion()
+            let cancellation = Task { @MainActor in
+                let outcome = try await store.cancelReview(
+                    jobID: "job-1",
+                    cancellation: .mcpClient(message: "Stop")
+                )
+                await cancellationCompletion.complete()
+                return outcome
+            }
             try await backend.waitForInterruptReview(timeout: .seconds(2))
             await backend.yield(.cancelled("Stop"), for: run)
             await backend.waitForCleanupReview()
 
+            #expect(await cancellationCompletion.isComplete() == false)
+            #expect(store.reviewWorkerTasks["job-1"]?.isCancelled == true)
             #expect(await backend.cleanupReviewWasCancelled() == false)
             await cleanupGate.open()
-            let cancel = try await cancellation
+            let cancel = try await cancellation.value
             let final = try await result
             #expect(cancel.cancelled)
             #expect(final.core.lifecycle.status == .cancelled)

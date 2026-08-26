@@ -676,11 +676,11 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
 
     package func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws {
         commands.append(.cleanupReview(run))
-        cleanupReviewTaskWasCancelled = Task.isCancelled
         await cleanupReviewStartedGate.open()
         if let cleanupReviewGate {
-            await cleanupReviewGate.wait()
+            await cleanupReviewGate.waitIgnoringCancellation()
         }
+        cleanupReviewTaskWasCancelled = Task.isCancelled
         if let cleanupFailure {
             throw cleanupFailure
         }
