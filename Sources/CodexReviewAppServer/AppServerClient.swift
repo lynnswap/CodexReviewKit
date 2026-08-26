@@ -306,12 +306,15 @@ package actor AppServerClient {
 
 package actor RequestSerializer {
     private let waiterQueued: (@Sendable () -> Void)?
+    private let waiterGranted: (@Sendable () async -> Void)?
     private var lanes: [AppServerAPI.RequestScope: SerialLane] = [:]
 
     package init(
-        waiterQueued: (@Sendable () -> Void)? = nil
+        waiterQueued: (@Sendable () -> Void)? = nil,
+        waiterGranted: (@Sendable () async -> Void)? = nil
     ) {
         self.waiterQueued = waiterQueued
+        self.waiterGranted = waiterGranted
     }
 
     package func run<Output: Sendable>(
@@ -338,7 +341,10 @@ package actor RequestSerializer {
         if let lane = lanes[scope] {
             return lane
         }
-        let lane = SerialLane(waiterQueued: waiterQueued)
+        let lane = SerialLane(
+            waiterQueued: waiterQueued,
+            waiterGranted: waiterGranted
+        )
         lanes[scope] = lane
         return lane
     }
@@ -353,9 +359,14 @@ private actor SerialLane {
     private var isOccupied = false
     private var waiters: [Waiter] = []
     private let waiterQueued: (@Sendable () -> Void)?
+    private let waiterGranted: (@Sendable () async -> Void)?
 
-    init(waiterQueued: (@Sendable () -> Void)?) {
+    init(
+        waiterQueued: (@Sendable () -> Void)?,
+        waiterGranted: (@Sendable () async -> Void)?
+    ) {
         self.waiterQueued = waiterQueued
+        self.waiterGranted = waiterGranted
     }
 
     func enter() async throws {
@@ -389,6 +400,7 @@ private actor SerialLane {
                 await self.cancelWaiter(id: waiterID)
             }
         }
+        await waiterGranted?()
         do {
             try Task.checkCancellation()
         } catch {
