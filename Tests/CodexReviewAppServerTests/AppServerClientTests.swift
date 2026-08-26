@@ -1217,6 +1217,181 @@ struct AppServerClientTests {
         #expect(params.turnID == "turn-1")
     }
 
+    @Test func finishedControlAbsorbsLaterReviewPhases() async throws {
+        let transport = FakeJSONRPCTransport()
+        let control = AppServerReviewControl(client: .init(transport: transport))
+
+        control.recordReviewStarted(turnThreadID: "thread-1", turnID: "turn-1")
+        control.finish()
+        control.recordReviewStarted(turnThreadID: "thread-2", turnID: "turn-2")
+        control.recordTurnStarted(turnThreadID: "thread-3", turnID: "turn-3")
+
+        #expect(try await control.interrupt() == nil)
+        #expect(await transport.recordedRequests().isEmpty)
+    }
+
+    @Test func finishedControlRejectsRetryFromSuspendedInterrupt() async throws {
+        let transport = FakeJSONRPCTransport()
+        await transport.enqueueFailure(
+            .responseError(
+                code: -32602,
+                message: "expected active turn id turn-old but found turn-new"
+            ),
+            for: "turn/interrupt"
+        )
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let firstRequest = RequestBarrier()
+        await transport.beforeReturningNextResponse(method: "turn/interrupt") {
+            await firstRequest.enterAndWait()
+        }
+        let control = AppServerReviewControl(client: .init(transport: transport))
+        control.recordReviewStarted(turnThreadID: "thread-1", turnID: "turn-old")
+
+        let interrupt = Task {
+            try await control.interruptOutcome()
+        }
+        await firstRequest.waitUntilEntered()
+        control.finish()
+        await firstRequest.open()
+
+        let outcome = try await interrupt.value
+        #expect(outcome == .superseded)
+        #expect(outcome.interruption == nil)
+        #expect(await transport.recordedRequests().count == 1)
+    }
+
+    @Test func identicalPhaseDoesNotInvalidateReservedInterruptRetry() async throws {
+        let transport = FakeJSONRPCTransport()
+        await transport.enqueueFailure(
+            .responseError(
+                code: -32602,
+                message: "expected active turn id turn-old but found turn-new"
+            ),
+            for: "turn/interrupt"
+        )
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let firstRequest = RequestBarrier()
+        await transport.beforeReturningNextResponse(method: "turn/interrupt") {
+            await firstRequest.enterAndWait()
+        }
+        let control = AppServerReviewControl(client: .init(transport: transport))
+        control.recordReviewStarted(turnThreadID: "thread-1", turnID: "turn-old")
+
+        let interrupt = Task {
+            try await control.interruptOutcome()
+        }
+        await firstRequest.waitUntilEntered()
+        control.recordTurnStarted(turnThreadID: "thread-1", turnID: "turn-old")
+        await firstRequest.open()
+
+        #expect(try await interrupt.value == .sent(.init(
+            threadID: "thread-1",
+            turnID: "turn-new"
+        )))
+        #expect(await transport.recordedRequests().count == 2)
+    }
+
+    @Test func currentReportedPhaseAuthorizesReservedInterruptRetry() async throws {
+        let transport = FakeJSONRPCTransport()
+        await transport.enqueueFailure(
+            .responseError(
+                code: -32602,
+                message: "expected active turn id turn-old but found turn-new"
+            ),
+            for: "turn/interrupt"
+        )
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let firstRequest = RequestBarrier()
+        await transport.beforeReturningNextResponse(method: "turn/interrupt") {
+            await firstRequest.enterAndWait()
+        }
+        let control = AppServerReviewControl(client: .init(transport: transport))
+        control.recordReviewStarted(turnThreadID: "thread-1", turnID: "turn-old")
+
+        let interrupt = Task {
+            try await control.interruptOutcome()
+        }
+        await firstRequest.waitUntilEntered()
+        control.recordTurnStarted(turnThreadID: "thread-1", turnID: "turn-new")
+        await firstRequest.open()
+
+        #expect(try await interrupt.value == .sent(.init(
+            threadID: "thread-1",
+            turnID: "turn-new"
+        )))
+        #expect(await transport.recordedRequests().count == 2)
+    }
+
+    @Test func successfulRetryDoesNotOverwriteNewerPhase() async throws {
+        let transport = FakeJSONRPCTransport()
+        await transport.enqueueFailure(
+            .responseError(
+                code: -32602,
+                message: "expected active turn id turn-old but found turn-new"
+            ),
+            for: "turn/interrupt"
+        )
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let retryRequest = RequestBarrier()
+        await transport.beforeReturningNextResponse(method: "turn/interrupt") {}
+        await transport.beforeReturningNextResponse(method: "turn/interrupt") {
+            await retryRequest.enterAndWait()
+        }
+        let control = AppServerReviewControl(client: .init(transport: transport))
+        control.recordReviewStarted(turnThreadID: "thread-1", turnID: "turn-old")
+
+        let interrupt = Task {
+            try await control.interruptOutcome()
+        }
+        await retryRequest.waitUntilEntered()
+        control.recordTurnStarted(turnThreadID: "thread-1", turnID: "turn-newer")
+        await retryRequest.open()
+
+        #expect(try await interrupt.value == .sent(.init(
+            threadID: "thread-1",
+            turnID: "turn-new"
+        )))
+        #expect(try await control.interruptOutcome() == .sent(.init(
+            threadID: "thread-1",
+            turnID: "turn-newer"
+        )))
+        let requests = await transport.recordedRequests()
+        let turns = try requests.map {
+            try JSONDecoder().decode(
+                AppServerAPI.Turn.Interrupt.Params.self,
+                from: $0.params
+            ).turnID
+        }
+        #expect(turns == ["turn-old", "turn-new", "turn-newer"])
+    }
+
+    @Test func backendDoesNotFallbackAfterRegisteredControlFinishes() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let run = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-1",
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "thread-1"
+        )
+        var events = await eventSequence(backend, run).makeAsyncIterator()
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: "thread-1",
+                turn: .init(id: "turn-1", status: "failed")
+            )
+        )
+        await backend.waitForReviewNotificationCompletionForTesting(1)
+        #expect(try await events.next() == .failed(nil))
+
+        try await backend.interruptReview(run, reason: .init(message: "Stop"))
+
+        #expect(await transport.recordedRequests().map(\.method) == ["initialize"])
+    }
+
     @Test func rejectedLateStartedDoesNotAdvanceControlOrMetrics() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
