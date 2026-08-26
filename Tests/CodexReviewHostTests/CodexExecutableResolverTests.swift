@@ -1,10 +1,204 @@
+import Darwin
 import Foundation
 import Testing
 import CodexReviewHost
 
 @Suite("Codex executable resolver")
 struct CodexExecutableResolverTests {
-    @Test func explicitAndEnvironmentPrecedence() throws {
+    @Test func shellCandidateResolvesWhenApplicationPathMissesAndBeatsFixedFallbacks() async throws {
+        let recorder = ShellDiscoveryRecorder(outcome: .output(markedShellOutput(
+            noiseBefore: "startup noise\n/ignore/me",
+            candidate: "/shell/bin/codex",
+            noiseAfter: "shutdown noise"
+        )))
+        let resolver = makeResolver(
+            executables: ["/shell/bin/codex", "/home/.local/bin/codex", "/system/codex"],
+            shellPathDiscovery: .init { shellURL, environment in
+                await recorder.discover(shellURL: shellURL, environment: environment)
+            }
+        )
+
+        let resolved = try await resolver.resolve(
+            configuredPath: nil,
+            environment: ["PATH": "/app/bin", "SHELL": "/bin/zsh", "HOME": "/ignored"]
+        )
+
+        #expect(resolved.path == "/shell/bin/codex")
+        #expect(await recorder.invocations() == [
+            .init(shellPath: "/bin/zsh", path: "/app/bin")
+        ])
+    }
+
+    @Test func shellOutputMustContainOneMarkedAbsoluteExecutable() async {
+        let cases: [(String, CodexShellPathDiscovery.Outcome, String)] = [
+            (
+                "relative",
+                .output(markedShellOutput(candidate: "relative/codex")),
+                "not absolute"
+            ),
+            (
+                "invalid executable",
+                .output(markedShellOutput(candidate: "/missing/codex")),
+                "not an executable regular file"
+            ),
+            (
+                "ambiguous marked output",
+                .output(markedShellOutput(candidate: "/first/codex\n/second/codex")),
+                "did not contain one marked candidate"
+            ),
+        ]
+
+        for (name, outcome, expectedReason) in cases {
+            let resolver = makeResolver(shellPathDiscovery: .init { _, _ in outcome })
+            do {
+                _ = try await resolver.resolve(
+                    configuredPath: nil,
+                    environment: ["PATH": "/app/bin", "SHELL": "/bin/zsh"]
+                )
+                Issue.record("\(name) unexpectedly resolved.")
+            } catch {
+                #expect(error.kind == .notFound)
+                #expect(error.trace.contains {
+                    $0.source == .shell("/bin/zsh") && $0.reason.contains(expectedReason)
+                })
+            }
+        }
+    }
+
+    @Test func nonabsoluteAndUnsupportedShellValuesAreNotExecuted() async throws {
+        let recorder = ShellDiscoveryRecorder(outcome: .output(markedShellOutput(candidate: "/shell/codex")))
+        let resolver = makeResolver(
+            executables: ["/system/codex", "/shell/codex"],
+            shellPathDiscovery: .init { shellURL, environment in
+                await recorder.discover(shellURL: shellURL, environment: environment)
+            }
+        )
+
+        for shell in ["zsh", "/bin/fish", ""] {
+            let resolved = try await resolver.resolve(
+                configuredPath: nil,
+                environment: ["PATH": "/app/bin", "SHELL": shell]
+            )
+            #expect(resolved.path == "/system/codex")
+        }
+        #expect(await recorder.invocations().isEmpty)
+    }
+
+    @Test func shellTimeoutFallsThroughAndIsTraced() async throws {
+        let timeoutDiscovery = CodexShellPathDiscovery { _, _ in .timedOut }
+        let fallback = makeResolver(
+            executables: ["/system/codex"],
+            shellPathDiscovery: timeoutDiscovery
+        )
+        #expect(try await fallback.resolve(
+            configuredPath: nil,
+            environment: ["PATH": "/app/bin", "SHELL": "/bin/zsh"]
+        ).path == "/system/codex")
+
+        do {
+            _ = try await makeResolver(shellPathDiscovery: timeoutDiscovery).resolve(
+                configuredPath: nil,
+                environment: ["PATH": "/app/bin", "SHELL": "/bin/zsh"]
+            )
+            Issue.record("Timed-out shell discovery unexpectedly resolved.")
+        } catch {
+            #expect(error.trace.contains {
+                $0.source == .shell("/bin/zsh") && $0.reason == "shell discovery timed out"
+            })
+        }
+    }
+
+    @Test func explicitEnvironmentAndProcessPathDoNotLaunchShellDiscovery() async throws {
+        let recorder = ShellDiscoveryRecorder(outcome: .output(markedShellOutput(candidate: "/shell/codex")))
+        let resolver = makeResolver(
+            executables: ["/explicit", "/env/tool", "/app/codex", "/shell/codex"],
+            shellPathDiscovery: .init { shellURL, environment in
+                await recorder.discover(shellURL: shellURL, environment: environment)
+            }
+        )
+        let shellEnvironment = ["PATH": "/app", "SHELL": "/bin/zsh"]
+
+        #expect(try await resolver.resolve(
+            configuredPath: "/explicit",
+            environment: shellEnvironment
+        ).path == "/explicit")
+        #expect(try await resolver.resolve(
+            configuredPath: nil,
+            environment: shellEnvironment.merging(["CODEX_EXECUTABLE": "/env/tool"]) { _, new in new }
+        ).path == "/env/tool")
+        #expect(try await resolver.resolve(
+            configuredPath: nil,
+            environment: shellEnvironment
+        ).path == "/app/codex")
+        #expect(await recorder.invocations().isEmpty)
+    }
+
+    @Test func liveZshDiscoveryLoadsLoginAndInteractiveStartupFiles() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-shell-discovery-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bin = root.appendingPathComponent("managed-bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let codex = bin.appendingPathComponent("codex")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: codex)
+        #expect(chmod(codex.path, S_IRWXU) == 0)
+        let startup = root.appendingPathComponent(".zshrc")
+        try Data("print startup-noise\nexport PATH=\"\(bin.path):$PATH\"\n".utf8).write(to: startup)
+        let resolver = CodexExecutableResolver(configuration: .init(
+            homeDirectory: root,
+            applicationDirectories: [],
+            fallbackBinDirectories: [],
+            fileSystem: .live,
+            shellPathDiscovery: .live(timeout: .seconds(1))
+        ))
+
+        let resolved = try await resolver.resolve(
+            configuredPath: nil,
+            environment: [
+                "HOME": root.path,
+                "PATH": "/usr/bin:/bin",
+                "SHELL": "/bin/zsh",
+                "ZDOTDIR": root.path,
+            ]
+        )
+
+        #expect(resolved == codex)
+    }
+
+    @Test func liveZshDiscoveryTerminatesHungStartupAtTimeout() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-shell-timeout-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let childPIDURL = root.appendingPathComponent("child.pid")
+        try Data("""
+            /bin/sh -c 'trap "" TERM; while :; do /bin/sleep 1; done' &
+            print $! > "\(childPIDURL.path)"
+            wait
+            """.utf8).write(to: root.appendingPathComponent(".zshrc"))
+        let clock = ContinuousClock()
+        let start = clock.now
+
+        let outcome = await CodexShellPathDiscovery.live(timeout: .milliseconds(50)).discover(
+            shellURL: URL(fileURLWithPath: "/bin/zsh"),
+            environment: [
+                "HOME": root.path,
+                "PATH": "/usr/bin:/bin",
+                "ZDOTDIR": root.path,
+            ]
+        )
+
+        #expect(outcome == .timedOut)
+        #expect(clock.now - start < .seconds(1))
+        let childPID = try #require(Int32(
+            String(contentsOf: childPIDURL, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        ))
+        #expect(Darwin.kill(childPID, 0) == -1)
+        #expect(errno == ESRCH)
+    }
+
+    @Test func explicitAndEnvironmentPrecedence() async throws {
         let resolver = makeResolver(executables: [
             "/explicit", "/commands/app", "/commands/review", "/commands/legacy",
         ])
@@ -14,27 +208,27 @@ struct CodexExecutableResolverTests {
             "CODEX_EXECUTABLE": "legacy",
             "PATH": "/commands",
         ]
-        #expect(try resolver.resolve(configuredPath: "/explicit", environment: allEnvironment).path == "/explicit")
-        #expect(try resolver.resolve(configuredPath: nil, environment: allEnvironment).path == "/commands/app")
-        #expect(try resolver.resolve(configuredPath: nil, environment: [
+        #expect(try await resolver.resolve(configuredPath: "/explicit", environment: allEnvironment).path == "/explicit")
+        #expect(try await resolver.resolve(configuredPath: nil, environment: allEnvironment).path == "/commands/app")
+        #expect(try await resolver.resolve(configuredPath: nil, environment: [
             "CODEX_REVIEW_CODEX_EXECUTABLE": "review", "CODEX_EXECUTABLE": "legacy", "PATH": "/commands",
         ]).path == "/commands/review")
-        #expect(try resolver.resolve(configuredPath: nil, environment: [
+        #expect(try await resolver.resolve(configuredPath: nil, environment: [
             "CODEX_EXECUTABLE": "legacy", "PATH": "/commands",
         ]).path == "/commands/legacy")
     }
 
-    @Test func invalidExplicitSourcesDoNotFallback() {
+    @Test func invalidExplicitSourcesDoNotFallback() async {
         let resolver = makeResolver(executables: ["/auto/codex", "/home/.local/bin/codex"])
         do {
-            _ = try resolver.resolve(configuredPath: "/missing", environment: ["PATH": "/auto"])
+            _ = try await resolver.resolve(configuredPath: "/missing", environment: ["PATH": "/auto"])
             Issue.record("Invalid configured path unexpectedly fell back.")
         } catch {
             #expect(error.kind == .invalidExplicit)
             #expect(error.trace.first?.source == .configuredPath)
         }
         do {
-            _ = try resolver.resolve(configuredPath: nil, environment: [
+            _ = try await resolver.resolve(configuredPath: nil, environment: [
                 "CODEX_APP_SERVER_CODEX_EXECUTABLE": "missing",
                 "CODEX_REVIEW_CODEX_EXECUTABLE": "/auto/codex",
                 "PATH": "/auto",
@@ -46,16 +240,16 @@ struct CodexExecutableResolverTests {
         }
     }
 
-    @Test func pathOrderIgnoresEmptyComponents() throws {
+    @Test func pathOrderIgnoresEmptyComponents() async throws {
         let resolver = makeResolver(executables: ["/first/codex", "/second/codex"])
-        let resolved = try resolver.resolve(
+        let resolved = try await resolver.resolve(
             configuredPath: nil,
             environment: ["PATH": ":/first::/second:"]
         )
         #expect(resolved.path == "/first/codex")
     }
 
-    @Test func homeBundlesAndFallbackKeepContractOrder() throws {
+    @Test func homeBundlesAndFallbackKeepContractOrder() async throws {
         let homeFirst = makeResolver(
             executables: [
                 "/home/.local/bin/codex",
@@ -65,7 +259,7 @@ struct CodexExecutableResolverTests {
             directories: ["/Applications/Codex.app"],
             bundleIDs: ["/Applications/Codex.app": "com.openai.codex"]
         )
-        #expect(try homeFirst.resolve(configuredPath: nil, environment: ["HOME": "/other"]).path == "/home/.local/bin/codex")
+        #expect(try await homeFirst.resolve(configuredPath: nil, environment: ["HOME": "/other"]).path == "/home/.local/bin/codex")
         let systemAppFirst = makeResolver(
             executables: [
                 "/Applications/Codex.app/Contents/Resources/codex",
@@ -77,12 +271,12 @@ struct CodexExecutableResolverTests {
                 "/home/Applications/ChatGPT.app": "com.openai.codex",
             ]
         )
-        #expect(try systemAppFirst.resolve(configuredPath: nil, environment: [:]).path == "/Applications/Codex.app/Contents/Resources/codex")
+        #expect(try await systemAppFirst.resolve(configuredPath: nil, environment: [:]).path == "/Applications/Codex.app/Contents/Resources/codex")
         let fallback = makeResolver(executables: ["/brew/codex", "/system/codex"])
-        #expect(try fallback.resolve(configuredPath: nil, environment: [:]).path == "/brew/codex")
+        #expect(try await fallback.resolve(configuredPath: nil, environment: [:]).path == "/brew/codex")
     }
 
-    @Test func bundleIdentityAndExactLayoutAreRequired() throws {
+    @Test func bundleIdentityAndExactLayoutAreRequired() async throws {
         let resolver = makeResolver(
             executables: [
                 "/Applications/ChatGPT.app/Contents/Resources/codex",
@@ -95,21 +289,21 @@ struct CodexExecutableResolverTests {
                 "/Applications/Codex.app": "com.openai.codex",
             ]
         )
-        #expect(try resolver.resolve(configuredPath: nil, environment: [:]).path == "/system/codex")
+        #expect(try await resolver.resolve(configuredPath: nil, environment: [:]).path == "/system/codex")
     }
 
-    @Test func canonicalizesSymlinksAndDeduplicatesTrace() throws {
+    @Test func canonicalizesSymlinksAndDeduplicatesTrace() async throws {
         let selected = makeResolver(
             executables: ["/real/codex"],
             canonical: ["/link/codex": "/real/codex"]
         )
-        #expect(try selected.resolve(configuredPath: nil, environment: ["PATH": "/link"]).path == "/real/codex")
+        #expect(try await selected.resolve(configuredPath: nil, environment: ["PATH": "/link"]).path == "/real/codex")
         let failed = makeResolver(canonical: [
             "/link/codex": "/real/missing",
             "/home/.local/bin/codex": "/real/missing",
         ])
         do {
-            _ = try failed.resolve(configuredPath: nil, environment: ["PATH": "/link"])
+            _ = try await failed.resolve(configuredPath: nil, environment: ["PATH": "/link"])
             Issue.record("Missing candidates unexpectedly resolved.")
         } catch {
             #expect(error.kind == .notFound)
@@ -119,7 +313,7 @@ struct CodexExecutableResolverTests {
             #expect(error.localizedDescription.contains("No usable Codex executable was found."))
         }
         do {
-            _ = try makeResolver().resolve(configuredPath: nil, environment: ["PATH": "::"])
+            _ = try await makeResolver().resolve(configuredPath: nil, environment: ["PATH": "::"])
             Issue.record("Empty PATH unexpectedly resolved.")
         } catch {
             let first = error.trace.first
@@ -130,11 +324,52 @@ struct CodexExecutableResolverTests {
     }
 }
 
+private func markedShellOutput(
+    noiseBefore: String = "",
+    candidate: String,
+    noiseAfter: String = ""
+) -> String {
+    [
+        noiseBefore,
+        "__CODEX_REVIEW_SHELL_PATH_BEGIN__",
+        candidate,
+        "__CODEX_REVIEW_SHELL_PATH_END__",
+        noiseAfter,
+    ].joined(separator: "\n")
+}
+
+private actor ShellDiscoveryRecorder {
+    struct Invocation: Equatable, Sendable {
+        var shellPath: String
+        var path: String?
+    }
+
+    private let outcome: CodexShellPathDiscovery.Outcome
+    private var recordedInvocations: [Invocation] = []
+
+    init(outcome: CodexShellPathDiscovery.Outcome) {
+        self.outcome = outcome
+    }
+
+    func discover(
+        shellURL: URL,
+        environment: [String: String]
+    ) -> CodexShellPathDiscovery.Outcome {
+        recordedInvocations.append(.init(shellPath: shellURL.path, path: environment["PATH"]))
+        return outcome
+    }
+
+    func invocations() -> [Invocation] {
+        recordedInvocations
+    }
+}
+
 func makeResolver(
     executables: Set<String> = [],
     directories: Set<String> = [],
     bundleIDs: [String: String] = [:],
-    canonical: [String: String] = [:]
+    canonical: [String: String] = [:],
+    shellPathDiscovery: CodexShellPathDiscovery = .init { _, _ in .failed("not configured for test") }
 ) -> CodexExecutableResolver {
     let fileSystem = CodexExecutableResolver.FileSystem(
         canonicalURL: { URL(fileURLWithPath: canonical[$0.standardizedFileURL.path] ?? $0.standardizedFileURL.path) },
@@ -152,6 +387,7 @@ func makeResolver(
             URL(fileURLWithPath: "/brew", isDirectory: true),
             URL(fileURLWithPath: "/system", isDirectory: true),
         ],
-        fileSystem: fileSystem
+        fileSystem: fileSystem,
+        shellPathDiscovery: shellPathDiscovery
     ))
 }

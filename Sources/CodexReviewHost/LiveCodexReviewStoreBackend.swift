@@ -588,32 +588,26 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         self.mcpPortOwnerResolver = mcpPortOwnerResolver ?? Self.defaultMCPPortOwnerResolver
         self.mcpHTTPServerBindChecker = mcpHTTPServerBindChecker ?? Self.defaultMCPHTTPServerBindChecker
         self.shutdownCleanupTimeout = shutdownCleanupTimeout
-        let executableResolution: Result<URL, CodexExecutableResolutionError>
+        let executableResolution: Task<Result<URL, CodexExecutableResolutionError>, Never>
         switch codexExecutableDependencyForTesting {
         case .resolvedForTesting(let url):
-            executableResolution = .success(url)
+            executableResolution = Task { .success(url) }
         case .resolver(let resolver):
-            do {
-                executableResolution = .success(try resolver.resolve(
-                    configuredPath: runtimePreferences.codexExecutablePath,
-                    environment: environment
-                ))
-            } catch {
-                executableResolution = .failure(error)
-            }
+            executableResolution = Self.resolveCodexExecutable(
+                resolver: resolver,
+                configuredPath: runtimePreferences.codexExecutablePath,
+                environment: environment
+            )
         case nil:
-            do {
-                executableResolution = .success(try CodexExecutableResolver(configuration: .live()).resolve(
-                    configuredPath: runtimePreferences.codexExecutablePath,
-                    environment: environment
-                ))
-            } catch {
-                executableResolution = .failure(error)
-            }
+            executableResolution = Self.resolveCodexExecutable(
+                resolver: CodexExecutableResolver(configuration: .live()),
+                configuredPath: runtimePreferences.codexExecutablePath,
+                environment: environment
+            )
         }
         let resolvedFactory = appServerRuntimeFactory ?? Self.makeAppServerRuntimeFactory()
         self.appServerRuntimeFactory = { codexHomeURL in
-            try await resolvedFactory(codexHomeURL, executableResolution.get())
+            try await resolvedFactory(codexHomeURL, executableResolution.value.get())
         }
         let registry = CodexReviewAccountRegistry.load(
             codexHomeURL: codexHomeURL
@@ -649,6 +643,23 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             return URL(fileURLWithPath: codexHomePath, isDirectory: true)
         }
         return AppServerCodexHome.url(environment: environment)
+    }
+
+    private nonisolated static func resolveCodexExecutable(
+        resolver: CodexExecutableResolver,
+        configuredPath: String?,
+        environment: [String: String]
+    ) -> Task<Result<URL, CodexExecutableResolutionError>, Never> {
+        Task.detached(priority: .utility) {
+            do throws(CodexExecutableResolutionError) {
+                return .success(try await resolver.resolve(
+                    configuredPath: configuredPath,
+                    environment: environment
+                ))
+            } catch {
+                return .failure(error)
+            }
+        }
     }
 
     private static func defaultMCPPortOwnerResolver(

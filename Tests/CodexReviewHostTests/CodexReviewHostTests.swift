@@ -2444,6 +2444,46 @@ struct CodexReviewHostTests {
         #expect(message.contains("No usable Codex executable was found."))
     }
 
+    @Test func liveStoreDiscoversShellExecutableOffInitializerAndReusesResolution() async throws {
+        let homeURL = try temporaryHome()
+        let gate = AsyncGate()
+        let shellDiscovery = HostShellDiscovery(gate: gate)
+        let executableURL = URL(fileURLWithPath: "/shell/bin/codex")
+        let resolver = makeResolver(
+            executables: [executableURL.path],
+            shellPathDiscovery: .init { shellURL, environment in
+                await shellDiscovery.discover(shellURL: shellURL, environment: environment)
+            }
+        )
+        var resolvedExecutables: [URL] = []
+
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: [
+                "HOME": homeURL.path,
+                "PATH": "/app/bin",
+                "SHELL": "/bin/zsh",
+            ],
+            codexExecutableResolver: resolver,
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            resolvedTransportFactory: { _, resolvedExecutableURL in
+                resolvedExecutables.append(resolvedExecutableURL)
+                return FakeJSONRPCTransport()
+            }
+        )
+
+        try #require(await waitUntil(timeout: .seconds(1)) {
+            await shellDiscovery.invocationCount() == 1
+        })
+        #expect(resolvedExecutables.isEmpty)
+        await gate.open()
+
+        await store.start(forceRestartIfNeeded: true)
+        await store.start(forceRestartIfNeeded: true)
+
+        #expect(resolvedExecutables == [executableURL, executableURL])
+        #expect(await shellDiscovery.invocationCount() == 1)
+    }
+
     @Test func liveStoreUsesOneExecutableForPrimaryAndStagingAndCleansLoginOnFailure() async throws {
         let homeURL = try temporaryHome()
         let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
@@ -3293,6 +3333,35 @@ private final class NoopMCPHTTPServer: CodexReviewMCPHTTPServing, @unchecked Sen
     func start() async throws {}
 
     func stop() async throws {}
+}
+
+private actor HostShellDiscovery {
+    private let gate: AsyncGate
+    private var count = 0
+
+    init(gate: AsyncGate) {
+        self.gate = gate
+    }
+
+    func discover(
+        shellURL: URL,
+        environment: [String: String]
+    ) async -> CodexShellPathDiscovery.Outcome {
+        count += 1
+        #expect(shellURL.path == "/bin/zsh")
+        #expect(environment["PATH"] == "/app/bin")
+        await gate.wait()
+        return .output("""
+            startup noise
+            __CODEX_REVIEW_SHELL_PATH_BEGIN__
+            /shell/bin/codex
+            __CODEX_REVIEW_SHELL_PATH_END__
+            """)
+    }
+
+    func invocationCount() -> Int {
+        count
+    }
 }
 
 @MainActor

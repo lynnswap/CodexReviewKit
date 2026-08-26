@@ -4,7 +4,7 @@ package struct CodexExecutableResolutionError: LocalizedError, Equatable, Sendab
     package enum Kind: Equatable, Sendable { case invalidExplicit, notFound }
     package enum Source: Equatable, Sendable {
         case configuredPath, environment(String), path(String), homeLocalBin
-        case applicationBundle(String), fallbackBin(String)
+        case shell(String), applicationBundle(String), fallbackBin(String)
     }
     package struct Trace: Equatable, Sendable {
         package var source: Source
@@ -68,14 +68,19 @@ package struct CodexExecutableResolver: Sendable {
         package var applicationDirectories: [URL]
         package var fallbackBinDirectories: [URL]
         package var fileSystem: FileSystem
+        package var shellPathDiscovery: CodexShellPathDiscovery
         package init(
             homeDirectory: URL,
             applicationDirectories: [URL],
             fallbackBinDirectories: [URL],
-            fileSystem: FileSystem
+            fileSystem: FileSystem,
+            shellPathDiscovery: CodexShellPathDiscovery
         ) {
-            (self.homeDirectory, self.applicationDirectories, self.fallbackBinDirectories, self.fileSystem) =
-                (homeDirectory, applicationDirectories, fallbackBinDirectories, fileSystem)
+            self.homeDirectory = homeDirectory
+            self.applicationDirectories = applicationDirectories
+            self.fallbackBinDirectories = fallbackBinDirectories
+            self.fileSystem = fileSystem
+            self.shellPathDiscovery = shellPathDiscovery
         }
         package static func live() -> Self {
             let home = FileManager.default.homeDirectoryForCurrentUser
@@ -88,7 +93,8 @@ package struct CodexExecutableResolver: Sendable {
                 fallbackBinDirectories: [
                     "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin",
                 ].map { URL(fileURLWithPath: $0, isDirectory: true) },
-                fileSystem: .live
+                fileSystem: .live,
+                shellPathDiscovery: .live()
             )
         }
     }
@@ -97,7 +103,7 @@ package struct CodexExecutableResolver: Sendable {
     package init(configuration: Configuration) { self.configuration = configuration }
     package func resolve(
         configuredPath: String?, environment: [String: String]
-    ) throws(CodexExecutableResolutionError) -> URL {
+    ) async throws(CodexExecutableResolutionError) -> URL {
         var search = Search(configuration: configuration)
         if let configuredPath { return try search.explicitPath(configuredPath) }
         let path = Self.pathDirectories(environment["PATH"])
@@ -121,6 +127,38 @@ package struct CodexExecutableResolver: Sendable {
                 return url
             }
         }
+        if let shellURL = search.shellURL(environment["SHELL"]) {
+            let source = CodexExecutableResolutionError.Source.shell(shellURL.path)
+            switch await configuration.shellPathDiscovery.discover(
+                shellURL: shellURL,
+                environment: environment
+            ) {
+            case .output(let output):
+                if let rawPath = Self.shellCandidate(from: output) {
+                    if rawPath.hasPrefix("/") {
+                        if let url = search.candidate(URL(fileURLWithPath: rawPath), source) {
+                            return url
+                        }
+                    } else {
+                        search.trace.append(.init(
+                            source: source,
+                            candidate: rawPath,
+                            reason: "not absolute"
+                        ))
+                    }
+                } else {
+                    search.trace.append(.init(
+                        source: source,
+                        candidate: "codex",
+                        reason: "shell output did not contain one marked candidate"
+                    ))
+                }
+            case .failed(let reason):
+                search.trace.append(.init(source: source, candidate: "codex", reason: reason))
+            case .timedOut:
+                search.trace.append(.init(source: source, candidate: "codex", reason: "shell discovery timed out"))
+            }
+        }
         // GUI/launchd HOME can be absent or unrelated; the OS account home owns this fallback.
         if let url = search.candidate(
             configuration.homeDirectory.appendingPathComponent(".local/bin/codex"), .homeLocalBin
@@ -141,10 +179,38 @@ package struct CodexExecutableResolver: Sendable {
         (path ?? "").split(separator: ":", omittingEmptySubsequences: true)
             .map { URL(fileURLWithPath: String($0), isDirectory: true) }
     }
+    private static func shellCandidate(from output: String) -> String? {
+        let lines = output.split(whereSeparator: \.isNewline).map(String.init)
+        guard let begin = lines.firstIndex(of: CodexShellProbeMarkers.begin),
+              let end = lines[lines.index(after: begin)...].firstIndex(of: CodexShellProbeMarkers.end)
+        else {
+            return nil
+        }
+        let candidates = lines[lines.index(after: begin)..<end]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.isEmpty == false }
+        guard candidates.count == 1 else { return nil }
+        return candidates[0]
+    }
     private struct Search {
         var configuration: Configuration
         var seen: Set<String> = []
         var trace: [CodexExecutableResolutionError.Trace] = []
+        mutating func shellURL(_ value: String?) -> URL? {
+            let rawValue = value ?? "/bin/zsh"
+            let path = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let source = CodexExecutableResolutionError.Source.shell(rawValue)
+            guard path.hasPrefix("/") else {
+                trace.append(.init(source: source, candidate: rawValue, reason: "not absolute"))
+                return nil
+            }
+            let url = URL(fileURLWithPath: path)
+            guard ["zsh", "bash"].contains(url.lastPathComponent) else {
+                trace.append(.init(source: source, candidate: rawValue, reason: "unsupported shell"))
+                return nil
+            }
+            return url
+        }
         mutating func explicitPath(_ value: String) throws(CodexExecutableResolutionError) -> URL {
             let path = value.trimmingCharacters(in: .whitespacesAndNewlines)
             guard path.hasPrefix("/") else { try failExplicit(.configuredPath, value, "not absolute") }
