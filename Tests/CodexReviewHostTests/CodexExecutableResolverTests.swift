@@ -125,6 +125,38 @@ struct CodexExecutableResolverTests {
         }
     }
 
+    @Test func streamingShellOutputKeepsSplitMarkedSectionAcrossLargeNoise() {
+        var accumulator = CodexShellProbeOutputAccumulator()
+        let chunks = [
+            Data(repeating: UInt8(ascii: "p"), count: 70 * 1024),
+            Data("\n__CODEX_REVIEW_SHELL_PATH_BE".utf8),
+            Data("GIN__\r\n/shell/bin/co".utf8),
+            Data("dex\r\n__CODEX_REVIEW_SHELL_PATH_E".utf8),
+            Data("ND__\r\n".utf8),
+            Data(repeating: UInt8(ascii: "s"), count: 70 * 1024),
+        ]
+
+        for chunk in chunks {
+            accumulator.append(chunk)
+        }
+
+        #expect(String(decoding: accumulator.finish(), as: UTF8.self) == """
+            __CODEX_REVIEW_SHELL_PATH_BEGIN__
+            /shell/bin/codex
+            __CODEX_REVIEW_SHELL_PATH_END__
+
+            """)
+    }
+
+    @Test func streamingShellOutputRejectsOversizedMarkedSection() {
+        var accumulator = CodexShellProbeOutputAccumulator()
+        accumulator.append(Data("__CODEX_REVIEW_SHELL_PATH_BEGIN__\n".utf8))
+        accumulator.append(Data(repeating: UInt8(ascii: "x"), count: 70 * 1024))
+        accumulator.append(Data("\n__CODEX_REVIEW_SHELL_PATH_END__\n".utf8))
+
+        #expect(accumulator.finish().isEmpty)
+    }
+
     @Test func nonabsoluteAndUnsupportedShellValuesAreNotExecuted() async throws {
         let recorder = ShellDiscoveryRecorder(outcome: .output(markedShellOutput(candidate: "/shell/codex")))
         let resolver = makeResolver(
@@ -287,6 +319,44 @@ struct CodexExecutableResolverTests {
             shellPath: "/bin/bash",
             startupFile: ".bash_profile"
         )
+    }
+
+    @Test func liveZshDiscoveryIgnoresLargeStartupPrefix() async throws {
+        let root = try temporaryShellHome(prefix: "codex-shell-large-prefix")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let codex = try writeCodexExecutable(in: root)
+        let noise = String(repeating: "p", count: 70 * 1024)
+        try Data("printf '\(noise)'\nexport PATH=\"\(codex.deletingLastPathComponent().path):$PATH\"\n".utf8)
+            .write(to: root.appendingPathComponent(".zshrc"))
+        let resolver = makeLiveResolver(
+            homeDirectory: root,
+            loginShellURL: URL(fileURLWithPath: "/bin/zsh")
+        )
+
+        #expect(try await resolver.resolve(
+            configuredPath: nil,
+            environment: ["PATH": "/usr/bin:/bin", "SHELL": "/bin/zsh"]
+        ) == codex)
+    }
+
+    @Test func liveZshDiscoveryIgnoresLargeLogoutSuffix() async throws {
+        let root = try temporaryShellHome(prefix: "codex-shell-large-suffix")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let codex = try writeCodexExecutable(in: root)
+        try Data("export PATH=\"\(codex.deletingLastPathComponent().path):$PATH\"\n".utf8)
+            .write(to: root.appendingPathComponent(".zshrc"))
+        let noise = String(repeating: "s", count: 70 * 1024)
+        try Data("printf '\(noise)'\n".utf8)
+            .write(to: root.appendingPathComponent(".zlogout"))
+        let resolver = makeLiveResolver(
+            homeDirectory: root,
+            loginShellURL: URL(fileURLWithPath: "/bin/zsh")
+        )
+
+        #expect(try await resolver.resolve(
+            configuredPath: nil,
+            environment: ["PATH": "/usr/bin:/bin", "SHELL": "/bin/zsh"]
+        ) == codex)
     }
 
     @Test func liveZshDiscoveryTerminatesHungStartupAtTimeout() async throws {

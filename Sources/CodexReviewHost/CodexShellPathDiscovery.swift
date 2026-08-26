@@ -309,13 +309,107 @@ private final class ShellProbeProcess: @unchecked Sendable {
     }
 }
 
+package struct CodexShellProbeOutputAccumulator: Sendable {
+    private enum Phase: Sendable {
+        case startup, marked, complete, invalid
+    }
+
+    private static let markedSectionByteLimit = 64 * 1024
+    private static let beginLine = Data(CodexShellProbeMarkers.begin.utf8)
+    private static let endLine = Data(CodexShellProbeMarkers.end.utf8)
+
+    private var phase = Phase.startup
+    private var line = Data()
+    private var lineOverflowed = false
+    private var markedSection = Data()
+    private var markedSectionOverflowed = false
+
+    package init() {}
+
+    package mutating func append(_ chunk: Data) {
+        guard phase != .complete, phase != .invalid else { return }
+        for byte in chunk {
+            if byte == UInt8(ascii: "\n") {
+                finishLine()
+            } else {
+                appendToLine(byte)
+            }
+        }
+    }
+
+    package mutating func finish() -> Data {
+        if line.isEmpty == false || lineOverflowed {
+            finishLine()
+        }
+        guard phase == .complete else { return Data() }
+        var output = Data()
+        output.append(Self.beginLine)
+        output.append(UInt8(ascii: "\n"))
+        output.append(markedSection)
+        output.append(Self.endLine)
+        output.append(UInt8(ascii: "\n"))
+        return output
+    }
+
+    private mutating func appendToLine(_ byte: UInt8) {
+        let limit: Int
+        if phase == .startup {
+            limit = Self.beginLine.count + 1
+        } else {
+            let remainingSectionBytes = max(
+                0,
+                Self.markedSectionByteLimit - markedSection.count - 1
+            )
+            limit = max(Self.endLine.count + 1, remainingSectionBytes)
+        }
+        guard line.count < limit else {
+            lineOverflowed = true
+            return
+        }
+        line.append(byte)
+    }
+
+    private mutating func finishLine() {
+        if line.last == UInt8(ascii: "\r") {
+            line.removeLast()
+        }
+        switch phase {
+        case .startup:
+            if lineOverflowed == false, line == Self.beginLine {
+                phase = .marked
+            }
+        case .marked:
+            if lineOverflowed == false, line == Self.endLine {
+                phase = markedSectionOverflowed ? .invalid : .complete
+            } else {
+                appendMarkedLine()
+            }
+        case .complete, .invalid:
+            break
+        }
+        line.removeAll(keepingCapacity: false)
+        lineOverflowed = false
+    }
+
+    private mutating func appendMarkedLine() {
+        let requiredCount = markedSection.count + line.count + 1
+        guard lineOverflowed == false,
+              requiredCount <= Self.markedSectionByteLimit
+        else {
+            markedSectionOverflowed = true
+            return
+        }
+        markedSection.append(line)
+        markedSection.append(UInt8(ascii: "\n"))
+    }
+}
+
 private final class BoundedOutputCollector: @unchecked Sendable {
-    private static let byteLimit = 64 * 1024
 
     private let fileHandle: FileHandle
     private let lock = NSLock()
     private let reachedEnd = DispatchSemaphore(value: 0)
-    private var data = Data()
+    private var accumulator = CodexShellProbeOutputAccumulator()
 
     init(fileHandle: FileHandle) {
         self.fileHandle = fileHandle
@@ -330,10 +424,7 @@ private final class BoundedOutputCollector: @unchecked Sendable {
                 return
             }
             lock.withLock {
-                let remaining = Self.byteLimit - data.count
-                if remaining > 0 {
-                    data.append(available.prefix(remaining))
-                }
+                accumulator.append(available)
             }
         }
     }
@@ -344,7 +435,7 @@ private final class BoundedOutputCollector: @unchecked Sendable {
 
     func stop() -> Data {
         fileHandle.readabilityHandler = nil
-        return lock.withLock { data }
+        return lock.withLock { accumulator.finish() }
     }
 }
 
