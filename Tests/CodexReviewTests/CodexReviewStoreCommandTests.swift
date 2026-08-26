@@ -1220,6 +1220,15 @@ struct CodexReviewStoreCommandTests {
                     commandStatus: "inProgress"
                 )
             ), for: initialRun)
+            try #require(await StoreSnapshotProbe(store: store).waitUntilLogs(
+                jobID: "job-1"
+            ) { logs in
+                logs.contains {
+                    $0.kind == .command
+                        && $0.groupID == "cmd-1"
+                        && $0.metadata?.commandStatus == "inProgress"
+                }
+            } != nil)
 
             networkMonitor.yield(.init(status: .unsatisfied))
             try await resolveTypedRecoveryDisposition(backend: backend, store: store)
