@@ -880,6 +880,40 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func cancelledWorkerDrainsWithoutWaitingForTerminalInput() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+            )
+            _ = try #require(await StoreSnapshotProbe(store: store).waitUntilRunAttempt(
+                "attempt-1",
+                jobID: "job-1"
+            ))
+            let cancellation = Task { @MainActor in
+                try await store.cancelReview(
+                    jobID: "job-1",
+                    cancellation: .mcpClient(message: "Stop")
+                )
+            }
+            try await backend.waitForInterruptReview(timeout: .seconds(2))
+            store.reviewWorkerTasks["job-1"]?.cancel()
+
+            let cancel = try await cancellation.value
+            let final = try await result
+            #expect(cancel.cancelled)
+            #expect(final.core.lifecycle.status == .cancelled)
+            #expect(final.core.lifecycle.cancellation?.message == "Stop")
+            #expect(store.reviewAttemptOwnerships["job-1"] == nil)
+            #expect(store.reviewWorkerTasks["job-1"] == nil)
+        }
+    }
+
     @Test func userCancellationWakesPendingOutageStreamTerminal() async throws {
         let run = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",

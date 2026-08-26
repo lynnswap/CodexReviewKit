@@ -464,7 +464,8 @@ extension CodexReviewStore {
     private func interruptActiveAttemptAndRecordTerminal(
         _ active: StoreReviewActiveAttempt,
         cancellation: ActiveAttemptCancellation,
-        inputs: ReviewWorkerInputs?
+        inputs: ReviewWorkerInputs?,
+        drainCancellation: Bool
     ) async throws -> ReviewInterruptResolution {
         guard let inputs else { throw recoveryOwnershipFailure("drain active cancellation") }
         let interrupt = Task<Result<ReviewInterruptResolution, any Error>, Never> { @MainActor in
@@ -476,7 +477,12 @@ extension CodexReviewStore {
             }
         }
         if try await active.admission.hasRecordedActiveTerminal(for: active.run) == false {
-            try await recordNextTerminal(for: active, cancellationRequest: cancellation.requestReceipt, inputs: inputs)
+            try await recordNextTerminal(
+                for: active,
+                cancellationRequest: cancellation.requestReceipt,
+                inputs: inputs,
+                drainCancellation: drainCancellation
+            )
         }
         return try await interrupt.value.get()
     }
@@ -490,11 +496,12 @@ extension CodexReviewStore {
     private func recordNextTerminal(
         for active: StoreReviewActiveAttempt,
         cancellationRequest: ReviewCancellationRequestReceipt?,
-        inputs: ReviewWorkerInputs
+        inputs: ReviewWorkerInputs,
+        drainCancellation: Bool
     ) async throws {
         while true {
             let input: ReviewWorkerInput?
-            if Task.isCancelled {
+            if drainCancellation || Task.isCancelled {
                 input = await inputs.nextBuffered()
                 if input == nil {
                     try await active.admission.recordStreamTerminal(.ownerCancellation, for: active.run, cancellationRequest: cancellationRequest)
@@ -571,7 +578,8 @@ extension CodexReviewStore {
                     let resolution = try await interruptActiveAttemptAndRecordTerminal(
                         active,
                         cancellation: cancellation,
-                        inputs: inputs
+                        inputs: inputs,
+                        drainCancellation: workerWasCancelled
                     )
                     failure = cleanupFailure(from: resolution.requestFailure)
                 } catch {
@@ -592,7 +600,12 @@ extension CodexReviewStore {
                 if dispositionJoin != nil,
                    await receipt.source.admission.activeTerminalResolution() == nil {
                     guard let inputs else { throw recoveryOwnershipFailure("drain recovery cancellation") }
-                    try await recordNextTerminal(for: receipt.source, cancellationRequest: cancellationRequest, inputs: inputs)
+                    try await recordNextTerminal(
+                        for: receipt.source,
+                        cancellationRequest: cancellationRequest,
+                        inputs: inputs,
+                        drainCancellation: workerWasCancelled
+                    )
                 }
                 let join = try dispositionJoin ?? receipt.joinOwnedOperationIfPresent()
                 if let join {
