@@ -1770,8 +1770,9 @@ struct CodexReviewStoreCommandTests {
                 rejectionDisposition: .preserveRuntimeStopIntent
             )
 
-            await storeBackend.waitForReviewRecoveryStageCancellation()
-            await stageAdmission.waitForCancellationRequestReceipt(runtimeReceipt.id)
+            let cancellationReceipt =
+                await storeBackend.waitForReviewRecoveryStageCancellation()
+            #expect(cancellationReceipt?.id == runtimeReceipt.id)
             #expect(await stageAdmission.cancellationRequest() == reason)
             #expect(await recoveryReceipt.source.admission.activeTerminalResolution() == sourceTerminal)
             await stageGate.open()
@@ -1840,8 +1841,9 @@ struct CodexReviewStoreCommandTests {
                 rejectionDisposition: .preserveRuntimeStopIntent
             )
 
-            await storeBackend.waitForReviewRecoveryCommitCancellation()
-            await committedAdmission.waitForCancellationRequestReceipt(runtimeReceipt.id)
+            let cancellationReceipt =
+                await storeBackend.waitForReviewRecoveryCommitCancellation()
+            #expect(cancellationReceipt?.id == runtimeReceipt.id)
             #expect(await committedAdmission.cancellationRequest() == reason)
             #expect(await recoveryReceipt.source.admission.activeTerminalResolution() == sourceTerminal)
             await commitGate.open()

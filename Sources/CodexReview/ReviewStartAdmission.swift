@@ -300,6 +300,11 @@ package actor ReviewStartAdmission {
         recordJoinedCancellation(.receipt(receipt))
     }
 
+    package func effectiveCancellationRequestReceiptSnapshot()
+        -> ReviewCancellationRequestReceipt? {
+        effectiveCancellationRequestReceipt
+    }
+
     package func admitThreadStartDispatch() throws {
         switch phase {
         case .preparingThread(.notSent):

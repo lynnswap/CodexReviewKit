@@ -54,10 +54,15 @@ struct StoreReviewRecoveryReceiptTests {
             rejectionDisposition: .preserveRuntimeStopIntent
         )
 
-        await receipt.cancelOwnedOperation(cancellationRequest: cancellationRequest)
+        let cancel = Task { @MainActor in
+            await receipt.cancelOwnedOperation(cancellationRequest: cancellationRequest)
+        }
         await preparationCancelled.wait()
 
-        await source.admission.waitForCancellationRequestReceipt(cancellationRequest.id)
+        let observedReceipt =
+            await source.admission.effectiveCancellationRequestReceiptSnapshot()
+        #expect(observedReceipt?.id == cancellationRequest.id)
+        await cancel.value
         #expect(await source.admission.cancellationRequest() == cancellation)
         await preparationGate.open()
         await #expect(throws: CancellationError.self) {
