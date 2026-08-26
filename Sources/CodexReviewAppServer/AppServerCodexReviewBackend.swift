@@ -1339,9 +1339,13 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     private func sendTurnInterrupt(
         for run: CodexReviewBackendModel.Review.Run
     ) async throws {
-        if let control = controlsByThreadID[run.threadID],
-           try await control.interrupt() != nil {
-            return
+        if let control = controlsByThreadID[run.threadID] {
+            switch try await control.interruptOutcome() {
+            case .sent, .superseded:
+                return
+            case .fallbackRequired:
+                break
+            }
         }
         let threadID = appServerTurnThreadID(for: run)
         let _: EmptyResponse = try await client.send(AppServerAPI.Turn.Interrupt.Request(
