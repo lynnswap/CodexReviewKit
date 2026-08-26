@@ -6880,10 +6880,15 @@ struct AppServerClientTests {
 
         #expect(read.core.lifecycle.status == .failed)
         #expect(read.core.lifecycle.errorMessage == "primary review failed")
-        #expect(read.logs.contains(where: {
-            $0.kind == .diagnostic
-                && $0.text == "Review cleanup failed: cleanup failed"
-        }))
+        #expect(read.logs.allSatisfy { $0.audience == .product })
+        let allRead = try store.readReview(jobID: "job-1", logFilter: .all)
+        let cleanupEntry = try #require(allRead.logs.first { $0.audience == .developer })
+        #expect(cleanupEntry.kind == .diagnostic)
+        #expect(cleanupEntry.text == "Review cleanup failed: cleanup failed")
+        let job = try #require(store.job(id: "job-1"))
+        #expect(job.logEntries.contains(cleanupEntry))
+        #expect(job.rawLogText == cleanupEntry.text)
+        #expect(job.diagnosticText.hasSuffix(cleanupEntry.text))
         await backend.finishEventMailboxes()
         await store.cancelAndDrainReviewWorkersForTesting()
     }

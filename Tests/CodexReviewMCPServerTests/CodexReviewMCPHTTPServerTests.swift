@@ -1506,6 +1506,11 @@ struct CodexReviewMCPHTTPServerTests {
                             .init(kind: .command, groupID: "cmd-1", text: "$ swift test"),
                             .init(kind: .commandOutput, groupID: "cmd-1", text: "Tests passed"),
                             .init(kind: .agentMessage, text: "No correctness issues found."),
+                            .init(
+                                kind: .diagnostic,
+                                text: "Developer detail",
+                                audience: .developer
+                            ),
                         ]
                     ),
                     CodexReviewJob.makeForTesting(
@@ -1566,6 +1571,7 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(allowed.value(for: ["result", "structuredContent", "jobId"]) as? String == "job-in-session")
             let defaultLogs = allowed.value(for: ["result", "structuredContent", "logs"]) as? [[String: Any]]
             #expect(defaultLogs?.compactMap { $0["kind"] as? String } == ["command", "agentMessage"])
+            #expect(defaultLogs?.allSatisfy { $0["audience"] == nil } == true)
             #expect(allowed.value(for: ["result", "structuredContent", "logsPage", "total"]) as? Int == 2)
             #expect(allowed.value(for: ["result", "structuredContent", "logsPage", "offset"]) as? Int == 0)
             #expect(allowed.value(for: ["result", "structuredContent", "logsPage", "limit"]) as? Int == 100)
@@ -1575,6 +1581,19 @@ struct CodexReviewMCPHTTPServerTests {
                 "command",
                 "commandOutput",
                 "agentMessage",
+                "diagnostic",
+            ])
+            #expect(unfilteredLogs?.dropLast().allSatisfy { $0["audience"] == nil } == true)
+            let developerLog = try #require(unfilteredLogs?.last)
+            #expect(developerLog["audience"] as? String == "developer")
+            #expect(Set(developerLog.keys) == [
+                "audience",
+                "groupId",
+                "id",
+                "kind",
+                "replacesGroup",
+                "text",
+                "timestamp",
             ])
             let readText = (allowed.value(for: ["result", "content"]) as? [[String: Any]])?.first?["text"] as? String
             #expect(readText == "Done")

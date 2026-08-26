@@ -1,6 +1,28 @@
 import Foundation
 
 public struct ReviewLogEntry: Codable, Identifiable, Sendable, Hashable {
+    package enum Audience: String, Codable, Sendable, Hashable {
+        case product
+        case developer
+    }
+
+    @propertyWrapper
+    package struct AudienceMetadata: Codable, Sendable, Hashable {
+        package var wrappedValue: Audience
+
+        package init(wrappedValue: Audience) {
+            self.wrappedValue = wrappedValue
+        }
+
+        package init(from decoder: Decoder) throws {
+            wrappedValue = try Audience(from: decoder)
+        }
+
+        package func encode(to encoder: Encoder) throws {
+            try wrappedValue.encode(to: encoder)
+        }
+    }
+
     public struct Metadata: Codable, Sendable, Hashable {
         public struct CommandAction: Codable, Sendable, Hashable {
             public enum Kind: String, Codable, Sendable, Hashable {
@@ -120,6 +142,7 @@ public struct ReviewLogEntry: Codable, Identifiable, Sendable, Hashable {
     public let replacesGroup: Bool
     public let text: String
     public let metadata: Metadata?
+    @AudienceMetadata package var audience: Audience
     public let timestamp: Date
 
     public init(
@@ -131,13 +154,59 @@ public struct ReviewLogEntry: Codable, Identifiable, Sendable, Hashable {
         metadata: Metadata? = nil,
         timestamp: Date = Date()
     ) {
+        self.init(
+            id: id,
+            kind: kind,
+            groupID: groupID,
+            replacesGroup: replacesGroup,
+            text: text,
+            metadata: metadata,
+            audience: .product,
+            timestamp: timestamp
+        )
+    }
+
+    package init(
+        id: UUID = UUID(),
+        kind: Kind,
+        groupID: String? = nil,
+        replacesGroup: Bool = false,
+        text: String,
+        metadata: Metadata? = nil,
+        audience: Audience,
+        timestamp: Date = Date()
+    ) {
         self.id = id
         self.kind = kind
         self.groupID = groupID
         self.replacesGroup = replacesGroup
         self.text = text
         self.metadata = metadata
+        self.audience = audience
         self.timestamp = timestamp
     }
 
+}
+
+package extension KeyedDecodingContainer {
+    func decode(
+        _ type: ReviewLogEntry.AudienceMetadata.Type,
+        forKey key: Key
+    ) throws -> ReviewLogEntry.AudienceMetadata {
+        let audience = try decodeIfPresent(ReviewLogEntry.Audience.self, forKey: key)
+            ?? .product
+        return .init(wrappedValue: audience)
+    }
+}
+
+package extension KeyedEncodingContainer {
+    mutating func encode(
+        _ value: ReviewLogEntry.AudienceMetadata,
+        forKey key: Key
+    ) throws {
+        guard value.wrappedValue == .developer else {
+            return
+        }
+        try encode(value.wrappedValue, forKey: key)
+    }
 }
