@@ -183,10 +183,10 @@ extension ReviewUITests {
             #expect(requestMethods.contains("thread/backgroundTerminals/clean"))
             #expect(requestMethods.contains("thread/unsubscribe"))
             #expect(requestMethods.contains("thread/delete"))
-            #expect(await backend.activeReviewEventStreamSubscriptionIDForTesting(
-                threadID: "thread-review"
-            ) == nil)
         }
+        #expect(await transport.isClosedForTesting())
+        #expect(await backend.reviewEventSessionCountForTesting() == 0)
+        #expect(await backend.notificationRouterIsRunningForTesting() == false)
     }
 
     @Test func appServerUIHarnessCleansUpAfterThrownTestBody() async throws {
@@ -239,9 +239,8 @@ extension ReviewUITests {
         #expect(requestMethods.contains("thread/delete"))
         #expect(await transport.isClosedForTesting())
         #expect(store.reviewWorkerTasks["job-1"] == nil)
-        #expect(await backend.activeReviewEventStreamSubscriptionIDForTesting(
-            threadID: "thread-review"
-        ) == nil)
+        #expect(await backend.reviewEventSessionCountForTesting() == 0)
+        #expect(await backend.notificationRouterIsRunningForTesting() == false)
     }
 }
 
