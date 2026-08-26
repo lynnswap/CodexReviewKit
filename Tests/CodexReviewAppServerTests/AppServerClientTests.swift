@@ -6921,6 +6921,98 @@ struct AppServerClientTests {
         #expect(try await serializer.run(scope: scope) { "next" } == "next")
     }
 
+    @Test func cleanupClassifiesTransportFatalErrorsAsRuntimeInvalidation() async throws {
+        let transportErrors: [JSONRPC.Error] = [
+            .invalidMessage("Malformed response."),
+            .transportTerminated(.processExit("App-server exited.")),
+        ]
+        for transportError in transportErrors {
+            let transport = FakeJSONRPCTransport()
+            await transport.enqueueFailure(
+                transportError,
+                for: "thread/backgroundTerminals/clean"
+            )
+            let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+            let run = CodexReviewBackendModel.Review.Run(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                reviewThreadID: "thread-1"
+            )
+
+            do {
+                try await backend.cleanupReview(run)
+                Issue.record("Transport-fatal cleanup unexpectedly succeeded.")
+            } catch let failure as ReviewRuntimeCloseFailure {
+                #expect(failure == .connection(
+                    "thread/backgroundTerminals/clean for thread-1: "
+                        + transportError.localizedDescription
+                ))
+            } catch {
+                Issue.record("Transport-fatal cleanup returned an untyped error.")
+            }
+            #expect(await transport.isClosedForTesting() == false)
+            #expect(await transport.recordedRequests().map(\.method) == [
+                "thread/backgroundTerminals/clean",
+            ])
+        }
+    }
+
+    @Test func cleanupSeparatesRawTransportAndResponseDecodingFailures() async throws {
+        let transportFailure = FakeJSONRPCTransport()
+        await transportFailure.enqueueTransportFailure(
+            message: "raw cleanup I/O failed",
+            for: "thread/backgroundTerminals/clean"
+        )
+        let transportBackend = AppServerCodexReviewBackend(
+            client: .init(transport: transportFailure)
+        )
+        let run = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-transport",
+            turnID: "turn-1",
+            reviewThreadID: "thread-transport"
+        )
+
+        do {
+            try await transportBackend.cleanupReview(run)
+            Issue.record("Raw transport cleanup unexpectedly succeeded.")
+        } catch let failure as ReviewRuntimeCloseFailure {
+            guard case .connection(let message) = failure else {
+                Issue.record("Raw transport cleanup did not invalidate the runtime.")
+                return
+            }
+            #expect(message.contains("transport"))
+            #expect(message.contains("raw cleanup I/O failed"))
+        }
+        #expect(await transportFailure.isClosedForTesting() == false)
+
+        let decodingFailure = FakeJSONRPCTransport()
+        await decodingFailure.enqueueRawResponse(
+            Data("not-json".utf8),
+            for: "thread/backgroundTerminals/clean"
+        )
+        let decodingBackend = AppServerCodexReviewBackend(
+            client: .init(transport: decodingFailure)
+        )
+        let decodingRun = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-decoding",
+            turnID: "turn-1",
+            reviewThreadID: "thread-decoding"
+        )
+
+        do {
+            try await decodingBackend.cleanupReview(decodingRun)
+            Issue.record("Response decoding cleanup unexpectedly succeeded.")
+        } catch let failure as ReviewRuntimeCloseFailure {
+            guard case .cleanup(let message) = failure else {
+                Issue.record("Response decoding failure incorrectly invalidated the runtime.")
+                return
+            }
+            #expect(message.contains("responseDecoding"))
+            #expect(message.contains("thread/backgroundTerminals/clean"))
+        }
+        #expect(await decodingFailure.isClosedForTesting() == false)
+    }
+
     @Test @MainActor
     func storeRetainsCleanupFailureAsSecondaryDiagnosticWithoutMaskingPrimary() async throws {
         let backend = FakeCodexReviewBackend()

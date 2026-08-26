@@ -1590,6 +1590,7 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
     private var activeRequestGates: [UUID: AsyncGate] = [:]
     private var beforeReturningResponseByMethod: [String: [@Sendable () async -> Void]] = [:]
     private var requestCountWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+    private var activeRequestWaiters: [String: [(Int, CheckedContinuation<Void, Never>)]] = [:]
     private var notificationStreamCountWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
     private var closeWaiters: [CheckedContinuation<Void, Never>] = []
     private var closed = false
@@ -1653,6 +1654,7 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
         requests.append(request)
         resumeRequestCountWaiters()
         activeByMethod[request.method, default: 0] += 1
+        resumeActiveRequestWaiters(for: request.method)
         defer { activeByMethod[request.method, default: 1] -= 1 }
         maxActiveByMethod[request.method] = max(
             maxActiveByMethod[request.method] ?? 0,
@@ -1769,6 +1771,22 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
         }
     }
 
+    package func waitForActiveRequests(
+        method: String,
+        count: Int = 1
+    ) async {
+        if activeByMethod[method, default: 0] >= count {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            if activeByMethod[method, default: 0] >= count {
+                continuation.resume()
+            } else {
+                activeRequestWaiters[method, default: []].append((count, continuation))
+            }
+        }
+    }
+
     package func recordedNotifications() -> [JSONRPC.Notification] {
         notifications
     }
@@ -1800,6 +1818,26 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
         }
         await withCheckedContinuation { continuation in
             closeWaiters.append(continuation)
+        }
+    }
+
+    private func resumeActiveRequestWaiters(for method: String) {
+        guard let waiters = activeRequestWaiters[method] else {
+            return
+        }
+        let activeCount = activeByMethod[method, default: 0]
+        var pending: [(Int, CheckedContinuation<Void, Never>)] = []
+        for (count, continuation) in waiters {
+            if activeCount >= count {
+                continuation.resume()
+            } else {
+                pending.append((count, continuation))
+            }
+        }
+        if pending.isEmpty {
+            activeRequestWaiters.removeValue(forKey: method)
+        } else {
+            activeRequestWaiters[method] = pending
         }
     }
 
