@@ -8,7 +8,9 @@ import CodexReviewTesting
 struct AppServerInterruptAdmissionTests {
     @Test func acceptedRequestedCancellationClassifiesExactArtifactsAsDeveloperDiagnostics() async throws {
         let transport = FakeJSONRPCTransport()
+        let responseGate = AsyncGate()
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        await transport.hold(method: "turn/interrupt", gate: responseGate)
         let fixture = try await makeCancellationArtifactFixture(transport)
         let accepted = AsyncGate()
         let cancellation = ReviewCancellation.mcpClient(message: "Stop")
@@ -22,12 +24,24 @@ struct AppServerInterruptAdmissionTests {
                 }
             )
         }
-        await accepted.wait()
-
+        await transport.waitForRequestCount(4)
         try await emitCancellationArtifactSequence(
             transport,
             terminal: .interrupted(message: "Upstream interrupted")
         )
+        try await transport.emitServerNotification(
+            method: "thread/status/changed",
+            params: CancellationArtifactThreadStatusNotification(
+                threadID: "review-thread",
+                status: .init(type: "notLoaded")
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "thread/closed",
+            params: CancellationArtifactThreadNotification(threadID: "review-thread")
+        )
+        await responseGate.open()
+        await accepted.wait()
         let events = try await collectCancellationArtifactEvents(fixture.attempt)
         try await fixture.admission.recordCanonicalTerminal(
             .interrupted(.server(message: "Upstream interrupted")),
@@ -84,10 +98,106 @@ struct AppServerInterruptAdmissionTests {
         _ = try await interrupt.value
 
         assertProductCancellationArtifacts(events)
+        #expect(events.contains { event in
+            guard case .logEntry(
+                .agentMessage,
+                "",
+                let groupID,
+                true,
+                let metadata,
+                .product
+            ) = event else {
+                return false
+            }
+            return groupID == "cancellation-companion"
+                && metadata?.sourceType == "suppressedFinalReviewCompanion"
+        })
         #expect(events.last == .completed(
             summary: "Succeeded.",
             result: cancellationReviewFallback
         ))
+    }
+
+    @Test func canonicalInterruptedTerminalSurvivesConnectionCloseBeforeInterruptACK() async throws {
+        let transport = FakeJSONRPCTransport()
+        let responseGate = AsyncGate()
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        await transport.hold(method: "turn/interrupt", gate: responseGate)
+        let fixture = try await makeCancellationArtifactFixture(transport)
+        let accepted = AsyncGate()
+        let cancellation = ReviewCancellation.mcpClient(message: "Stop")
+        let interrupt = Task {
+            try await fixture.admission.interrupt(
+                fixture.run,
+                cancellation: cancellation,
+                request: { requestAdmission, reason in
+                    try await fixture.backend.interruptReview(requestAdmission, reason: reason)
+                    await accepted.open()
+                }
+            )
+        }
+        await transport.waitForRequestCount(4)
+        try await emitCancellationArtifactSequence(
+            transport,
+            terminal: .interrupted(message: "Upstream interrupted")
+        )
+        await transport.finishNotificationStreams(throwing: JSONRPC.Error.closed)
+        await fixture.backend.waitForNotificationRouterCompletionForTesting()
+        #expect(await fixture.attempt.events.isFinished() == false)
+
+        await responseGate.open()
+        await accepted.wait()
+        let events = try await collectCancellationArtifactEvents(fixture.attempt)
+        try await fixture.admission.recordCanonicalTerminal(
+            .interrupted(.server(message: "Upstream interrupted")),
+            for: fixture.run
+        )
+        let resolution = try await interrupt.value
+
+        #expect(resolution.terminal == .canonical(.interrupted(.requested(cancellation))))
+        assertDeveloperCancellationArtifacts(events)
+        #expect(events.last == .cancelled("Upstream interrupted"))
+        await transport.close()
+    }
+
+    @Test func canonicalInterruptedTerminalSurvivesProcessCloseBeforeInterruptRejection() async throws {
+        let transport = FakeJSONRPCTransport()
+        let responseGate = AsyncGate()
+        await transport.enqueueFailure(
+            .responseError(code: -32_000, message: "No active turn"),
+            for: "turn/interrupt"
+        )
+        await transport.hold(method: "turn/interrupt", gate: responseGate)
+        let fixture = try await makeCancellationArtifactFixture(transport)
+        let interrupt = Task {
+            try await fixture.admission.interrupt(
+                fixture.run,
+                cancellation: .mcpClient(message: "Stop"),
+                request: { requestAdmission, reason in
+                    try await fixture.backend.interruptReview(requestAdmission, reason: reason)
+                }
+            )
+        }
+        await transport.waitForRequestCount(4)
+        try await emitCancellationArtifactSequence(
+            transport,
+            terminal: .interrupted(message: "Server interrupted")
+        )
+        await transport.finishNotificationStreams(
+            throwing: JSONRPC.Error.transportTerminated(.processExit("Process exited"))
+        )
+        await fixture.backend.waitForNotificationRouterCompletionForTesting()
+        #expect(await fixture.attempt.events.isFinished() == false)
+
+        await responseGate.open()
+        await #expect(throws: ReviewInterruptRequestFailure.self) {
+            try await interrupt.value
+        }
+        let events = try await collectCancellationArtifactEvents(fixture.attempt)
+
+        assertProductCancellationArtifacts(events)
+        #expect(events.last == .cancelled("Server interrupted"))
+        await transport.close()
     }
 
     @Test func failedTerminalFlushesOriginalProductArtifacts() async throws {
@@ -870,7 +980,8 @@ private func assertProductCancellationArtifacts(
         text: String,
         audience: ReviewLogEntry.Audience
     )? in
-        guard case .logEntry(let kind, let text, let groupID, _, _, let audience) = event,
+        guard case .logEntry(let kind, let text, let groupID, _, let metadata, let audience) = event,
+              metadata?.sourceType != "suppressedFinalReviewCompanion",
               groupID == "review-exit" || groupID == "cancellation-companion"
         else {
             return nil
@@ -890,6 +1001,26 @@ private func assertProductCancellationArtifacts(
         cancellationCompanionMessage,
     ])
     #expect(artifacts.allSatisfy { $0.audience == .product })
+}
+
+private func assertDeveloperCancellationArtifacts(
+    _ events: [CodexReviewBackendModel.Review.Event]
+) {
+    let artifacts = events.compactMap { event -> (
+        kind: ReviewLogEntry.Kind,
+        groupID: String?,
+        audience: ReviewLogEntry.Audience
+    )? in
+        guard case .logEntry(let kind, _, let groupID, _, _, let audience) = event,
+              groupID == "review-exit" || groupID == "cancellation-companion"
+        else {
+            return nil
+        }
+        return (kind, groupID, audience)
+    }
+    #expect(artifacts.map(\.kind) == [.diagnostic, .diagnostic])
+    #expect(artifacts.map(\.groupID) == ["review-exit", "cancellation-companion"])
+    #expect(artifacts.allSatisfy { $0.audience == .developer })
 }
 
 private struct CancellationArtifactItem: Encodable, Sendable {
@@ -941,6 +1072,28 @@ private struct CancellationArtifactTurnNotification: Encodable, Sendable {
     enum CodingKeys: String, CodingKey {
         case threadID = "threadId"
         case turn
+    }
+}
+
+private struct CancellationArtifactThreadNotification: Encodable, Sendable {
+    var threadID: String
+
+    enum CodingKeys: String, CodingKey {
+        case threadID = "threadId"
+    }
+}
+
+private struct CancellationArtifactThreadStatusNotification: Encodable, Sendable {
+    struct Status: Encodable, Sendable {
+        var type: String
+    }
+
+    var threadID: String
+    var status: Status
+
+    enum CodingKeys: String, CodingKey {
+        case threadID = "threadId"
+        case status
     }
 }
 

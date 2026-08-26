@@ -1146,6 +1146,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         notificationRouterTask != nil
     }
 
+    package func waitForNotificationRouterCompletionForTesting() async {
+        await notificationRouterTask?.value
+    }
+
     package func reviewEventSessionCountForTesting() -> Int {
         reviewEventSessionsByAttemptID.count
     }
@@ -2099,6 +2103,11 @@ private actor AppServerReviewEventSession {
         guard finished == false else {
             return
         }
+        guard deferredTerminalAwaitingCancellationAcceptance == nil else {
+            cancelPendingStreamedLogFlush()
+            pendingStartupNotifications.removeAll(keepingCapacity: true)
+            return
+        }
         let precedingEvents = drainPendingStreamedLogEvents()
             + drainRequestedCancellationProductEvents()
         finished = true
@@ -2166,13 +2175,19 @@ private actor AppServerReviewEventSession {
         defer {
             isDrainingStartupNotifications = false
         }
-        while finished == false, pendingStartupNotifications.isEmpty == false {
+        while finished == false,
+              deferredTerminalAwaitingCancellationAcceptance == nil,
+              pendingStartupNotifications.isEmpty == false {
             let notification = pendingStartupNotifications.removeFirst()
             await process(notification)
         }
     }
 
     private func process(_ notification: AppServerRoutedReviewNotification) async {
+        guard deferredTerminalAwaitingCancellationAcceptance == nil else {
+            metrics.ignored += 1
+            return
+        }
         recordActiveInterruptTurn(from: notification)
         guard var terminalReducer else {
             await failAttempt(.missingRoutingIdentity(method: notification.method))
@@ -2427,14 +2442,7 @@ private actor AppServerReviewEventSession {
             return (developerEvents, terminal)
         }
 
-        guard case .ready = artifacts.phase,
-              let companionItemID = artifacts.companion?.itemID,
-              case .completed(var result) = terminal
-        else {
-            return (artifacts.originalEvents, terminal)
-        }
-        result.suppressedAgentMessageItemIDs.remove(companionItemID)
-        return (artifacts.originalEvents, .completed(result))
+        return (artifacts.originalEvents, terminal)
     }
 
     private func resolveDeferredTerminalIfPossible() async {
@@ -2459,6 +2467,7 @@ private actor AppServerReviewEventSession {
             _ = await emit(commandEvent)
         }
         commandLifecycleByItemID.removeAll(keepingCapacity: true)
+        pendingStartupNotifications.removeAll(keepingCapacity: true)
         await emitTerminal(resolved.terminal)
         finished = true
     }
@@ -2477,7 +2486,9 @@ private actor AppServerReviewEventSession {
 
     func receiveGlobalDiagnostic(_ notification: AppServerRoutedReviewNotification) async {
         metrics.routed += 1
-        guard finished == false else {
+        guard finished == false,
+              deferredTerminalAwaitingCancellationAcceptance == nil
+        else {
             metrics.ignored += 1
             return
         }
@@ -2669,6 +2680,9 @@ private actor AppServerReviewEventSession {
 
     private func flushPendingStreamedLogFromTimer() async {
         streamedLogFlushTask = nil
+        guard deferredTerminalAwaitingCancellationAcceptance == nil else {
+            return
+        }
         _ = await flushPendingStreamedLog()
     }
 
