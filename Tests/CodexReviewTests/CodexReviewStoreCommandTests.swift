@@ -1894,11 +1894,8 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func registeredWorkCloseFinalizesTypedInterruptFailureBeforeWorkerExit() async throws {
+    @Test func registeredWorkClosePreservesReceiptWhenWorkerCancellationWinsDispatch() async throws {
         let backend = FakeCodexReviewBackend()
-        let interruptGate = AsyncGate()
-        await backend.holdInterruptReview(with: interruptGate)
-        await backend.rejectInterrupts(message: "Interrupt failed.")
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "job-1" })
@@ -1913,31 +1910,18 @@ struct CodexReviewStoreCommandTests {
             "attempt-1",
             jobID: "job-1"
         ) != nil)
+        guard case .active(let active)? = store.reviewAttemptOwnerships["job-1"] else { Issue.record("Expected an active review attempt."); return }
         let reason = ReviewCancellation.system(message: "Store work owner closed.")
-        let closeCompletion = StoreCommandTaskCompletion()
-        let close = Task { @MainActor in
-            let result = await store.closeRegisteredStoreWork(reason: reason)
-            await closeCompletion.complete()
-            return result
-        }
-        try #require(await waitUntil { store.storeWorkRegistryStatus == .closing })
-        #expect(store.reviewWorkerTasks["job-1"]?.isCancelled == true)
-        try await backend.waitForInterruptReview(timeout: .seconds(2))
-
-        #expect(try store.readReview(jobID: "job-1").core.lifecycle.cancellation == reason)
-        #expect(await closeCompletion.isComplete() == false)
-        await interruptGate.open()
-        #expect(await close.value == .success)
+        let job = try #require(store.job(id: "job-1"))
+        let firstReceipt = try #require(store.recordCancellationRequest(.mcpClient(message: "Earlier request"), for: job))
+        #expect(await store.closeRegisteredStoreWork(reason: reason) == .success)
         let final = try await review.value
+        let resolution = try #require(await active.admission.activeTerminalResolution())
+        let receipt = try #require(resolution.cancellationRequestReceipt)
 
-        #expect(final.core.lifecycle.status == .cancelled)
-        #expect(final.core.lifecycle.cancellation == reason)
-        #expect(store.job(id: "job-1")?.logEntries.contains {
-            $0.kind == .diagnostic && $0.text == "Review cleanup failed: Interrupt failed."
-        } == true)
-        #expect(store.reviewWorkerTasks["job-1"] == nil)
-        #expect(store.storeWorkRegistry.activeOrdinals.isEmpty)
-        #expect(await closeCompletion.isComplete())
+        #expect(final.core.lifecycle.status == .cancelled && final.core.lifecycle.cancellation == reason)
+        #expect(receipt.id.jobID == firstReceipt.id.jobID && receipt.id.ordinal == firstReceipt.id.ordinal + 1 && receipt.cancellation == reason && receipt.rejectionDisposition == .preserveRuntimeStopIntent)
+        #expect(await backend.recordedCommands().contains(.cleanupReview(active.run)) && store.reviewWorkerTasks["job-1"] == nil && store.storeWorkRegistry.activeOrdinals.isEmpty)
     }
 
     @Test func registeredWorkCloseJoinsInterruptWithRecordedTerminal() async throws {
