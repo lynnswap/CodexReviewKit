@@ -1,146 +1,134 @@
+import CodexReview
 import Foundation
 import Testing
 @testable import CodexReviewAppServer
 
-@Suite("review ingestion diagnostic log plan")
-struct ReviewIngestionDiagnosticLogPlanTests {
-    private let recordID = "00000000-0000-0000-0000-000000000001"
-
-    @Test func emptyPayloadNeedsNoChunk() {
-        let rawParams = Data()
-        let plan = ReviewIngestionDiagnosticLogPlan(
-            rawParams: rawParams,
-            recordID: recordID
+@Suite("review ingestion diagnostic summary")
+struct ReviewIngestionDiagnosticSummaryTests {
+    @Test func summaryContainsOnlyFixedMetadataCountsAndPresence() {
+        let secret = String(repeating: "secret🌏", count: 10_000)
+        let summary = ReviewIngestionDiagnosticSummary(
+            diagnostic(
+                method: secret,
+                threadID: secret,
+                turnID: nil,
+                itemType: secret,
+                rawParams: Data(repeating: 0xFF, count: 1_000_000),
+                error: .malformedKnownEvent(method: secret, message: secret)
+            ),
+            recordID: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
         )
 
-        #expect(plan.header == .init(
-            recordID: recordID,
-            originalRawByteCount: 0,
-            capturedRawByteCount: 0,
-            capturedBase64Length: 0,
-            chunkCount: 0,
-            isTruncated: false
-        ))
-        #expect(plan.chunks.isEmpty)
-        expectExactReconstruction(plan, of: rawParams)
+        #expect(summary.key.methodCategory == .other)
+        #expect(summary.key.errorCase == .malformedKnownEvent)
+        #expect(summary.rawByteCount == 1_000_000)
+        #expect(summary.hasThreadID)
+        #expect(summary.hasTurnID == false)
+        #expect(summary.hasItemType)
+        #expect(String(reflecting: summary).contains(secret) == false)
     }
 
-    @Test func payloadAtChunkBoundaryUsesOneBoundedChunk() {
-        let rawParams = Data(repeating: 0xA5, count: 384)
-        let plan = ReviewIngestionDiagnosticLogPlan(
-            rawParams: rawParams,
-            recordID: recordID
-        )
-
-        #expect(plan.header == .init(
-            recordID: recordID,
-            originalRawByteCount: 384,
-            capturedRawByteCount: 384,
-            capturedBase64Length: 512,
-            chunkCount: 1,
-            isTruncated: false
-        ))
-        #expect(plan.chunks.map(\.index) == [0])
-        #expect(plan.chunks.map(\.count) == [1])
-        #expect(plan.chunks.first?.base64.utf8.count == 512)
-        expectExactReconstruction(plan, of: rawParams)
+    @Test func registeredMethodsMapToClosedCategories() {
+        #expect(summary(method: "warning").key.methodCategory == .globalDiagnostic)
+        #expect(summary(method: "thread/closed").key.methodCategory == .threadLifecycle)
+        #expect(summary(method: "turn/completed").key.methodCategory == .turnLifecycle)
+        #expect(summary(method: "item/completed").key.methodCategory == .itemLifecycle)
+        #expect(summary(method: "item/reasoning/textDelta").key.methodCategory == .itemDelta)
+        #expect(summary(method: "model/rerouted").key.methodCategory == .model)
+        #expect(summary(method: "unknown").key.methodCategory == .other)
     }
 
-    @Test func payloadPastChunkBoundaryUsesExplicitZeroBasedIndices() {
-        let rawParams = Data(repeating: 0x5A, count: 385)
-        let plan = ReviewIngestionDiagnosticLogPlan(
-            rawParams: rawParams,
-            recordID: recordID
-        )
+    private func summary(method: String) -> ReviewIngestionDiagnosticSummary {
+        .init(diagnostic(method: method), recordID: UUID())
+    }
+}
 
-        #expect(plan.header == .init(
-            recordID: recordID,
-            originalRawByteCount: 385,
-            capturedRawByteCount: 385,
-            capturedBase64Length: 516,
-            chunkCount: 2,
-            isTruncated: false
-        ))
-        #expect(plan.chunks.map(\.recordID) == [recordID, recordID])
-        #expect(plan.chunks.map(\.index) == [0, 1])
-        #expect(plan.chunks.map(\.count) == [2, 2])
-        #expect(plan.chunks.map { $0.base64.utf8.count } == [512, 4])
-        expectExactReconstruction(plan, of: rawParams)
+@Suite("review ingestion diagnostic sampler")
+struct ReviewIngestionDiagnosticSamplerTests {
+    @Test func repeatedKeyEmitsTwoRecordsThenOneSuppression() {
+        var sampler = ReviewIngestionDiagnosticSampler()
+        let key = summary(method: "warning").key
+        #expect((0..<5).map { _ in sampler.decision(for: key) } == [
+            .emitFullRecord, .emitFullRecord, .emitSuppressionSummary, .suppress, .suppress,
+        ])
+        #expect(sampler.trackedKeyCount == 1)
     }
 
-    @Test func unicodeAndRawBinaryRoundTripThroughASCIIChunks() {
-        var rawParams = Data(#"{"message":"こんにちは🌏"}"#.utf8)
-        rawParams.append(contentsOf: [0x00, 0x7F, 0x80, 0xFF])
-        let plan = ReviewIngestionDiagnosticLogPlan(
-            rawParams: rawParams,
-            recordID: recordID
-        )
-
-        #expect(plan.chunks.allSatisfy { $0.base64.utf8.allSatisfy { $0 < 0x80 } })
-        expectExactReconstruction(plan, of: rawParams)
+    @Test func distinctFixedKeysHaveIndependentAllowance() {
+        var sampler = ReviewIngestionDiagnosticSampler()
+        let first = summary(method: "warning").key
+        let second = summary(method: "thread/closed").key
+        #expect(sampler.decision(for: first) == .emitFullRecord)
+        #expect(sampler.decision(for: first) == .emitFullRecord)
+        #expect(sampler.decision(for: first) == .emitSuppressionSummary)
+        #expect(sampler.decision(for: second) == .emitFullRecord)
+        #expect(sampler.trackedKeyCount == 2)
     }
 
-    @Test func overBudgetPayloadReportsAndReconstructsItsExactCapturedPrefix() {
-        let rawParams = Data(
-            (0..<(ReviewIngestionDiagnosticLogPlan.maximumCapturedRawByteCount + 257))
-                .map { UInt8(truncatingIfNeeded: $0) }
-        )
-        let plan = ReviewIngestionDiagnosticLogPlan(
-            rawParams: rawParams,
-            recordID: recordID
-        )
-
-        #expect(plan.header == .init(
-            recordID: recordID,
-            originalRawByteCount: rawParams.count,
-            capturedRawByteCount: 12_288,
-            capturedBase64Length: 16_384,
-            chunkCount: 32,
-            isTruncated: true
-        ))
-        #expect(plan.chunks.map(\.index) == Array(0..<32))
-        #expect(plan.chunks.allSatisfy { $0.count == 32 })
-        expectExactReconstruction(plan, of: rawParams)
-    }
-
-    @Test func repeatedPlansNeverExceedTheSynchronousChunkBudget() {
-        let rawParams = Data(
-            repeating: 0xC3,
-            count: ReviewIngestionDiagnosticLogPlan.maximumCapturedRawByteCount * 8
-        )
-
-        for iteration in 0..<64 {
-            let plan = ReviewIngestionDiagnosticLogPlan(
-                rawParams: rawParams,
-                recordID: "\(recordID)-\(iteration)"
-            )
-
-            #expect(plan.chunks.count <= ReviewIngestionDiagnosticLogPlan.maximumChunkCount)
-            #expect(plan.header.chunkCount <= ReviewIngestionDiagnosticLogPlan.maximumChunkCount)
-            #expect(plan.header.capturedRawByteCount
-                <= ReviewIngestionDiagnosticLogPlan.maximumCapturedRawByteCount)
+    @Test func stateAndOverflowSummaryAreFinite() {
+        var sampler = ReviewIngestionDiagnosticSampler()
+        let categories: [ReviewIngestionDiagnosticSummary.MethodCategory] = [
+            .globalDiagnostic, .threadLifecycle, .turnLifecycle, .itemLifecycle,
+            .itemDelta, .model, .other,
+        ]
+        let stages: [ReviewIngestionDiagnosticRecord.Stage] = [
+            .paramsDecoding, .schemaValidation, .payloadDecoding,
+        ]
+        let keys = categories.flatMap { category in
+            stages.map { stage in key(methodCategory: category, stage: stage) }
         }
+        for key in keys.prefix(ReviewIngestionDiagnosticSampler.maximumKeyCount) {
+            #expect(sampler.decision(for: key) == .emitFullRecord)
+        }
+        #expect(sampler.decision(for: keys[16]) == .emitCapacitySuppressionSummary)
+        #expect(sampler.decision(for: keys[17]) == .suppress)
+        #expect(sampler.trackedKeyCount == ReviewIngestionDiagnosticSampler.maximumKeyCount)
     }
 
-    private func expectExactReconstruction(
-        _ plan: ReviewIngestionDiagnosticLogPlan,
-        of rawParams: Data
-    ) {
-        let expectedCapture = Data(
-            rawParams.prefix(ReviewIngestionDiagnosticLogPlan.maximumCapturedRawByteCount)
+    @Test func connectionFailureAlwaysEmitsWithoutSamplerState() {
+        var sampler = ReviewIngestionDiagnosticSampler()
+        let key = key(methodCategory: .itemLifecycle, disposition: .connectionFailed)
+        for _ in 0..<64 {
+            #expect(sampler.decision(for: key) == .emitFullRecord)
+        }
+        #expect(sampler.trackedKeyCount == 0)
+    }
+
+    private func summary(method: String) -> ReviewIngestionDiagnosticSummary {
+        .init(diagnostic(method: method), recordID: UUID())
+    }
+
+    private func key(
+        methodCategory: ReviewIngestionDiagnosticSummary.MethodCategory,
+        stage: ReviewIngestionDiagnosticRecord.Stage = .schemaValidation,
+        disposition: ReviewIngestionDiagnosticRecord.Disposition = .ignored
+    ) -> ReviewIngestionDiagnosticSummary.Key {
+        .init(
+            methodCategory: methodCategory,
+            stage: stage,
+            disposition: disposition,
+            errorCase: .malformedKnownEvent
         )
-        #expect(plan.header.recordID == recordID)
-        #expect(plan.header.originalRawByteCount == rawParams.count)
-        #expect(plan.header.capturedRawByteCount == expectedCapture.count)
-        #expect(plan.header.isTruncated == (rawParams.count > expectedCapture.count))
-        #expect(plan.header.chunkCount == plan.chunks.count)
-        #expect(plan.header.chunkCount <= ReviewIngestionDiagnosticLogPlan.maximumChunkCount)
-        #expect(plan.chunks.allSatisfy {
-            $0.base64.utf8.count <= ReviewIngestionDiagnosticLogPlan.maximumBase64ChunkLength
-        })
-
-        let base64 = plan.chunks.map(\.base64).joined()
-        #expect(plan.header.capturedBase64Length == base64.utf8.count)
-        #expect(Data(base64Encoded: base64) == expectedCapture)
     }
+}
+
+private func diagnostic(
+    method: String,
+    threadID: String? = nil,
+    turnID: String? = nil,
+    itemType: String? = nil,
+    rawParams: Data = Data(),
+    error: ReviewIngestionError = .malformedKnownEvent(method: "known", message: "invalid"),
+    disposition: ReviewIngestionDiagnosticRecord.Disposition = .ignored
+) -> ReviewIngestionDiagnosticRecord {
+    .init(
+        method: method,
+        threadID: threadID,
+        turnID: turnID,
+        itemType: itemType,
+        rawParams: rawParams,
+        stage: .schemaValidation,
+        error: error,
+        disposition: disposition
+    )
 }

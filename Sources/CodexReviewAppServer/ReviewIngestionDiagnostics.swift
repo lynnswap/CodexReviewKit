@@ -1,6 +1,7 @@
 import CodexReview
 import Foundation
 import OSLog
+import Synchronization
 
 private let reviewIngestionLogger = Logger(
     subsystem: "CodexReviewKit",
@@ -8,14 +9,14 @@ private let reviewIngestionLogger = Logger(
 )
 
 package struct ReviewIngestionDiagnosticRecord: Equatable, Sendable {
-    package enum Stage: String, Equatable, Sendable {
+    package enum Stage: String, Hashable, Sendable {
         case paramsDecoding
         case schemaValidation
         case payloadDecoding
         case routing
     }
 
-    package enum Disposition: String, Equatable, Sendable {
+    package enum Disposition: String, Hashable, Sendable {
         case ignored
         case connectionFailed
     }
@@ -54,79 +55,177 @@ package protocol ReviewIngestionDiagnosticRecording: Sendable {
     func record(_ diagnostic: ReviewIngestionDiagnosticRecord)
 }
 
-package struct ReviewIngestionDiagnosticLogPlan: Equatable, Sendable {
-    // Bound synchronous work on the notification-routing actor before encoding.
-    package static let maximumCapturedRawByteCount = 12 * 1_024
+package struct ReviewIngestionDiagnosticSummary: Equatable, Sendable {
+    package enum MethodCategory: String, Hashable, Sendable {
+        case globalDiagnostic
+        case threadLifecycle
+        case turnLifecycle
+        case itemLifecycle
+        case itemDelta
+        case model
+        case other
 
-    // Keep the variable payload at half of OSLog's 1 KiB message budget so the
-    // fixed format, correlation identifier, and decimal counters have headroom.
-    package static let maximumBase64ChunkLength = 512
-    package static let maximumChunkCount = 32
-
-    package struct Header: Equatable, Sendable {
-        package let recordID: String
-        package let originalRawByteCount: Int
-        package let capturedRawByteCount: Int
-        package let capturedBase64Length: Int
-        package let chunkCount: Int
-        package let isTruncated: Bool
-    }
-
-    package struct Chunk: Equatable, Sendable {
-        package let recordID: String
-        package let index: Int
-        package let count: Int
-        package let base64: String
-    }
-
-    package let header: Header
-    package let chunks: [Chunk]
-
-    package init(rawParams: Data, recordID: String) {
-        let capturedRawParams = Data(rawParams.prefix(Self.maximumCapturedRawByteCount))
-        let encoded = capturedRawParams.base64EncodedData()
-        let chunkCount = encoded.isEmpty
-            ? 0
-            : ((encoded.count - 1) / Self.maximumBase64ChunkLength) + 1
-        header = Header(
-            recordID: recordID,
-            originalRawByteCount: rawParams.count,
-            capturedRawByteCount: capturedRawParams.count,
-            capturedBase64Length: encoded.count,
-            chunkCount: chunkCount,
-            isTruncated: capturedRawParams.count != rawParams.count
-        )
-        chunks = stride(
-            from: encoded.startIndex,
-            to: encoded.endIndex,
-            by: Self.maximumBase64ChunkLength
-        ).enumerated().map { index, start in
-            let end = min(start + Self.maximumBase64ChunkLength, encoded.endIndex)
-            return Chunk(
-                recordID: recordID,
-                index: index,
-                count: chunkCount,
-                base64: String(decoding: encoded[start..<end], as: UTF8.self)
-            )
+        fileprivate init(_ method: String) {
+            switch method {
+            case "warning", "guardianWarning", "deprecationNotice", "configWarning", "error":
+                self = .globalDiagnostic
+            case "thread/closed", "thread/status/changed", "thread/compacted":
+                self = .threadLifecycle
+            case "turn/started", "turn/completed", "turn/diff/updated", "turn/plan/updated":
+                self = .turnLifecycle
+            case "item/started", "item/completed",
+                 "item/autoApprovalReview/started", "item/autoApprovalReview/completed":
+                self = .itemLifecycle
+            case "item/agentMessage/delta", "item/plan/delta",
+                 "item/reasoning/summaryTextDelta", "item/reasoning/summaryPartAdded",
+                 "item/reasoning/textDelta", "item/commandExecution/outputDelta",
+                 "item/commandExecution/terminalInteraction", "item/fileChange/outputDelta",
+                 "item/fileChange/patchUpdated", "item/mcpToolCall/progress":
+                self = .itemDelta
+            case "model/rerouted", "model/verification":
+                self = .model
+            default:
+                self = .other
+            }
         }
+    }
+
+    package enum ErrorCase: String, Hashable, Sendable {
+        case malformedKnownEvent
+        case unsupportedItemType
+        case missingRoutingIdentity
+        case conflictingActiveRouting
+        case conflictingStableEvent
+        case invalidTerminalStatus
+        case missingFinalReview
+        case outputTooLarge
+        case streamEndedWithoutTerminal
+
+        fileprivate init(_ error: ReviewIngestionError) {
+            switch error {
+            case .malformedKnownEvent: self = .malformedKnownEvent
+            case .unsupportedItemType: self = .unsupportedItemType
+            case .missingRoutingIdentity: self = .missingRoutingIdentity
+            case .conflictingActiveRouting: self = .conflictingActiveRouting
+            case .conflictingStableEvent: self = .conflictingStableEvent
+            case .invalidTerminalStatus: self = .invalidTerminalStatus
+            case .missingFinalReview: self = .missingFinalReview
+            case .outputTooLarge: self = .outputTooLarge
+            case .streamEndedWithoutTerminal: self = .streamEndedWithoutTerminal
+            }
+        }
+    }
+
+    package struct Key: Hashable, Sendable {
+        package let methodCategory: MethodCategory
+        package let stage: ReviewIngestionDiagnosticRecord.Stage
+        package let disposition: ReviewIngestionDiagnosticRecord.Disposition
+        package let errorCase: ErrorCase
+
+        package init(_ diagnostic: ReviewIngestionDiagnosticRecord) {
+            methodCategory = .init(diagnostic.method)
+            stage = diagnostic.stage
+            disposition = diagnostic.disposition
+            errorCase = .init(diagnostic.error)
+        }
+
+        package init(
+            methodCategory: MethodCategory,
+            stage: ReviewIngestionDiagnosticRecord.Stage,
+            disposition: ReviewIngestionDiagnosticRecord.Disposition,
+            errorCase: ErrorCase
+        ) {
+            self.methodCategory = methodCategory
+            self.stage = stage
+            self.disposition = disposition
+            self.errorCase = errorCase
+        }
+    }
+
+    package let recordID: UUID
+    package let key: Key
+    package let rawByteCount: Int
+    package let hasThreadID: Bool
+    package let hasTurnID: Bool
+    package let hasItemType: Bool
+
+    package init(_ diagnostic: ReviewIngestionDiagnosticRecord, recordID: UUID) {
+        self.recordID = recordID
+        key = .init(diagnostic)
+        rawByteCount = diagnostic.rawParams.count
+        hasThreadID = diagnostic.threadID != nil
+        hasTurnID = diagnostic.turnID != nil
+        hasItemType = diagnostic.itemType != nil
     }
 }
 
-package struct OSLogReviewIngestionDiagnosticRecorder: ReviewIngestionDiagnosticRecording {
+package struct ReviewIngestionDiagnosticSampler: Sendable {
+    package enum Decision: Equatable, Sendable {
+        case emitFullRecord
+        case emitSuppressionSummary
+        case emitCapacitySuppressionSummary
+        case suppress
+    }
+
+    package static let fullRecordLimit = 2
+    package static let maximumKeyCount = 16
+
+    private var emissionCounts: [ReviewIngestionDiagnosticSummary.Key: Int] = [:]
+    private var didEmitCapacitySummary = false
+
+    package init() {}
+    package var trackedKeyCount: Int { emissionCounts.count }
+
+    package mutating func decision(
+        for key: ReviewIngestionDiagnosticSummary.Key
+    ) -> Decision {
+        if key.disposition == .connectionFailed {
+            return .emitFullRecord
+        }
+        if let count = emissionCounts[key] {
+            if count < Self.fullRecordLimit {
+                emissionCounts[key] = count + 1
+                return .emitFullRecord
+            }
+            if count == Self.fullRecordLimit {
+                emissionCounts[key] = count + 1
+                return .emitSuppressionSummary
+            }
+            return .suppress
+        }
+        guard emissionCounts.count < Self.maximumKeyCount else {
+            guard didEmitCapacitySummary == false else { return .suppress }
+            didEmitCapacitySummary = true
+            return .emitCapacitySuppressionSummary
+        }
+        emissionCounts[key] = 1
+        return .emitFullRecord
+    }
+}
+
+package final class OSLogReviewIngestionDiagnosticRecorder: ReviewIngestionDiagnosticRecording {
+    private let sampler = Mutex(ReviewIngestionDiagnosticSampler())
+
     package init() {}
 
     package func record(_ diagnostic: ReviewIngestionDiagnosticRecord) {
-        let plan = ReviewIngestionDiagnosticLogPlan(
-            rawParams: diagnostic.rawParams,
-            recordID: UUID().uuidString
-        )
-        reviewIngestionLogger.error(
-            "Review ingestion failed record_id=\(plan.header.recordID, privacy: .public) original_raw_byte_count=\(plan.header.originalRawByteCount, privacy: .private) captured_raw_byte_count=\(plan.header.capturedRawByteCount, privacy: .private) captured_base64_length=\(plan.header.capturedBase64Length, privacy: .private) raw_chunk_count=\(plan.header.chunkCount, privacy: .private) raw_is_truncated=\(plan.header.isTruncated, privacy: .private) method=\(diagnostic.method, privacy: .public) stage=\(diagnostic.stage.rawValue, privacy: .public) disposition=\(diagnostic.disposition.rawValue, privacy: .public) thread=\(diagnostic.threadID ?? "nil", privacy: .private) turn=\(diagnostic.turnID ?? "nil", privacy: .private) item_type=\(diagnostic.itemType ?? "nil", privacy: .private) error=\(diagnostic.error.localizedDescription, privacy: .private)"
-        )
-        for chunk in plan.chunks {
+        let key = ReviewIngestionDiagnosticSummary.Key(diagnostic)
+        switch sampler.withLock({ $0.decision(for: key) }) {
+        case .emitFullRecord:
+            let summary = ReviewIngestionDiagnosticSummary(diagnostic, recordID: UUID())
             reviewIngestionLogger.error(
-                "Review ingestion raw params record_id=\(chunk.recordID, privacy: .public) chunk_index_0_based=\(chunk.index, privacy: .private) chunk_count=\(chunk.count, privacy: .private) raw_params_base64_chunk=\(chunk.base64, privacy: .private)"
+                "Review ingestion failed record_id=\(summary.recordID.uuidString, privacy: .public) method_category=\(summary.key.methodCategory.rawValue, privacy: .public) stage=\(summary.key.stage.rawValue, privacy: .public) disposition=\(summary.key.disposition.rawValue, privacy: .public) error_case=\(summary.key.errorCase.rawValue, privacy: .public) raw_byte_count=\(summary.rawByteCount, privacy: .private) has_thread_id=\(summary.hasThreadID, privacy: .private) has_turn_id=\(summary.hasTurnID, privacy: .private) has_item_type=\(summary.hasItemType, privacy: .private)"
             )
+        case .emitSuppressionSummary:
+            reviewIngestionLogger.error(
+                "Review ingestion diagnostics suppressed method_category=\(key.methodCategory.rawValue, privacy: .public) stage=\(key.stage.rawValue, privacy: .public) disposition=\(key.disposition.rawValue, privacy: .public) error_case=\(key.errorCase.rawValue, privacy: .public) full_record_limit=\(ReviewIngestionDiagnosticSampler.fullRecordLimit, privacy: .public)"
+            )
+        case .emitCapacitySuppressionSummary:
+            reviewIngestionLogger.error(
+                "Review ingestion diagnostic sampler capacity reached tracked_key_limit=\(ReviewIngestionDiagnosticSampler.maximumKeyCount, privacy: .public)"
+            )
+        case .suppress:
+            break
         }
     }
 }
