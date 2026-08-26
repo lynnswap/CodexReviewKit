@@ -713,6 +713,45 @@ struct CurrentV2ReviewDecoderReducerTests {
         ))
     }
 
+    @Test func unsupportedTurnChildIsRemovedWithoutDroppingTerminalEnvelope() throws {
+        let rawParams = Data(#"{"threadId":"thread-review","turn":{"id":"turn-review","items":[{"type":"futureItem","id":"future-1"},{"type":"agentMessage","id":"final","text":"Final review"}],"itemsView":"summary","status":"completed"}}"#.utf8)
+
+        guard case .review(let envelope) = CurrentV2ReviewNotificationDecoder.decode(.init(
+            method: "turn/completed",
+            params: rawParams
+        )) else {
+            Issue.record("Expected a valid terminal envelope with one ignored child")
+            return
+        }
+        #expect(envelope.rawParams == rawParams)
+        #expect(envelope.ignoredSchemaErrors == [
+            .unsupportedItemType(method: "turn/completed", type: "futureItem"),
+        ])
+        let routed = try #require(
+            JSONSerialization.jsonObject(with: envelope.params) as? [String: Any]
+        )
+        let turn = try #require(routed["turn"] as? [String: Any])
+        let items = try #require(turn["items"] as? [[String: Any]])
+        #expect(items.count == 1)
+        #expect(items.first?["type"] as? String == "agentMessage")
+    }
+
+    @Test func malformedKnownTurnChildStillRejectsTerminalEnvelope() {
+        let rawParams = Data(#"{"threadId":"thread-review","turn":{"id":"turn-review","items":[{"type":"agentMessage","id":"missing-text"}],"itemsView":"summary","status":"completed"}}"#.utf8)
+
+        guard case .failure(let failure) = CurrentV2ReviewNotificationDecoder.decode(.init(
+            method: "turn/completed",
+            params: rawParams
+        )) else {
+            Issue.record("Expected malformed known child rejection")
+            return
+        }
+        guard case .malformedKnownEvent = failure.error else {
+            Issue.record("Expected malformed-known-event classification")
+            return
+        }
+    }
+
     @Test func missingPreRoutingIdentityIsConnectionClassified() throws {
         let malformed = JSONRPC.Notification(
             method: "item/completed",
@@ -1881,7 +1920,11 @@ struct CurrentV2ReviewRoutingIntegrationTests {
     @MainActor
     @Test func rawFullDeliveryCommitsOneCanonicalFinalRowEndToEnd() async throws {
         let transport = FakeJSONRPCTransport()
-        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let diagnostics = ReviewIngestionDiagnosticCapture()
+        let backend = AppServerCodexReviewBackend(
+            client: .init(transport: transport),
+            ingestionDiagnosticRecorder: diagnostics
+        )
         let attempt = await backend.reviewAttemptForTesting(.init(
             attemptID: "attempt-1",
             threadID: "thread-review",
@@ -1889,6 +1932,16 @@ struct CurrentV2ReviewRoutingIntegrationTests {
             reviewThreadID: "thread-review"
         ))
 
+        for method in ["item/started", "item/completed"] {
+            try await transport.emitServerNotification(
+                method: method,
+                params: V2ItemNotification(
+                    threadID: "thread-review",
+                    turnID: "turn-review",
+                    item: .init(type: "futureItem", id: "future-notification")
+                )
+            )
+        }
         try await transport.emitServerNotification(
             method: "item/started",
             params: V2ItemNotification(
@@ -1941,19 +1994,34 @@ struct CurrentV2ReviewRoutingIntegrationTests {
                 item: .init(type: "agentMessage", id: "final", text: "Canonical review")
             )
         )
-        try await transport.emitServerNotification(
-            method: "turn/completed",
-            params: V2TurnNotification(
-                threadID: "thread-review",
-                turn: .init(
-                    id: "turn-review",
-                    items: [.init(type: "agentMessage", id: "final", text: "Canonical review")],
-                    itemsView: "summary",
-                    status: "completed"
-                )
+        let terminalNotification = V2TurnNotification(
+            threadID: "thread-review",
+            turn: .init(
+                id: "turn-review",
+                items: [
+                    .init(type: "futureItem", id: "future-summary"),
+                    .init(type: "agentMessage", id: "final", text: "Canonical review"),
+                ],
+                itemsView: "summary",
+                status: "completed"
             )
         )
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: terminalNotification
+        )
         let normalizedEvents = try await collectEvents(from: attempt.events)
+        let capturedDiagnostics = diagnostics.snapshot()
+        #expect(capturedDiagnostics.count == 3)
+        #expect(capturedDiagnostics.allSatisfy { $0.disposition == .ignored })
+        let nestedDiagnostic = try #require(capturedDiagnostics.last)
+        #expect(nestedDiagnostic.error == .unsupportedItemType(
+            method: "turn/completed",
+            type: "futureItem"
+        ))
+        #expect(try canonicalJSON(nestedDiagnostic.rawParams) == canonicalJSON(
+            JSONEncoder().encode(terminalNotification)
+        ))
         let canonicalReviewEvents = normalizedEvents.filter { event in
             guard case .logEntry(_, _, _, _, let metadata) = event else {
                 return false
@@ -2027,6 +2095,8 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         #expect(visibleAgentRows.map(\.groupID) == ["non-final", "review-result"])
         #expect(visibleAgentRows.map(\.text) == ["Non-final message", "Canonical review"])
         #expect(visibleAgentRows.contains { $0.groupID == "final" } == false)
+        #expect(result.logs.contains { $0.kind == .error } == false)
+        #expect(result.core.lifecycle.status == .succeeded)
         #expect(result.core.lifecycle.terminal == .completed)
         #expect(result.core.output.lastAgentMessage == "Canonical review")
         #expect(result.core.output.hasFinalReview)
