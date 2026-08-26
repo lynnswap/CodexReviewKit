@@ -644,6 +644,272 @@ struct CodexReviewHostTests {
         await store.stop()
     }
 
+    @Test func liveCancelledCleanupReturnsBeforeEventualRuntimeReplacement() async throws {
+        let transport = FakeJSONRPCTransport()
+        let replacementTransport = FakeJSONRPCTransport()
+        let unusedTransport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(transport)
+        try await enqueueLiveRouteReviewStartResponses(
+            transport,
+            threadID: "route-thread",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1"
+        )
+        let cleanupGate = AsyncGate()
+        await transport.holdNextIgnoringCancellation(
+            method: "thread/backgroundTerminals/clean",
+            gate: cleanupGate
+        )
+        try await enqueueRuntimeStartResponses(replacementTransport)
+        try await enqueueLiveRouteReviewStartResponses(
+            replacementTransport,
+            threadID: "replacement-thread",
+            turnID: "replacement-turn",
+            reviewThreadID: "replacement-review-thread"
+        )
+        try await enqueueReviewCleanupResponses(replacementTransport)
+        let replacementFactoryStarted = AsyncGate()
+        let replacementFactoryGate = AsyncGate()
+        var transports = [transport, replacementTransport, unusedTransport]
+        var factoryCallCount = 0
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transportFactory: { _ in
+                factoryCallCount += 1
+                if factoryCallCount == 2 {
+                    await replacementFactoryStarted.open()
+                    await replacementFactoryGate.waitIgnoringCancellation()
+                }
+                return transports.removeFirst()
+            }
+        )
+        await store.start()
+        let attempt = try await store.backend.startReview(
+            makeLiveRouteReviewStartRequest(jobID: "job-cancelled-cleanup"),
+            admission: ReviewStartAdmission()
+        )
+        let cleanup = Task { @MainActor in
+            try await store.backend.cleanupReview(attempt.run)
+        }
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            await transport.recordedRequests().contains {
+                $0.method == "thread/backgroundTerminals/clean"
+            }
+        })
+
+        cleanup.cancel()
+        await #expect(throws: CancellationError.self) {
+            try await cleanup.value
+        }
+        await replacementFactoryStarted.wait()
+        guard case .acquiring(_, _, let replacementTask) = store.runtimeState else {
+            Issue.record("Expected cancelled cleanup to admit one eventual replacement.")
+            return
+        }
+
+        #expect(await transport.isClosedForTesting())
+        #expect(factoryCallCount == 2)
+        #expect(store.serverState != .running)
+
+        await replacementFactoryGate.open()
+        await replacementTask.value
+        #expect(store.serverState == .running)
+        let replacementAttempt = try await store.backend.startReview(
+            makeLiveRouteReviewStartRequest(jobID: "job-after-cancelled-cleanup"),
+            admission: ReviewStartAdmission()
+        )
+        try await store.backend.cleanupReview(replacementAttempt.run)
+        #expect(store.liveReviewAttemptRouteCountForTesting == 0)
+        await store.stop()
+    }
+
+    @Test func reviewWorkerCleanupReturnsBeforeItsRuntimeReplacementCompletes() async throws {
+        let transport = FakeJSONRPCTransport()
+        let replacementTransport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(transport)
+        try await enqueueLiveRouteReviewStartResponses(
+            transport,
+            threadID: "route-thread",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1"
+        )
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let interruptAccepted = AsyncGate()
+        await transport.beforeReturningNextResponse(method: "turn/interrupt") {
+            await interruptAccepted.open()
+        }
+        let cleanupStarted = AsyncGate()
+        await transport.beforeReturningNextResponse(
+            method: "thread/backgroundTerminals/clean"
+        ) {
+            await cleanupStarted.open()
+        }
+        await transport.enqueueTransportFailure(
+            message: "cleanup transport failed",
+            for: "thread/backgroundTerminals/clean"
+        )
+        try await enqueueRuntimeStartResponses(replacementTransport)
+        let replacementFactoryStarted = AsyncGate()
+        let replacementFactoryGate = AsyncGate()
+        var transports = [transport, replacementTransport]
+        var factoryCallCount = 0
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            shutdownCleanupTimeout: .seconds(30),
+            transportFactory: { _ in
+                factoryCallCount += 1
+                if factoryCallCount == 2 {
+                    await replacementFactoryStarted.open()
+                    await replacementFactoryGate.waitIgnoringCancellation()
+                }
+                return transports.removeFirst()
+            }
+        )
+        await store.start()
+        let review = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-worker-cleanup",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        let active = try #require(await StoreSnapshotProbe(store: store).waitUntil { snapshot in
+            snapshot.jobs.first?.activeRun?.turnID == "turn-1"
+        })
+        let jobID = try #require(active.jobs.first?.jobID)
+        let cancel = Task { @MainActor in
+            try await store.cancelReview(
+                jobID: jobID,
+                cancellation: .mcpClient(message: "Stop review")
+            )
+        }
+
+        await interruptAccepted.wait()
+        try await emitInterruptedTurn(
+            transport,
+            threadID: "review-thread-1",
+            turnID: "turn-1",
+            message: "Stop review"
+        )
+        await cleanupStarted.wait()
+        let cancellation = try await cancel.value
+        let result = try await review.value
+        await replacementFactoryStarted.wait()
+        guard case .acquiring(_, _, let replacementTask) = store.runtimeState else {
+            Issue.record("Expected worker cleanup to leave replacement completion Store-owned.")
+            return
+        }
+
+        #expect(cancellation.cancelled)
+        #expect(result.core.lifecycle.status == .cancelled)
+        #expect(store.reviewWorkerTasks[jobID] == nil)
+        #expect(store.runtimeStopDetachedReviewWorkerTasks[jobID] == nil)
+        #expect(factoryCallCount == 2)
+        #expect(store.serverState != .running)
+
+        await replacementFactoryGate.open()
+        await replacementTask.value
+        #expect(store.serverState == .running)
+        await store.stop()
+    }
+
+    @Test func concurrentLiveCleanupFailuresShareOneRuntimeReplacement() async throws {
+        let transport = FakeJSONRPCTransport()
+        let replacementTransport = FakeJSONRPCTransport()
+        let unusedTransport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(transport)
+        try await enqueueLiveRouteReviewStartResponses(
+            transport,
+            threadID: "route-thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1"
+        )
+        try await enqueueLiveRouteReviewStartResponses(
+            transport,
+            threadID: "route-thread-2",
+            turnID: "turn-2",
+            reviewThreadID: "review-thread-2"
+        )
+        let cleanupGate = AsyncGate()
+        await transport.holdNextIgnoringCancellation(
+            method: "thread/backgroundTerminals/clean",
+            gate: cleanupGate
+        )
+        await transport.holdNextIgnoringCancellation(
+            method: "thread/backgroundTerminals/clean",
+            gate: cleanupGate
+        )
+        try await enqueueRuntimeStartResponses(replacementTransport)
+        try await enqueueLiveRouteReviewStartResponses(
+            replacementTransport,
+            threadID: "replacement-thread",
+            turnID: "replacement-turn",
+            reviewThreadID: "replacement-review-thread"
+        )
+        try await enqueueReviewCleanupResponses(replacementTransport)
+        var transports = [transport, replacementTransport, unusedTransport]
+        var factoryCallCount = 0
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transportFactory: { _ in
+                factoryCallCount += 1
+                return transports.removeFirst()
+            }
+        )
+        await store.start()
+        let first = try await store.backend.startReview(
+            makeLiveRouteReviewStartRequest(jobID: "job-cleanup-1"),
+            admission: ReviewStartAdmission()
+        )
+        let second = try await store.backend.startReview(
+            makeLiveRouteReviewStartRequest(jobID: "job-cleanup-2"),
+            admission: ReviewStartAdmission()
+        )
+        let firstCleanup = Task {
+            do {
+                try await store.backend.cleanupReview(first.run)
+                return false
+            } catch is ReviewRuntimeCloseFailure {
+                return true
+            } catch {
+                return false
+            }
+        }
+        let secondCleanup = Task {
+            do {
+                try await store.backend.cleanupReview(second.run)
+                return false
+            } catch is ReviewRuntimeCloseFailure {
+                return true
+            } catch {
+                return false
+            }
+        }
+
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            await transport.recordedRequests().filter {
+                $0.method == "thread/backgroundTerminals/clean"
+            }.count == 2
+        })
+        await transport.close()
+        #expect(await firstCleanup.value)
+        #expect(await secondCleanup.value)
+        await waitForRuntimeLifecycleSettlement(store)
+        #expect(factoryCallCount == 2)
+        #expect(store.serverState == .running)
+        #expect(store.liveReviewAttemptRouteCountForTesting == 0)
+
+        let replacement = try await store.backend.startReview(
+            makeLiveRouteReviewStartRequest(jobID: "job-after-cleanup-replacement"),
+            admission: ReviewStartAdmission()
+        )
+        try await store.backend.cleanupReview(replacement.run)
+        #expect(store.liveReviewAttemptRouteCountForTesting == 0)
+        await store.stop()
+    }
+
     @Test func liveCompatibilityOutcomeUnknownStartDoesNotRetainLowerCleanupRoute() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueRuntimeStartResponses(transport)

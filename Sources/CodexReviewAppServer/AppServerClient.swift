@@ -57,7 +57,7 @@ package actor AppServerClient {
     private let transport: any JSONRPC.Transport
     private let overloadRetryDelay: @Sendable (Int) -> Duration?
     private let retrySleep: @Sendable (Duration) async throws -> Void
-    private let serializer = RequestSerializer()
+    private let serializer: RequestSerializer
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private var nextRequestID = 1
@@ -67,11 +67,13 @@ package actor AppServerClient {
     package init(
         transport: any JSONRPC.Transport,
         overloadRetryDelay: @escaping @Sendable (Int) -> Duration? = AppServerClient.defaultOverloadRetryDelay,
-        retrySleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
+        retrySleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+        serializer: RequestSerializer = .init()
     ) {
         self.transport = transport
         self.overloadRetryDelay = overloadRetryDelay
         self.retrySleep = retrySleep
+        self.serializer = serializer
     }
 
     package func initialize(
