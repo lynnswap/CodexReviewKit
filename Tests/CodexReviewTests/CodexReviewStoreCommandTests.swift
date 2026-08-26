@@ -2911,6 +2911,141 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func staleSameValueRejectionCannotClearRuntimeStopReceipt() async throws {
+        let run = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1"
+        )
+        let backend = FakeCodexReviewBackend(nextRun: run)
+        let interruptGate = AsyncGate()
+        await backend.holdInterruptReview(with: interruptGate)
+        await backend.rejectInterrupts(message: "Interrupt failed")
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            let review = Task { @MainActor in
+                try await store.startReview(
+                    sessionID: "session-1",
+                    request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+                )
+            }
+            try #require(await StoreSnapshotProbe(store: store).waitUntilRunAttempt(
+                run.attemptID,
+                jobID: "job-1"
+            ) != nil)
+            let cancellation = ReviewCancellation.system(message: "Same cancellation")
+            let first = Task { @MainActor in
+                try await store.cancelReview(jobID: "job-1", cancellation: cancellation)
+            }
+            try await backend.waitForInterruptReview(timeout: .seconds(2))
+            let firstReceipt = try #require(store.job(id: "job-1")?.pendingCancellationRequest)
+
+            let runtime = Task { @MainActor in
+                await store.requestActiveReviewCancellationsForRuntimeStop(reason: cancellation)
+            }
+            try #require(await waitUntil {
+                store.job(id: "job-1")?.pendingCancellationRequest?.id != firstReceipt.id
+            })
+            let runtimeReceipt = try #require(store.job(id: "job-1")?.pendingCancellationRequest)
+            #expect(runtimeReceipt.cancellation == firstReceipt.cancellation)
+            #expect(runtimeReceipt.rejectionDisposition == .preserveRuntimeStopIntent)
+
+            await interruptGate.open()
+            await #expect(throws: ReviewInterruptRequestFailure.self) {
+                try await first.value
+            }
+            let runtimeOutcome = await runtime.value
+
+            #expect(runtimeOutcome.firstFailure == .cleanup("Interrupt failed"))
+            #expect(store.job(id: "job-1")?.pendingCancellationRequest?.id == runtimeReceipt.id)
+            await backend.finishEvents(
+                throwing: ReviewAttemptStreamFailure.ownerForcedConnectionClose(
+                    .connection("Runtime closed")
+                ),
+                for: run
+            )
+            let final = try await review.value
+            #expect(final.core.lifecycle.status == .cancelled)
+            #expect(final.core.lifecycle.cancellation == cancellation)
+        }
+    }
+
+    @Test func staleReportFailureCannotClearSameValueSuccessorReceipt() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-1",
+            sessionID: "session-1",
+            cwd: "/tmp/project",
+            targetSummary: "Review",
+            status: .running,
+            summary: "Running"
+        )
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [.init(cwd: job.cwd)],
+            jobs: [job]
+        )
+        let cancellation = ReviewCancellation.mcpClient(message: "Same cancellation")
+        let first = try #require(store.recordCancellationRequest(cancellation, for: job))
+        let admission = ReviewStartAdmission()
+        let preparedRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-1",
+            threadID: "thread-1",
+            reviewThreadID: "thread-1"
+        )
+        let activeRun = CodexReviewBackendModel.Review.Run(
+            attemptID: preparedRun.attemptID,
+            threadID: preparedRun.threadID,
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1"
+        )
+        try await admission.admitThreadStartDispatch()
+        try await admission.recordPreparedThread(preparedRun)
+        try await admission.admitReviewStartDispatch(for: preparedRun)
+        try await admission.recordActiveRun(activeRun)
+        let rejection = ReviewInterruptRequestFailure(
+            outcome: .rejected(code: nil, message: "First request was rejected")
+        )
+        await #expect(throws: rejection) {
+            try await admission.interrupt(
+                activeRun,
+                cancellation: first.cancellation,
+                request: { _, _ in throw rejection }
+            )
+        }
+
+        let successor = try #require(store.recordCancellationRequest(cancellation, for: job))
+        let successorDispatched = AsyncGate()
+        let successorRequest = Task {
+            try await admission.interrupt(
+                activeRun,
+                cancellation: successor.cancellation,
+                request: { _, _ in await successorDispatched.open() }
+            )
+        }
+        await successorDispatched.wait()
+
+        #expect(successor.id != first.id)
+        try store.recordCancellationFailure(
+            jobID: job.id,
+            sessionID: job.sessionID,
+            receipt: first,
+            message: "First request was rejected"
+        )
+
+        #expect(job.pendingCancellationRequest?.id == successor.id)
+        #expect(job.core.lifecycle.cancellation == cancellation)
+        #expect(job.core.output.summary == cancellation.message)
+        try await admission.recordCanonicalTerminal(.completed, for: activeRun)
+        _ = try await successorRequest.value
+    }
+
     @Test func canonicalCompletionWinsPendingCancellationAndClearsRequestState() async throws {
         let backend = FakeCodexReviewBackend()
         let interruptGate = AsyncGate()
