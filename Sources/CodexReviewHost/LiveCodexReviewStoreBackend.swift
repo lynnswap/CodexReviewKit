@@ -1884,7 +1884,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         guard let store = attachedStore else {
             return
         }
-        store.requestRuntimeFailure(handle: handle, cause: cause)
+        guard store.requestRuntimeFailure(handle: handle, cause: cause) else {
+            return
+        }
         await store.restart()
     }
 

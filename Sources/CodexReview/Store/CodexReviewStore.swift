@@ -288,10 +288,11 @@ public final class CodexReviewStore {
         _ = admitRuntimeTeardown(intent: intent)
     }
 
+    @discardableResult
     package func requestRuntimeFailure(
         handle: any RuntimeLifecycleHandle,
         cause: String
-    ) {
+    ) -> Bool {
         let ownsHandle: Bool
         switch runtimeState {
         case .running(_, let runtime, _):
@@ -302,9 +303,10 @@ public final class CodexReviewStore {
             ownsHandle = false
         }
         guard ownsHandle else {
-            return
+            return false
         }
         _ = admitRuntimeTeardown(intent: .unexpectedFailure(cause))
+        return true
     }
 
     private func admitRuntimeTeardown(

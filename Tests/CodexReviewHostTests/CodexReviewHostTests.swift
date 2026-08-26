@@ -553,6 +553,101 @@ struct CodexReviewHostTests {
         await store.stop()
     }
 
+    @Test func concurrentLiveCleanupFailuresShareOneRuntimeReplacement() async throws {
+        let transport = FakeJSONRPCTransport()
+        let replacementTransport = FakeJSONRPCTransport()
+        let unusedTransport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(transport)
+        try await enqueueLiveRouteReviewStartResponses(
+            transport,
+            threadID: "route-thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1"
+        )
+        try await enqueueLiveRouteReviewStartResponses(
+            transport,
+            threadID: "route-thread-2",
+            turnID: "turn-2",
+            reviewThreadID: "review-thread-2"
+        )
+        let cleanupGate = AsyncGate()
+        await transport.holdNextIgnoringCancellation(
+            method: "thread/backgroundTerminals/clean",
+            gate: cleanupGate
+        )
+        await transport.holdNextIgnoringCancellation(
+            method: "thread/backgroundTerminals/clean",
+            gate: cleanupGate
+        )
+        try await enqueueRuntimeStartResponses(replacementTransport)
+        try await enqueueLiveRouteReviewStartResponses(
+            replacementTransport,
+            threadID: "replacement-thread",
+            turnID: "replacement-turn",
+            reviewThreadID: "replacement-review-thread"
+        )
+        try await enqueueReviewCleanupResponses(replacementTransport)
+        var transports = [transport, replacementTransport, unusedTransport]
+        var factoryCallCount = 0
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transportFactory: { _ in
+                factoryCallCount += 1
+                return transports.removeFirst()
+            }
+        )
+        await store.start()
+        let first = try await store.backend.startReview(
+            makeLiveRouteReviewStartRequest(jobID: "job-cleanup-1"),
+            admission: ReviewStartAdmission()
+        )
+        let second = try await store.backend.startReview(
+            makeLiveRouteReviewStartRequest(jobID: "job-cleanup-2"),
+            admission: ReviewStartAdmission()
+        )
+        let firstCleanup = Task {
+            do {
+                try await store.backend.cleanupReview(first.run)
+                return false
+            } catch is ReviewRuntimeCloseFailure {
+                return true
+            } catch {
+                return false
+            }
+        }
+        let secondCleanup = Task {
+            do {
+                try await store.backend.cleanupReview(second.run)
+                return false
+            } catch is ReviewRuntimeCloseFailure {
+                return true
+            } catch {
+                return false
+            }
+        }
+
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            await transport.recordedRequests().filter {
+                $0.method == "thread/backgroundTerminals/clean"
+            }.count == 2
+        })
+        await transport.close()
+        #expect(await firstCleanup.value)
+        #expect(await secondCleanup.value)
+        #expect(factoryCallCount == 2)
+        #expect(store.serverState == .running)
+        #expect(store.liveReviewAttemptRouteCountForTesting == 0)
+
+        let replacement = try await store.backend.startReview(
+            makeLiveRouteReviewStartRequest(jobID: "job-after-cleanup-replacement"),
+            admission: ReviewStartAdmission()
+        )
+        try await store.backend.cleanupReview(replacement.run)
+        #expect(store.liveReviewAttemptRouteCountForTesting == 0)
+        await store.stop()
+    }
+
     @Test func liveCompatibilityOutcomeUnknownStartDoesNotRetainLowerCleanupRoute() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueRuntimeStartResponses(transport)
