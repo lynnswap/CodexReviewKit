@@ -782,18 +782,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         do {
             try await requestCancellation(for: job)
         } catch {
-            handleCancellationFailure(error, for: job)
+            // The Store owns exact-receipt failure projection before this call returns.
         }
-    }
-
-    private func handleCancellationFailure(_ error: Error, for job: CodexReviewJob) {
-        let description = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
-        let message = description.isEmpty ? "Failed to cancel review." : description
-        try? store.recordCancellationFailure(
-            jobID: job.id,
-            sessionID: job.sessionID,
-            message: message
-        )
     }
 
     private func clearSelectionIfNeeded(for workspaces: [CodexReviewWorkspace]) {

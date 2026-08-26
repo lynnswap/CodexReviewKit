@@ -50,7 +50,11 @@ extension CodexReviewJob {
                     reviewResult: reviewResult
                 )
             ),
-            cancellationRequested: cancellationRequested,
+            pendingCancellationRequest: cancellationRequested ? .init(
+                id: .init(jobID: id, ordinal: 0),
+                cancellation: cancellation ?? .system(),
+                rejectionDisposition: .reportFailure
+            ) : nil,
             logEntries: logEntries
         )
     }

@@ -5,6 +5,24 @@ import Testing
 @Suite("Codex review job rendering")
 @MainActor
 struct CodexReviewJobRenderingTests {
+    @Test func cancellationRequestedSetterProjectsOnlyThePendingReceipt() throws {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-cancellation-projection",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            cancellationRequested: true,
+            summary: "Running"
+        )
+        let receipt = try #require(job.pendingCancellationRequest)
+
+        job.cancellationRequested = true
+        #expect(job.pendingCancellationRequest == receipt)
+
+        job.cancellationRequested = false
+        #expect(job.pendingCancellationRequest == nil)
+        #expect(job.cancellationRequested == false)
+    }
+
     @Test func renderedLogTextKeepsCommandOutputInSemanticProjection() {
         let job = CodexReviewJob.makeForTesting(
             id: "job-command-output",
