@@ -695,7 +695,7 @@ struct CurrentV2ReviewDecoderReducerTests {
         }
     }
 
-    @Test func unsupportedClosedUnionItemIsAttemptClassified() throws {
+    @Test func unsupportedClosedUnionItemRetainsBoundaryIdentity() throws {
         let unsupported = JSONRPC.Notification(
             method: "item/completed",
             params: Data(#"{"threadId":"thread-review","turnId":"turn-review","completedAtMs":2,"item":{"type":"futureItem","id":"item-1"}}"#.utf8)
@@ -711,6 +711,45 @@ struct CurrentV2ReviewDecoderReducerTests {
             method: "item/completed",
             type: "futureItem"
         ))
+    }
+
+    @Test func unsupportedTurnChildIsRemovedWithoutDroppingTerminalEnvelope() throws {
+        let rawParams = Data(#"{"threadId":"thread-review","turn":{"id":"turn-review","items":[{"type":"futureItem","id":"future-1"},{"type":"agentMessage","id":"final","text":"Final review"}],"itemsView":"summary","status":"completed"}}"#.utf8)
+
+        guard case .review(let envelope) = CurrentV2ReviewNotificationDecoder.decode(.init(
+            method: "turn/completed",
+            params: rawParams
+        )) else {
+            Issue.record("Expected a valid terminal envelope with one ignored child")
+            return
+        }
+        #expect(envelope.rawParams == rawParams)
+        #expect(envelope.ignoredSchemaErrors == [
+            .unsupportedItemType(method: "turn/completed", type: "futureItem"),
+        ])
+        let routed = try #require(
+            JSONSerialization.jsonObject(with: envelope.params) as? [String: Any]
+        )
+        let turn = try #require(routed["turn"] as? [String: Any])
+        let items = try #require(turn["items"] as? [[String: Any]])
+        #expect(items.count == 1)
+        #expect(items.first?["type"] as? String == "agentMessage")
+    }
+
+    @Test func malformedKnownTurnChildStillRejectsTerminalEnvelope() {
+        let rawParams = Data(#"{"threadId":"thread-review","turn":{"id":"turn-review","items":[{"type":"agentMessage","id":"missing-text"}],"itemsView":"summary","status":"completed"}}"#.utf8)
+
+        guard case .failure(let failure) = CurrentV2ReviewNotificationDecoder.decode(.init(
+            method: "turn/completed",
+            params: rawParams
+        )) else {
+            Issue.record("Expected malformed known child rejection")
+            return
+        }
+        guard case .malformedKnownEvent = failure.error else {
+            Issue.record("Expected malformed-known-event classification")
+            return
+        }
     }
 
     @Test func missingPreRoutingIdentityIsConnectionClassified() throws {
@@ -930,6 +969,8 @@ private enum V2IdentityFixture: Equatable {
 private struct BoundaryDiagnosticFixture: Sendable, CustomTestStringConvertible {
     enum Route: Sendable {
         case global
+        case ignoredSingle
+        case ignoredAmbiguous
         case connection
         case ambiguous
     }
@@ -973,10 +1014,11 @@ private struct BoundaryDiagnosticFixture: Sendable, CustomTestStringConvertible 
         .init(testDescription: "global payload", route: .global, method: "configWarning", params: .globalPayload(.init(summary: "valid", plan: "invalid")), threadID: nil, turnID: nil, itemType: nil, stage: .payloadDecoding, error: .malformedKnownEvent(method: "configWarning", message: "The data couldn’t be read because it isn’t in the correct format."), disposition: .ignored),
         .init(testDescription: "pre-routing identity", route: .connection, method: "guardianWarning", params: .warning(.init(message: "missing thread")), threadID: nil, turnID: nil, itemType: nil, stage: .schemaValidation, error: .missingRoutingIdentity(method: "guardianWarning"), disposition: .connectionFailed),
         .init(testDescription: "non-global params", route: .connection, method: "item/completed", params: .scalar("scalar params"), threadID: nil, turnID: nil, itemType: nil, stage: .paramsDecoding, error: .malformedKnownEvent(method: "item/completed", message: "params must be a JSON object"), disposition: .connectionFailed),
-        .init(testDescription: "no-session schema", route: .connection, method: "item/completed", params: .item(.init(threadID: "thread-target", turnID: "turn-target", item: .init(type: "futureItem", id: "item-1"))), threadID: "thread-target", turnID: "turn-target", itemType: "futureItem", stage: .schemaValidation, error: .unsupportedItemType(method: "item/completed", type: "futureItem"), disposition: .connectionFailed),
+        .init(testDescription: "no-session unsupported item", route: .ignoredSingle, method: "item/completed", params: .item(.init(threadID: "thread-target", turnID: "turn-target", item: .init(type: "futureItem", id: "item-1"))), threadID: "thread-target", turnID: "turn-target", itemType: "futureItem", stage: .schemaValidation, error: .unsupportedItemType(method: "item/completed", type: "futureItem"), disposition: .ignored),
         .init(testDescription: "no-session payload", route: .connection, method: "item/agentMessage/delta", params: .reviewPayload(.init(threadID: "thread-target", turnID: "turn-target", itemID: "item-1", delta: "delta", plan: "invalid")), threadID: "thread-target", turnID: "turn-target", itemType: nil, stage: .payloadDecoding, error: .malformedKnownEvent(method: "item/agentMessage/delta", message: "The data couldn’t be read because it isn’t in the correct format."), disposition: .connectionFailed),
         .init(testDescription: "ambiguous valid", route: .ambiguous, method: "item/agentMessage/delta", params: .delta(.init(threadID: "shared-thread", turnID: "turn-1", itemID: "item-1", delta: "delta")), threadID: "shared-thread", turnID: "turn-1", itemType: nil, stage: .routing, error: .conflictingActiveRouting(threadID: "shared-thread"), disposition: .connectionFailed),
-        .init(testDescription: "ambiguous decode", route: .ambiguous, method: "item/completed", params: .item(.init(threadID: "shared-thread", turnID: "turn-1", item: .init(type: "futureItem", id: "item-1"))), threadID: "shared-thread", turnID: "turn-1", itemType: "futureItem", stage: .routing, error: .conflictingActiveRouting(threadID: "shared-thread"), disposition: .connectionFailed),
+        .init(testDescription: "ambiguous unsupported item", route: .ignoredAmbiguous, method: "item/completed", params: .item(.init(threadID: "shared-thread", turnID: "turn-1", item: .init(type: "futureItem", id: "item-1"))), threadID: "shared-thread", turnID: "turn-1", itemType: "futureItem", stage: .schemaValidation, error: .unsupportedItemType(method: "item/completed", type: "futureItem"), disposition: .ignored),
+        .init(testDescription: "ambiguous malformed item", route: .ambiguous, method: "item/completed", params: .item(.init(threadID: "shared-thread", turnID: "turn-1", item: .init(type: "exitedReviewMode", id: "item-1"))), threadID: "shared-thread", turnID: "turn-1", itemType: "exitedReviewMode", stage: .routing, error: .conflictingActiveRouting(threadID: "shared-thread"), disposition: .connectionFailed),
     ]
 }
 
@@ -1305,61 +1347,117 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         #expect(await transport.isClosedForTesting() == false)
     }
 
-    @Test func unsupportedItemFailsOnlyItsSelectedAttempt() async throws {
+    @Test func unsupportedItemsAreIgnoredAndSelectedAttemptCompletes() async throws {
         let transport = FakeJSONRPCTransport()
-        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
-        let failedAttempt = await backend.reviewAttemptForTesting(.init(
+        let diagnostics = ReviewIngestionDiagnosticCapture()
+        let backend = AppServerCodexReviewBackend(
+            client: .init(transport: transport),
+            ingestionDiagnosticRecorder: diagnostics
+        )
+        let attempt = await backend.reviewAttemptForTesting(.init(
             attemptID: "attempt-1",
-            threadID: "thread-1",
-            turnID: "turn-1",
-            reviewThreadID: "thread-1"
-        ))
-        let healthyAttempt = await backend.reviewAttemptForTesting(.init(
-            attemptID: "attempt-2",
-            threadID: "thread-2",
-            turnID: "turn-2",
-            reviewThreadID: "thread-2"
+            threadID: "thread-review",
+            turnID: "turn-review",
+            reviewThreadID: "thread-review"
         ))
 
+        let unsupported: [(method: String, params: V2ItemNotification)] = [
+            ("item/started", .init(
+                threadID: "thread-review",
+                turnID: "turn-review",
+                item: .init(type: "futureItem", id: "future-1")
+            )),
+            ("item/completed", .init(
+                threadID: "thread-review",
+                turnID: "turn-review",
+                item: .init(type: "futureItem", id: "future-1")
+            )),
+        ]
+        for fixture in unsupported {
+            try await transport.emitServerNotification(
+                method: fixture.method,
+                params: fixture.params
+            )
+        }
+        try await transport.emitServerNotification(
+            method: "item/started",
+            params: V2ItemNotification(
+                threadID: "thread-review",
+                turnID: "turn-review",
+                item: .init(type: "commandExecution", id: "command-1", command: "swift test")
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/commandExecution/outputDelta",
+            params: V2DeltaNotification(
+                threadID: "thread-review",
+                turnID: "turn-review",
+                itemID: "command-1",
+                delta: "after unknown"
+            )
+        )
         try await transport.emitServerNotification(
             method: "item/completed",
             params: V2ItemNotification(
-                threadID: "thread-1",
-                turnID: "turn-1",
-                item: .init(type: "futureItem", id: "item-1")
+                threadID: "thread-review",
+                turnID: "turn-review",
+                item: .init(
+                    type: "commandExecution",
+                    id: "command-1",
+                    command: "swift test",
+                    aggregatedOutput: "",
+                    exitCode: 0
+                )
             )
         )
         try await transport.emitServerNotification(
-            method: "item/completed",
+            method: "item/started",
             params: V2ItemNotification(
-                threadID: "thread-2",
-                turnID: "turn-2",
-                item: .init(type: "exitedReviewMode", id: "result", review: "Healthy review")
+                threadID: "thread-review",
+                turnID: "turn-review",
+                item: .init(type: "exitedReviewMode", id: "result", review: "Final review")
             )
         )
-        try await transport.emitServerNotification(
-            method: "turn/completed",
-            params: V2TurnNotification(
-                threadID: "thread-2",
-                turn: .init(id: "turn-2", items: [], itemsView: "notLoaded", status: "completed")
-            )
-        )
+        try await emitCompletedReview(transport: transport, review: "Final review")
 
-        #expect(try await failedAttempt.events.next() == .failed(
-            "Unsupported app-server item type futureItem in item/completed."
-        ))
-        #expect(try await collectEvents(from: healthyAttempt.events).last == .completed(
+        let events = try await collectEvents(from: attempt.events)
+        #expect(outputTexts(in: events).contains("after unknown"))
+        #expect(events.contains { if case .failed = $0 { true } else { false } } == false)
+        #expect(events.contains {
+            if case .logEntry(.diagnostic, _, _, _, _) = $0 { true } else { false }
+        } == false)
+        #expect(events.last == .completed(
             summary: "Succeeded.",
-            result: "Healthy review"
+            result: "Final review"
         ))
-        #expect(await backend.notificationRouterMetricsForTesting().attemptFailures == 1)
+
+        let captured = diagnostics.snapshot()
+        #expect(captured.count == unsupported.count)
+        for (diagnostic, fixture) in zip(captured, unsupported) {
+            #expect(diagnostic.method == fixture.method)
+            #expect(diagnostic.threadID == "thread-review")
+            #expect(diagnostic.turnID == "turn-review")
+            #expect(diagnostic.itemType == "futureItem")
+            #expect(diagnostic.stage == .schemaValidation)
+            #expect(diagnostic.error == .unsupportedItemType(
+                method: fixture.method,
+                type: "futureItem"
+            ))
+            #expect(diagnostic.disposition == .ignored)
+            #expect(try canonicalJSON(diagnostic.rawParams) == canonicalJSON(
+                JSONEncoder().encode(fixture.params)
+            ))
+        }
+        let metrics = await backend.notificationRouterMetricsForTesting()
+        #expect(metrics.received == 8)
+        #expect(metrics.decoded == 6)
+        #expect(metrics.routed == 6)
+        #expect(metrics.diagnostics == 2)
+        #expect(metrics.ignored == 2)
+        #expect(metrics.attemptFailures == 0)
+        #expect(metrics.connectionFailures == 0)
         #expect(await transport.isClosedForTesting() == false)
     }
-
-
-
-
-
 
     @Test(arguments: BoundaryDiagnosticFixture.all)
     fileprivate func capturesOnlyExactBoundaryDiagnostics(_ fixture: BoundaryDiagnosticFixture) async throws {
@@ -1371,28 +1469,60 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         )
         let attempts: [BackendReviewAttempt]
         switch fixture.route {
-        case .global, .connection:
+        case .global, .ignoredSingle, .connection:
             attempts = [await backend.reviewAttemptForTesting(.init(
                 attemptID: "attempt-router",
                 threadID: "thread-review",
                 turnID: "turn-review",
                 reviewThreadID: "thread-review"
             ))]
-        case .ambiguous:
+        case .ignoredAmbiguous, .ambiguous:
             attempts = [
-                await backend.reviewAttemptForTesting(.init(attemptID: "attempt-1", threadID: "shared-thread", turnID: "turn-1", reviewThreadID: "shared-thread")),
-                await backend.reviewAttemptForTesting(.init(attemptID: "attempt-2", threadID: "shared-thread", turnID: "turn-2", reviewThreadID: "shared-thread")),
+                await backend.reviewAttemptForTesting(.init(attemptID: "attempt-1", threadID: "shared-thread", turnID: "turn-1", reviewThreadID: "review-1")),
+                await backend.reviewAttemptForTesting(.init(attemptID: "attempt-2", threadID: "shared-thread", turnID: "turn-2", reviewThreadID: "review-2")),
             ]
         }
 
         try await transport.emitServerNotification(method: fixture.method, params: fixture.params)
         await backend.waitForReviewNotificationCompletionForTesting(1)
         switch fixture.route {
-        case .global:
-            #expect(await backend.notificationRouterMetricsForTesting().ignored == 1)
+        case .global, .ignoredSingle:
+            let metrics = await backend.notificationRouterMetricsForTesting()
+            #expect(metrics.diagnostics == 1)
+            #expect(metrics.ignored == 1)
+            #expect(metrics.attemptFailures == 0)
+            #expect(metrics.connectionFailures == 0)
             try await emitCompletedReview(transport: transport, review: "No findings.")
             let events = try await collectEvents(from: attempts[0].events)
             #expect(events.contains { if case .logEntry(.diagnostic, _, _, _, _) = $0 { true } else { false } } == false)
+            #expect(await transport.isClosedForTesting() == false)
+        case .ignoredAmbiguous:
+            let metrics = await backend.notificationRouterMetricsForTesting()
+            #expect(metrics.diagnostics == 1)
+            #expect(metrics.ignored == 1)
+            #expect(metrics.attemptFailures == 0)
+            #expect(metrics.connectionFailures == 0)
+            #expect(await transport.isClosedForTesting() == false)
+            try await emitCompletedReview(
+                transport: transport,
+                review: "First review",
+                threadID: "review-1",
+                turnID: "turn-1"
+            )
+            try await emitCompletedReview(
+                transport: transport,
+                review: "Second review",
+                threadID: "review-2",
+                turnID: "turn-2"
+            )
+            #expect(try await collectEvents(from: attempts[0].events).last == .completed(
+                summary: "Succeeded.",
+                result: "First review"
+            ))
+            #expect(try await collectEvents(from: attempts[1].events).last == .completed(
+                summary: "Succeeded.",
+                result: "Second review"
+            ))
         case .connection, .ambiguous:
             for attempt in attempts {
                 await #expect(throws: BackendReviewEventMailboxError.self) {
@@ -1414,9 +1544,8 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         #expect(try canonicalJSON(diagnostic.rawParams) == canonicalJSON(JSONEncoder().encode(fixture.params)))
     }
 
-    @Test func selectedAttemptAndTerminalFailuresRemainOutsideBoundaryCapture() async throws {
+    @Test func selectedMalformedAndTerminalFailuresRemainOutsideBoundaryCapture() async throws {
         let fixtures: [(String, BoundaryDiagnosticFixture.Params, String)] = [
-            ("item/completed", .item(.init(threadID: "thread-selected", turnID: "turn-selected", item: .init(type: "futureItem", id: "item-1"))), "Unsupported app-server item type futureItem in item/completed."),
             ("item/agentMessage/delta", .reviewPayload(.init(threadID: "thread-selected", turnID: "turn-selected", itemID: "item-1", delta: "delta", plan: "invalid")), "Malformed app-server notification item/agentMessage/delta: The data couldn’t be read because it isn’t in the correct format."),
             ("turn/completed", .turn(.init(threadID: "thread-selected", turn: .init(id: "turn-selected", items: [], itemsView: "notLoaded", status: "completed"))), ReviewIngestionError.missingFinalReview.localizedDescription),
         ]
@@ -1791,7 +1920,11 @@ struct CurrentV2ReviewRoutingIntegrationTests {
     @MainActor
     @Test func rawFullDeliveryCommitsOneCanonicalFinalRowEndToEnd() async throws {
         let transport = FakeJSONRPCTransport()
-        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let diagnostics = ReviewIngestionDiagnosticCapture()
+        let backend = AppServerCodexReviewBackend(
+            client: .init(transport: transport),
+            ingestionDiagnosticRecorder: diagnostics
+        )
         let attempt = await backend.reviewAttemptForTesting(.init(
             attemptID: "attempt-1",
             threadID: "thread-review",
@@ -1799,6 +1932,16 @@ struct CurrentV2ReviewRoutingIntegrationTests {
             reviewThreadID: "thread-review"
         ))
 
+        for method in ["item/started", "item/completed"] {
+            try await transport.emitServerNotification(
+                method: method,
+                params: V2ItemNotification(
+                    threadID: "thread-review",
+                    turnID: "turn-review",
+                    item: .init(type: "futureItem", id: "future-notification")
+                )
+            )
+        }
         try await transport.emitServerNotification(
             method: "item/started",
             params: V2ItemNotification(
@@ -1851,19 +1994,34 @@ struct CurrentV2ReviewRoutingIntegrationTests {
                 item: .init(type: "agentMessage", id: "final", text: "Canonical review")
             )
         )
-        try await transport.emitServerNotification(
-            method: "turn/completed",
-            params: V2TurnNotification(
-                threadID: "thread-review",
-                turn: .init(
-                    id: "turn-review",
-                    items: [.init(type: "agentMessage", id: "final", text: "Canonical review")],
-                    itemsView: "summary",
-                    status: "completed"
-                )
+        let terminalNotification = V2TurnNotification(
+            threadID: "thread-review",
+            turn: .init(
+                id: "turn-review",
+                items: [
+                    .init(type: "futureItem", id: "future-summary"),
+                    .init(type: "agentMessage", id: "final", text: "Canonical review"),
+                ],
+                itemsView: "summary",
+                status: "completed"
             )
         )
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: terminalNotification
+        )
         let normalizedEvents = try await collectEvents(from: attempt.events)
+        let capturedDiagnostics = diagnostics.snapshot()
+        #expect(capturedDiagnostics.count == 3)
+        #expect(capturedDiagnostics.allSatisfy { $0.disposition == .ignored })
+        let nestedDiagnostic = try #require(capturedDiagnostics.last)
+        #expect(nestedDiagnostic.error == .unsupportedItemType(
+            method: "turn/completed",
+            type: "futureItem"
+        ))
+        #expect(try canonicalJSON(nestedDiagnostic.rawParams) == canonicalJSON(
+            JSONEncoder().encode(terminalNotification)
+        ))
         let canonicalReviewEvents = normalizedEvents.filter { event in
             guard case .logEntry(_, _, _, _, let metadata) = event else {
                 return false
@@ -1937,6 +2095,8 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         #expect(visibleAgentRows.map(\.groupID) == ["non-final", "review-result"])
         #expect(visibleAgentRows.map(\.text) == ["Non-final message", "Canonical review"])
         #expect(visibleAgentRows.contains { $0.groupID == "final" } == false)
+        #expect(result.logs.contains { $0.kind == .error } == false)
+        #expect(result.core.lifecycle.status == .succeeded)
         #expect(result.core.lifecycle.terminal == .completed)
         #expect(result.core.output.lastAgentMessage == "Canonical review")
         #expect(result.core.output.hasFinalReview)
@@ -2011,22 +2171,24 @@ struct CurrentV2ReviewRoutingIntegrationTests {
 
     private func emitCompletedReview(
         transport: FakeJSONRPCTransport,
-        review: String
+        review: String,
+        threadID: String = "thread-review",
+        turnID: String = "turn-review"
     ) async throws {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: V2ItemNotification(
-                threadID: "thread-review",
-                turnID: "turn-review",
+                threadID: threadID,
+                turnID: turnID,
                 item: .init(type: "exitedReviewMode", id: "result", review: review)
             )
         )
         try await transport.emitServerNotification(
             method: "turn/completed",
             params: V2TurnNotification(
-                threadID: "thread-review",
+                threadID: threadID,
                 turn: .init(
-                    id: "turn-review",
+                    id: turnID,
                     items: [],
                     itemsView: "notLoaded",
                     status: "completed"

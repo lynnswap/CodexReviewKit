@@ -5,10 +5,12 @@ import Foundation
 struct CurrentV2ReviewNotificationEnvelope: Sendable {
     var method: String
     var params: Data
+    var rawParams: Data
     var threadID: String?
     var turnID: String?
     var itemType: String?
     var stableReceipt: ReviewStableLifecycleReceipt?
+    var ignoredSchemaErrors: [ReviewIngestionError]
 }
 
 struct ReviewStableLifecycleReceipt: Sendable {
@@ -86,7 +88,7 @@ enum CurrentV2ReviewNotificationDecoder {
         _ notification: JSONRPC.Notification,
         identityRequirement: IdentityRequirement
     ) -> CurrentV2ReviewNotificationDecodeResult {
-        let object: [String: Any]
+        var object: [String: Any]
         do {
             guard let decoded = try JSONSerialization.jsonObject(
                 with: notification.params,
@@ -122,10 +124,13 @@ enum CurrentV2ReviewNotificationDecoder {
                 threadID: threadID,
                 turnID: turnID
             )
-            try validate(
+            let ignoredSchemaErrors = try validate(
                 method: notification.method,
-                object: object
+                object: &object
             )
+            let routedParams = ignoredSchemaErrors.isEmpty
+                ? notification.params
+                : try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
             let receipt = try stableReceipt(
                 method: notification.method,
                 object: object,
@@ -134,11 +139,13 @@ enum CurrentV2ReviewNotificationDecoder {
             )
             let envelope = CurrentV2ReviewNotificationEnvelope(
                 method: notification.method,
-                params: notification.params,
+                params: routedParams,
+                rawParams: notification.params,
                 threadID: threadID,
                 turnID: turnID,
                 itemType: itemType,
-                stableReceipt: receipt
+                stableReceipt: receipt,
+                ignoredSchemaErrors: ignoredSchemaErrors
             )
             if identityRequirement == .unscoped
                 || (identityRequirement == .optionalThread && threadID == nil) {
@@ -230,8 +237,9 @@ enum CurrentV2ReviewNotificationDecoder {
 
     private static func validate(
         method: String,
-        object: [String: Any]
-    ) throws {
+        object: inout [String: Any]
+    ) throws -> [ReviewIngestionError] {
+        var ignoredErrors: [ReviewIngestionError] = []
         switch method {
         case "warning", "guardianWarning":
             _ = try requiredString("message", in: object)
@@ -246,7 +254,9 @@ enum CurrentV2ReviewNotificationDecoder {
         case "thread/status/changed":
             try validateThreadStatus(try requiredObject("status", in: object))
         case "turn/started", "turn/completed":
-            try validateTurn(try requiredObject("turn", in: object), method: method)
+            var turn = try requiredObject("turn", in: object)
+            ignoredErrors = try validateTurn(&turn, method: method)
+            object["turn"] = turn
         case "turn/diff/updated":
             _ = try requiredString("diff", in: object)
         case "turn/plan/updated":
@@ -298,20 +308,31 @@ enum CurrentV2ReviewNotificationDecoder {
         default:
             break
         }
+        return ignoredErrors
     }
 
     private static func validateTurn(
-        _ turn: [String: Any],
+        _ turn: inout [String: Any],
         method: String
-    ) throws {
+    ) throws -> [ReviewIngestionError] {
         _ = try requiredNonemptyString("id", in: turn)
         _ = try requiredEnum("status", in: turn, allowed: turnStatuses)
         if turn.keys.contains("itemsView") {
             _ = try requiredEnum("itemsView", in: turn, allowed: turnItemsViews)
         }
+        var ignoredErrors: [ReviewIngestionError] = []
+        var supportedItems: [[String: Any]] = []
         for item in try requiredObjectArray("items", in: turn) {
-            try validateItem(item, method: method)
+            do {
+                try validateItem(item, method: method)
+                supportedItems.append(item)
+            } catch let error as ReviewIngestionError {
+                guard case .unsupportedItemType = error else { throw error }
+                ignoredErrors.append(error)
+            }
         }
+        turn["items"] = supportedItems
+        return ignoredErrors
     }
 
     private static func validateThreadStatus(_ status: [String: Any]) throws {

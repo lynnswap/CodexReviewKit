@@ -1457,6 +1457,15 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             notificationRouterMetrics.ignored += 1
             return
         case .failure(let failure):
+            if case .unsupportedItemType = failure.error {
+                recordIngestionDiagnostic(
+                    failure,
+                    disposition: .ignored
+                )
+                notificationRouterMetrics.diagnostics += 1
+                notificationRouterMetrics.ignored += 1
+                return
+            }
             if failure.isGlobalDiagnostic {
                 recordIngestionDiagnostic(
                     failure,
@@ -1472,6 +1481,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             await containNotificationDecodeFailure(failure)
             return
         case .globalDiagnostic(let envelope):
+            recordIgnoredSchemaErrors(in: envelope)
             do {
                 let payload = try JSONDecoder().decode(
                     TurnNotificationPayload.self,
@@ -1509,6 +1519,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             }
             return
         case .review(let envelope):
+            recordIgnoredSchemaErrors(in: envelope)
             await routeDecodedReviewNotification(envelope)
         }
     }
@@ -1668,11 +1679,26 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             threadID: envelope.threadID,
             turnID: envelope.turnID,
             itemType: error.diagnosticItemType ?? envelope.itemType,
-            rawParams: envelope.params,
+            rawParams: envelope.rawParams,
             stage: stage,
             error: error,
             disposition: disposition
         ))
+    }
+
+    private func recordIgnoredSchemaErrors(
+        in envelope: CurrentV2ReviewNotificationEnvelope
+    ) {
+        for error in envelope.ignoredSchemaErrors {
+            recordIngestionDiagnostic(
+                envelope,
+                stage: .schemaValidation,
+                error: error,
+                disposition: .ignored
+            )
+            notificationRouterMetrics.diagnostics += 1
+            notificationRouterMetrics.ignored += 1
+        }
     }
 
     private func failConnection(_ error: ReviewIngestionError) async {
