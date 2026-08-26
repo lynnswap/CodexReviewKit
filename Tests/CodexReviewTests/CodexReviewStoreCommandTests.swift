@@ -865,8 +865,10 @@ struct CodexReviewStoreCommandTests {
             await backend.yield(.cancelled("Stop"), for: run)
             await backend.waitForCleanupReview()
 
+            try #require(await waitUntil(timeout: .seconds(2)) {
+                store.reviewWorkerTasks["job-1"]?.isCancelled == true
+            })
             #expect(await cancellationCompletion.isComplete() == false)
-            #expect(store.reviewWorkerTasks["job-1"]?.isCancelled == true)
             #expect(await backend.cleanupReviewWasCancelled() == false)
             await cleanupGate.open()
             let cancel = try await cancellation.value
