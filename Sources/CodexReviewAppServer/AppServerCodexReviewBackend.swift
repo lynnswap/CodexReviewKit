@@ -188,6 +188,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
 
     private let client: AppServerClient
     private let threadStartPermissionStrategy: AppServerAPI.Thread.Start.PermissionStrategy
+    private let ingestionDiagnosticRecorder: any ReviewIngestionDiagnosticRecording
     private var controlsByThreadID: [String: AppServerReviewControl] = [:]
     private var reviewEventSessionsByAttemptID: [String: AppServerReviewEventSession] = [:]
     private var reviewEventSessionRegistrationOrdinalByAttemptID: [String: Int] = [:]
@@ -206,6 +207,8 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     private var notificationRouterStartTask: Task<Void, Never>?
     private var notificationRouterTask: Task<Void, Never>?
     private var reviewNotificationSequence = 0
+    private var completedReviewNotificationCount = 0
+    private var reviewNotificationCompletionWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
     private var notificationRouterMetrics = AppServerNotificationRouterMetrics()
     private var reviewStartRequestsInFlight = 0
     private var reviewStartRoutingAttemptIDs: Set<String> = []
@@ -213,10 +216,12 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
 
     package init(
         client: AppServerClient,
-        threadStartPermissionStrategy: AppServerAPI.Thread.Start.PermissionStrategy = .modernPermissions
+        threadStartPermissionStrategy: AppServerAPI.Thread.Start.PermissionStrategy = .modernPermissions,
+        ingestionDiagnosticRecorder: any ReviewIngestionDiagnosticRecording = OSLogReviewIngestionDiagnosticRecorder()
     ) {
         self.client = client
         self.threadStartPermissionStrategy = threadStartPermissionStrategy
+        self.ingestionDiagnosticRecorder = ingestionDiagnosticRecorder
     }
 
     package nonisolated var runtimeOwnerLifecycleHandle: AppServerRuntimeOwnerLifecycleHandle {
@@ -1109,6 +1114,15 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         notificationRouterMetrics
     }
 
+    package func waitForReviewNotificationCompletionForTesting(_ count: Int) async {
+        guard completedReviewNotificationCount < count else {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            reviewNotificationCompletionWaiters.append((count, continuation))
+        }
+    }
+
     package func reviewEventSessionMetricsForTesting(
         threadID: String
     ) async -> AppServerReviewEventSessionMetrics? {
@@ -1428,6 +1442,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
 
     private func routeReviewNotification(_ notification: JSONRPC.Notification) async {
         notificationRouterMetrics.received += 1
+        defer { recordReviewNotificationCompletion() }
         switch CurrentV2ReviewNotificationDecoder.decode(notification) {
         case .standaloneTraffic:
             notificationRouterMetrics.standaloneIgnored += 1
@@ -1439,6 +1454,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             return
         case .failure(let failure):
             if failure.isGlobalDiagnostic {
+                recordIngestionDiagnostic(
+                    failure,
+                    disposition: .ignored
+                )
                 diagnoseMalformedGlobalNotification(
                     failure.method,
                     error: failure.error
@@ -1471,6 +1490,16 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                     await session.receiveGlobalDiagnostic(routed)
                 }
             } catch {
+                let ingestionError = ReviewIngestionError.malformedKnownEvent(
+                    method: notification.method,
+                    message: error.localizedDescription
+                )
+                recordIngestionDiagnostic(
+                    envelope,
+                    stage: .payloadDecoding,
+                    error: ingestionError,
+                    disposition: .ignored
+                )
                 diagnoseMalformedGlobalNotification(notification.method, error: error)
                 notificationRouterMetrics.ignored += 1
             }
@@ -1480,18 +1509,40 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         }
     }
 
+    private func recordReviewNotificationCompletion() {
+        completedReviewNotificationCount += 1
+        let count = completedReviewNotificationCount
+        let ready = reviewNotificationCompletionWaiters.filter { count >= $0.0 }
+        reviewNotificationCompletionWaiters.removeAll { count >= $0.0 }
+        for (_, waiter) in ready {
+            waiter.resume()
+        }
+    }
+
     private func routeDecodedReviewNotification(
         _ envelope: CurrentV2ReviewNotificationEnvelope
     ) async {
         guard let threadID = envelope.threadID else {
-            await failConnection(
-                .missingRoutingIdentity(method: envelope.method)
+            let error = ReviewIngestionError.missingRoutingIdentity(method: envelope.method)
+            recordIngestionDiagnostic(
+                envelope,
+                stage: .schemaValidation,
+                error: error,
+                disposition: .connectionFailed
             )
+            await failConnection(error)
             return
         }
         let attemptIDs = activeReviewAttemptIDsByThreadID[threadID] ?? []
         if attemptIDs.count > 1 {
-            await failConnection(.conflictingActiveRouting(threadID: threadID))
+            let error = ReviewIngestionError.conflictingActiveRouting(threadID: threadID)
+            recordIngestionDiagnostic(
+                envelope,
+                stage: .routing,
+                error: error,
+                disposition: .connectionFailed
+            )
+            await failConnection(error)
             return
         }
         let payload: TurnNotificationPayload
@@ -1507,6 +1558,12 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                 notificationRouterMetrics.attemptFailures += 1
                 await session.failAttempt(ingestionError)
             } else {
+                recordIngestionDiagnostic(
+                    envelope,
+                    stage: .payloadDecoding,
+                    error: ingestionError,
+                    disposition: .connectionFailed
+                )
                 await failConnection(ingestionError)
             }
             return
@@ -1540,6 +1597,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         _ failure: CurrentV2ReviewNotificationDecodeFailure
     ) async {
         if failure.requiresConnectionContainment {
+            recordIngestionDiagnostic(
+                failure,
+                disposition: .connectionFailed
+            )
             await failConnection(failure.error)
             return
         }
@@ -1553,11 +1614,61 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                 return
             }
             if attemptIDs.count > 1 {
-                await failConnection(.conflictingActiveRouting(threadID: threadID))
+                let routingError = ReviewIngestionError.conflictingActiveRouting(
+                    threadID: threadID
+                )
+                recordIngestionDiagnostic(
+                    failure,
+                    stage: .routing,
+                    error: routingError,
+                    disposition: .connectionFailed
+                )
+                await failConnection(routingError)
                 return
             }
         }
+        recordIngestionDiagnostic(
+            failure,
+            disposition: .connectionFailed
+        )
         await failConnection(failure.error)
+    }
+
+    private func recordIngestionDiagnostic(
+        _ failure: CurrentV2ReviewNotificationDecodeFailure,
+        stage: ReviewIngestionDiagnosticRecord.Stage? = nil,
+        error: ReviewIngestionError? = nil,
+        disposition: ReviewIngestionDiagnosticRecord.Disposition
+    ) {
+        let recordedError = error ?? failure.error
+        ingestionDiagnosticRecorder.record(.init(
+            method: failure.method,
+            threadID: failure.routedThreadID,
+            turnID: failure.routedTurnID,
+            itemType: recordedError.diagnosticItemType ?? failure.itemType,
+            rawParams: failure.params,
+            stage: stage ?? failure.stage,
+            error: recordedError,
+            disposition: disposition
+        ))
+    }
+
+    private func recordIngestionDiagnostic(
+        _ envelope: CurrentV2ReviewNotificationEnvelope,
+        stage: ReviewIngestionDiagnosticRecord.Stage,
+        error: ReviewIngestionError,
+        disposition: ReviewIngestionDiagnosticRecord.Disposition
+    ) {
+        ingestionDiagnosticRecorder.record(.init(
+            method: envelope.method,
+            threadID: envelope.threadID,
+            turnID: envelope.turnID,
+            itemType: error.diagnosticItemType ?? envelope.itemType,
+            rawParams: envelope.params,
+            stage: stage,
+            error: error,
+            disposition: disposition
+        ))
     }
 
     private func failConnection(_ error: ReviewIngestionError) async {

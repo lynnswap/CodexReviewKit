@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import Testing
 @testable import CodexReviewAppServer
 import CodexReview
@@ -926,6 +927,59 @@ private enum V2IdentityFixture: Equatable {
     case threadAndTurn
 }
 
+private struct BoundaryDiagnosticFixture: Sendable, CustomTestStringConvertible {
+    enum Route: Sendable {
+        case global
+        case connection
+        case ambiguous
+    }
+
+    enum Params: Encodable, Sendable {
+        case scalar(String)
+        case warning(V2WarningNotification)
+        case globalPayload(V2MalformedGlobalPayloadNotification)
+        case item(V2ItemNotification)
+        case reviewPayload(V2MalformedReviewPayloadNotification)
+        case delta(V2DeltaNotification)
+        case turn(V2TurnNotification)
+
+        func encode(to encoder: any Encoder) throws {
+            switch self {
+            case .scalar(let value): try value.encode(to: encoder)
+            case .warning(let value): try value.encode(to: encoder)
+            case .globalPayload(let value): try value.encode(to: encoder)
+            case .item(let value): try value.encode(to: encoder)
+            case .reviewPayload(let value): try value.encode(to: encoder)
+            case .delta(let value): try value.encode(to: encoder)
+            case .turn(let value): try value.encode(to: encoder)
+            }
+        }
+    }
+
+    let testDescription: String
+    let route: Route
+    let method: String
+    let params: Params
+    let threadID: String?
+    let turnID: String?
+    let itemType: String?
+    let stage: ReviewIngestionDiagnosticRecord.Stage
+    let error: ReviewIngestionError
+    let disposition: ReviewIngestionDiagnosticRecord.Disposition
+
+    static let all: [Self] = [
+        .init(testDescription: "global params", route: .global, method: "configWarning", params: .scalar("scalar params"), threadID: nil, turnID: nil, itemType: nil, stage: .paramsDecoding, error: .malformedKnownEvent(method: "configWarning", message: "params must be a JSON object"), disposition: .ignored),
+        .init(testDescription: "global schema", route: .global, method: "configWarning", params: .warning(.init(message: "wrong field")), threadID: nil, turnID: nil, itemType: nil, stage: .schemaValidation, error: .malformedKnownEvent(method: "configWarning", message: "summary must be a string"), disposition: .ignored),
+        .init(testDescription: "global payload", route: .global, method: "configWarning", params: .globalPayload(.init(summary: "valid", plan: "invalid")), threadID: nil, turnID: nil, itemType: nil, stage: .payloadDecoding, error: .malformedKnownEvent(method: "configWarning", message: "The data couldn’t be read because it isn’t in the correct format."), disposition: .ignored),
+        .init(testDescription: "pre-routing identity", route: .connection, method: "guardianWarning", params: .warning(.init(message: "missing thread")), threadID: nil, turnID: nil, itemType: nil, stage: .schemaValidation, error: .missingRoutingIdentity(method: "guardianWarning"), disposition: .connectionFailed),
+        .init(testDescription: "non-global params", route: .connection, method: "item/completed", params: .scalar("scalar params"), threadID: nil, turnID: nil, itemType: nil, stage: .paramsDecoding, error: .malformedKnownEvent(method: "item/completed", message: "params must be a JSON object"), disposition: .connectionFailed),
+        .init(testDescription: "no-session schema", route: .connection, method: "item/completed", params: .item(.init(threadID: "thread-target", turnID: "turn-target", item: .init(type: "futureItem", id: "item-1"))), threadID: "thread-target", turnID: "turn-target", itemType: "futureItem", stage: .schemaValidation, error: .unsupportedItemType(method: "item/completed", type: "futureItem"), disposition: .connectionFailed),
+        .init(testDescription: "no-session payload", route: .connection, method: "item/agentMessage/delta", params: .reviewPayload(.init(threadID: "thread-target", turnID: "turn-target", itemID: "item-1", delta: "delta", plan: "invalid")), threadID: "thread-target", turnID: "turn-target", itemType: nil, stage: .payloadDecoding, error: .malformedKnownEvent(method: "item/agentMessage/delta", message: "The data couldn’t be read because it isn’t in the correct format."), disposition: .connectionFailed),
+        .init(testDescription: "ambiguous valid", route: .ambiguous, method: "item/agentMessage/delta", params: .delta(.init(threadID: "shared-thread", turnID: "turn-1", itemID: "item-1", delta: "delta")), threadID: "shared-thread", turnID: "turn-1", itemType: nil, stage: .routing, error: .conflictingActiveRouting(threadID: "shared-thread"), disposition: .connectionFailed),
+        .init(testDescription: "ambiguous decode", route: .ambiguous, method: "item/completed", params: .item(.init(threadID: "shared-thread", turnID: "turn-1", item: .init(type: "futureItem", id: "item-1"))), threadID: "shared-thread", turnID: "turn-1", itemType: "futureItem", stage: .routing, error: .conflictingActiveRouting(threadID: "shared-thread"), disposition: .connectionFailed),
+    ]
+}
+
 @Suite("current-v2 review routing integration")
 struct CurrentV2ReviewRoutingIntegrationTests {
     @Test func canonicalStartIsEmittedOnlyOnceAcrossNonterminalEvents() async throws {
@@ -1302,6 +1356,90 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         #expect(await transport.isClosedForTesting() == false)
     }
 
+
+
+
+
+
+    @Test(arguments: BoundaryDiagnosticFixture.all)
+    fileprivate func capturesOnlyExactBoundaryDiagnostics(_ fixture: BoundaryDiagnosticFixture) async throws {
+        let transport = FakeJSONRPCTransport()
+        let diagnostics = ReviewIngestionDiagnosticCapture()
+        let backend = AppServerCodexReviewBackend(
+            client: .init(transport: transport),
+            ingestionDiagnosticRecorder: diagnostics
+        )
+        let attempts: [BackendReviewAttempt]
+        switch fixture.route {
+        case .global, .connection:
+            attempts = [await backend.reviewAttemptForTesting(.init(
+                attemptID: "attempt-router",
+                threadID: "thread-review",
+                turnID: "turn-review",
+                reviewThreadID: "thread-review"
+            ))]
+        case .ambiguous:
+            attempts = [
+                await backend.reviewAttemptForTesting(.init(attemptID: "attempt-1", threadID: "shared-thread", turnID: "turn-1", reviewThreadID: "shared-thread")),
+                await backend.reviewAttemptForTesting(.init(attemptID: "attempt-2", threadID: "shared-thread", turnID: "turn-2", reviewThreadID: "shared-thread")),
+            ]
+        }
+
+        try await transport.emitServerNotification(method: fixture.method, params: fixture.params)
+        await backend.waitForReviewNotificationCompletionForTesting(1)
+        switch fixture.route {
+        case .global:
+            #expect(await backend.notificationRouterMetricsForTesting().ignored == 1)
+            try await emitCompletedReview(transport: transport, review: "No findings.")
+            let events = try await collectEvents(from: attempts[0].events)
+            #expect(events.contains { if case .logEntry(.diagnostic, _, _, _, _) = $0 { true } else { false } } == false)
+        case .connection, .ambiguous:
+            for attempt in attempts {
+                await #expect(throws: BackendReviewEventMailboxError.self) {
+                    _ = try await attempt.events.next()
+                }
+            }
+        }
+
+        let captured = diagnostics.snapshot()
+        #expect(captured.count == 1)
+        let diagnostic = try #require(captured.first)
+        #expect(diagnostic.method == fixture.method)
+        #expect(diagnostic.threadID == fixture.threadID)
+        #expect(diagnostic.turnID == fixture.turnID)
+        #expect(diagnostic.itemType == fixture.itemType)
+        #expect(diagnostic.stage == fixture.stage)
+        #expect(diagnostic.error == fixture.error)
+        #expect(diagnostic.disposition == fixture.disposition)
+        #expect(try canonicalJSON(diagnostic.rawParams) == canonicalJSON(JSONEncoder().encode(fixture.params)))
+    }
+
+    @Test func selectedAttemptAndTerminalFailuresRemainOutsideBoundaryCapture() async throws {
+        let fixtures: [(String, BoundaryDiagnosticFixture.Params, String)] = [
+            ("item/completed", .item(.init(threadID: "thread-selected", turnID: "turn-selected", item: .init(type: "futureItem", id: "item-1"))), "Unsupported app-server item type futureItem in item/completed."),
+            ("item/agentMessage/delta", .reviewPayload(.init(threadID: "thread-selected", turnID: "turn-selected", itemID: "item-1", delta: "delta", plan: "invalid")), "Malformed app-server notification item/agentMessage/delta: The data couldn’t be read because it isn’t in the correct format."),
+            ("turn/completed", .turn(.init(threadID: "thread-selected", turn: .init(id: "turn-selected", items: [], itemsView: "notLoaded", status: "completed"))), ReviewIngestionError.missingFinalReview.localizedDescription),
+        ]
+        for (index, fixture) in fixtures.enumerated() {
+            let transport = FakeJSONRPCTransport()
+            let diagnostics = ReviewIngestionDiagnosticCapture()
+            let backend = AppServerCodexReviewBackend(
+                client: .init(transport: transport),
+                ingestionDiagnosticRecorder: diagnostics
+            )
+            let attempt = await backend.reviewAttemptForTesting(.init(
+                attemptID: "attempt-\(index)",
+                threadID: "thread-selected",
+                turnID: "turn-selected",
+                reviewThreadID: "thread-selected"
+            ))
+            try await transport.emitServerNotification(method: fixture.0, params: fixture.1)
+            #expect(try await attempt.events.next() == .failed(fixture.2))
+            await backend.waitForReviewNotificationCompletionForTesting(1)
+            #expect(diagnostics.snapshot().isEmpty)
+        }
+    }
+
     @Test func unscopedOptionalThreadWarningLogsAndConnectionContinues() async throws {
         let transport = FakeJSONRPCTransport()
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
@@ -1356,32 +1494,6 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         #expect(await transport.isClosedForTesting() == false)
     }
 
-    @Test func malformedUnscopedDiagnosticIsBoundedAndConnectionContinues() async throws {
-        let transport = FakeJSONRPCTransport()
-        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
-        let attempt = await backend.reviewAttemptForTesting(.init(
-            attemptID: "attempt-1",
-            threadID: "thread-review",
-            turnID: "turn-review",
-            reviewThreadID: "thread-review"
-        ))
-
-        try await transport.emitServerNotification(
-            method: "configWarning",
-            params: V2WarningNotification(message: "wrong field for configWarning")
-        )
-        try await emitCompletedReview(
-            transport: transport,
-            review: "No findings."
-        )
-
-        #expect(try await collectEvents(from: attempt.events).last == .completed(
-            summary: "Succeeded.",
-            result: "No findings."
-        ))
-        #expect(await backend.notificationRouterMetricsForTesting().ignored == 1)
-        #expect(await transport.isClosedForTesting() == false)
-    }
 
     @Test func subAgentActivityAndSleepAreValidCurrentV2LifecycleItems() async throws {
         let transport = FakeJSONRPCTransport()
@@ -1830,41 +1942,7 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         #expect(result.core.output.hasFinalReview)
     }
 
-    @Test func conflictingActiveRoutingClosesTheConnectionAndFailsAffectedAttempts() async throws {
-        let transport = FakeJSONRPCTransport()
-        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
-        let first = await backend.reviewAttemptForTesting(.init(
-            attemptID: "attempt-1",
-            threadID: "shared-thread",
-            turnID: "turn-1",
-            reviewThreadID: "shared-thread"
-        ))
-        let second = await backend.reviewAttemptForTesting(.init(
-            attemptID: "attempt-2",
-            threadID: "shared-thread",
-            turnID: "turn-2",
-            reviewThreadID: "shared-thread"
-        ))
 
-        try await transport.emitServerNotification(
-            method: "item/agentMessage/delta",
-            params: V2DeltaNotification(
-                threadID: "shared-thread",
-                turnID: "turn-1",
-                itemID: "message",
-                delta: "ambiguous"
-            )
-        )
-
-        await #expect(throws: BackendReviewEventMailboxError.self) {
-            _ = try await first.events.next()
-        }
-        await #expect(throws: BackendReviewEventMailboxError.self) {
-            _ = try await second.events.next()
-        }
-        #expect(await backend.notificationRouterMetricsForTesting().connectionFailures == 1)
-        #expect(await transport.isClosedForTesting())
-    }
 
     @Test func retiredAndUnknownMethodsCannotBypassReducerTerminal() async throws {
         let transport = FakeJSONRPCTransport()
@@ -1967,6 +2045,11 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         return events
     }
 
+    private func canonicalJSON(_ data: Data) throws -> Data {
+        let object = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
+        return try JSONSerialization.data(withJSONObject: object, options: [.fragmentsAllowed, .sortedKeys])
+    }
+
     private func outputTexts(
         in events: [CodexReviewBackendModel.Review.Event]
     ) -> [String] {
@@ -1976,6 +2059,18 @@ struct CurrentV2ReviewRoutingIntegrationTests {
             }
             return text
         }
+    }
+}
+
+private final class ReviewIngestionDiagnosticCapture: ReviewIngestionDiagnosticRecording {
+    private let diagnostics = Mutex<[ReviewIngestionDiagnosticRecord]>([])
+
+    func record(_ diagnostic: ReviewIngestionDiagnosticRecord) {
+        diagnostics.withLock { $0.append(diagnostic) }
+    }
+
+    func snapshot() -> [ReviewIngestionDiagnosticRecord] {
+        diagnostics.withLock { $0 }
     }
 }
 
@@ -2027,6 +2122,27 @@ private struct V2WarningNotification: Encodable, Sendable {
     enum CodingKeys: String, CodingKey {
         case threadID = "threadId"
         case message
+    }
+}
+
+private struct V2MalformedGlobalPayloadNotification: Encodable, Sendable {
+    var summary: String
+    var plan: String
+}
+
+private struct V2MalformedReviewPayloadNotification: Encodable, Sendable {
+    var threadID: String
+    var turnID: String
+    var itemID: String
+    var delta: String
+    var plan: String
+
+    enum CodingKeys: String, CodingKey {
+        case threadID = "threadId"
+        case turnID = "turnId"
+        case itemID = "itemId"
+        case delta
+        case plan
     }
 }
 
