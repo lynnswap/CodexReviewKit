@@ -7,6 +7,11 @@ private let runtimeLifecycleLogger = Logger(
     category: "runtime-lifecycle"
 )
 
+private struct ReviewRuntimeCancellationRegistration: Sendable {
+    let jobID: String
+    let receipt: ReviewCancellationRequestReceipt
+}
+
 package enum StoreReviewAttemptOwnership {
     case starting(ReviewStartAdmission)
     case active(StoreReviewActiveAttempt)
@@ -83,6 +88,7 @@ public final class CodexReviewStore {
     @ObservationIgnored package var reviewWorkerTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored package var runtimeStopDetachedReviewWorkerTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored package var reviewTerminalWaiters: [String: [ReviewTerminalWaiter]] = [:]
+    @ObservationIgnored package var nextCancellationRequestOrdinal: UInt64 = 0
     @ObservationIgnored package var closedSessions: Set<String> = []
     @ObservationIgnored package var accountRateLimitAutoRefreshDriver: CodexReviewStoreRateLimitAutoRefreshDriver?
     @ObservationIgnored package let storeWorkRegistry = ReviewStoreWorkRegistry()
@@ -511,16 +517,39 @@ public final class CodexReviewStore {
     package func closeRegisteredStoreWork(
         reason: ReviewCancellation
     ) async -> ReviewStoreWorkDrainResult {
-        var reviewWorkerJobIDs: [String] = []
-        let operation = storeWorkRegistry.beginClosing { [self] in
-            reviewWorkerJobIDs = recordActiveReviewCancellationRequestsForRuntimeStop(reason: reason)
-            accountRateLimitAutoRefreshDriver?.closeAdmission()
-        }
-        for jobID in reviewWorkerJobIDs {
-            if case .recovering(let receipt) = reviewAttemptOwnerships[jobID] {
-                await receipt.cancelOwnedOperation(reason)
+        let reviewWorkerJobIDs: [String]
+        let cancellationRegistrations: [ReviewRuntimeCancellationRegistration]
+        if storeWorkRegistryStatus == .open {
+            reviewWorkerJobIDs = recordActiveReviewCancellationRequestsForRuntimeStop(
+                reason: reason
+            )
+            cancellationRegistrations = reviewWorkerJobIDs.compactMap { jobID in
+                guard let receipt = job(id: jobID)?.pendingCancellationRequest else {
+                    return nil
+                }
+                return .init(jobID: jobID, receipt: receipt)
             }
-            reviewWorkerTasks[jobID]?.cancel()
+        } else {
+            reviewWorkerJobIDs = []
+            cancellationRegistrations = []
+        }
+        let operation = storeWorkRegistry.beginClosing { [self] in
+            accountRateLimitAutoRefreshDriver?.closeAdmission()
+        } beforeTaskCancellation: { [self] in
+            for registration in cancellationRegistrations {
+                switch reviewAttemptOwnerships[registration.jobID] {
+                case .starting(let admission):
+                    await admission.registerCancellationRequest(registration.receipt)
+                case .active(let active):
+                    await active.admission.registerCancellationRequest(registration.receipt)
+                case .recovering(let recoveryReceipt):
+                    await recoveryReceipt.cancelOwnedOperation(
+                        cancellationRequest: registration.receipt
+                    )
+                case nil:
+                    break
+                }
+            }
         }
         let result = await operation.task.value
         await cancelAccountRateLimitAutoRefreshAndWait()

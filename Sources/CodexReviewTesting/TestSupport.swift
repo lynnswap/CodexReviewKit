@@ -1591,7 +1591,9 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
     private var beforeReturningResponseByMethod: [String: [@Sendable () async -> Void]] = [:]
     private var requestCountWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
     private var notificationStreamCountWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+    private var closeWaiters: [CheckedContinuation<Void, Never>] = []
     private var closed = false
+    private var closeCompleted = false
 
     package init(responses: [String: [Data]] = [:]) {
         self.responses = responses
@@ -1736,6 +1738,11 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
             continuation.finish()
         }
         serverNotificationContinuations.removeAll()
+        closeCompleted = true
+        for waiter in closeWaiters {
+            waiter.resume()
+        }
+        closeWaiters.removeAll(keepingCapacity: false)
     }
 
     package func finishNotificationStreams(throwing error: any Error) {
@@ -1785,6 +1792,15 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
 
     package func isClosedForTesting() -> Bool {
         closed
+    }
+
+    package func waitUntilClosedForTesting() async {
+        guard closeCompleted == false else {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            closeWaiters.append(continuation)
+        }
     }
 
     package func maxActiveCount(for method: String) -> Int {
