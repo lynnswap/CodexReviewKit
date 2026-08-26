@@ -57,7 +57,7 @@ package protocol ReviewIngestionDiagnosticRecording: Sendable {
 
 package struct ReviewIngestionDiagnosticSummary: Equatable, Sendable {
     package enum MethodCategory: String, Hashable, Sendable {
-        case globalDiagnostic
+        case diagnosticMethod
         case threadLifecycle
         case turnLifecycle
         case itemLifecycle
@@ -68,7 +68,7 @@ package struct ReviewIngestionDiagnosticSummary: Equatable, Sendable {
         fileprivate init(_ method: String) {
             switch method {
             case "warning", "guardianWarning", "deprecationNotice", "configWarning", "error":
-                self = .globalDiagnostic
+                self = .diagnosticMethod
             case "thread/closed", "thread/status/changed", "thread/compacted":
                 self = .threadLifecycle
             case "turn/started", "turn/completed", "turn/diff/updated", "turn/plan/updated":
@@ -179,9 +179,6 @@ package struct ReviewIngestionDiagnosticSampler: Sendable {
     package mutating func decision(
         for key: ReviewIngestionDiagnosticSummary.Key
     ) -> Decision {
-        if key.disposition == .connectionFailed {
-            return .emitFullRecord
-        }
         if let count = emissionCounts[key] {
             if count < Self.fullRecordLimit {
                 emissionCounts[key] = count + 1

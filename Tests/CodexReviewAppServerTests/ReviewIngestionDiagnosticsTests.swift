@@ -29,7 +29,7 @@ struct ReviewIngestionDiagnosticSummaryTests {
     }
 
     @Test func registeredMethodsMapToClosedCategories() {
-        #expect(summary(method: "warning").key.methodCategory == .globalDiagnostic)
+        #expect(summary(method: "warning").key.methodCategory == .diagnosticMethod)
         #expect(summary(method: "thread/closed").key.methodCategory == .threadLifecycle)
         #expect(summary(method: "turn/completed").key.methodCategory == .turnLifecycle)
         #expect(summary(method: "item/completed").key.methodCategory == .itemLifecycle)
@@ -68,7 +68,7 @@ struct ReviewIngestionDiagnosticSamplerTests {
     @Test func stateAndOverflowSummaryAreFinite() {
         var sampler = ReviewIngestionDiagnosticSampler()
         let categories: [ReviewIngestionDiagnosticSummary.MethodCategory] = [
-            .globalDiagnostic, .threadLifecycle, .turnLifecycle, .itemLifecycle,
+            .diagnosticMethod, .threadLifecycle, .turnLifecycle, .itemLifecycle,
             .itemDelta, .model, .other,
         ]
         let stages: [ReviewIngestionDiagnosticRecord.Stage] = [
@@ -85,13 +85,13 @@ struct ReviewIngestionDiagnosticSamplerTests {
         #expect(sampler.trackedKeyCount == ReviewIngestionDiagnosticSampler.maximumKeyCount)
     }
 
-    @Test func connectionFailureAlwaysEmitsWithoutSamplerState() {
+    @Test func connectionFailureUsesTheSameBoundedAllowance() {
         var sampler = ReviewIngestionDiagnosticSampler()
         let key = key(methodCategory: .itemLifecycle, disposition: .connectionFailed)
-        for _ in 0..<64 {
-            #expect(sampler.decision(for: key) == .emitFullRecord)
-        }
-        #expect(sampler.trackedKeyCount == 0)
+        #expect((0..<5).map { _ in sampler.decision(for: key) } == [
+            .emitFullRecord, .emitFullRecord, .emitSuppressionSummary, .suppress, .suppress,
+        ])
+        #expect(sampler.trackedKeyCount == 1)
     }
 
     private func summary(method: String) -> ReviewIngestionDiagnosticSummary {
