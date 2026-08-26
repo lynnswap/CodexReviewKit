@@ -4566,7 +4566,7 @@ struct AppServerClientTests {
 
         try await backend.interruptReview(run, reason: .init(message: "Stop"))
 
-        guard case .logEntry(let kind, let text, let groupID, let replacesGroup, let metadata) = try await iterator.next()
+        guard case .logEntry(let kind, let text, let groupID, let replacesGroup, let metadata, _) = try await iterator.next()
         else {
             Issue.record("Expected active command to be closed before cancellation.")
             return
@@ -4648,7 +4648,7 @@ struct AppServerClientTests {
             if case .cancelled("Stop") = event {
                 break
             }
-            guard case .logEntry(let kind, let text, let groupID, let replacesGroup, let metadata) = event,
+            guard case .logEntry(let kind, let text, let groupID, let replacesGroup, let metadata, _) = event,
                   kind == .commandOutput,
                   replacesGroup
             else {
@@ -6123,7 +6123,7 @@ struct AppServerClientTests {
             replacesGroup: false,
             metadata: .init(sourceType: "commandExecution", title: "Command output", itemID: "cmd-1")
         ))
-        guard case .logEntry(let kind, let text, let groupID, let replacesGroup, let metadata) = try await iterator.next()
+        guard case .logEntry(let kind, let text, let groupID, let replacesGroup, let metadata, _) = try await iterator.next()
         else {
             Issue.record("Expected review exit to close the active command execution.")
             return
@@ -6140,7 +6140,7 @@ struct AppServerClientTests {
         #expect(metadata?.completedAt != nil)
         #expect(metadata?.durationMs != nil)
         #expect(metadata?.commandStatus == "completed")
-        guard case .logEntry(let outputKind, let outputText, let outputGroupID, let outputReplacesGroup, let outputMetadata) = try await iterator.next()
+        guard case .logEntry(let outputKind, let outputText, let outputGroupID, let outputReplacesGroup, let outputMetadata, _) = try await iterator.next()
         else {
             Issue.record("Expected review exit to close the active command output.")
             return
@@ -6243,7 +6243,7 @@ struct AppServerClientTests {
             replacesGroup: false,
             metadata: .init(sourceType: "commandExecution", title: "Command output", itemID: "cmd-1")
         ))
-        guard case .logEntry(let commandKind, _, let commandGroupID, let commandReplacesGroup, let commandMetadata) = try await iterator.next()
+        guard case .logEntry(let commandKind, _, let commandGroupID, let commandReplacesGroup, let commandMetadata, _) = try await iterator.next()
         else {
             Issue.record("Expected following reasoning to close the active command execution.")
             return
@@ -6255,7 +6255,7 @@ struct AppServerClientTests {
         #expect(commandMetadata?.itemID == "cmd-1")
         #expect(commandMetadata?.startedAt == startedAt)
         #expect(commandMetadata?.completedAt != nil)
-        guard case .logEntry(let outputKind, let outputText, let outputGroupID, let outputReplacesGroup, let outputMetadata) = try await iterator.next()
+        guard case .logEntry(let outputKind, let outputText, let outputGroupID, let outputReplacesGroup, let outputMetadata, _) = try await iterator.next()
         else {
             Issue.record("Expected following reasoning to close the active command output.")
             return

@@ -355,6 +355,36 @@ extension ReviewUITests {
             #expect(interruptParams.threadID == "thread-review")
             #expect(interruptParams.turnID == "turn-review")
 
+            let reviewExitArtifact = "Review mode exited after cancellation."
+            let companionArtifact = "Review was interrupted before completion."
+            for method in ["item/started", "item/completed"] {
+                try await transport.emitServerNotification(
+                    method: method,
+                    params: ReviewUIV2ItemNotification(
+                        threadID: "thread-review",
+                        turnID: "turn-review",
+                        item: .init(
+                            type: "exitedReviewMode",
+                            id: "review-exit",
+                            review: reviewExitArtifact
+                        )
+                    )
+                )
+            }
+            for method in ["item/started", "item/completed"] {
+                try await transport.emitServerNotification(
+                    method: method,
+                    params: ReviewUIV2ItemNotification(
+                        threadID: "thread-review",
+                        turnID: "turn-review",
+                        item: .init(
+                            type: "agentMessage",
+                            id: "cancellation-companion",
+                            text: companionArtifact
+                        )
+                    )
+                )
+            }
             try await transport.emitServerNotification(
                 method: "turn/completed",
                 params: ReviewUIV2TurnNotification(
@@ -381,6 +411,29 @@ extension ReviewUITests {
             #expect(job.core.lifecycle.errorMessage == expectedCancellation.message)
             #expect(job.logEntries.contains { $0.kind == .error } == false)
             #expect(rendered.log.contains("Partial review before cancellation."))
+            #expect(rendered.log.contains(reviewExitArtifact) == false)
+            #expect(rendered.log.contains(companionArtifact) == false)
+
+            let defaultRead = try store.readReview(jobID: job.id)
+            let allRead = try store.readReview(jobID: job.id, logFilter: .all)
+            let developerDiagnostics = allRead.logs.filter {
+                $0.audience == .developer
+            }
+            #expect(defaultRead.logs.allSatisfy { $0.audience == .product })
+            #expect(developerDiagnostics.map(\.kind) == [.diagnostic, .diagnostic])
+            #expect(developerDiagnostics.map(\.groupID) == [
+                "review-exit",
+                "cancellation-companion",
+            ])
+            #expect(developerDiagnostics.map(\.text) == [
+                reviewExitArtifact,
+                companionArtifact,
+            ])
+            #expect(job.rawLogText == """
+            Review mode exited after cancellation.
+            Review was interrupted before completion.
+            """)
+            #expect(allRead.rawLogText == job.rawLogText)
             try await waitForCondition {
                 store.reviewWorkerTasks["job-1"] == nil
             }
