@@ -2172,7 +2172,9 @@ private actor AppServerReviewEventSession {
             )
             metrics.decoded += 1
             for event in decoded.events {
-                _ = await emit(event)
+                if await emit(event) {
+                    return
+                }
             }
         } catch {
             metrics.ignored += 1
@@ -2205,8 +2207,10 @@ private actor AppServerReviewEventSession {
         _ event: CodexReviewBackendModel.Review.Event,
         controlThreadID: String? = nil
     ) async -> Bool {
+        guard await mailbox.append(event) else {
+            return true
+        }
         noteEmission(event)
-        await mailbox.append(event)
         recordReviewEvent(event, controlThreadID: controlThreadID)
         return event.isTerminal
     }
@@ -2248,9 +2252,10 @@ private actor AppServerReviewEventSession {
         case .failed(let message):
             event = .failed(message)
         }
-        noteEmission(event)
-        await mailbox.append(event)
-        recordReviewEvent(event, controlThreadID: controlThreadID)
+        if await mailbox.append(event) {
+            noteEmission(event)
+            recordReviewEvent(event, controlThreadID: controlThreadID)
+        }
         await mailbox.finish()
     }
 
@@ -2402,17 +2407,12 @@ private actor AppServerReviewEventSession {
         }
     }
 
-    private func noteEmissions(_ events: [CodexReviewBackendModel.Review.Event]) {
-        for event in events {
-            noteEmission(event)
-        }
-    }
-
     private func emitPrecedingEvents(_ events: [CodexReviewBackendModel.Review.Event]) async {
-        noteEmissions(events)
         for event in events {
-            await mailbox.append(event)
-            recordReviewEvent(event)
+            if await mailbox.append(event) {
+                noteEmission(event)
+                recordReviewEvent(event)
+            }
         }
     }
 

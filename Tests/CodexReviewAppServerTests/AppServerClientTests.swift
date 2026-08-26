@@ -1217,6 +1217,61 @@ struct AppServerClientTests {
         #expect(params.turnID == "turn-1")
     }
 
+    @Test func rejectedLateStartedDoesNotAdvanceControlOrMetrics() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let provisionalRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-1",
+            threadID: "thread-1",
+            reviewThreadID: "thread-1"
+        )
+        let activeRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-1",
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "thread-1"
+        )
+        let attempt = await backend.reviewAttemptForTesting(provisionalRun)
+        _ = await backend.reviewAttemptForTesting(activeRun)
+        await attempt.events.abandon()
+
+        try await transport.emitServerNotification(
+            method: "item/started",
+            params: TestItemNotification(
+                lifecycle: .started,
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(
+                    type: "commandExecution",
+                    id: "command-1",
+                    command: "git diff",
+                    cwd: "/tmp/project"
+                )
+            )
+        )
+        await backend.waitForReviewNotificationCompletionForTesting(1)
+        let beforeInterrupt = try #require(
+            await backend.reviewEventSessionMetricsForTesting(threadID: "thread-1")
+        )
+        #expect(beforeInterrupt.emitted == 0)
+
+        try await backend.interruptReview(activeRun, reason: .init(message: "Stop"))
+
+        let requests = await transport.recordedRequests()
+        #expect(requests.map(\.method) == ["initialize", "turn/interrupt"])
+        let interrupt = try JSONDecoder().decode(
+            AppServerAPI.Turn.Interrupt.Params.self,
+            from: requests[1].params
+        )
+        #expect(interrupt.turnID.isEmpty)
+        let afterInterrupt = try #require(
+            await backend.reviewEventSessionMetricsForTesting(threadID: "thread-1")
+        )
+        #expect(afterInterrupt.emitted == 0)
+    }
+
     @Test func runningInterruptRetriesWithCurrentActiveTurnID() async throws {
         let transport = FakeJSONRPCTransport()
         await transport.enqueueFailure(
