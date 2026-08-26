@@ -1863,6 +1863,15 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
     ) async throws {
         do {
             try await runtime.backend.cleanupReview(run)
+        } catch let invalidation as AppServerCleanupTransportInvalidation {
+            await invalidateRuntimeAfterCleanupFailure(
+                runtime,
+                cause: invalidation.failure.localizedDescription
+            )
+            if invalidation.callerWasCancelled {
+                throw CancellationError()
+            }
+            throw invalidation.failure
         } catch let failure as ReviewRuntimeCloseFailure {
             if case .connection = failure {
                 await invalidateRuntimeAfterCleanupFailure(

@@ -6874,6 +6874,57 @@ struct AppServerClientTests {
         #expect(await transport.isClosedForTesting())
     }
 
+    @Test func timeoutCleanupPreservesCallerCancellationAcrossTransportContainment() async throws {
+        let transport = FakeJSONRPCTransport()
+        let cleanupGate = AsyncGate()
+        let timeoutGate = AsyncGate()
+        let closeStarted = AsyncGate()
+        let closeGate = AsyncGate()
+        await transport.holdNextIgnoringCancellation(
+            method: "thread/backgroundTerminals/clean",
+            gate: cleanupGate
+        )
+        let client = AppServerClient(transport: transport)
+        let backend = AppServerCodexReviewBackend(
+            client: client,
+            cleanupRequestTimeout: .seconds(2),
+            cleanupRequestSleep: { _ in
+                await timeoutGate.wait()
+            },
+            cleanupTransportClose: {
+                await closeStarted.open()
+                await closeGate.waitIgnoringCancellation()
+                try await client.close()
+            }
+        )
+        let run = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "thread-1"
+        )
+        let cleanup = Task {
+            try await backend.cleanupReview(run)
+        }
+
+        await transport.waitForRequestCount(1)
+        await timeoutGate.open()
+        await closeStarted.wait()
+        cleanup.cancel()
+        await closeGate.open()
+
+        do {
+            try await cleanup.value
+            Issue.record("Timeout cleanup unexpectedly succeeded.")
+        } catch let invalidation as AppServerCleanupTransportInvalidation {
+            #expect(invalidation.failure == .connection(
+                "thread/backgroundTerminals/clean cleanup request timed out after 2.0 seconds."
+            ))
+            #expect(invalidation.callerWasCancelled)
+        } catch {
+            Issue.record("Timeout cleanup returned an untyped error.")
+        }
+    }
+
     @Test func cancelledCleanupClosesTransportAndReturnsCancellation() async throws {
         let transport = FakeJSONRPCTransport()
         let cleanupGate = AsyncGate()
@@ -6894,8 +6945,16 @@ struct AppServerClientTests {
         await transport.waitForRequestCount(1)
         cleanup.cancel()
 
-        await #expect(throws: CancellationError.self) {
+        do {
             try await cleanup.value
+            Issue.record("Cancelled cleanup unexpectedly succeeded.")
+        } catch let invalidation as AppServerCleanupTransportInvalidation {
+            #expect(invalidation.failure == .connection(
+                "thread/backgroundTerminals/clean cleanup request was cancelled."
+            ))
+            #expect(invalidation.callerWasCancelled)
+        } catch {
+            Issue.record("Cancelled cleanup returned an untyped error.")
         }
         #expect(await transport.isClosedForTesting())
         #expect(await transport.recordedRequests().map(\.method) == [
