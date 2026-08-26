@@ -428,6 +428,19 @@ public final class CodexReviewJob: Identifiable, Hashable {
     public internal(set) var sortOrder: Double
     public internal(set) var targetSummary: String
     public internal(set) var core: ReviewJobCore
+    public internal(set) var cancellationRequested: Bool {
+        get { pendingCancellationRequest != nil }
+        set {
+            if newValue {
+                precondition(
+                    pendingCancellationRequest != nil,
+                    "CodexReviewStore must create a pending cancellation receipt before setting cancellationRequested."
+                )
+            } else {
+                pendingCancellationRequest = nil
+            }
+        }
+    }
     package var pendingCancellationRequest: ReviewCancellationRequestReceipt?
     @ObservationIgnored
     package var agentMessagesByItemID: [String: String]
@@ -446,10 +459,6 @@ public final class CodexReviewJob: Identifiable, Hashable {
 
     public var isTerminal: Bool {
         core.isTerminal
-    }
-
-    public var cancellationRequested: Bool {
-        pendingCancellationRequest != nil
     }
 
     public var displayTitle: String {
