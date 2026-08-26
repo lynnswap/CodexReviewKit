@@ -271,14 +271,19 @@ extension CodexReviewStore {
                 markReviewFailed(job, message: error.localizedDescription)
             }
         }
-        if let cleanupFailure = await cleanupReviewAttemptOwnership(
-            jobID: jobID,
-            job: job,
-            workerAdmission: admission,
-            unpublishedAttempt: unpublishedAttempt,
-            cancellationRequest: cleanupCancellationRequest,
-            inputs: inputs
-        ) {
+        // Cleanup RPCs remain owned by a fresh task so a worker cancelled to wake
+        // a pending-outage wait cannot carry cancellation into backend cleanup.
+        let cleanupTask = Task { @MainActor [self] in
+            await self.cleanupReviewAttemptOwnership(
+                jobID: jobID,
+                job: job,
+                workerAdmission: admission,
+                unpublishedAttempt: unpublishedAttempt,
+                cancellationRequest: cleanupCancellationRequest,
+                inputs: inputs
+            )
+        }
+        if let cleanupFailure = await cleanupTask.value {
             retainCleanupFailure(cleanupFailure, for: job)
         }
         await inputs?.cancelAndWait()
