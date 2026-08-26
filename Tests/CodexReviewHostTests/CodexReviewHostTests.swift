@@ -1045,6 +1045,27 @@ struct CodexReviewHostTests {
     }
 
     @Test func liveStoreSkipsRateLimitRefreshForUnsupportedActiveAccount() async throws {
+        let homeURL = try temporaryHome()
+        try writeRegistryRecords(
+            homeURL: homeURL,
+            activeAccountKey: "api-key",
+            records: [
+                [
+                    "accountKey": "api-key",
+                    "kind": "chatgpt",
+                    "email": "API Key",
+                    "planType": "pro",
+                    "lastRateLimitFetchAt": 1_800_000_000,
+                    "lastRateLimitError": "Stale ChatGPT rate-limit failure.",
+                    "cachedRateLimits": [
+                        [
+                            "windowDurationMinutes": 300,
+                            "usedPercent": 40,
+                        ],
+                    ],
+                ],
+            ]
+        )
         let transport = FakeJSONRPCTransport()
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await transport.enqueue(
@@ -1057,17 +1078,28 @@ struct CodexReviewHostTests {
         )
         try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
         let store = CodexReviewStore.makeLiveStoreForTesting(
-            environment: ["HOME": try temporaryHome().path],
+            environment: ["HOME": homeURL.path],
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
             transport: transport
         )
+        let staleAccount = try #require(store.auth.selectedAccount)
+        #expect(staleAccount.kind == .chatGPT)
+        #expect(staleAccount.rateLimits.first?.usedPercent == 40)
+        #expect(staleAccount.lastRateLimitFetchAt != nil)
+        #expect(staleAccount.lastRateLimitError == "Stale ChatGPT rate-limit failure.")
 
         await store.start(forceRestartIfNeeded: true)
         await transport.waitForRequestCount(4)
         await store.refreshAccountRateLimits(accountKey: "api-key")
         await Task.yield()
 
-        #expect(store.auth.selectedAccount?.kind == .apiKey)
+        let reconciledAccount = try #require(store.auth.selectedAccount)
+        #expect(reconciledAccount === staleAccount)
+        #expect(reconciledAccount.kind == .apiKey)
+        #expect(reconciledAccount.capabilities.supportsRateLimitRefresh == false)
+        #expect(reconciledAccount.rateLimits.isEmpty)
+        #expect(reconciledAccount.lastRateLimitFetchAt == nil)
+        #expect(reconciledAccount.lastRateLimitError == nil)
         #expect(await transport.recordedRequests().map(\.method) == [
             "initialize",
             "account/read",
