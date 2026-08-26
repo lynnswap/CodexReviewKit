@@ -166,7 +166,7 @@ extension CodexReviewStore {
             try? completeCancellationLocally(
                 jobID: job.id,
                 sessionID: job.sessionID,
-                cancellation: job.core.lifecycle.cancellation ?? .system()
+                cancellation: job.pendingCancellationRequest?.cancellation ?? .system()
             )
         }
         reviewWorkerTasks.removeValue(forKey: jobID)
@@ -214,7 +214,7 @@ extension CodexReviewStore {
             unpublishedAttempt = nil
             if Task.isCancelled { throw CancellationError() }
             if let startupCancellation = await admission.cancellationRequest()
-                ?? (job.cancellationRequested ? job.core.lifecycle.cancellation ?? .system() : nil) {
+                ?? job.pendingCancellationRequest?.cancellation {
                 recordCancellationRequest(startupCancellation, for: job)
                 throw CancellationError()
             } else if job.isTerminal == false {
@@ -237,7 +237,7 @@ extension CodexReviewStore {
                 try? completeCancellationAfterRegisteredWorkSuspension(
                     for: job,
                     requested: startupCancellation
-                        ?? job.core.lifecycle.cancellation
+                        ?? job.pendingCancellationRequest?.cancellation
                         ?? .system()
                 )
             }
@@ -254,8 +254,20 @@ extension CodexReviewStore {
                 switch inputFailure.failure {
                 case .protocolViolation, .workerContract:
                     markReviewFailed(job, message: inputFailure.localizedDescription)
-                case .recoverableNetwork, .ownerForcedConnectionClose,
-                     .unexpectedConnection, .process:
+                case .ownerForcedConnectionClose:
+                    if let receipt = job.pendingCancellationRequest,
+                       receipt.rejectionDisposition == .preserveRuntimeStopIntent {
+                        try? completeCancellationAfterRegisteredWorkSuspension(
+                            for: job,
+                            requested: receipt.cancellation
+                        )
+                    } else {
+                        markReviewInterrupted(
+                            job,
+                            cause: .transport(message: inputFailure.localizedDescription)
+                        )
+                    }
+                case .recoverableNetwork, .unexpectedConnection, .process:
                     markReviewInterrupted(
                         job,
                         cause: .transport(message: inputFailure.localizedDescription)
@@ -263,7 +275,7 @@ extension CodexReviewStore {
                 case .ownerCancellation:
                     try? completeCancellationAfterRegisteredWorkSuspension(
                         for: job,
-                        requested: job.core.lifecycle.cancellation ?? .system()
+                        requested: job.pendingCancellationRequest?.cancellation ?? .system()
                     )
                 }
             } else if job.isTerminal == false {
@@ -389,7 +401,7 @@ extension CodexReviewStore {
         guard storeWorkRegistry.acceptsNewWork == false else {
             return requested
         }
-        return job.core.lifecycle.cancellation ?? requested
+        return job.pendingCancellationRequest?.cancellation ?? requested
     }
 
     private func completeCancellationAfterRegisteredWorkSuspension(
@@ -405,18 +417,24 @@ extension CodexReviewStore {
 
     private func recordCancellationFailureAfterRegisteredWorkSuspension(
         for job: CodexReviewJob,
+        receipt: ReviewCancellationRequestReceipt,
         message: String
     ) throws {
-        guard job.isTerminal == false else {
+        guard job.isTerminal == false,
+              job.pendingCancellationRequest?.id == receipt.id
+        else {
             return
         }
         if storeWorkRegistry.acceptsNewWork {
             try recordCancellationFailure(
                 jobID: job.id,
                 sessionID: job.sessionID,
+                receipt: receipt,
                 message: message
             )
         } else {
+            job.pendingCancellationRequest = nil
+            job.core.lifecycle.cancellation = nil
             markReviewFailed(job, message: message)
         }
     }
@@ -532,7 +550,8 @@ extension CodexReviewStore {
                 failure = await cleanupReviewFailure(run)
             }
         case .active(let active):
-            if let cancellation = job.core.lifecycle.cancellation
+            if let cancellation = job.pendingCancellationRequest?.cancellation
+                ?? job.core.lifecycle.cancellation
                 ?? (Task.isCancelled ? .system() : nil) {
                 do {
                     let resolution = try await interruptActiveAttemptAndRecordTerminal(
@@ -549,7 +568,8 @@ extension CodexReviewStore {
                 failure = failure ?? cleanup
             }
         case .recovering(let receipt):
-            if let cancellation = job.core.lifecycle.cancellation
+            if let cancellation = job.pendingCancellationRequest?.cancellation
+                ?? job.core.lifecycle.cancellation
                 ?? (Task.isCancelled ? .system() : nil) {
                 await receipt.cancelOwnedOperation(cancellation)
             }
@@ -783,7 +803,8 @@ extension CodexReviewStore {
 
     func performCancelReview(
         jobID: String,
-        cancellation: ReviewCancellation
+        cancellation: ReviewCancellation,
+        rejectionDisposition: ReviewCancellationRequestReceipt.RejectionDisposition = .reportFailure
     ) async throws -> CodexReviewAPI.Cancel.Outcome {
         let job = try job(jobID: jobID)
         guard job.isTerminal == false else {
@@ -799,18 +820,25 @@ extension CodexReviewStore {
             for: job,
             requested: cancellation
         )
-        recordCancellationRequest(requestedCancellation, for: job)
+        guard let requestReceipt = recordCancellationRequest(
+            requestedCancellation,
+            rejectionDisposition: rejectionDisposition,
+            for: job
+        ) else {
+            return .init(jobID: job.id, cancelled: false, core: job.core)
+        }
+        let admittedCancellation = requestReceipt.cancellation
 
         switch ownership {
         case .recovering(let receipt):
-            await receipt.cancelOwnedOperation(requestedCancellation)
+            await receipt.cancelOwnedOperation(admittedCancellation)
             reviewWorkerTasks[jobID]?.cancel()
             await reviewWorkerTasks[jobID]?.value
         case .active(let active):
             do {
                 _ = try await interruptActiveAttempt(
                     active,
-                    cancellation: requestedCancellation
+                    cancellation: admittedCancellation
                 )
                 reviewWorkerTasks[jobID]?.cancel()
                 await reviewWorkerTasks[jobID]?.value
@@ -822,16 +850,22 @@ extension CodexReviewStore {
                         core: job.core
                     )
                 }
-                try recordCancellationFailureAfterRegisteredWorkSuspension(
-                    for: job,
-                    message: error.localizedDescription
-                )
+                switch requestReceipt.rejectionDisposition {
+                case .reportFailure:
+                    try recordCancellationFailureAfterRegisteredWorkSuspension(
+                        for: job,
+                        receipt: requestReceipt,
+                        message: error.localizedDescription
+                    )
+                case .preserveRuntimeStopIntent:
+                    await active.admission.recordCancellation(admittedCancellation)
+                }
                 throw error
             }
         case .starting(let admission):
-            await admission.recordCancellation(requestedCancellation)
+            await admission.recordCancellation(admittedCancellation)
             let startupCancellation = await admission.cancellationRequest()
-                ?? requestedCancellation
+                ?? admittedCancellation
             try completeCancellationAfterRegisteredWorkSuspension(
                 for: job,
                 requested: startupCancellation
@@ -1013,13 +1047,17 @@ extension CodexReviewStore {
                         )
                     }
                 }
+                let admittedCancellation = terminal == nil
+                    ? nil
+                    : await event.source.admission.cancellationRequest()
                 switch reviewAttemptOwnerships[job.id] {
                 case .active(let active) where active.matches(event.source):
                     _ = handleReviewEvent(
                         event.event,
                         job: job,
                         sourceRun: event.source.run,
-                        currentRun: active.run
+                        currentRun: active.run,
+                        admittedCancellation: admittedCancellation
                     )
                     if job.isTerminal { return }
                 case .recovering(let receipt) where receipt.source.matches(event.source):
@@ -1366,7 +1404,8 @@ extension CodexReviewStore {
         _ event: CodexReviewBackendModel.Review.Event,
         job: CodexReviewJob,
         sourceRun: CodexReviewBackendModel.Review.Run,
-        currentRun: CodexReviewBackendModel.Review.Run
+        currentRun: CodexReviewBackendModel.Review.Run,
+        admittedCancellation: ReviewCancellation? = nil
     ) -> CodexReviewBackendModel.Review.Run {
         let ownsSourceRun: Bool = switch reviewAttemptOwnerships[job.id] {
         case .active(let active): active.run == sourceRun
@@ -1432,8 +1471,8 @@ extension CodexReviewStore {
             clearPendingCancellationProjection(for: job)
             markReviewFailed(job, message: message)
         case .cancelled(let message):
-            if job.cancellationRequested,
-               let cancellation = job.core.lifecycle.cancellation {
+            if let cancellation = admittedCancellation
+                ?? job.pendingCancellationRequest?.cancellation {
                 try? completeCancellationLocally(
                     jobID: job.id,
                     sessionID: job.sessionID,
@@ -1452,20 +1491,19 @@ extension CodexReviewStore {
     }
 
     private func clearPendingCancellationProjection(for job: CodexReviewJob) {
-        job.cancellationRequested = false
+        job.pendingCancellationRequest = nil
         job.core.lifecycle.cancellation = nil
         job.core.lifecycle.errorMessage = nil
     }
 
     private func completePendingCancellationIfNeeded(for job: CodexReviewJob) -> Bool {
-        guard job.cancellationRequested else {
+        guard let receipt = job.pendingCancellationRequest else {
             return false
         }
-        let cancellation = job.core.lifecycle.cancellation ?? .system()
         try? completeCancellationLocally(
             jobID: job.id,
             sessionID: job.sessionID,
-            cancellation: cancellation
+            cancellation: receipt.cancellation
         )
         return true
     }

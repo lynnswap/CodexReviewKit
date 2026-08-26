@@ -33,17 +33,37 @@ package struct ReviewRuntimeCancellationRequestOutcome: Sendable {
 }
 
 extension CodexReviewStore {
+    @discardableResult
     package func recordCancellationRequest(
         _ cancellation: ReviewCancellation,
+        rejectionDisposition: ReviewCancellationRequestReceipt.RejectionDisposition = .reportFailure,
         for job: CodexReviewJob
-    ) {
+    ) -> ReviewCancellationRequestReceipt? {
         guard job.isTerminal == false else {
-            return
+            return nil
         }
-        job.cancellationRequested = true
+        if let current = job.pendingCancellationRequest {
+            switch (current.rejectionDisposition, rejectionDisposition) {
+            case (.preserveRuntimeStopIntent, _), (.reportFailure, .reportFailure):
+                return current
+            case (.reportFailure, .preserveRuntimeStopIntent):
+                break
+            }
+        }
+        guard nextCancellationRequestOrdinal < UInt64.max else {
+            preconditionFailure("CodexReviewStore cancellation request ordinal exhausted.")
+        }
+        nextCancellationRequestOrdinal += 1
+        let receipt = ReviewCancellationRequestReceipt(
+            id: .init(jobID: job.id, ordinal: nextCancellationRequestOrdinal),
+            cancellation: cancellation,
+            rejectionDisposition: rejectionDisposition
+        )
+        job.pendingCancellationRequest = receipt
         job.core.lifecycle.cancellation = cancellation
         job.core.output.summary = cancellation.message
         job.core.lifecycle.errorMessage = cancellation.message
+        return receipt
     }
 
     @discardableResult
@@ -52,7 +72,11 @@ extension CodexReviewStore {
     ) -> [String] {
         let jobs = orderedJobs.filter { $0.isTerminal == false }
         for job in jobs {
-            recordCancellationRequest(reason, for: job)
+            recordCancellationRequest(
+                reason,
+                rejectionDisposition: .preserveRuntimeStopIntent,
+                for: job
+            )
         }
         return jobs.map(\.id)
     }
@@ -76,7 +100,7 @@ extension CodexReviewStore {
 
         let endedAt = clock.now()
         job.closeActiveCommandLogEntries(status: "canceled", completedAt: endedAt)
-        job.cancellationRequested = false
+        job.pendingCancellationRequest = nil
         job.core.lifecycle.cancellation = cancellation
         job.core.lifecycle.status = .cancelled
         job.core.output.summary = cancellation.message
@@ -92,6 +116,7 @@ extension CodexReviewStore {
     package func recordCancellationFailure(
         jobID: String,
         sessionID: String,
+        receipt: ReviewCancellationRequestReceipt,
         message: String
     ) throws {
         guard let job = job(id: jobID)
@@ -102,8 +127,13 @@ extension CodexReviewStore {
         else {
             throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
         }
+        guard job.isTerminal == false,
+              job.pendingCancellationRequest?.id == receipt.id
+        else {
+            return
+        }
 
-        job.cancellationRequested = false
+        job.pendingCancellationRequest = nil
         job.core.lifecycle.cancellation = nil
         if let message = message.nilIfEmpty {
             if message == "Failed to cancel review." {
@@ -143,14 +173,6 @@ extension CodexReviewStore {
                     cancellation: cancellation
                 )
             } catch {
-                let message = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
-                if storeWorkRegistry.acceptsNewWork {
-                    try? recordCancellationFailure(
-                        jobID: job.id,
-                        sessionID: job.sessionID,
-                        message: message.isEmpty ? "Failed to cancel review." : message
-                    )
-                }
                 if firstError == nil {
                     firstError = error
                 }
@@ -170,7 +192,11 @@ extension CodexReviewStore {
         var firstFailure: ReviewRuntimeCloseFailure?
         for jobID in activeJobIDs {
             do {
-                _ = try await cancelReview(jobID: jobID, cancellation: reason)
+                _ = try await performCancelReview(
+                    jobID: jobID,
+                    cancellation: reason,
+                    rejectionDisposition: .preserveRuntimeStopIntent
+                )
             } catch {
                 if firstFailure == nil {
                     firstFailure = (error as? ReviewRuntimeCloseFailure)
@@ -274,7 +300,7 @@ extension CodexReviewStore {
         let resolvedError = failureMessage.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
         var terminatedJobIDs: [String] = []
         for job in orderedJobs where job.isTerminal == false {
-            job.cancellationRequested = false
+            job.pendingCancellationRequest = nil
             job.core.lifecycle.cancellation = nil
             job.core.lifecycle.status = .failed
             if let resolvedError {

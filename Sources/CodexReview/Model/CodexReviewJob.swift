@@ -428,7 +428,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
     public internal(set) var sortOrder: Double
     public internal(set) var targetSummary: String
     public internal(set) var core: ReviewJobCore
-    public internal(set) var cancellationRequested: Bool
+    package var pendingCancellationRequest: ReviewCancellationRequestReceipt?
     @ObservationIgnored
     package var agentMessagesByItemID: [String: String]
     @ObservationIgnored
@@ -448,6 +448,10 @@ public final class CodexReviewJob: Identifiable, Hashable {
         core.isTerminal
     }
 
+    public var cancellationRequested: Bool {
+        pendingCancellationRequest != nil
+    }
+
     public var displayTitle: String {
         targetSummary
     }
@@ -463,7 +467,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
         sortOrder: Double = 0,
         targetSummary: String,
         core: ReviewJobCore,
-        cancellationRequested: Bool = false,
+        pendingCancellationRequest: ReviewCancellationRequestReceipt? = nil,
         logEntries: [ReviewLogEntry]
     ) {
         let initialState = Self.trimmedLogState(entries: logEntries)
@@ -473,7 +477,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
         self.sortOrder = sortOrder
         self.targetSummary = targetSummary
         self.core = core
-        self.cancellationRequested = cancellationRequested
+        self.pendingCancellationRequest = pendingCancellationRequest
         self.agentMessagesByItemID = [:]
         self.completedAgentMessageItemIDs = []
         self.logState = initialState.logState
