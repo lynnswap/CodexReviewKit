@@ -1457,6 +1457,15 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             notificationRouterMetrics.ignored += 1
             return
         case .failure(let failure):
+            if case .unsupportedItemType = failure.error {
+                recordIngestionDiagnostic(
+                    failure,
+                    disposition: .ignored
+                )
+                notificationRouterMetrics.diagnostics += 1
+                notificationRouterMetrics.ignored += 1
+                return
+            }
             if failure.isGlobalDiagnostic {
                 recordIngestionDiagnostic(
                     failure,
