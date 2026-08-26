@@ -1049,8 +1049,8 @@ extension CodexReviewStore {
             return pendingRequest?.cancellation
         }
         guard terminal.cancellationRequestReceipt?.rejectionDisposition == .preserveRuntimeStopIntent else { return cancellation }
-        if case .ownerForcedConnectionClose = failure { return cancellation }
-        return nil
+        guard terminal.cancellationRequestReceipt?.id == pendingRequest?.id else { return nil }
+        return cancellation
     }
 
     private func consumeReviewEvents(
@@ -1129,6 +1129,7 @@ extension CodexReviewStore {
                 }
             case .reviewStreamTerminal(let streamTerminal):
                 guard activeEventSubscriptionID == streamTerminal.subscriptionID else { continue }
+                await reviewStreamTerminalDequeueSuspension?()
                 let failure: ReviewAttemptStreamFailure = switch streamTerminal.kind {
                 case .finished:
                     .workerContract(.init(
@@ -1136,12 +1137,17 @@ extension CodexReviewStore {
                     ))
                 case .failed(let failure): failure
                 }
-                let terminalCancellationRequest: ReviewCancellationRequestReceipt? = switch failure {
-                case .ownerForcedConnectionClose:
-                    job.pendingCancellationRequest
-                case .recoverableNetwork, .unexpectedConnection, .process,
-                     .protocolViolation, .workerContract, .ownerCancellation:
-                    nil
+                let terminalCancellationRequest: ReviewCancellationRequestReceipt?
+                if Task.isCancelled {
+                    terminalCancellationRequest = job.pendingCancellationRequest
+                } else {
+                    terminalCancellationRequest = switch failure {
+                    case .ownerForcedConnectionClose:
+                        job.pendingCancellationRequest
+                    case .recoverableNetwork, .unexpectedConnection, .process,
+                         .protocolViolation, .workerContract, .ownerCancellation:
+                        nil
+                    }
                 }
                 let terminalResolution: ReviewInterruptResolution
                 do {
@@ -1159,7 +1165,11 @@ extension CodexReviewStore {
                 }
                 switch reviewAttemptOwnerships[job.id] {
                 case .active(let active) where active.matches(streamTerminal.source):
-                    if let cancellation = recordedStreamCancellation(terminalResolution, failure: failure) {
+                    if let cancellation = recordedStreamCancellation(
+                        terminalResolution,
+                        failure: failure,
+                        pendingRequest: job.pendingCancellationRequest
+                    ) {
                         try? completeCancellationLocally(
                             jobID: job.id,
                             sessionID: job.sessionID,

@@ -2565,6 +2565,60 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func runtimeReceiptRecordedAfterStreamTerminalDequeueWinsBeforeProjection() async throws {
+        let backend = FakeCodexReviewBackend()
+        let terminalDequeued = AsyncGate()
+        let terminalProjection = AsyncGate()
+        let closeReason = ReviewCancellation.system(message: "Store work owner closed.")
+        let failure = ReviewAttemptStreamFailure.workerContract(.init(
+            message: "Buffered stream terminal"
+        ))
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" }),
+            reviewStreamTerminalDequeueSuspension: {
+                await terminalDequeued.open()
+                await terminalProjection.waitIgnoringCancellation()
+            }
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+            )
+            try #require(await StoreSnapshotProbe(store: store).waitUntilRunAttempt(
+                "attempt-1",
+                jobID: "job-1"
+            ) != nil)
+            guard case .active(let active) = store.reviewAttemptOwnerships["job-1"] else {
+                Issue.record("Review did not publish its exact active attempt.")
+                return
+            }
+
+            await backend.finishEvents(throwing: failure)
+            await terminalDequeued.wait()
+            let close = Task { @MainActor in
+                await store.closeRegisteredStoreWork(reason: closeReason)
+            }
+            try #require(await waitUntil {
+                store.job(id: "job-1")?.pendingCancellationRequest?.rejectionDisposition
+                    == .preserveRuntimeStopIntent
+                    && store.reviewWorkerTasks["job-1"]?.isCancelled == true
+            })
+            let runtimeReceipt = try #require(store.job(id: "job-1")?.pendingCancellationRequest)
+
+            await terminalProjection.open()
+            #expect(await close.value == .success)
+            let read = try await result
+            let resolution = try #require(await active.admission.activeTerminalResolution())
+
+            #expect(read.core.lifecycle.status == .cancelled)
+            #expect(read.core.lifecycle.cancellation == closeReason)
+            #expect(resolution.cancellationRequestReceipt?.id == runtimeReceipt.id)
+            #expect(resolution.terminal == .stream(failure))
+        }
+    }
+
     @Test(arguments: [ReviewAttemptStreamFailure.ownerForcedConnectionClose(.connection("Runtime closed")), .workerContract(.init(message: "Missing terminal"))])
     func streamTerminalSnapshotIgnoresLateRuntimeReceipt(failure: ReviewAttemptStreamFailure) async throws {
         let backend = FakeCodexReviewBackend()

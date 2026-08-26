@@ -79,6 +79,7 @@ public final class CodexReviewStore {
     @ObservationIgnored package var previewSupportRetainer: AnyObject?
     @ObservationIgnored package let clock: CodexReviewClock
     @ObservationIgnored package let idGenerator: CodexReviewIDGenerator
+    @ObservationIgnored package let reviewStreamTerminalDequeueSuspension: (@MainActor @Sendable () async -> Void)?
     @ObservationIgnored package var reviewAttemptOwnerships: [String: StoreReviewAttemptOwnership] = [:]
     @ObservationIgnored package var reviewWorkerTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored package var runtimeStopDetachedReviewWorkerTasks: [String: Task<Void, Never>] = [:]
@@ -98,7 +99,8 @@ public final class CodexReviewStore {
         clock: CodexReviewClock = .init(),
         idGenerator: CodexReviewIDGenerator = .init(),
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
-        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default
+        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
+        reviewStreamTerminalDequeueSuspension: (@MainActor @Sendable () async -> Void)? = nil
     ) {
         self.backend = backend
         self.networkMonitor = networkMonitor
@@ -106,6 +108,7 @@ public final class CodexReviewStore {
         self.diagnosticsURL = diagnosticsURL
         self.clock = clock
         self.idGenerator = idGenerator
+        self.reviewStreamTerminalDequeueSuspension = reviewStreamTerminalDequeueSuspension
         self.auth = CodexReviewAuthModel()
         self.settings = SettingsStore(snapshot: backend.seed.initialSettingsSnapshot)
         self.settingsService = settingsService ?? CodexReviewSettingsService(
@@ -175,7 +178,8 @@ public final class CodexReviewStore {
         clock: CodexReviewClock = .init(),
         idGenerator: CodexReviewIDGenerator = .init(),
         networkMonitor: any CodexReviewNetworkMonitoring = StaticCodexReviewNetworkMonitor(),
-        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default
+        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
+        reviewStreamTerminalDequeueSuspension: (@MainActor @Sendable () async -> Void)? = nil
     ) -> CodexReviewStore {
         CodexReviewStore(
             backend: backend,
@@ -183,7 +187,8 @@ public final class CodexReviewStore {
             clock: clock,
             idGenerator: idGenerator,
             networkMonitor: networkMonitor,
-            networkRecoveryPolicy: networkRecoveryPolicy
+            networkRecoveryPolicy: networkRecoveryPolicy,
+            reviewStreamTerminalDequeueSuspension: reviewStreamTerminalDequeueSuspension
         )
     }
 
