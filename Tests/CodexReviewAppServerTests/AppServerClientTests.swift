@@ -6903,6 +6903,42 @@ struct AppServerClientTests {
         ])
     }
 
+    @Test func cleanupClassifiesTransportFatalErrorsAsRuntimeInvalidation() async throws {
+        let transportErrors: [JSONRPC.Error] = [
+            .invalidMessage("Malformed response."),
+            .transportTerminated(.processExit("App-server exited.")),
+        ]
+        for transportError in transportErrors {
+            let transport = FakeJSONRPCTransport()
+            await transport.enqueueFailure(
+                transportError,
+                for: "thread/backgroundTerminals/clean"
+            )
+            let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+            let run = CodexReviewBackendModel.Review.Run(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                reviewThreadID: "thread-1"
+            )
+
+            do {
+                try await backend.cleanupReview(run)
+                Issue.record("Transport-fatal cleanup unexpectedly succeeded.")
+            } catch let failure as ReviewRuntimeCloseFailure {
+                #expect(failure == .connection(
+                    "thread/backgroundTerminals/clean for thread-1: "
+                        + transportError.localizedDescription
+                ))
+            } catch {
+                Issue.record("Transport-fatal cleanup returned an untyped error.")
+            }
+            #expect(await transport.isClosedForTesting())
+            #expect(await transport.recordedRequests().map(\.method) == [
+                "thread/backgroundTerminals/clean",
+            ])
+        }
+    }
+
     @Test @MainActor
     func storeRetainsCleanupFailureAsSecondaryDiagnosticWithoutMaskingPrimary() async throws {
         let backend = FakeCodexReviewBackend()

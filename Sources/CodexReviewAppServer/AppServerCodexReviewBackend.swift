@@ -1102,8 +1102,13 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                 await race.resolve(.success(try await client.send(request)))
             } catch is CancellationError {
                 await race.resolve(.cancelled)
-            } catch let error as JSONRPC.Error where error == .closed {
-                await race.resolve(.transportInvalidated(error.localizedDescription))
+            } catch let error as JSONRPC.Error {
+                switch error {
+                case .closed, .invalidMessage, .transportTerminated:
+                    await race.resolve(.transportInvalidated(error.localizedDescription))
+                case .responseError:
+                    await race.resolve(.failure(error.localizedDescription))
+                }
             } catch {
                 await race.resolve(.failure(error.localizedDescription))
             }
