@@ -6,6 +6,23 @@ import Testing
 @Suite("ReviewMonitor log projection")
 @MainActor
 struct ReviewMonitorLogProjectionTests {
+    @Test func developerEntryCannotCaptureAProductLogGroup() {
+        var projection = ReviewMonitorLog.Projection()
+
+        let document = projection.render(entries: [
+            .init(
+                kind: .agentMessage,
+                groupID: "shared-message",
+                text: "Developer detail",
+                audience: .developer
+            ),
+            .init(kind: .agentMessage, groupID: "shared-message", text: "Product message"),
+        ])
+
+        #expect(document.sourceText == "Product message")
+        #expect(document.blocks.map(\.kind) == [.agentMessage])
+    }
+
     @Test func documentIncludesCommandOutputAndKeepsPlainTranscript() {
         let job = CodexReviewJob.makeForTesting(
             id: "job-command-output",

@@ -121,7 +121,7 @@ enum Filter: String, Codable, Sendable, Hashable {
     package func includes(_ entry: ReviewLogEntry) -> Bool {
         switch self {
         case .defaultSetting:
-            entry.kind != .commandOutput
+            entry.audience == .product && entry.kind != .commandOutput
         case .all:
             true
         }

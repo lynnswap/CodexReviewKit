@@ -1,4 +1,10 @@
 import Foundation
+import OSLog
+
+private let reviewCleanupLogger = Logger(
+    subsystem: "CodexReviewKit",
+    category: "review-cleanup"
+)
 
 private let networkRecoveryUnavailableMessage = "Network unavailable; waiting to reconnect."
 private let networkRecoveryRestoredMessage = "Network restored; restarting review."
@@ -386,8 +392,12 @@ extension CodexReviewStore {
         job.appendLogEntry(.init(
             kind: .diagnostic,
             text: failure.localizedDescription,
+            audience: .developer,
             timestamp: clock.now()
         ))
+        reviewCleanupLogger.error(
+            "Review cleanup failed for job \(job.id, privacy: .public): \(failure.localizedDescription, privacy: .public)"
+        )
         writeDiagnosticsIfNeeded()
     }
 
@@ -1542,7 +1552,7 @@ extension CodexReviewStore {
             ))
         case .log(let text):
             job.appendLogEntry(.init(kind: .progress, text: text, timestamp: clock.now()))
-        case .logEntry(let kind, let text, let groupID, let replacesGroup, let metadata):
+        case .logEntry(let kind, let text, let groupID, let replacesGroup, let metadata, let audience):
             if metadata?.sourceType == "suppressedFinalReviewCompanion",
                let groupID {
                 job.replaceLogEntries(job.logEntries.filter {
@@ -1566,6 +1576,7 @@ extension CodexReviewStore {
                 replacesGroup: replacesGroup,
                 text: text,
                 metadata: metadata,
+                audience: audience,
                 timestamp: clock.now()
             ))
         case .completed(let summary, let result):
@@ -1758,6 +1769,7 @@ package func latestCleanupCancellationRequest(_ captured: ReviewCancellationRequ
 
 private struct ReviewReadLogGroupKey: Hashable {
     var kind: ReviewLogEntry.Kind
+    var audience: ReviewLogEntry.Audience
     var groupID: String
 }
 
@@ -1787,6 +1799,7 @@ private func projectedLogsForReviewRead(_ entries: [ReviewLogEntry]) -> [ReviewL
                 replacesGroup: false,
                 text: text,
                 metadata: metadata,
+                audience: entry.audience,
                 timestamp: entry.timestamp
             )
             continue
@@ -1802,6 +1815,7 @@ private func projectedLogsForReviewRead(_ entries: [ReviewLogEntry]) -> [ReviewL
             replacesGroup: false,
             text: entry.text,
             metadata: entry.metadata,
+            audience: entry.audience,
             timestamp: entry.timestamp
         ))
     }
@@ -1814,7 +1828,11 @@ private func reviewReadLogGroupKey(for entry: ReviewLogEntry) -> ReviewReadLogGr
         return nil
     }
 
-    return ReviewReadLogGroupKey(kind: entry.kind, groupID: groupID)
+    return ReviewReadLogGroupKey(
+        kind: entry.kind,
+        audience: entry.audience,
+        groupID: groupID
+    )
 }
 
 private func shouldAppendReviewReadLogDelta(for kind: ReviewLogEntry.Kind) -> Bool {

@@ -313,7 +313,8 @@ enum Event: Equatable, Sendable {
         text: String,
         groupID: String?,
         replacesGroup: Bool,
-        metadata: ReviewLogEntry.Metadata? = nil
+        metadata: ReviewLogEntry.Metadata? = nil,
+        audience: ReviewLogEntry.Audience = .product
     )
     case completed(summary: String, result: String?)
     case failed(String?)

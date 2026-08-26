@@ -732,6 +732,9 @@ private extension ReviewLogEntry {
             "timestamp": .string(timestamp.ISO8601Format()),
         ]
         object["groupId"] = groupID.map(Value.string) ?? .null
+        if audience == .developer {
+            object["audience"] = .string(audience.rawValue)
+        }
         return .object(object)
     }
 }

@@ -1,5 +1,5 @@
 import Testing
-@testable import CodexReview
+@_spi(Testing) @testable import CodexReview
 import CodexReviewMCPServer
 import CodexReviewTesting
 
@@ -44,5 +44,51 @@ struct CodexReviewMCPServerTests {
         }
         #expect(read.jobID == "job-1")
         #expect(read.core.lifecycle.status == .succeeded)
+    }
+
+    @Test func reviewReadDefaultHidesDeveloperLogsWhileAllRetainsThem() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-1",
+            cwd: "/tmp/project",
+            targetSummary: "Uncommitted changes",
+            status: .failed,
+            summary: "Failed",
+            logEntries: [
+                .init(kind: .diagnostic, text: "Product diagnostic"),
+                .init(kind: .diagnostic, text: "Developer diagnostic", audience: .developer),
+            ]
+        )
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [.init(cwd: "/tmp/project")],
+            jobs: [job]
+        )
+        let server = CodexReviewMCPServer(store: store)
+
+        let defaultResponse = try await server.handle(.reviewRead(
+            sessionID: nil,
+            jobID: job.id,
+            logFilter: .defaultSetting,
+            logPage: .default
+        ))
+        let allResponse = try await server.handle(.reviewRead(
+            sessionID: nil,
+            jobID: job.id,
+            logFilter: .all,
+            logPage: .default
+        ))
+
+        guard case .reviewRead(let defaultRead) = defaultResponse,
+              case .reviewRead(let allRead) = allResponse else {
+            Issue.record("Expected reviewRead responses")
+            return
+        }
+        #expect(defaultRead.logs.map(\.audience) == [.product])
+        #expect(allRead.logs.map(\.audience) == [.product, .developer])
+        #expect(defaultRead.rawLogText == allRead.rawLogText)
     }
 }
