@@ -124,9 +124,10 @@ package actor BackendReviewEventMailbox {
         }
     }
 
-    package func append(_ event: CodexReviewBackendModel.Review.Event) {
+    @discardableResult
+    package func append(_ event: CodexReviewBackendModel.Review.Event) -> Bool {
         guard terminal == nil else {
-            return
+            return false
         }
         if let waiterID = waiters.keys.first,
            let waiter = waiters.removeValue(forKey: waiterID) {
@@ -138,6 +139,7 @@ package actor BackendReviewEventMailbox {
             terminal = .finished
             resumeWaitersForTerminal()
         }
+        return true
     }
 
     package func append(contentsOf events: [CodexReviewBackendModel.Review.Event]) {
