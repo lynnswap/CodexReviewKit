@@ -6874,6 +6874,40 @@ struct AppServerClientTests {
         #expect(await transport.isClosedForTesting())
     }
 
+    @Test func cancelledSameThreadCleanupWaiterIsRemovedBeforeNextRequest() async throws {
+        let firstGate = AsyncGate()
+        let (waiterQueuedStream, waiterQueuedContinuation) = AsyncStream<Void>.makeStream()
+        let serializer = RequestSerializer(waiterQueued: {
+            waiterQueuedContinuation.yield()
+        })
+        let scope = AppServerAPI.RequestScope.thread("thread-1")
+        let firstStarted = AsyncGate()
+        let first = Task {
+            try await serializer.run(scope: scope) {
+                await firstStarted.open()
+                await firstGate.waitIgnoringCancellation()
+                return "first"
+            }
+        }
+        await firstStarted.wait()
+
+        let second = Task {
+            try await serializer.run(scope: scope) {
+                "second"
+            }
+        }
+        var waiterQueuedIterator = waiterQueuedStream.makeAsyncIterator()
+        _ = await waiterQueuedIterator.next()
+        second.cancel()
+        await #expect(throws: CancellationError.self) {
+            try await second.value
+        }
+
+        await firstGate.open()
+        #expect(try await first.value == "first")
+        #expect(try await serializer.run(scope: scope) { "next" } == "next")
+    }
+
     @Test func timeoutCleanupPreservesCallerCancellationAcrossTransportContainment() async throws {
         let transport = FakeJSONRPCTransport()
         let cleanupGate = AsyncGate()
