@@ -1186,7 +1186,7 @@ struct CurrentV2ReviewRoutingIntegrationTests {
 
         let events = try await collectEvents(from: attempt.events)
         let commandOutputTexts = events.compactMap { event -> String? in
-            guard case .logEntry(.commandOutput, let text, _, _, _) = event else {
+            guard case .logEntry(.commandOutput, let text, _, _, _, _) = event else {
                 return nil
             }
             return text
@@ -1424,7 +1424,7 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         #expect(outputTexts(in: events).contains("after unknown"))
         #expect(events.contains { if case .failed = $0 { true } else { false } } == false)
         #expect(events.contains {
-            if case .logEntry(.diagnostic, _, _, _, _) = $0 { true } else { false }
+            if case .logEntry(.diagnostic, _, _, _, _, _) = $0 { true } else { false }
         } == false)
         #expect(events.last == .completed(
             summary: "Succeeded.",
@@ -1494,7 +1494,7 @@ struct CurrentV2ReviewRoutingIntegrationTests {
             #expect(metrics.connectionFailures == 0)
             try await emitCompletedReview(transport: transport, review: "No findings.")
             let events = try await collectEvents(from: attempts[0].events)
-            #expect(events.contains { if case .logEntry(.diagnostic, _, _, _, _) = $0 { true } else { false } } == false)
+            #expect(events.contains { if case .logEntry(.diagnostic, _, _, _, _, _) = $0 { true } else { false } } == false)
             #expect(await transport.isClosedForTesting() == false)
         case .ignoredAmbiguous:
             let metrics = await backend.notificationRouterMetricsForTesting()
@@ -1843,7 +1843,7 @@ struct CurrentV2ReviewRoutingIntegrationTests {
 
         let events = try await collectEvents(from: attempt.events)
         let replacements = events.compactMap { event -> (ReviewLogEntry.Kind, String, String?, Bool)? in
-            guard case .logEntry(let kind, let text, let groupID, let replacesGroup, _) = event,
+            guard case .logEntry(let kind, let text, let groupID, let replacesGroup, _, _) = event,
                   kind == .event || kind == .todoList else {
                 return nil
             }
@@ -2023,7 +2023,7 @@ struct CurrentV2ReviewRoutingIntegrationTests {
             JSONEncoder().encode(terminalNotification)
         ))
         let canonicalReviewEvents = normalizedEvents.filter { event in
-            guard case .logEntry(_, _, _, _, let metadata) = event else {
+            guard case .logEntry(_, _, _, _, let metadata, _) = event else {
                 return false
             }
             return metadata?.sourceType == "exitedReviewMode"
@@ -2045,7 +2045,7 @@ struct CurrentV2ReviewRoutingIntegrationTests {
             ),
         ])
         let companionEvents = normalizedEvents.filter { event in
-            guard case .logEntry(_, _, let groupID, _, _) = event else {
+            guard case .logEntry(_, _, let groupID, _, _, _) = event else {
                 return false
             }
             return groupID == "final"
@@ -2216,7 +2216,7 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         in events: [CodexReviewBackendModel.Review.Event]
     ) -> [String] {
         events.compactMap { event in
-            guard case .logEntry(.commandOutput, let text, _, _, _) = event else {
+            guard case .logEntry(.commandOutput, let text, _, _, _, _) = event else {
                 return nil
             }
             return text

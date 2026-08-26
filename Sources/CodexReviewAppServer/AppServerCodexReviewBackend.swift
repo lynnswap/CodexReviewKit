@@ -758,23 +758,24 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             return
         }
         let session = await reviewEventSession(for: run, admittedBy: operationID)
-        await session.requestCancellation(message: reason.message)
+        let cancellationRequestID = await session.requestCancellation(message: reason.message)
         do {
             try await sendTurnInterrupt(for: run)
+            await session.acceptCancellationRequest(cancellationRequestID)
             await finishReviewEventStream(
                 threadID: run.threadID,
                 cancellationMessage: reason.message,
                 buffersMissingContinuation: true
             )
         } catch {
-            await session.clearCancellationRequest()
+            await session.clearCancellationRequest(cancellationRequestID)
             throw error
         }
     }
 
     package func interruptReview(
         _ requestAdmission: ReviewInterruptRequestAdmission,
-        reason _: CodexReviewBackendModel.CancellationReason
+        reason: CodexReviewBackendModel.CancellationReason
     ) async throws {
         let operationID = try admitReviewOperation()
         defer { finishReviewOperation(operationID) }
@@ -788,7 +789,15 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                     message: "Review attempt \(run.attemptID) is no longer active."
                 ))
             }
-            try await sendTurnInterrupt(for: run)
+            let session = await reviewEventSession(for: run, admittedBy: operationID)
+            let cancellationRequestID = await session.requestCancellation(message: reason.message)
+            do {
+                try await sendTurnInterrupt(for: run)
+                await session.acceptCancellationRequest(cancellationRequestID)
+            } catch {
+                await session.clearCancellationRequest(cancellationRequestID)
+                throw error
+            }
         } catch {
             throw Self.interruptRequestFailure(for: error)
         }
@@ -1135,6 +1144,20 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
 
     package func notificationRouterIsRunningForTesting() -> Bool {
         notificationRouterTask != nil
+    }
+
+    package func waitForNotificationRouterCompletionForTesting() async {
+        await notificationRouterTask?.value
+    }
+
+    package func holdNextReviewEventSessionTerminalCommitForTesting(
+        _ run: CodexReviewBackendModel.Review.Run,
+        operation: @escaping @Sendable () async -> Void
+    ) async {
+        guard let session = reviewEventSessionsByAttemptID[run.attemptID] else {
+            preconditionFailure("Review event session must exist before holding terminal commit.")
+        }
+        await session.holdNextTerminalCommitForTesting(operation: operation)
     }
 
     package func reviewEventSessionCountForTesting() -> Int {
@@ -1802,12 +1825,14 @@ private struct DecodedReviewNotification {
 private struct PendingStreamedLogEntry: Sendable {
     struct Key: Hashable, Sendable {
         var kind: ReviewLogEntry.Kind
+        var audience: ReviewLogEntry.Audience
         var groupID: String
         var sourceType: String?
         var itemID: String?
     }
 
     var kind: ReviewLogEntry.Kind
+    var audience: ReviewLogEntry.Audience
     var text: String
     var groupID: String
     var metadata: ReviewLogEntry.Metadata?
@@ -1815,6 +1840,7 @@ private struct PendingStreamedLogEntry: Sendable {
     var key: Key {
         .init(
             kind: kind,
+            audience: audience,
             groupID: groupID,
             sourceType: metadata?.sourceType,
             itemID: metadata?.itemID
@@ -1827,12 +1853,13 @@ private struct PendingStreamedLogEntry: Sendable {
             text: text,
             groupID: groupID,
             replacesGroup: false,
-            metadata: metadata
+            metadata: metadata,
+            audience: audience
         )
     }
 
     init?(_ event: CodexReviewBackendModel.Review.Event) {
-        guard case .logEntry(let kind, let text, let groupID, let replacesGroup, let metadata) = event,
+        guard case .logEntry(let kind, let text, let groupID, let replacesGroup, let metadata, let audience) = event,
               text.isEmpty == false,
               replacesGroup == false,
               let groupID
@@ -1852,6 +1879,7 @@ private struct PendingStreamedLogEntry: Sendable {
             return nil
         }
         self.kind = kind
+        self.audience = audience
         self.text = text
         self.groupID = groupID
         self.metadata = metadata
@@ -1863,6 +1891,101 @@ private struct PendingStreamedLogEntry: Sendable {
 }
 
 private actor AppServerReviewEventSession {
+    private struct CancellationRequests {
+        var pendingMessagesByID: [UUID: String] = [:]
+        var acceptedMessage: String?
+
+        var hasIntent: Bool {
+            acceptedMessage != nil || pendingMessagesByID.isEmpty == false
+        }
+
+        var isAwaitingAcceptance: Bool {
+            acceptedMessage == nil && pendingMessagesByID.isEmpty == false
+        }
+
+        mutating func begin(message: String) -> UUID {
+            let id = UUID()
+            pendingMessagesByID[id] = message
+            return id
+        }
+
+        mutating func accept(_ id: UUID) {
+            guard let message = pendingMessagesByID.removeValue(forKey: id) else {
+                return
+            }
+            if acceptedMessage == nil {
+                acceptedMessage = message
+            }
+        }
+
+        mutating func reject(_ id: UUID) {
+            pendingMessagesByID.removeValue(forKey: id)
+        }
+    }
+
+    private struct BufferedCancellationArtifact {
+        var itemID: String
+        var originalEvents: [CodexReviewBackendModel.Review.Event]
+        var completedText: String?
+        var completedMetadata: ReviewLogEntry.Metadata?
+    }
+
+    private struct RequestedCancellationArtifacts {
+        enum Phase {
+            case reviewExitStarted
+            case awaitingCompanionStart
+            case companionStarted
+            case ready
+        }
+
+        var phase: Phase
+        var reviewExit: BufferedCancellationArtifact
+        var companion: BufferedCancellationArtifact?
+
+        var originalEvents: [CodexReviewBackendModel.Review.Event] {
+            reviewExit.originalEvents + (companion?.originalEvents ?? [])
+        }
+
+        var developerEvents: [CodexReviewBackendModel.Review.Event]? {
+            guard case .ready = phase,
+                  let reviewExitText = reviewExit.completedText,
+                  let companion,
+                  let companionText = companion.completedText
+            else {
+                return nil
+            }
+            return [
+                .logEntry(
+                    kind: .diagnostic,
+                    text: reviewExitText,
+                    groupID: reviewExit.itemID,
+                    replacesGroup: false,
+                    metadata: reviewExit.completedMetadata,
+                    audience: .developer
+                ),
+                .logEntry(
+                    kind: .diagnostic,
+                    text: companionText,
+                    groupID: companion.itemID,
+                    replacesGroup: false,
+                    metadata: companion.completedMetadata,
+                    audience: .developer
+                ),
+            ]
+        }
+    }
+
+    private enum TerminalCommitState {
+        case open
+        case awaitingCancellationAcceptance(ReviewAttemptTerminal)
+        case finalizing
+        case finished
+
+        var acceptsIngress: Bool {
+            if case .open = self { true } else { false }
+        }
+    }
+
     private static let commandTimeoutExitCode = 124
     private static let longCommandDurationWarningMs = 100_000
     private static let streamedLogFlushIntervalNanoseconds: UInt64 = 20_000_000
@@ -1877,9 +2000,11 @@ private actor AppServerReviewEventSession {
     private var pendingStreamedLogEntries: [PendingStreamedLogEntry] = []
     private var pendingStreamedLogIndexByKey: [PendingStreamedLogEntry.Key: Int] = [:]
     private var streamedLogFlushTask: Task<Void, Never>?
-    private var cancellationRequestedMessage: String?
+    private var cancellationRequests = CancellationRequests()
+    private var requestedCancellationArtifacts: RequestedCancellationArtifacts?
+    private var terminalCommitState = TerminalCommitState.open
+    private var terminalCommitTestingOperation: (@Sendable () async -> Void)?
     private let createdAt = Date()
-    private var finished = false
     private var isRunFinalized: Bool
     private var isDrainingStartupNotifications = false
     private var pendingStartupNotifications: [AppServerRoutedReviewNotification] = []
@@ -1942,17 +2067,31 @@ private actor AppServerReviewEventSession {
         return threadIDs
     }
 
-    func requestCancellation(message: String) {
-        cancellationRequestedMessage = message
+    func requestCancellation(message: String) -> UUID {
+        cancellationRequests.begin(message: message)
     }
 
-    func clearCancellationRequest() {
-        cancellationRequestedMessage = nil
+    func acceptCancellationRequest(_ id: UUID) async {
+        cancellationRequests.accept(id)
+        await resolveDeferredTerminalIfPossible()
+    }
+
+    func clearCancellationRequest(_ id: UUID) async {
+        cancellationRequests.reject(id)
+        guard cancellationRequests.hasIntent == false else {
+            return
+        }
+        if case .awaitingCancellationAcceptance(let terminal) = terminalCommitState,
+           beginTerminalCommit() {
+            await commitTerminal(terminal)
+        } else if terminalCommitState.acceptsIngress {
+            await emitPrecedingEvents(drainRequestedCancellationProductEvents())
+        }
     }
 
     func receive(_ notification: AppServerRoutedReviewNotification) async {
         metrics.routed += 1
-        guard finished == false else {
+        guard terminalCommitState.acceptsIngress else {
             metrics.ignored += 1
             return
         }
@@ -1968,11 +2107,16 @@ private actor AppServerReviewEventSession {
         cancellationMessage: String?,
         buffersMissingContinuation _: Bool = false
     ) async {
+        guard terminalCommitState.acceptsIngress else {
+            return
+        }
         var precedingEvents = drainPendingStreamedLogEvents()
         if cancellationMessage == nil {
             cancelPendingStreamedLogFlush()
         } else {
-            cancellationRequestedMessage = cancellationMessage
+            if cancellationRequests.acceptedMessage == nil {
+                cancellationRequests.acceptedMessage = cancellationMessage
+            }
             precedingEvents.append(contentsOf: commandLifecycleByItemID.closeActiveCommands(status: "canceled"))
             commandLifecycleByItemID.removeAll(keepingCapacity: true)
         }
@@ -1980,11 +2124,18 @@ private actor AppServerReviewEventSession {
     }
 
     func finish(throwing failure: ReviewAttemptStreamFailure?) async {
-        guard finished == false else {
+        switch terminalCommitState {
+        case .awaitingCancellationAcceptance, .finalizing:
+            cancelPendingStreamedLogFlush()
+            pendingStartupNotifications.removeAll(keepingCapacity: true)
             return
+        case .finished:
+            return
+        case .open:
+            terminalCommitState = .finalizing
         }
         let precedingEvents = drainPendingStreamedLogEvents()
-        finished = true
+            + drainRequestedCancellationProductEvents()
         cancelPendingStreamedLogFlush()
         commandLifecycleByItemID.removeAll(keepingCapacity: true)
         pendingStartupNotifications.removeAll(keepingCapacity: true)
@@ -1994,18 +2145,20 @@ private actor AppServerReviewEventSession {
         } else {
             await mailbox.finish()
         }
+        terminalCommitState = .finished
     }
 
     func abandon() async {
-        guard finished == false else {
+        if case .finished = terminalCommitState {
             return
         }
-        finished = true
+        terminalCommitState = .finished
         cancelPendingStreamedLogFlush()
         commandLifecycleByItemID.removeAll(keepingCapacity: true)
         pendingStreamedLogEntries.removeAll(keepingCapacity: true)
         pendingStreamedLogIndexByKey.removeAll(keepingCapacity: true)
         pendingStartupNotifications.removeAll(keepingCapacity: true)
+        requestedCancellationArtifacts = nil
         await mailbox.abandon()
     }
 
@@ -2019,22 +2172,31 @@ private actor AppServerReviewEventSession {
 
     func detach(subscriptionID _: Int) {}
 
+    func holdNextTerminalCommitForTesting(
+        operation: @escaping @Sendable () async -> Void
+    ) {
+        precondition(terminalCommitTestingOperation == nil)
+        terminalCommitTestingOperation = operation
+    }
+
     private func finish(
         precedingEvents: [CodexReviewBackendModel.Review.Event],
         cancellationMessage: String?
     ) async {
-        guard finished == false else {
+        guard terminalCommitState.acceptsIngress else {
             return
         }
+        terminalCommitState = .finalizing
         cancelPendingStreamedLogFlush()
         pendingStartupNotifications.removeAll(keepingCapacity: true)
         await emitPrecedingEvents(precedingEvents)
         if let cancellationMessage {
-            await emitTerminal(.interrupted(message: cancellationMessage))
+            await commitTerminal(.interrupted(message: cancellationMessage))
         } else {
+            await emitPrecedingEvents(drainRequestedCancellationProductEvents())
             await mailbox.finish()
+            terminalCommitState = .finished
         }
-        finished = true
     }
 
     private func drainStartupNotifications() async {
@@ -2045,13 +2207,18 @@ private actor AppServerReviewEventSession {
         defer {
             isDrainingStartupNotifications = false
         }
-        while finished == false, pendingStartupNotifications.isEmpty == false {
+        while terminalCommitState.acceptsIngress,
+              pendingStartupNotifications.isEmpty == false {
             let notification = pendingStartupNotifications.removeFirst()
             await process(notification)
         }
     }
 
     private func process(_ notification: AppServerRoutedReviewNotification) async {
+        guard terminalCommitState.acceptsIngress else {
+            metrics.ignored += 1
+            return
+        }
         recordActiveInterruptTurn(from: notification)
         guard var terminalReducer else {
             await failAttempt(.missingRoutingIdentity(method: notification.method))
@@ -2144,7 +2311,11 @@ private actor AppServerReviewEventSession {
             }
         }
 
-        for event in decoded.events {
+        let events = eventsAfterRequestedCancellationArtifactBuffering(
+            notification: notification,
+            events: decoded.events
+        )
+        for event in events {
             if bufferStreamedLog(event) {
                 continue
             }
@@ -2165,20 +2336,189 @@ private actor AppServerReviewEventSession {
         }
 
         if let terminal {
-            if await flushPendingStreamedLog() {
-                return
+            if cancellationRequests.isAwaitingAcceptance {
+                terminalCommitState = .awaitingCancellationAcceptance(terminal)
+            } else if beginTerminalCommit() {
+                await commitTerminal(terminal)
             }
-            for commandEvent in commandLifecycleByItemID.closeActiveCommands(
-                status: terminal.commandStatus
-            ) {
-                _ = await emit(commandEvent)
-            }
-            commandLifecycleByItemID.removeAll(keepingCapacity: true)
-            await emitTerminal(terminal)
         } else if decoded.events.isEmpty,
                   notification.method != "turn/started" {
             metrics.ignored += 1
         }
+    }
+
+    private func eventsAfterRequestedCancellationArtifactBuffering(
+        notification: AppServerRoutedReviewNotification,
+        events: [CodexReviewBackendModel.Review.Event]
+    ) -> [CodexReviewBackendModel.Review.Event] {
+        guard cancellationRequests.hasIntent else {
+            return drainRequestedCancellationProductEvents() + events
+        }
+
+        guard var artifacts = requestedCancellationArtifacts else {
+            guard notification.method == "item/started",
+                  let item = notification.payload.item,
+                  item.type == "exitedReviewMode"
+            else {
+                return events
+            }
+            requestedCancellationArtifacts = .init(
+                phase: .reviewExitStarted,
+                reviewExit: .init(
+                    itemID: item.id,
+                    originalEvents: events,
+                    completedText: nil,
+                    completedMetadata: nil
+                ),
+                companion: nil
+            )
+            metrics.buffered += 1
+            return []
+        }
+
+        let matched: Bool
+        switch artifacts.phase {
+        case .reviewExitStarted:
+            if notification.method == "item/completed",
+               let item = notification.payload.item,
+               item.type == "exitedReviewMode",
+               item.id == artifacts.reviewExit.itemID {
+                artifacts.reviewExit.originalEvents.append(contentsOf: events)
+                artifacts.reviewExit.completedText = item.review
+                artifacts.reviewExit.completedMetadata = Self.lastLogMetadata(in: events)
+                artifacts.phase = .awaitingCompanionStart
+                matched = true
+            } else {
+                matched = false
+            }
+        case .awaitingCompanionStart:
+            if notification.method == "item/started",
+               let item = notification.payload.item,
+               item.type == "agentMessage" {
+                artifacts.companion = .init(
+                    itemID: item.id,
+                    originalEvents: events,
+                    completedText: nil,
+                    completedMetadata: nil
+                )
+                artifacts.phase = .companionStarted
+                matched = true
+            } else {
+                matched = false
+            }
+        case .companionStarted:
+            if notification.method == "item/agentMessage/delta",
+               notification.payload.itemID == artifacts.companion?.itemID {
+                artifacts.companion?.originalEvents.append(contentsOf: events)
+                matched = true
+            } else if notification.method == "item/completed",
+                      let item = notification.payload.item,
+                      item.type == "agentMessage",
+                      item.id == artifacts.companion?.itemID {
+                artifacts.companion?.originalEvents.append(contentsOf: events)
+                artifacts.companion?.completedText = item.text
+                artifacts.companion?.completedMetadata = Self.lastLogMetadata(in: events)
+                artifacts.phase = .ready
+                matched = true
+            } else {
+                matched = false
+            }
+        case .ready:
+            matched = notification.method == "turn/completed"
+        }
+
+        if matched {
+            requestedCancellationArtifacts = artifacts
+            metrics.buffered += 1
+            return []
+        }
+
+        requestedCancellationArtifacts = nil
+        return artifacts.originalEvents + events
+    }
+
+    private static func lastLogMetadata(
+        in events: [CodexReviewBackendModel.Review.Event]
+    ) -> ReviewLogEntry.Metadata? {
+        for event in events.reversed() {
+            if case .logEntry(_, _, _, _, let metadata, _) = event {
+                return metadata
+            }
+        }
+        return nil
+    }
+
+    private func drainRequestedCancellationProductEvents() -> [CodexReviewBackendModel.Review.Event] {
+        guard let artifacts = requestedCancellationArtifacts else {
+            return []
+        }
+        requestedCancellationArtifacts = nil
+        return artifacts.originalEvents
+    }
+
+    private func resolveRequestedCancellationArtifacts(
+        for terminal: ReviewAttemptTerminal
+    ) -> (
+        events: [CodexReviewBackendModel.Review.Event],
+        terminal: ReviewAttemptTerminal
+    ) {
+        guard let artifacts = requestedCancellationArtifacts else {
+            return ([], terminal)
+        }
+        requestedCancellationArtifacts = nil
+
+        if case .interrupted = terminal,
+           cancellationRequests.acceptedMessage != nil,
+           let developerEvents = artifacts.developerEvents {
+            return (developerEvents, terminal)
+        }
+
+        return (artifacts.originalEvents, terminal)
+    }
+
+    private func resolveDeferredTerminalIfPossible() async {
+        guard cancellationRequests.isAwaitingAcceptance == false,
+              case .awaitingCancellationAcceptance(let terminal) = terminalCommitState,
+              beginTerminalCommit()
+        else {
+            return
+        }
+        await commitTerminal(terminal)
+    }
+
+    private func beginTerminalCommit() -> Bool {
+        switch terminalCommitState {
+        case .open, .awaitingCancellationAcceptance:
+            terminalCommitState = .finalizing
+            return true
+        case .finalizing, .finished:
+            return false
+        }
+    }
+
+    private func commitTerminal(_ terminal: ReviewAttemptTerminal) async {
+        guard case .finalizing = terminalCommitState else {
+            return
+        }
+        if let operation = terminalCommitTestingOperation {
+            terminalCommitTestingOperation = nil
+            await operation()
+        }
+        if await flushPendingStreamedLog() {
+            terminalCommitState = .finished
+            return
+        }
+        let resolved = resolveRequestedCancellationArtifacts(for: terminal)
+        await emitPrecedingEvents(resolved.events)
+        for commandEvent in commandLifecycleByItemID.closeActiveCommands(
+            status: resolved.terminal.commandStatus
+        ) {
+            _ = await emit(commandEvent)
+        }
+        commandLifecycleByItemID.removeAll(keepingCapacity: true)
+        pendingStartupNotifications.removeAll(keepingCapacity: true)
+        await emitTerminal(resolved.terminal)
+        terminalCommitState = .finished
     }
 
     private func recordActiveInterruptTurn(
@@ -2195,7 +2535,7 @@ private actor AppServerReviewEventSession {
 
     func receiveGlobalDiagnostic(_ notification: AppServerRoutedReviewNotification) async {
         metrics.routed += 1
-        guard finished == false else {
+        guard terminalCommitState.acceptsIngress else {
             metrics.ignored += 1
             return
         }
@@ -2217,15 +2557,18 @@ private actor AppServerReviewEventSession {
     }
 
     func failAttempt(_ error: ReviewIngestionError) async {
-        guard finished == false else {
+        guard terminalCommitState.acceptsIngress else {
+            metrics.ignored += 1
             return
         }
+        terminalCommitState = .finalizing
         let precedingEvents = drainPendingStreamedLogEvents()
+            + drainRequestedCancellationProductEvents()
         cancelPendingStreamedLogFlush()
         pendingStartupNotifications.removeAll(keepingCapacity: true)
         await emitPrecedingEvents(precedingEvents)
         await emitTerminal(.failed(message: error.localizedDescription))
-        finished = true
+        terminalCommitState = .finished
     }
 
     private func noteReviewThreadIDForCleanup(_ reviewThreadID: String?) {
@@ -2317,7 +2660,7 @@ private actor AppServerReviewEventSession {
         switch event {
         case .started, .message, .messageDelta, .log:
             return true
-        case .logEntry(let kind, _, _, _, _):
+        case .logEntry(let kind, _, _, _, _, _):
             return kind != .command && kind != .commandOutput
         case .completed, .failed, .cancelled:
             return false
@@ -2328,7 +2671,7 @@ private actor AppServerReviewEventSession {
         guard commandLifecycleByItemID.isEmpty == false else {
             return false
         }
-        let status = cancellationRequestedMessage == nil ? "completed" : "canceled"
+        let status = cancellationRequests.hasIntent ? "canceled" : "completed"
         for commandEvent in commandLifecycleByItemID.closeActiveCommands(status: status) {
             if await emit(commandEvent) {
                 return true
@@ -2342,7 +2685,7 @@ private actor AppServerReviewEventSession {
         guard commandLifecycleByItemID.isEmpty == false else {
             return false
         }
-        let status = cancellationRequestedMessage == nil ? "completed" : "canceled"
+        let status = cancellationRequests.hasIntent ? "canceled" : "completed"
         appServerBackendLogger.info(
             "Review mode exited with \(self.commandLifecycleByItemID.count, privacy: .public) active command execution(s); closing as \(status, privacy: .public)."
         )
@@ -2385,6 +2728,9 @@ private actor AppServerReviewEventSession {
 
     private func flushPendingStreamedLogFromTimer() async {
         streamedLogFlushTask = nil
+        guard terminalCommitState.acceptsIngress else {
+            return
+        }
         _ = await flushPendingStreamedLog()
     }
 
@@ -2451,7 +2797,7 @@ private actor AppServerReviewEventSession {
     }
 
     private static func isCommandTimeoutWarning(_ event: CodexReviewBackendModel.Review.Event) -> Bool {
-        guard case .logEntry(_, _, _, _, let metadata) = event,
+        guard case .logEntry(_, _, _, _, let metadata, _) = event,
               metadata?.sourceType == "commandExecution"
         else {
             return false
