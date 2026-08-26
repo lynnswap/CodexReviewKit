@@ -15,6 +15,15 @@ private func makeAppServerReviewAttemptID() -> String {
     UUID().uuidString
 }
 
+private struct AppServerCleanupRequestTimeout: LocalizedError, Sendable {
+    let method: String
+    let timeout: Duration
+
+    var errorDescription: String? {
+        "\(method) cleanup request timed out after \(timeout)."
+    }
+}
+
 package struct AppServerRuntimeOwnerLifecycleHandle: Sendable {
     private let closeAdmissionOperation: @Sendable () async -> Void
     private let closeAndWaitOperation: @Sendable () async throws -> Void
@@ -189,6 +198,8 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     private let client: AppServerClient
     private let threadStartPermissionStrategy: AppServerAPI.Thread.Start.PermissionStrategy
     private let ingestionDiagnosticRecorder: any ReviewIngestionDiagnosticRecording
+    private let cleanupRequestTimeout: Duration
+    private let cleanupRequestSleep: @Sendable (Duration) async throws -> Void
     private var controlsByThreadID: [String: AppServerReviewControl] = [:]
     private var reviewEventSessionsByAttemptID: [String: AppServerReviewEventSession] = [:]
     private var reviewEventSessionRegistrationOrdinalByAttemptID: [String: Int] = [:]
@@ -217,11 +228,15 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     package init(
         client: AppServerClient,
         threadStartPermissionStrategy: AppServerAPI.Thread.Start.PermissionStrategy = .modernPermissions,
-        ingestionDiagnosticRecorder: any ReviewIngestionDiagnosticRecording = OSLogReviewIngestionDiagnosticRecorder()
+        ingestionDiagnosticRecorder: any ReviewIngestionDiagnosticRecording = OSLogReviewIngestionDiagnosticRecorder(),
+        cleanupRequestTimeout: Duration = .seconds(2),
+        cleanupRequestSleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
     ) {
         self.client = client
         self.threadStartPermissionStrategy = threadStartPermissionStrategy
         self.ingestionDiagnosticRecorder = ingestionDiagnosticRecorder
+        self.cleanupRequestTimeout = cleanupRequestTimeout
+        self.cleanupRequestSleep = cleanupRequestSleep
     }
 
     package nonisolated var runtimeOwnerLifecycleHandle: AppServerRuntimeOwnerLifecycleHandle {
@@ -1013,6 +1028,25 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         try await performCleanupReview(run)
     }
 
+    private func sendCleanupRequest<Request: AppServerAPI.Request>(
+        _ request: Request
+    ) async throws -> Request.Response {
+        try await withThrowingTaskGroup(of: Request.Response.self) { group in
+            group.addTask { [client] in
+                try await client.send(request)
+            }
+            group.addTask { [cleanupRequestSleep, cleanupRequestTimeout] in
+                try await cleanupRequestSleep(cleanupRequestTimeout)
+                throw AppServerCleanupRequestTimeout(
+                    method: Request.method,
+                    timeout: cleanupRequestTimeout
+                )
+            }
+            defer { group.cancelAll() }
+            return try await group.next()!
+        }
+    }
+
     private func performCleanupReview(
         _ run: CodexReviewBackendModel.Review.Run
     ) async throws {
@@ -1031,7 +1065,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         }
         var failureMessages: [String] = []
         do {
-            let _: EmptyResponse = try await client.send(AppServerAPI.Thread.BackgroundTerminals.Clean.Request(
+            let _: EmptyResponse = try await sendCleanupRequest(AppServerAPI.Thread.BackgroundTerminals.Clean.Request(
                 params: .init(threadID: run.threadID)
             ))
         } catch {
@@ -1040,7 +1074,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             )
         }
         do {
-            let _: AppServerAPI.Thread.Unsubscribe.Response = try await client.send(AppServerAPI.Thread.Unsubscribe.Request(
+            let _: AppServerAPI.Thread.Unsubscribe.Response = try await sendCleanupRequest(AppServerAPI.Thread.Unsubscribe.Request(
                 params: .init(threadID: run.threadID)
             ))
         } catch {
@@ -1050,7 +1084,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         }
         for threadID in cleanupThreadIDs {
             do {
-                let _: EmptyResponse = try await client.send(AppServerAPI.Thread.Delete.Request(
+                let _: EmptyResponse = try await sendCleanupRequest(AppServerAPI.Thread.Delete.Request(
                     params: .init(threadID: threadID)
                 ))
             } catch {

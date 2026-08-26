@@ -6835,6 +6835,48 @@ struct AppServerClientTests {
         #expect(deletedThreadIDs == ["review-thread-1", "thread-1"])
     }
 
+    @Test func backendCleanupTimesOutHeldRequestAndCancelsItsSend() async throws {
+        let transport = FakeJSONRPCTransport()
+        let cleanupGate = AsyncGate()
+        let timeoutGate = AsyncGate()
+        await transport.holdNext(
+            method: "thread/backgroundTerminals/clean",
+            gate: cleanupGate
+        )
+        let backend = AppServerCodexReviewBackend(
+            client: .init(transport: transport),
+            cleanupRequestTimeout: .seconds(2),
+            cleanupRequestSleep: { _ in
+                await timeoutGate.wait()
+            }
+        )
+        let run = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "thread-1"
+        )
+        let cleanup = Task {
+            try await backend.cleanupReview(run)
+        }
+
+        await transport.waitForRequestCount(1)
+        await timeoutGate.open()
+
+        await #expect(throws: ReviewRuntimeCloseFailure.cleanup(
+            "thread/backgroundTerminals/clean for thread-1: "
+                + "thread/backgroundTerminals/clean cleanup request timed out after 2.0 seconds.; "
+                + "thread/unsubscribe for thread-1: thread/unsubscribe cleanup request timed out after 2.0 seconds.; "
+                + "thread/delete for thread-1: thread/delete cleanup request timed out after 2.0 seconds."
+        )) {
+            try await cleanup.value
+        }
+        #expect(await transport.recordedRequests().map(\.method) == [
+            "thread/backgroundTerminals/clean",
+            "thread/unsubscribe",
+            "thread/delete",
+        ])
+    }
+
     @Test @MainActor
     func storeRetainsCleanupFailureAsSecondaryDiagnosticWithoutMaskingPrimary() async throws {
         let backend = FakeCodexReviewBackend()
