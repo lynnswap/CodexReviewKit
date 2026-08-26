@@ -1138,6 +1138,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         notificationRouterTask != nil
     }
 
+    package func reviewEventSessionCountForTesting() -> Int {
+        reviewEventSessionsByAttemptID.count
+    }
+
     package func waitForRuntimeOwnerCloseCallersForTesting(_ count: Int) async {
         await withCheckedContinuation { continuation in
             lifecycleTestingObservation.appendCloseCallerWaiter(

@@ -6,7 +6,7 @@ import CodexReviewTesting
 @Suite("review recovery admission")
 struct ReviewRecoveryAdmissionTests {
     @Test @MainActor
-    func storeBackendDefaultTypedInterruptRejectsBeforeDispatch() async throws {
+    func previewStoreBackendTypedInterruptRejectsBeforeDispatch() async throws {
         let backend = PreviewCodexReviewStoreBackend()
         let (admission, run) = try await makeActiveRecoveryAdmission()
 
