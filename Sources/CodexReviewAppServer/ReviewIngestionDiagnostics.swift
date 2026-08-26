@@ -54,14 +54,71 @@ package protocol ReviewIngestionDiagnosticRecording: Sendable {
     func record(_ diagnostic: ReviewIngestionDiagnosticRecord)
 }
 
+package struct ReviewIngestionDiagnosticLogPlan: Equatable, Sendable {
+    // Keep the variable payload at half of OSLog's 1 KiB message budget so the
+    // fixed format, correlation identifier, and decimal counters have headroom.
+    package static let maximumBase64ChunkLength = 512
+
+    package struct Header: Equatable, Sendable {
+        package let recordID: String
+        package let rawByteCount: Int
+        package let rawBase64Length: Int
+        package let chunkCount: Int
+    }
+
+    package struct Chunk: Equatable, Sendable {
+        package let recordID: String
+        package let index: Int
+        package let count: Int
+        package let base64: String
+    }
+
+    package let header: Header
+    package let chunks: [Chunk]
+
+    package init(rawParams: Data, recordID: String) {
+        let encoded = rawParams.base64EncodedData()
+        let chunkCount = encoded.isEmpty
+            ? 0
+            : ((encoded.count - 1) / Self.maximumBase64ChunkLength) + 1
+        header = Header(
+            recordID: recordID,
+            rawByteCount: rawParams.count,
+            rawBase64Length: encoded.count,
+            chunkCount: chunkCount
+        )
+        chunks = stride(
+            from: encoded.startIndex,
+            to: encoded.endIndex,
+            by: Self.maximumBase64ChunkLength
+        ).enumerated().map { index, start in
+            let end = min(start + Self.maximumBase64ChunkLength, encoded.endIndex)
+            return Chunk(
+                recordID: recordID,
+                index: index,
+                count: chunkCount,
+                base64: String(decoding: encoded[start..<end], as: UTF8.self)
+            )
+        }
+    }
+}
+
 package struct OSLogReviewIngestionDiagnosticRecorder: ReviewIngestionDiagnosticRecording {
     package init() {}
 
     package func record(_ diagnostic: ReviewIngestionDiagnosticRecord) {
-        let rawParamsBase64 = diagnostic.rawParams.base64EncodedString()
-        reviewIngestionLogger.error(
-            "Review ingestion failed method=\(diagnostic.method, privacy: .public) thread=\(diagnostic.threadID ?? "nil", privacy: .private) turn=\(diagnostic.turnID ?? "nil", privacy: .private) item_type=\(diagnostic.itemType ?? "nil", privacy: .private) stage=\(diagnostic.stage.rawValue, privacy: .public) disposition=\(diagnostic.disposition.rawValue, privacy: .public) error=\(diagnostic.error.localizedDescription, privacy: .private) raw_params_base64=\(rawParamsBase64, privacy: .private)"
+        let plan = ReviewIngestionDiagnosticLogPlan(
+            rawParams: diagnostic.rawParams,
+            recordID: UUID().uuidString
         )
+        reviewIngestionLogger.error(
+            "Review ingestion failed record_id=\(plan.header.recordID, privacy: .public) raw_byte_count=\(plan.header.rawByteCount, privacy: .private) raw_base64_length=\(plan.header.rawBase64Length, privacy: .private) raw_chunk_count=\(plan.header.chunkCount, privacy: .private) method=\(diagnostic.method, privacy: .public) stage=\(diagnostic.stage.rawValue, privacy: .public) disposition=\(diagnostic.disposition.rawValue, privacy: .public) thread=\(diagnostic.threadID ?? "nil", privacy: .private) turn=\(diagnostic.turnID ?? "nil", privacy: .private) item_type=\(diagnostic.itemType ?? "nil", privacy: .private) error=\(diagnostic.error.localizedDescription, privacy: .private)"
+        )
+        for chunk in plan.chunks {
+            reviewIngestionLogger.error(
+                "Review ingestion raw params record_id=\(chunk.recordID, privacy: .public) chunk_index_0_based=\(chunk.index, privacy: .private) chunk_count=\(chunk.count, privacy: .private) raw_params_base64_chunk=\(chunk.base64, privacy: .private)"
+            )
+        }
     }
 }
 
