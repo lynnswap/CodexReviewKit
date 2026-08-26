@@ -231,43 +231,42 @@ extension CodexReviewStore {
                     requested: cancellation.cancellation
                 )
             }
+        } catch let inputFailure as ReviewWorkerInputQueueError {
+            applyReviewWorkerInputFailure(inputFailure.failure, to: job)
         } catch let error where error is CancellationError || Task.isCancelled {
-            let startupCancellation = await admission.cancellationRequest()
-            if job.isTerminal == false || startupCancellation != nil {
-                try? completeCancellationAfterRegisteredWorkSuspension(
-                    for: job,
-                    requested: startupCancellation
-                        ?? job.pendingCancellationRequest?.cancellation
-                        ?? .system()
-                )
+            if let terminal = await admission.activeTerminalResolution(),
+               case .stream(let failure) = terminal.terminal {
+                if let cancellation = recordedStreamCancellation(
+                    terminal,
+                    failure: failure,
+                    pendingRequest: job.pendingCancellationRequest
+                ) {
+                    try? completeCancellationLocally(
+                        jobID: job.id,
+                        sessionID: job.sessionID,
+                        cancellation: cancellation
+                    )
+                } else {
+                    applyReviewWorkerInputFailure(failure, to: job)
+                }
+            } else {
+                let cancellation = await admission.cancellationRequest()
+                if job.isTerminal == false || cancellation != nil {
+                    try? completeCancellationAfterRegisteredWorkSuspension(
+                        for: job,
+                        requested: cancellation ?? job.pendingCancellationRequest?.cancellation ?? .system()
+                    )
+                }
             }
         } catch {
-            let primaryError = error
             let startupCancellation = await admission.cancellationRequest()
             if job.isTerminal == false, let startupCancellation {
                 try? completeCancellationAfterRegisteredWorkSuspension(
                     for: job,
                     requested: startupCancellation
                 )
-            } else if job.isTerminal == false,
-                      let inputFailure = primaryError as? ReviewWorkerInputQueueError {
-                switch inputFailure.failure {
-                case .protocolViolation, .workerContract:
-                    markReviewFailed(job, message: inputFailure.localizedDescription)
-                case .recoverableNetwork, .ownerForcedConnectionClose,
-                     .unexpectedConnection, .process:
-                    markReviewInterrupted(
-                        job,
-                        cause: .transport(message: inputFailure.localizedDescription)
-                    )
-                case .ownerCancellation:
-                    try? completeCancellationAfterRegisteredWorkSuspension(
-                        for: job,
-                        requested: job.pendingCancellationRequest?.cancellation ?? .system()
-                    )
-                }
             } else if job.isTerminal == false {
-                markReviewFailed(job, message: primaryError.localizedDescription)
+                markReviewFailed(job, message: error.localizedDescription)
             }
         }
         if let cleanupFailure = await cleanupReviewAttemptOwnership(
@@ -996,7 +995,6 @@ extension CodexReviewStore {
         _ job: CodexReviewJob,
         cause: ReviewInterruptionCause
     ) {
-        clearPendingCancellationProjection(for: job)
         let message: String? = switch cause {
         case .requested(let cancellation):
             cancellation.message
@@ -1012,6 +1010,38 @@ extension CodexReviewStore {
             message: message,
             terminal: .interrupted(cause)
         )
+    }
+
+    private func applyReviewWorkerInputFailure(
+        _ failure: ReviewAttemptStreamFailure,
+        to job: CodexReviewJob
+    ) {
+        guard job.isTerminal == false else { return }
+        switch failure {
+        case .protocolViolation, .workerContract:
+            markReviewFailed(job, message: failure.localizedDescription)
+        case .recoverableNetwork, .ownerForcedConnectionClose, .unexpectedConnection, .process:
+            markReviewInterrupted(job, cause: .transport(message: failure.localizedDescription))
+        case .ownerCancellation:
+            try? completeCancellationLocally(
+                jobID: job.id,
+                sessionID: job.sessionID,
+                cancellation: job.pendingCancellationRequest?.cancellation ?? .system()
+            )
+        }
+    }
+
+    private func recordedStreamCancellation(_ terminal: ReviewInterruptResolution,
+        failure: ReviewAttemptStreamFailure,
+        pendingRequest: ReviewCancellationRequestReceipt? = nil
+    ) -> ReviewCancellation? {
+        guard let cancellation = terminal.cancellation else {
+            guard case .recoverableNetwork = failure else { return nil }
+            return pendingRequest?.cancellation
+        }
+        guard terminal.cancellationRequestReceipt?.rejectionDisposition == .preserveRuntimeStopIntent else { return cancellation }
+        if case .ownerForcedConnectionClose = failure { return cancellation }
+        return nil
     }
 
     private func consumeReviewEvents(
@@ -1120,7 +1150,7 @@ extension CodexReviewStore {
                 }
                 switch reviewAttemptOwnerships[job.id] {
                 case .active(let active) where active.matches(streamTerminal.source):
-                    if let cancellation = terminalResolution.cancellation {
+                    if let cancellation = recordedStreamCancellation(terminalResolution, failure: failure) {
                         try? completeCancellationLocally(
                             jobID: job.id,
                             sessionID: job.sessionID,
@@ -1260,13 +1290,7 @@ extension CodexReviewStore {
     }
 
     private func throwReviewEventStreamFailure(_ failure: ReviewAttemptStreamFailure) throws -> Never {
-        switch failure {
-        case .ownerCancellation:
-            throw CancellationError()
-        case .recoverableNetwork, .ownerForcedConnectionClose, .unexpectedConnection,
-             .process, .protocolViolation, .workerContract:
-            throw ReviewWorkerInputQueueError(failure: failure)
-        }
+        throw ReviewWorkerInputQueueError(failure: failure)
     }
 
     private func throwTerminalRecordFailure(

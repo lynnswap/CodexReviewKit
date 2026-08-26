@@ -50,11 +50,7 @@ struct ReviewInterruptAdmissionTests {
         let requestGate = AsyncGate()
         let requestFinished = InterruptInvocationCounter()
         let cancellation = ReviewCancellation.system(message: "Stop runtime")
-        let receipt = ReviewCancellationRequestReceipt(
-            id: .init(jobID: "job-1", ordinal: 1),
-            cancellation: cancellation,
-            rejectionDisposition: .preserveRuntimeStopIntent
-        )
+        let receipt = makeReceipt(1, cancellation, .preserveRuntimeStopIntent)
 
         let interruption = Task {
             try await admission.interrupt(
@@ -92,20 +88,8 @@ struct ReviewInterruptAdmissionTests {
         let requestGate = AsyncGate()
         let requestCount = InterruptInvocationCounter()
         let cancellation = ReviewCancellation.mcpClient(message: "Same cancellation")
-        let firstReceipt = ReviewCancellationRequestReceipt(
-            id: .init(jobID: "job-1", ordinal: 1),
-            cancellation: cancellation,
-            rejectionDisposition: .reportFailure
-        )
-        let successorReceipt = ReviewCancellationRequestReceipt(
-            id: .init(jobID: "job-1", ordinal: 2),
-            cancellation: cancellation,
-            rejectionDisposition: .reportFailure
-        )
-        let rejection = ReviewInterruptRequestFailure(
-            outcome: .rejected(code: nil, message: "Rejected")
-        )
-
+        let firstReceipt = makeReceipt(1, cancellation)
+        let successorReceipt = makeReceipt(2, cancellation)
         let first = Task {
             try await admission.interrupt(
                 run,
@@ -114,7 +98,6 @@ struct ReviewInterruptAdmissionTests {
                     await requestCount.record()
                     await requestStarted.open()
                     await requestGate.waitIgnoringCancellation()
-                    throw rejection
                 }
             )
         }
@@ -128,19 +111,18 @@ struct ReviewInterruptAdmissionTests {
                 }
             )
         }
-        for _ in 0..<1_000 {
-            if await admission.cancellationRequestReceipt()?.id == successorReceipt.id {
-                break
-            }
-            await Task.yield()
-        }
-        #expect(await admission.cancellationRequestReceipt()?.id == successorReceipt.id)
+        await admission.waitForCancellationRequestReceipt(successorReceipt.id)
+        let terminal = try await admission.recordCanonicalTerminal(
+            .completed,
+            for: run,
+            cancellationRequest: firstReceipt
+        )
         await requestGate.open()
 
-        await #expect(throws: rejection) { try await first.value }
-        await #expect(throws: rejection) { try await successor.value }
+        _ = try await first.value
+        _ = try await successor.value
         #expect(await requestCount.count() == 1)
-        #expect(await admission.cancellationRequestReceipt() == nil)
+        #expect(terminal.cancellationRequestReceipt?.id == successorReceipt.id)
     }
 
     @Test func explicitRejectionReturnsToActiveAndAllowsAReasonedRetry() async throws {
@@ -148,11 +130,7 @@ struct ReviewInterruptAdmissionTests {
         let rejection = ReviewInterruptRequestFailure(
             outcome: .rejected(code: -32_000, message: "No active turn")
         )
-        let firstReceipt = ReviewCancellationRequestReceipt(
-            id: .init(jobID: "job-1", ordinal: 1),
-            cancellation: .mcpClient(message: "First stop"),
-            rejectionDisposition: .reportFailure
-        )
+        let firstReceipt = makeReceipt(1, .mcpClient(message: "First stop"))
 
         await #expect(throws: rejection) {
             try await admission.interrupt(
@@ -163,7 +141,6 @@ struct ReviewInterruptAdmissionTests {
         }
         #expect(await admission.currentPhase() == .active(run))
         #expect(await admission.cancellationRequest() == nil)
-        #expect(await admission.cancellationRequestReceipt() == nil)
 
         let retryStarted = AsyncGate()
         let retryCancellation = ReviewCancellation.system(message: "Retry stop")
@@ -353,6 +330,14 @@ private actor InterruptInvocationCounter {
     func count() -> Int {
         value
     }
+}
+
+private func makeReceipt(
+    _ ordinal: UInt64,
+    _ cancellation: ReviewCancellation,
+    _ disposition: ReviewCancellationRequestReceipt.RejectionDisposition = .reportFailure
+) -> ReviewCancellationRequestReceipt {
+    .init(id: .init(jobID: "job-1", ordinal: ordinal), cancellation: cancellation, rejectionDisposition: disposition)
 }
 
 private func makeActiveInterruptAdmission() async throws -> (

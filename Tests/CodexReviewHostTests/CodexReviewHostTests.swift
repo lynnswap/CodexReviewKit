@@ -2115,7 +2115,7 @@ struct CodexReviewHostTests {
         #expect(statusAtForcedCloseBoundary != .failed)
         #expect(cancellationAtForcedCloseBoundary?.message == "Review runtime stopped.")
         #expect(cancellationWasPendingAtForcedCloseBoundary || statusAtForcedCloseBoundary == .cancelled)
-        #expect(result.core.lifecycle.status == .cancelled)
+        #expect(result.core.lifecycle.status == .cancelled && result.core.lifecycle.cancellation?.message == "Review runtime stopped.")
     }
 
     @Test func liveStoreStopDetachesStartingWorkerFromPreCancellationSnapshot() async throws {

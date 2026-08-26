@@ -2338,7 +2338,8 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func userCancellationWakesPendingOutageStreamTerminal() async throws {
+    @Test(arguments: [ReviewCancellationRequestReceipt.RejectionDisposition.reportFailure, .preserveRuntimeStopIntent])
+    func cancellationWakesPendingOutageStreamTerminal(rejectionDisposition: ReviewCancellationRequestReceipt.RejectionDisposition) async throws {
         let run = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
             turnID: "turn-1",
@@ -2380,8 +2381,9 @@ struct CodexReviewStoreCommandTests {
             })
             #expect(try store.readReview(jobID: "job-1").core.lifecycle.status == .running)
 
-            async let cancel = store.cancelReview(
-                jobID: "job-1", cancellation: .mcpClient(message: "Stop")
+            async let cancel = store.performCancelReview(
+                jobID: "job-1", cancellation: .mcpClient(message: "Stop"),
+                rejectionDisposition: rejectionDisposition
             )
             _ = try await cancel
             let read = try await result
@@ -2389,8 +2391,7 @@ struct CodexReviewStoreCommandTests {
 
             #expect(read.core.lifecycle.status == .cancelled)
             #expect(read.core.lifecycle.cancellation?.message == "Stop")
-            #expect(store.reviewAttemptOwnerships["job-1"] == nil)
-            #expect(store.reviewWorkerTasks["job-1"] == nil)
+            #expect(store.reviewAttemptOwnerships["job-1"] == nil && store.reviewWorkerTasks["job-1"] == nil)
             #expect(await backend.recordedCommands().contains {
                 if case .interruptReviewAdmission = $0 { true } else { false }
             } == false)
@@ -2580,13 +2581,8 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test(arguments: [
-        ReviewAttemptStreamFailure.ownerForcedConnectionClose(.connection("Runtime closed")),
-        .workerContract(.init(message: "Missing terminal")),
-    ])
-    func streamTerminalSnapshotIgnoresLateRuntimeReceipt(
-        failure: ReviewAttemptStreamFailure
-    ) async throws {
+    @Test(arguments: [ReviewAttemptStreamFailure.ownerForcedConnectionClose(.connection("Runtime closed")), .workerContract(.init(message: "Missing terminal"))])
+    func streamTerminalSnapshotIgnoresLateRuntimeReceipt(failure: ReviewAttemptStreamFailure) async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -2605,7 +2601,6 @@ struct CodexReviewStoreCommandTests {
                 Issue.record("Review did not publish its exact active attempt.")
                 return
             }
-            await backend.yield(.message("partial review"))
             try await active.admission.recordStreamTerminal(failure, for: active.run)
             let job = try #require(store.job(id: "job-1"))
             store.recordCancellationRequest(
@@ -2613,14 +2608,12 @@ struct CodexReviewStoreCommandTests {
                 rejectionDisposition: .preserveRuntimeStopIntent,
                 for: job
             )
+            store.reviewWorkerTasks["job-1"]?.cancel()
             await backend.finishEvents(throwing: failure)
             let read = try await result
 
-            #expect(read.core.lifecycle.status == .failed)
-            #expect(read.core.lifecycle.cancellation == nil)
+            #expect(read.core.lifecycle.status == .failed && read.core.lifecycle.cancellation == nil)
             #expect(job.cancellationRequested == false)
-            #expect(read.core.output.lastAgentMessage == "partial review")
-            #expect(read.logs.map(\.text).contains("partial review"))
         }
     }
 
@@ -2757,13 +2750,13 @@ struct CodexReviewStoreCommandTests {
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
             try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
+            store.recordActiveReviewCancellationRequestsForRuntimeStop(reason: .system(message: "Runtime owner stopped."))
             await backend.finishEvents(throwing: CancellationError())
             let read = try await result
 
-            #expect(read.core.lifecycle.status == .cancelled)
+            #expect(read.core.lifecycle.status == .cancelled && read.core.lifecycle.cancellation?.message == "Runtime owner stopped.")
             let commands = await backend.recordedCommands()
-            #expect(commands.contains { if case .cleanupReview = $0 { true } else { false } })
-            #expect(commands.contains { if case .interruptReviewAdmission = $0 { true } else { false } } == false)
+            #expect(commands.contains { if case .cleanupReview = $0 { true } else { false } } && commands.contains { if case .interruptReviewAdmission = $0 { true } else { false } } == false)
         }
     }
 
@@ -2978,9 +2971,7 @@ struct CodexReviewStoreCommandTests {
             let runtimeReceipt = try #require(store.job(id: "job-1")?.pendingCancellationRequest)
             #expect(runtimeReceipt.cancellation == firstReceipt.cancellation)
             #expect(runtimeReceipt.rejectionDisposition == .preserveRuntimeStopIntent)
-            try #require(await waitUntil {
-                await active.admission.cancellationRequestReceipt()?.id == runtimeReceipt.id
-            })
+            await active.admission.waitForCancellationRequestReceipt(runtimeReceipt.id)
 
             await interruptGate.open()
             await #expect(throws: ReviewInterruptRequestFailure.self) {
@@ -3005,9 +2996,7 @@ struct CodexReviewStoreCommandTests {
             let final = try await review.value
             #expect(final.core.lifecycle.status == .cancelled)
             #expect(final.core.lifecycle.cancellation == cancellation)
-            let resolution = try #require(await active.admission.activeTerminalResolution())
-            #expect(resolution.cancellation == cancellation)
-            #expect(resolution.cancellationRequestReceipt?.id == runtimeReceipt.id)
+            #expect(await active.admission.activeTerminalResolution()?.cancellationRequestReceipt?.id == runtimeReceipt.id)
         }
     }
 

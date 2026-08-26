@@ -258,6 +258,7 @@ package actor ReviewStartAdmission {
     private var phase: Phase = .preparingThread(.notSent)
     private var requestedCancellation: ReviewCancellation?
     private var effectiveCancellationRequestReceipt: ReviewCancellationRequestReceipt?
+    private var cancellationRequestReceiptWaiters: [ReviewCancellationRequestReceipt.ID: [CheckedContinuation<Void, Never>]] = [:]
     private var preservedInterruptRequestFailure: ReviewInterruptRequestFailure?
     private var interruptionTask: Task<ReviewInterruptResolution, any Error>?
     private var recoveryTask: Task<ReviewRecoveryDisposition, any Error>?
@@ -774,14 +775,12 @@ package actor ReviewStartAdmission {
     @discardableResult
     package func recordConnectionTerminal(
         _ failure: ReviewRuntimeCloseFailure,
-        for run: CodexReviewBackendModel.Review.Run,
-        cancellationRequest: ReviewCancellationRequestReceipt? = nil
+        for run: CodexReviewBackendModel.Review.Run
     ) throws -> ReviewInterruptResolution {
         guard case .connection = failure else {
             throw contractFailure(.connectionTerminalRequiresConnectionFailure(failure))
         }
         _ = try requireActiveRun(run, operation: .recordActiveConnectionTerminal)
-        adoptTerminalCancellationRequest(cancellationRequest)
         return try recordActiveTerminal(
             .connection(failure),
             for: run,
@@ -855,8 +854,9 @@ package actor ReviewStartAdmission {
         }
     }
 
-    package func cancellationRequestReceipt() -> ReviewCancellationRequestReceipt? {
-        effectiveCancellationRequestReceipt
+    package func waitForCancellationRequestReceipt(_ id: ReviewCancellationRequestReceipt.ID) async {
+        if effectiveCancellationRequestReceipt?.id == id { return }
+        await withCheckedContinuation { cancellationRequestReceiptWaiters[id, default: []].append($0) }
     }
 
     package func activeTerminalResolution() -> ReviewInterruptResolution? {
@@ -1296,7 +1296,7 @@ package actor ReviewStartAdmission {
         case .semantic(let cancellation):
             return requestedCancellation ?? cancellation
         case .receipt(let receipt):
-            effectiveCancellationRequestReceipt = receipt
+            setEffectiveCancellationRequestReceipt(receipt)
             if receipt.rejectionDisposition == .preserveRuntimeStopIntent {
                 return receipt.cancellation
             }
@@ -1311,23 +1311,15 @@ package actor ReviewStartAdmission {
                 requestedCancellation = cancellation
             }
         case .receipt(let receipt):
-            let shouldAdopt = switch effectiveCancellationRequestReceipt {
-            case nil:
-                true
-            case .some(let current):
-                current.id == receipt.id
-                    || current.rejectionDisposition == .reportFailure
-            }
-            guard shouldAdopt else {
-                return
-            }
+            if effectiveCancellationRequestReceipt?.id == receipt.id { return }
+            guard shouldAdoptCancellationRequestReceipt(receipt) else { return }
             switch phase {
             case .finishing, .finishingRecovery, .terminal:
                 // A recorded terminal already owns its exact cancellation pair;
                 // a later receipt joins that result but cannot relabel it.
                 return
             case .interrupting(let run, _, let request):
-                effectiveCancellationRequestReceipt = receipt
+                setEffectiveCancellationRequestReceipt(receipt)
                 requestedCancellation = receipt.cancellation
                 phase = .interrupting(
                     run: run,
@@ -1336,19 +1328,28 @@ package actor ReviewStartAdmission {
                 )
             case .preparingThread, .startingReview, .rollingBackRecovery,
                  .active, .recovering:
-                effectiveCancellationRequestReceipt = receipt
+                setEffectiveCancellationRequestReceipt(receipt)
                 requestedCancellation = receipt.cancellation
             }
         }
     }
 
-    private func adoptTerminalCancellationRequest(
-        _ receipt: ReviewCancellationRequestReceipt?
-    ) {
-        guard let receipt else {
-            return
-        }
+    private func shouldAdoptCancellationRequestReceipt(_ receipt: ReviewCancellationRequestReceipt) -> Bool {
+        guard let current = effectiveCancellationRequestReceipt else { return true }
+        guard current.id.jobID == receipt.id.jobID,
+              receipt.id.ordinal > current.id.ordinal else { return false }
+        return current.rejectionDisposition == .reportFailure
+            || receipt.rejectionDisposition == .preserveRuntimeStopIntent
+    }
+
+    private func adoptTerminalCancellationRequest(_ receipt: ReviewCancellationRequestReceipt?) {
+        guard let receipt else { return }
         recordJoinedCancellation(.receipt(receipt))
+    }
+
+    private func setEffectiveCancellationRequestReceipt(_ receipt: ReviewCancellationRequestReceipt) {
+        effectiveCancellationRequestReceipt = receipt
+        cancellationRequestReceiptWaiters.removeValue(forKey: receipt.id)?.forEach { $0.resume() }
     }
 
     private func resolvedAttempt(

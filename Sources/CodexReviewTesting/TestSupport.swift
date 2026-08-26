@@ -1593,6 +1593,7 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
     private var notificationStreamCountWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
     private var closeWaiters: [CheckedContinuation<Void, Never>] = []
     private var closed = false
+    private var closeCompleted = false
 
     package init(responses: [String: [Data]] = [:]) {
         self.responses = responses
@@ -1728,10 +1729,6 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
 
     package func close() async {
         closed = true
-        for waiter in closeWaiters {
-            waiter.resume()
-        }
-        closeWaiters.removeAll(keepingCapacity: false)
         let requestGates = Array(activeRequestGates.values)
         activeRequestGates.removeAll(keepingCapacity: false)
         for gate in requestGates {
@@ -1741,6 +1738,11 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
             continuation.finish()
         }
         serverNotificationContinuations.removeAll()
+        closeCompleted = true
+        for waiter in closeWaiters {
+            waiter.resume()
+        }
+        closeWaiters.removeAll(keepingCapacity: false)
     }
 
     package func finishNotificationStreams(throwing error: any Error) {
@@ -1793,7 +1795,7 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
     }
 
     package func waitUntilClosedForTesting() async {
-        guard closed == false else {
+        guard closeCompleted == false else {
             return
         }
         await withCheckedContinuation { continuation in
