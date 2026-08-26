@@ -38,20 +38,15 @@ package final class AppServerReviewControl: @unchecked Sendable {
         var generation: Int
     }
 
-    private enum RetryAuthorization {
-        case exactReservation(InterruptReservation)
-        case currentActiveTurn(InterruptReservation)
-        case incompatibleReplacement
-        case superseded
+    private struct InterruptDispatch {
+        var interruption: AppServerReviewInterruption
+        var reservation: InterruptReservation
+    }
 
-        var reservation: InterruptReservation? {
-            switch self {
-            case .exactReservation(let reservation), .currentActiveTurn(let reservation):
-                reservation
-            case .incompatibleReplacement, .superseded:
-                nil
-            }
-        }
+    private enum InterruptDispatchDecision {
+        case send(InterruptDispatch)
+        case fallbackRequired
+        case superseded
     }
 
     private let client: AppServerClient
@@ -93,24 +88,37 @@ package final class AppServerReviewControl: @unchecked Sendable {
     }
 
     package func interruptOutcome() async throws -> InterruptOutcome {
-        let reservation = interruptReservation()
-        switch reservation.phase {
-        case .preparing:
-            return .fallbackRequired
-        case .interruptAcceptedAwaitingTerminalNotification, .finished:
-            return .superseded
-        case .threadStarted(let threadID):
-            return try await sendInterrupt(
-                threadID: threadID,
-                turnID: "",
-                reservation: reservation
-            )
-        case .reviewStarted(let turnThreadID, let turnID):
-            return try await sendInterrupt(
-                threadID: turnThreadID,
-                turnID: turnID,
-                reservation: reservation
-            )
+        var decision = nextInterruptDispatch()
+        while true {
+            switch decision {
+            case .fallbackRequired:
+                return .fallbackRequired
+            case .superseded:
+                return .superseded
+            case .send(let dispatch):
+                do {
+                    let _: EmptyResponse = try await client.send(
+                        AppServerAPI.Turn.Interrupt.Request(params: .init(
+                            threadID: dispatch.interruption.threadID,
+                            turnID: dispatch.interruption.turnID
+                        ))
+                    )
+                    if recordInterruptAccepted(ifOwnedBy: dispatch.reservation) {
+                        return .sent(dispatch.interruption)
+                    }
+                    decision = nextInterruptDispatch()
+                } catch {
+                    guard let activeTurnID = Self.activeTurnID(from: error),
+                          activeTurnID != dispatch.interruption.turnID
+                    else {
+                        throw error
+                    }
+                    decision = nextInterruptDispatch(
+                        after: dispatch,
+                        reportedActiveTurnID: activeTurnID
+                    )
+                }
+            }
         }
     }
 
@@ -124,44 +132,65 @@ package final class AppServerReviewControl: @unchecked Sendable {
         phaseGeneration += 1
     }
 
-    private func interruptReservation() -> InterruptReservation {
+    private func nextInterruptDispatch() -> InterruptDispatchDecision {
         phaseLock.lock()
         defer { phaseLock.unlock() }
-        return .init(phase: phase, generation: phaseGeneration)
+        return dispatchDecision(for: .init(
+            phase: phase,
+            generation: phaseGeneration
+        ))
     }
 
-    private func sendInterrupt(
-        threadID: String,
-        turnID: String,
-        reservation: InterruptReservation
-    ) async throws -> InterruptOutcome {
-        do {
-            let _: EmptyResponse = try await client.send(AppServerAPI.Turn.Interrupt.Request(
-                params: .init(threadID: threadID, turnID: turnID)
+    private func nextInterruptDispatch(
+        after dispatch: InterruptDispatch,
+        reportedActiveTurnID: String
+    ) -> InterruptDispatchDecision {
+        phaseLock.lock()
+        defer { phaseLock.unlock() }
+        let currentReservation = InterruptReservation(
+            phase: phase,
+            generation: phaseGeneration
+        )
+        switch phase {
+        case .interruptAcceptedAwaitingTerminalNotification, .finished:
+            return .superseded
+        case .preparing, .threadStarted, .reviewStarted:
+            break
+        }
+        if currentReservation == dispatch.reservation
+            || phase == .reviewStarted(
+                turnThreadID: dispatch.interruption.threadID,
+                turnID: reportedActiveTurnID
+            ) {
+            return .send(.init(
+                interruption: .init(
+                    threadID: dispatch.interruption.threadID,
+                    turnID: reportedActiveTurnID
+                ),
+                reservation: currentReservation
             ))
-            recordInterruptAccepted(ifOwnedBy: reservation)
-            return .sent(.init(threadID: threadID, turnID: turnID))
-        } catch {
-            guard let activeTurnID = Self.activeTurnID(from: error),
-                  activeTurnID != turnID
-            else {
-                throw error
-            }
-            guard let retryReservation = authorizeRetry(
-                for: reservation,
-                threadID: threadID,
-                activeTurnID: activeTurnID
-            ).reservation else {
-                return .superseded
-            }
-            let activeInterruption = AppServerReviewInterruption(threadID: threadID, turnID: activeTurnID)
-            let _: EmptyResponse = try await client.send(AppServerAPI.Turn.Interrupt.Request(
-                params: .init(threadID: threadID, turnID: activeTurnID)
+        }
+        return dispatchDecision(for: currentReservation)
+    }
+
+    private func dispatchDecision(
+        for reservation: InterruptReservation
+    ) -> InterruptDispatchDecision {
+        switch reservation.phase {
+        case .preparing:
+            return .fallbackRequired
+        case .interruptAcceptedAwaitingTerminalNotification, .finished:
+            return .superseded
+        case .threadStarted(let threadID):
+            return .send(.init(
+                interruption: .init(threadID: threadID, turnID: ""),
+                reservation: reservation
             ))
-            // Do not rebind to activeTurnID: non-startup interrupt responses are sent
-            // only after that turn is terminal, before its terminal notification.
-            recordInterruptAccepted(ifOwnedBy: retryReservation)
-            return .sent(activeInterruption)
+        case .reviewStarted(let turnThreadID, let turnID):
+            return .send(.init(
+                interruption: .init(threadID: turnThreadID, turnID: turnID),
+                reservation: reservation
+            ))
         }
     }
 
@@ -181,48 +210,20 @@ package final class AppServerReviewControl: @unchecked Sendable {
         phaseGeneration += 1
     }
 
-    private func authorizeRetry(
-        for reservation: InterruptReservation,
-        threadID: String,
-        activeTurnID: String
-    ) -> RetryAuthorization {
-        phaseLock.lock()
-        defer { phaseLock.unlock() }
-        switch phase {
-        case .interruptAcceptedAwaitingTerminalNotification, .finished:
-            return .superseded
-        case .preparing, .threadStarted, .reviewStarted:
-            break
-        }
-        let currentReservation = InterruptReservation(
-            phase: phase,
-            generation: phaseGeneration
-        )
-        if phase == reservation.phase,
-           phaseGeneration == reservation.generation {
-            return .exactReservation(currentReservation)
-        }
-        if phase == .reviewStarted(
-            turnThreadID: threadID,
-            turnID: activeTurnID
-        ) {
-            return .currentActiveTurn(currentReservation)
-        }
-        return .incompatibleReplacement
-    }
-
+    @discardableResult
     private func recordInterruptAccepted(
         ifOwnedBy reservation: InterruptReservation
-    ) {
+    ) -> Bool {
         phaseLock.lock()
         defer { phaseLock.unlock() }
         guard phase == reservation.phase,
               phaseGeneration == reservation.generation
         else {
-            return
+            return false
         }
         phase = .interruptAcceptedAwaitingTerminalNotification
         phaseGeneration += 1
+        return true
     }
 
     private static func activeTurnID(from error: Error) -> String? {

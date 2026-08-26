@@ -6,7 +6,7 @@ import CodexReviewTesting
 
 @Suite("app-server interrupt admission")
 struct AppServerInterruptAdmissionTests {
-    @Test func admissionAwareInterruptSendsOnlyTheRequestAndWaitsForCanonicalTerminal() async throws {
+    @Test func admissionAwareInterruptUsesStartedChildTurnAndWaitsForCanonicalTerminal() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInterruptInitialize(transport)
         try await transport.enqueue(
@@ -19,6 +19,107 @@ struct AppServerInterruptAdmissionTests {
                 reviewThreadID: "review-thread"
             ),
             for: "review/start"
+        )
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let admission = ReviewStartAdmission()
+        let attempt = try await backend.startReview(
+            .init(
+                jobID: "job-1",
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                model: "gpt-5"
+            ),
+            admission: admission
+        )
+        let run = attempt.run
+        let cancellation = ReviewCancellation.mcpClient(message: "Stop")
+        try await transport.emitServerNotification(
+            method: "turn/started",
+            params: InterruptTurnNotification(
+                threadID: "review-thread",
+                turnID: "child-turn"
+            )
+        )
+        await backend.waitForReviewNotificationCompletionForTesting(1)
+
+        let interruption = Task {
+            try await admission.interrupt(
+                run,
+                cancellation: cancellation,
+                request: { requestAdmission, reason in
+                    try await backend.interruptReview(
+                        requestAdmission,
+                        reason: reason
+                    )
+                    try await backend.interruptReview(
+                        requestAdmission,
+                        reason: reason
+                    )
+                }
+            )
+        }
+        await transport.waitForRequestCount(4)
+
+        guard case .interrupting(let phaseRun, let phaseCancellation, _) =
+            await admission.currentPhase()
+        else {
+            Issue.record("Interrupt ACK incorrectly completed the attempt.")
+            return
+        }
+        #expect(phaseRun == run)
+        #expect(phaseCancellation == cancellation)
+        #expect(await attempt.events.isFinished() == false)
+        try await admission.recordCanonicalTerminal(
+            .interrupted(.server(message: "Stopped")),
+            for: run
+        )
+        let resolution = try await interruption.value
+
+        #expect(resolution.terminal == .canonical(
+            .interrupted(.requested(cancellation))
+        ))
+        #expect(resolution.run == run)
+        #expect(await attempt.events.isFinished() == false)
+        let requests = await transport.recordedRequests()
+        #expect(requests.map(\.method) == [
+            "initialize",
+            "thread/start",
+            "review/start",
+            "turn/interrupt",
+        ])
+        let interruptions = try requests
+            .filter { $0.method == "turn/interrupt" }
+            .map {
+                try JSONDecoder().decode(
+                    AppServerAPI.Turn.Interrupt.Params.self,
+                    from: $0.params
+                )
+            }
+        #expect(interruptions.map(\.threadID) == ["review-thread"])
+        #expect(interruptions.map(\.turnID) == ["child-turn"])
+    }
+
+    @Test func admissionAwareInterruptRetriesReportedActiveTurnWhenStartedNotificationIsMissing() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInterruptInitialize(transport)
+        try await transport.enqueue(
+            AppServerAPI.Thread.Start.Response(threadID: "parent-thread", model: "gpt-5"),
+            for: "thread/start"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Review.Start.Response(
+                turnID: "turn-1",
+                reviewThreadID: "review-thread"
+            ),
+            for: "review/start"
+        )
+        await transport.enqueueFailure(
+            .responseError(
+                code: -32_602,
+                message: "expected active turn id turn-1 but found child-turn"
+            ),
+            for: "turn/interrupt"
         )
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
@@ -47,41 +148,27 @@ struct AppServerInterruptAdmissionTests {
                 }
             )
         }
-        await transport.waitForRequestCount(4)
-
-        guard case .interrupting(let phaseRun, let phaseCancellation, _) =
-            await admission.currentPhase()
-        else {
-            Issue.record("Interrupt ACK incorrectly completed the attempt.")
-            return
-        }
-        #expect(phaseRun == run)
-        #expect(phaseCancellation == cancellation)
-        #expect(await attempt.events.isFinished() == false)
+        await transport.waitForRequestCount(5)
         try await admission.recordCanonicalTerminal(
             .interrupted(.server(message: "Stopped")),
             for: run
         )
         let resolution = try await interruption.value
 
+        #expect(resolution.run == run)
         #expect(resolution.terminal == .canonical(
             .interrupted(.requested(cancellation))
         ))
-        #expect(await attempt.events.isFinished() == false)
-        let requests = await transport.recordedRequests()
-        #expect(requests.map(\.method) == [
-            "initialize",
-            "thread/start",
-            "review/start",
-            "turn/interrupt",
-        ])
-        let interrupt = try #require(requests.last)
-        let params = try JSONDecoder().decode(
-            AppServerAPI.Turn.Interrupt.Params.self,
-            from: interrupt.params
-        )
-        #expect(params.threadID == run.reviewThreadID)
-        #expect(params.turnID == run.turnID)
+        let interruptions = try await transport.recordedRequests()
+            .filter { $0.method == "turn/interrupt" }
+            .map {
+                try JSONDecoder().decode(
+                    AppServerAPI.Turn.Interrupt.Params.self,
+                    from: $0.params
+                )
+            }
+        #expect(interruptions.map(\.threadID) == ["review-thread", "review-thread"])
+        #expect(interruptions.map(\.turnID) == ["turn-1", "child-turn"])
     }
 
     @Test func admissionAwareInterruptRecordsExplicitRejectionForRetry() async throws {
@@ -115,6 +202,9 @@ struct AppServerInterruptAdmissionTests {
 
         #expect(await admission.currentPhase() == .active(run))
         #expect(await admission.cancellationRequest() == nil)
+        let interruptRequests = await transport.recordedRequests()
+            .filter { $0.method == "turn/interrupt" }
+        #expect(interruptRequests.count == 1)
     }
 
     @Test func admissionAwareInterruptRecordsOutcomeUnknownUntilConnectionTerminal() async throws {
@@ -149,44 +239,6 @@ struct AppServerInterruptAdmissionTests {
             ))
             #expect(failure.secondaryBarrierDiagnostic == connection.localizedDescription)
         }
-    }
-
-    @Test func admissionAwareInterruptDoesNotRetargetFromResponseText() async throws {
-        let transport = FakeJSONRPCTransport()
-        try await enqueueInterruptInitialize(transport)
-        await transport.enqueueFailure(
-            .responseError(
-                code: -32_602,
-                message: "expected active turn id turn-1 but found turn-other"
-            ),
-            for: "turn/interrupt"
-        )
-        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
-        let (admission, run) = try await makeAppServerInterruptAdmission()
-
-        await #expect(throws: ReviewInterruptRequestFailure.self) {
-            try await admission.interrupt(
-                run,
-                cancellation: .system(message: "Stop"),
-                request: { requestAdmission, reason in
-                    try await backend.interruptReview(
-                        requestAdmission,
-                        reason: reason
-                    )
-                }
-            )
-        }
-
-        let interruptRequests = await transport.recordedRequests()
-            .filter { $0.method == "turn/interrupt" }
-        #expect(interruptRequests.count == 1)
-        let request = try #require(interruptRequests.first)
-        let params = try JSONDecoder().decode(
-            AppServerAPI.Turn.Interrupt.Params.self,
-            from: request.params
-        )
-        #expect(params.turnID == run.turnID)
-        #expect(await admission.currentPhase() == .active(run))
     }
 
     @Test func typedRecoveryPreparationRetainsTheBarrierWithoutAnotherInterrupt() async throws {
@@ -612,5 +664,28 @@ private struct UnroutedRecoveryErrorNotification: Encodable, Sendable {
             forKey: .error
         )
         try container.encode(willRetry, forKey: .willRetry)
+    }
+}
+
+private struct InterruptTurnNotification: Encodable, Sendable {
+    var threadID: String
+    var turnID: String
+
+    enum CodingKeys: String, CodingKey {
+        case threadID = "threadId"
+        case turn
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(threadID, forKey: .threadID)
+        try container.encode(Turn(id: turnID), forKey: .turn)
+    }
+
+    private struct Turn: Encodable {
+        var id: String
+        var items: [String] = []
+        var itemsView = "notLoaded"
+        var status = "inProgress"
     }
 }

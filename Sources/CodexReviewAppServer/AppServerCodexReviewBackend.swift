@@ -788,12 +788,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                     message: "Review attempt \(run.attemptID) is no longer active."
                 ))
             }
-            let _: EmptyResponse = try await client.send(AppServerAPI.Turn.Interrupt.Request(
-                params: .init(
-                    threadID: requestAdmission.threadID,
-                    turnID: requestAdmission.turnID
-                )
-            ))
+            try await sendTurnInterrupt(for: run)
         } catch {
             throw Self.interruptRequestFailure(for: error)
         }
@@ -911,8 +906,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         }
         try await admission.recordRecoveryRollbackAcknowledged(for: interruptedRun)
 
-        let control = controlsByThreadID[interruptedRun.threadID]
-            ?? AppServerReviewControl(client: client)
+        let control = AppServerReviewControl(client: client)
         controlsByThreadID[interruptedRun.threadID] = control
         let attemptID = makeAppServerReviewAttemptID()
         let provisionalRun = CodexReviewBackendModel.Review.Run(
@@ -2058,6 +2052,7 @@ private actor AppServerReviewEventSession {
     }
 
     private func process(_ notification: AppServerRoutedReviewNotification) async {
+        recordActiveInterruptTurn(from: notification)
         guard var terminalReducer else {
             await failAttempt(.missingRoutingIdentity(method: notification.method))
             return
@@ -2102,7 +2097,6 @@ private actor AppServerReviewEventSession {
             return
         }
         metrics.decoded += 1
-        let controlThreadID = notification.payload.threadID
         let terminal: ReviewAttemptTerminal?
         if case .accepted(let acceptedTerminal) = ingestion {
             terminal = acceptedTerminal
@@ -2119,8 +2113,7 @@ private actor AppServerReviewEventSession {
                     turnID: run.turnID ?? "",
                     reviewThreadID: run.reviewThreadID ?? run.threadID,
                     model: nil
-                ),
-                controlThreadID: controlThreadID
+                )
             ) {
                 return
             }
@@ -2129,13 +2122,11 @@ private actor AppServerReviewEventSession {
             notification: notification,
             decoded: decoded
         ) {
-            if await flushPendingStreamedLog(controlThreadID: controlThreadID) {
+            if await flushPendingStreamedLog() {
                 return
             }
             let closedItemIDs = Set(commandLifecycleByItemID.keys)
-            if await closeActiveCommandsForProgressBoundary(
-                controlThreadID: controlThreadID
-            ) {
+            if await closeActiveCommandsForProgressBoundary() {
                 return
             }
             for itemID in closedItemIDs {
@@ -2145,12 +2136,10 @@ private actor AppServerReviewEventSession {
         commandLifecycleByItemID = decodedCommandLifecycleByItemID
 
         if decoded.finishesReviewMode {
-            if await flushPendingStreamedLog(controlThreadID: controlThreadID) {
+            if await flushPendingStreamedLog() {
                 return
             }
-            if await closeActiveCommandsForReviewExit(
-                controlThreadID: controlThreadID
-            ) {
+            if await closeActiveCommandsForReviewExit() {
                 return
             }
         }
@@ -2159,37 +2148,49 @@ private actor AppServerReviewEventSession {
             if bufferStreamedLog(event) {
                 continue
             }
-            if await flushPendingStreamedLog(controlThreadID: controlThreadID) {
+            if await flushPendingStreamedLog() {
                 return
             }
             for commandEvent in commandLifecycleByItemID.closeActiveCommands(for: event) {
-                if await emit(commandEvent, controlThreadID: controlThreadID) {
+                if await emit(commandEvent) {
                     return
                 }
             }
             if event.activeCommandTerminalStatus != nil {
                 commandLifecycleByItemID.removeAll(keepingCapacity: true)
             }
-            if await emit(event, controlThreadID: controlThreadID) {
+            if await emit(event) {
                 return
             }
         }
 
         if let terminal {
-            if await flushPendingStreamedLog(controlThreadID: controlThreadID) {
+            if await flushPendingStreamedLog() {
                 return
             }
             for commandEvent in commandLifecycleByItemID.closeActiveCommands(
                 status: terminal.commandStatus
             ) {
-                _ = await emit(commandEvent, controlThreadID: controlThreadID)
+                _ = await emit(commandEvent)
             }
             commandLifecycleByItemID.removeAll(keepingCapacity: true)
-            await emitTerminal(terminal, controlThreadID: controlThreadID)
+            await emitTerminal(terminal)
         } else if decoded.events.isEmpty,
                   notification.method != "turn/started" {
             metrics.ignored += 1
         }
+    }
+
+    private func recordActiveInterruptTurn(
+        from notification: AppServerRoutedReviewNotification
+    ) {
+        guard notification.method == "turn/started",
+              let threadID = notification.envelope.threadID,
+              let turnID = notification.envelope.turnID
+        else {
+            return
+        }
+        control.recordTurnStarted(turnThreadID: threadID, turnID: turnID)
     }
 
     func receiveGlobalDiagnostic(_ notification: AppServerRoutedReviewNotification) async {
@@ -2237,22 +2238,16 @@ private actor AppServerReviewEventSession {
         reviewThreadIDsForCleanup.append(reviewThreadID)
     }
 
-    private func emit(
-        _ event: CodexReviewBackendModel.Review.Event,
-        controlThreadID: String? = nil
-    ) async -> Bool {
+    private func emit(_ event: CodexReviewBackendModel.Review.Event) async -> Bool {
         guard await mailbox.append(event) else {
             return true
         }
         noteEmission(event)
-        recordReviewEvent(event, controlThreadID: controlThreadID)
+        recordReviewEvent(event)
         return event.isTerminal
     }
 
-    private func emitTerminal(
-        _ terminal: ReviewAttemptTerminal,
-        controlThreadID: String? = nil
-    ) async {
+    private func emitTerminal(_ terminal: ReviewAttemptTerminal) async {
         let event: CodexReviewBackendModel.Review.Event
         switch terminal {
         case .completed(let result):
@@ -2264,8 +2259,7 @@ private actor AppServerReviewEventSession {
                         groupID: itemID,
                         replacesGroup: true,
                         metadata: .init(sourceType: "suppressedFinalReviewCompanion")
-                    ),
-                    controlThreadID: controlThreadID
+                    )
                 )
             }
             if case .turnSummary(let itemID) = result.source {
@@ -2276,8 +2270,7 @@ private actor AppServerReviewEventSession {
                         groupID: itemID,
                         replacesGroup: true,
                         metadata: .init(sourceType: "canonicalReviewResult")
-                    ),
-                    controlThreadID: controlThreadID
+                    )
                 )
             }
             event = .completed(summary: "Succeeded.", result: result.text)
@@ -2288,7 +2281,7 @@ private actor AppServerReviewEventSession {
         }
         if await mailbox.append(event) {
             noteEmission(event)
-            recordReviewEvent(event, controlThreadID: controlThreadID)
+            recordReviewEvent(event)
         }
         await mailbox.finish()
     }
@@ -2331,15 +2324,13 @@ private actor AppServerReviewEventSession {
         }
     }
 
-    private func closeActiveCommandsForProgressBoundary(
-        controlThreadID: String? = nil
-    ) async -> Bool {
+    private func closeActiveCommandsForProgressBoundary() async -> Bool {
         guard commandLifecycleByItemID.isEmpty == false else {
             return false
         }
         let status = cancellationRequestedMessage == nil ? "completed" : "canceled"
         for commandEvent in commandLifecycleByItemID.closeActiveCommands(status: status) {
-            if await emit(commandEvent, controlThreadID: controlThreadID) {
+            if await emit(commandEvent) {
                 return true
             }
         }
@@ -2347,9 +2338,7 @@ private actor AppServerReviewEventSession {
         return false
     }
 
-    private func closeActiveCommandsForReviewExit(
-        controlThreadID: String? = nil
-    ) async -> Bool {
+    private func closeActiveCommandsForReviewExit() async -> Bool {
         guard commandLifecycleByItemID.isEmpty == false else {
             return false
         }
@@ -2358,7 +2347,7 @@ private actor AppServerReviewEventSession {
             "Review mode exited with \(self.commandLifecycleByItemID.count, privacy: .public) active command execution(s); closing as \(status, privacy: .public)."
         )
         for commandEvent in commandLifecycleByItemID.closeActiveCommands(status: status) {
-            if await emit(commandEvent, controlThreadID: controlThreadID) {
+            if await emit(commandEvent) {
                 return true
             }
         }
@@ -2399,16 +2388,14 @@ private actor AppServerReviewEventSession {
         _ = await flushPendingStreamedLog()
     }
 
-    private func flushPendingStreamedLog(
-        controlThreadID: String? = nil
-    ) async -> Bool {
+    private func flushPendingStreamedLog() async -> Bool {
         let events = drainPendingStreamedLogEvents()
         guard events.isEmpty == false else {
             return false
         }
         cancelPendingStreamedLogFlush()
         for event in events {
-            if await emit(event, controlThreadID: controlThreadID) {
+            if await emit(event) {
                 return true
             }
         }
@@ -2427,10 +2414,10 @@ private actor AppServerReviewEventSession {
         streamedLogFlushTask = nil
     }
 
-    private func recordReviewEvent(_ event: CodexReviewBackendModel.Review.Event, controlThreadID: String? = nil) {
+    private func recordReviewEvent(_ event: CodexReviewBackendModel.Review.Event) {
         switch event {
-        case .started(let turnID, _, _):
-            control.recordTurnStarted(turnThreadID: controlThreadID ?? appServerTurnThreadID(for: run), turnID: turnID)
+        case .started:
+            break
         case .completed, .failed, .cancelled:
             control.finish()
             appServerBackendLogger.debug(
