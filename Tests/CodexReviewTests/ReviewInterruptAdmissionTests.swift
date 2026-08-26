@@ -82,47 +82,43 @@ struct ReviewInterruptAdmissionTests {
         #expect(resolution.cancellationRequestReceipt?.id == receipt.id)
     }
 
-    @Test func joinedReportCallersUseLatestReceiptAndOneRequest() async throws {
+    @Test func reportReceiptHighWaterRejectsInverseArrivalAndAdmitsNewerRetry() async throws {
         let (admission, run) = try await makeActiveInterruptAdmission()
-        let requestStarted = AsyncGate()
-        let requestGate = AsyncGate()
         let requestCount = InterruptInvocationCounter()
+        let retryStarted = AsyncGate()
         let cancellation = ReviewCancellation.mcpClient(message: "Same cancellation")
-        let firstReceipt = makeReceipt(1, cancellation)
-        let successorReceipt = makeReceipt(2, cancellation)
-        let first = Task {
-            try await admission.interrupt(
-                run,
-                cancellationRequest: firstReceipt,
-                request: { _, _ in
-                    await requestCount.record()
-                    await requestStarted.open()
-                    await requestGate.waitIgnoringCancellation()
-                }
-            )
-        }
-        await requestStarted.wait()
-        let successor = Task {
-            try await admission.interrupt(
-                run,
-                cancellationRequest: successorReceipt,
-                request: { _, _ in
-                    Issue.record("A joined report receipt dispatched a second request.")
-                }
-            )
-        }
-        await admission.waitForCancellationRequestReceipt(successorReceipt.id)
-        let terminal = try await admission.recordCanonicalTerminal(
-            .completed,
-            for: run,
-            cancellationRequest: firstReceipt
-        )
-        await requestGate.open()
+        let rejection = ReviewInterruptRequestFailure(outcome: .rejected(code: -32_000, message: "No active turn"))
+        let delayedReceipt = makeReceipt(1, cancellation)
+        let rejectedReceipt = makeReceipt(2, cancellation)
+        let retryReceipt = makeReceipt(3, cancellation)
+        let crossJobReceipt = ReviewCancellationRequestReceipt(id: .init(jobID: "job-2", ordinal: 4), cancellation: cancellation, rejectionDisposition: .reportFailure)
 
-        _ = try await first.value
-        _ = try await successor.value
-        #expect(await requestCount.count() == 1)
-        #expect(terminal.cancellationRequestReceipt?.id == successorReceipt.id)
+        await #expect(throws: rejection) {
+            try await admission.interrupt(run, cancellationRequest: rejectedReceipt) { _, _ in
+                await requestCount.record()
+                throw rejection
+            }
+        }
+        for blockedReceipt in [delayedReceipt, rejectedReceipt, crossJobReceipt] {
+            await #expect(throws: rejection) {
+                try await admission.interrupt(run, cancellationRequest: blockedReceipt) { _, _ in
+                    Issue.record("A blocked report receipt dispatched another request.")
+                }
+            }
+        }
+        let retry = Task {
+            try await admission.interrupt(run, cancellationRequest: retryReceipt) { _, _ in
+                await requestCount.record()
+                await retryStarted.open()
+            }
+        }
+        await admission.waitForCancellationRequestReceipt(retryReceipt.id)
+        await retryStarted.wait()
+        let terminal = try await admission.recordCanonicalTerminal(.completed, for: run)
+
+        _ = try await retry.value
+        #expect(await requestCount.count() == 2)
+        #expect(terminal.cancellationRequestReceipt?.id == retryReceipt.id)
     }
 
     @Test func explicitRejectionReturnsToActiveAndAllowsAReasonedRetry() async throws {

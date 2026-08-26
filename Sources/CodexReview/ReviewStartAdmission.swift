@@ -258,6 +258,7 @@ package actor ReviewStartAdmission {
     private var phase: Phase = .preparingThread(.notSent)
     private var requestedCancellation: ReviewCancellation?
     private var effectiveCancellationRequestReceipt: ReviewCancellationRequestReceipt?
+    private var cancellationRequestHighWater: (receipt: ReviewCancellationRequestReceipt, reportRejection: ReviewInterruptRequestFailure?)?
     private var cancellationRequestReceiptWaiters: [ReviewCancellationRequestReceipt.ID: [CheckedContinuation<Void, Never>]] = [:]
     private var preservedInterruptRequestFailure: ReviewInterruptRequestFailure?
     private var interruptionTask: Task<ReviewInterruptResolution, any Error>?
@@ -643,6 +644,18 @@ package actor ReviewStartAdmission {
             run,
             operation: .interruptActiveRun
         )
+        if case .terminal(.recovery(let disposition)) = phase {
+            return try checkedInterruptResolution(
+                interruptResolution(
+                    for: disposition,
+                    cancellation: requestedCancellation
+                )
+            )
+        }
+        if case .terminal(.active(let resolution)) = phase {
+            return try checkedInterruptResolution(resolution)
+        }
+        if case .receipt(let receipt) = admittedCancellation, let rejection = cancellationRequestHighWater?.reportRejection, activeTerminalSource == nil, shouldAdoptCancellationRequestReceipt(receipt) == false { throw rejection }
         if let recoveryTask {
             recordJoinedCancellation(admittedCancellation)
             return try checkedInterruptResolution(
@@ -652,20 +665,9 @@ package actor ReviewStartAdmission {
                 )
             )
         }
-        if case .terminal(.recovery(let disposition)) = phase {
-            return try checkedInterruptResolution(
-                interruptResolution(
-                    for: disposition,
-                    cancellation: requestedCancellation
-                )
-            )
-        }
         if let interruptionTask {
             recordJoinedCancellation(admittedCancellation)
             return try await interruptionTask.value
-        }
-        if case .terminal(.active(let resolution)) = phase {
-            return try checkedInterruptResolution(resolution)
         }
         if let preservedInterruptRequestFailure {
             recordJoinedCancellation(admittedCancellation)
@@ -1009,6 +1011,7 @@ package actor ReviewStartAdmission {
             }
             if effectiveCancellationRequestReceipt?.rejectionDisposition == .reportFailure
                 || effectiveCancellationRequestReceipt == nil {
+                if effectiveCancellationRequestReceipt?.rejectionDisposition == .reportFailure { cancellationRequestHighWater?.reportRejection = failure }
                 requestedCancellation = nil
                 effectiveCancellationRequestReceipt = nil
                 preservedInterruptRequestFailure = nil
@@ -1335,7 +1338,7 @@ package actor ReviewStartAdmission {
     }
 
     private func shouldAdoptCancellationRequestReceipt(_ receipt: ReviewCancellationRequestReceipt) -> Bool {
-        guard let current = effectiveCancellationRequestReceipt else { return true }
+        guard let current = cancellationRequestHighWater?.receipt else { return true }
         guard current.id.jobID == receipt.id.jobID,
               receipt.id.ordinal > current.id.ordinal else { return false }
         return current.rejectionDisposition == .reportFailure
@@ -1349,6 +1352,7 @@ package actor ReviewStartAdmission {
 
     private func setEffectiveCancellationRequestReceipt(_ receipt: ReviewCancellationRequestReceipt) {
         effectiveCancellationRequestReceipt = receipt
+        cancellationRequestHighWater = (receipt, nil)
         cancellationRequestReceiptWaiters.removeValue(forKey: receipt.id)?.forEach { $0.resume() }
     }
 
