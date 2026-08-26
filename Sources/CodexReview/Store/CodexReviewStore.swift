@@ -7,6 +7,11 @@ private let runtimeLifecycleLogger = Logger(
     category: "runtime-lifecycle"
 )
 
+private struct ReviewRuntimeCancellationAdmissionRegistration: Sendable {
+    var admission: ReviewStartAdmission
+    var receipt: ReviewCancellationRequestReceipt
+}
+
 package enum StoreReviewAttemptOwnership {
     case starting(ReviewStartAdmission)
     case active(StoreReviewActiveAttempt)
@@ -79,7 +84,6 @@ public final class CodexReviewStore {
     @ObservationIgnored package var previewSupportRetainer: AnyObject?
     @ObservationIgnored package let clock: CodexReviewClock
     @ObservationIgnored package let idGenerator: CodexReviewIDGenerator
-    @ObservationIgnored package let reviewStreamTerminalDequeueSuspension: (@MainActor @Sendable () async -> Void)?
     @ObservationIgnored package var reviewAttemptOwnerships: [String: StoreReviewAttemptOwnership] = [:]
     @ObservationIgnored package var reviewWorkerTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored package var runtimeStopDetachedReviewWorkerTasks: [String: Task<Void, Never>] = [:]
@@ -99,8 +103,7 @@ public final class CodexReviewStore {
         clock: CodexReviewClock = .init(),
         idGenerator: CodexReviewIDGenerator = .init(),
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
-        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
-        reviewStreamTerminalDequeueSuspension: (@MainActor @Sendable () async -> Void)? = nil
+        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default
     ) {
         self.backend = backend
         self.networkMonitor = networkMonitor
@@ -108,7 +111,6 @@ public final class CodexReviewStore {
         self.diagnosticsURL = diagnosticsURL
         self.clock = clock
         self.idGenerator = idGenerator
-        self.reviewStreamTerminalDequeueSuspension = reviewStreamTerminalDequeueSuspension
         self.auth = CodexReviewAuthModel()
         self.settings = SettingsStore(snapshot: backend.seed.initialSettingsSnapshot)
         self.settingsService = settingsService ?? CodexReviewSettingsService(
@@ -178,8 +180,7 @@ public final class CodexReviewStore {
         clock: CodexReviewClock = .init(),
         idGenerator: CodexReviewIDGenerator = .init(),
         networkMonitor: any CodexReviewNetworkMonitoring = StaticCodexReviewNetworkMonitor(),
-        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
-        reviewStreamTerminalDequeueSuspension: (@MainActor @Sendable () async -> Void)? = nil
+        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default
     ) -> CodexReviewStore {
         CodexReviewStore(
             backend: backend,
@@ -187,8 +188,7 @@ public final class CodexReviewStore {
             clock: clock,
             idGenerator: idGenerator,
             networkMonitor: networkMonitor,
-            networkRecoveryPolicy: networkRecoveryPolicy,
-            reviewStreamTerminalDequeueSuspension: reviewStreamTerminalDequeueSuspension
+            networkRecoveryPolicy: networkRecoveryPolicy
         )
     }
 
@@ -517,16 +517,37 @@ public final class CodexReviewStore {
     package func closeRegisteredStoreWork(
         reason: ReviewCancellation
     ) async -> ReviewStoreWorkDrainResult {
-        var reviewWorkerJobIDs: [String] = []
+        let reviewWorkerJobIDs: [String]
+        let cancellationRegistrations: [ReviewRuntimeCancellationAdmissionRegistration]
+        if storeWorkRegistryStatus == .open {
+            reviewWorkerJobIDs = recordActiveReviewCancellationRequestsForRuntimeStop(
+                reason: reason
+            )
+            cancellationRegistrations = reviewWorkerJobIDs.compactMap { jobID in
+                guard let receipt = job(id: jobID)?.pendingCancellationRequest,
+                      let admission = reviewAttemptOwnerships[jobID]?.workerAdmission
+                else {
+                    return nil
+                }
+                return .init(admission: admission, receipt: receipt)
+            }
+        } else {
+            reviewWorkerJobIDs = []
+            cancellationRegistrations = []
+        }
         let operation = storeWorkRegistry.beginClosing { [self] in
-            reviewWorkerJobIDs = recordActiveReviewCancellationRequestsForRuntimeStop(reason: reason)
             accountRateLimitAutoRefreshDriver?.closeAdmission()
+        } beforeTaskCancellation: {
+            for registration in cancellationRegistrations {
+                await registration.admission.registerCancellationRequest(
+                    registration.receipt
+                )
+            }
         }
         for jobID in reviewWorkerJobIDs {
             if case .recovering(let receipt) = reviewAttemptOwnerships[jobID] {
                 await receipt.cancelOwnedOperation(reason)
             }
-            reviewWorkerTasks[jobID]?.cancel()
         }
         let result = await operation.task.value
         await cancelAccountRateLimitAutoRefreshAndWait()

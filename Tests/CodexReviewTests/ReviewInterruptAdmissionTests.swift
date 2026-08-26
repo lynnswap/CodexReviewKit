@@ -297,6 +297,43 @@ struct ReviewInterruptAdmissionTests {
         #expect(await admission.activeTerminalResolution()?.terminal == .canonical(.completed))
     }
 
+    @Test func registeredRuntimeReceiptIsCapturedByFollowingStreamTerminal() async throws {
+        let (admission, run) = try await makeActiveInterruptAdmission()
+        let cancellation = ReviewCancellation.system(message: "Runtime stopped")
+        let receipt = makeReceipt(1, cancellation, .preserveRuntimeStopIntent)
+        let failure = ReviewAttemptStreamFailure.workerContract(.init(
+            message: "Buffered stream terminal"
+        ))
+
+        await admission.registerCancellationRequest(receipt)
+        let resolution = try await admission.recordStreamTerminal(failure, for: run)
+
+        #expect(resolution == .init(
+            run: run,
+            cancellation: cancellation,
+            cancellationRequestReceipt: receipt,
+            terminal: .stream(failure)
+        ))
+    }
+
+    @Test func runtimeReceiptRegisteredAfterStreamTerminalCannotRelabelSnapshot() async throws {
+        let (admission, run) = try await makeActiveInterruptAdmission()
+        let failure = ReviewAttemptStreamFailure.workerContract(.init(
+            message: "Buffered stream terminal"
+        ))
+        let terminal = try await admission.recordStreamTerminal(failure, for: run)
+        let receipt = makeReceipt(
+            1,
+            .system(message: "Late runtime stop"),
+            .preserveRuntimeStopIntent
+        )
+
+        await admission.registerCancellationRequest(receipt)
+
+        #expect(await admission.activeTerminalResolution() == terminal)
+        #expect(await admission.cancellationRequest() == nil)
+    }
+
     private func resolveCanonicalTerminal(
         _ terminal: ReviewTerminalRecord
     ) async throws -> ReviewInterruptResolution {

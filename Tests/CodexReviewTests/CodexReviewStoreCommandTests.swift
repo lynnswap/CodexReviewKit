@@ -1910,14 +1910,27 @@ struct CodexReviewStoreCommandTests {
         guard case .active(let active)? = store.reviewAttemptOwnerships["job-1"] else { Issue.record("Expected an active review attempt."); return }
         let reason = ReviewCancellation.system(message: "Store work owner closed.")
         let job = try #require(store.job(id: "job-1"))
+        let workerTask = try #require(store.reviewWorkerTasks["job-1"])
         let firstReceipt = try #require(store.recordCancellationRequest(.mcpClient(message: "Earlier request"), for: job))
-        #expect(await store.closeRegisteredStoreWork(reason: reason) == .success)
+        let close = Task { @MainActor in
+            await store.closeRegisteredStoreWork(reason: reason)
+        }
+        let runtimeReceipt = ReviewCancellationRequestReceipt(
+            id: .init(jobID: job.id, ordinal: firstReceipt.id.ordinal + 1),
+            cancellation: reason,
+            rejectionDisposition: .preserveRuntimeStopIntent
+        )
+        await active.workerAdmission.waitForCancellationRequestReceipt(runtimeReceipt.id)
+        #expect(workerTask.isCancelled)
+
+        #expect(await close.value == .success)
         let final = try await review.value
         let resolution = try #require(await active.admission.activeTerminalResolution())
         let receipt = try #require(resolution.cancellationRequestReceipt)
         let crossJobReceipt = ReviewCancellationRequestReceipt(id: .init(jobID: "job-2", ordinal: receipt.id.ordinal + 1), cancellation: reason, rejectionDisposition: .preserveRuntimeStopIntent)
 
         #expect(final.core.lifecycle.status == .cancelled && final.core.lifecycle.cancellation == reason)
+        #expect(receipt.id == runtimeReceipt.id)
         #expect(receipt.id.jobID == firstReceipt.id.jobID && receipt.id.ordinal == firstReceipt.id.ordinal + 1 && receipt.cancellation == reason && receipt.rejectionDisposition == .preserveRuntimeStopIntent)
         #expect(latestCleanupCancellationRequest(firstReceipt, receipt) == receipt && latestCleanupCancellationRequest(firstReceipt, nil) == firstReceipt)
         #expect(latestCleanupCancellationRequest(receipt, firstReceipt) == receipt && latestCleanupCancellationRequest(firstReceipt, firstReceipt) == firstReceipt && latestCleanupCancellationRequest(firstReceipt, crossJobReceipt) == firstReceipt)
@@ -2562,60 +2575,6 @@ struct CodexReviewStoreCommandTests {
 
             #expect(read.core.lifecycle.status == .cancelled)
             #expect(read.core.output.summary == "Stop")
-        }
-    }
-
-    @Test func runtimeReceiptRecordedAfterStreamTerminalDequeueWinsBeforeProjection() async throws {
-        let backend = FakeCodexReviewBackend()
-        let terminalDequeued = AsyncGate()
-        let terminalProjection = AsyncGate()
-        let closeReason = ReviewCancellation.system(message: "Store work owner closed.")
-        let failure = ReviewAttemptStreamFailure.workerContract(.init(
-            message: "Buffered stream terminal"
-        ))
-        let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
-            idGenerator: .init(next: { "job-1" }),
-            reviewStreamTerminalDequeueSuspension: {
-                await terminalDequeued.open()
-                await terminalProjection.waitIgnoringCancellation()
-            }
-        )
-        try await withStoreCommandTestCleanup(backend: backend, store: store) {
-            async let result = store.startReview(
-                sessionID: "session-1",
-                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
-            )
-            try #require(await StoreSnapshotProbe(store: store).waitUntilRunAttempt(
-                "attempt-1",
-                jobID: "job-1"
-            ) != nil)
-            guard case .active(let active) = store.reviewAttemptOwnerships["job-1"] else {
-                Issue.record("Review did not publish its exact active attempt.")
-                return
-            }
-
-            await backend.finishEvents(throwing: failure)
-            await terminalDequeued.wait()
-            let close = Task { @MainActor in
-                await store.closeRegisteredStoreWork(reason: closeReason)
-            }
-            try #require(await waitUntil {
-                store.job(id: "job-1")?.pendingCancellationRequest?.rejectionDisposition
-                    == .preserveRuntimeStopIntent
-                    && store.reviewWorkerTasks["job-1"]?.isCancelled == true
-            })
-            let runtimeReceipt = try #require(store.job(id: "job-1")?.pendingCancellationRequest)
-
-            await terminalProjection.open()
-            #expect(await close.value == .success)
-            let read = try await result
-            let resolution = try #require(await active.admission.activeTerminalResolution())
-
-            #expect(read.core.lifecycle.status == .cancelled)
-            #expect(read.core.lifecycle.cancellation == closeReason)
-            #expect(resolution.cancellationRequestReceipt?.id == runtimeReceipt.id)
-            #expect(resolution.terminal == .stream(failure))
         }
     }
 

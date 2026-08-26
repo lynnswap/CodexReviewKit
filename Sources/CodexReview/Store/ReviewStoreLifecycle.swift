@@ -210,7 +210,8 @@ package final class ReviewStoreWorkRegistry {
     }
 
     package func beginClosing(
-        onAdmissionClosed: () -> Void
+        onAdmissionClosed: () -> Void,
+        beforeTaskCancellation: @escaping @MainActor @Sendable () async -> Void = {}
     ) -> CloseOperation {
         switch state {
         case .open:
@@ -226,6 +227,7 @@ package final class ReviewStoreWorkRegistry {
             let operation = CloseOperation(
                 id: nextCloseID,
                 task: Task { @MainActor in
+                    await beforeTaskCancellation()
                     for task in tasks {
                         task.cancel()
                     }

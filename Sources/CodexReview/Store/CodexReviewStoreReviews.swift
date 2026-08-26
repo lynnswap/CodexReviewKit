@@ -1129,7 +1129,6 @@ extension CodexReviewStore {
                 }
             case .reviewStreamTerminal(let streamTerminal):
                 guard activeEventSubscriptionID == streamTerminal.subscriptionID else { continue }
-                await reviewStreamTerminalDequeueSuspension?()
                 let failure: ReviewAttemptStreamFailure = switch streamTerminal.kind {
                 case .finished:
                     .workerContract(.init(
@@ -1137,17 +1136,12 @@ extension CodexReviewStore {
                     ))
                 case .failed(let failure): failure
                 }
-                let terminalCancellationRequest: ReviewCancellationRequestReceipt?
-                if Task.isCancelled {
-                    terminalCancellationRequest = job.pendingCancellationRequest
-                } else {
-                    terminalCancellationRequest = switch failure {
-                    case .ownerForcedConnectionClose:
-                        job.pendingCancellationRequest
-                    case .recoverableNetwork, .unexpectedConnection, .process,
-                         .protocolViolation, .workerContract, .ownerCancellation:
-                        nil
-                    }
+                let terminalCancellationRequest: ReviewCancellationRequestReceipt? = switch failure {
+                case .ownerForcedConnectionClose:
+                    job.pendingCancellationRequest
+                case .recoverableNetwork, .unexpectedConnection, .process,
+                     .protocolViolation, .workerContract, .ownerCancellation:
+                    nil
                 }
                 let terminalResolution: ReviewInterruptResolution
                 do {
