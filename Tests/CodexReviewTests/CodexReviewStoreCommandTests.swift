@@ -2936,6 +2936,10 @@ struct CodexReviewStoreCommandTests {
                 run.attemptID,
                 jobID: "job-1"
             ) != nil)
+            guard case .active(let active) = store.reviewAttemptOwnerships["job-1"] else {
+                Issue.record("Review did not publish its exact active attempt.")
+                return
+            }
             let cancellation = ReviewCancellation.system(message: "Same cancellation")
             let first = Task { @MainActor in
                 try await store.cancelReview(jobID: "job-1", cancellation: cancellation)
@@ -2952,6 +2956,9 @@ struct CodexReviewStoreCommandTests {
             let runtimeReceipt = try #require(store.job(id: "job-1")?.pendingCancellationRequest)
             #expect(runtimeReceipt.cancellation == firstReceipt.cancellation)
             #expect(runtimeReceipt.rejectionDisposition == .preserveRuntimeStopIntent)
+            try #require(await waitUntil {
+                await active.admission.cancellationRequestReceipt()?.id == runtimeReceipt.id
+            })
 
             await interruptGate.open()
             await #expect(throws: ReviewInterruptRequestFailure.self) {
@@ -2961,6 +2968,14 @@ struct CodexReviewStoreCommandTests {
 
             #expect(runtimeOutcome.firstFailure == .cleanup("Interrupt failed"))
             #expect(store.job(id: "job-1")?.pendingCancellationRequest?.id == runtimeReceipt.id)
+            #expect(await active.admission.currentPhase() == .active(run))
+            #expect(await active.admission.cancellationRequest() == cancellation)
+            await #expect(throws: ReviewInterruptRequestFailure.self) {
+                try await store.cancelReview(jobID: "job-1", cancellation: cancellation)
+            }
+            #expect(await backend.recordedCommands().filter {
+                if case .interruptReviewAdmission = $0 { true } else { false }
+            }.count == 1)
             await backend.finishEvents(
                 throwing: ReviewAttemptStreamFailure.ownerForcedConnectionClose(
                     .connection("Runtime closed")
@@ -2970,6 +2985,13 @@ struct CodexReviewStoreCommandTests {
             let final = try await review.value
             #expect(final.core.lifecycle.status == .cancelled)
             #expect(final.core.lifecycle.cancellation == cancellation)
+            let resolution = try #require(await active.admission.activeTerminalResolution())
+            #expect(resolution.cancellation == cancellation)
+            #expect(resolution.cancellationRequestReceipt?.id == runtimeReceipt.id)
+            #expect(resolution.requestFailure?.outcome == .rejected(
+                code: nil,
+                message: "Interrupt failed"
+            ))
         }
     }
 

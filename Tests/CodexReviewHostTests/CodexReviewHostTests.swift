@@ -2093,26 +2093,28 @@ struct CodexReviewHostTests {
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
         }
-        await waitUntil { store.jobs.first?.core.run.turnID == "turn-1" }
+        try #require(await StoreSnapshotProbe(store: store).waitUntil { snapshot in
+            snapshot.jobs.first?.activeRun?.turnID == "turn-1"
+        } != nil)
 
         let stop = Task { @MainActor in
             await store.stop()
         }
-        let reachedForcedCloseBoundary = await waitUntil(timeout: .seconds(2)) {
-            let methods = await transport.recordedRequests().map(\.method)
-            return await transport.isClosedForTesting()
-                || methods.contains("thread/backgroundTerminals/clean")
-        }
+        await transport.waitUntilClosedForTesting()
         let methodsAtBoundary = await transport.recordedRequests().map(\.method)
-        let forcedClosedBeforeCleanup = await transport.isClosedForTesting()
-            && methodsAtBoundary.contains("thread/backgroundTerminals/clean") == false
+        let jobAtForcedCloseBoundary = try #require(store.jobs.first)
+        let statusAtForcedCloseBoundary = jobAtForcedCloseBoundary.core.lifecycle.status
+        let cancellationAtForcedCloseBoundary = jobAtForcedCloseBoundary.core.lifecycle.cancellation
+        let cancellationWasPendingAtForcedCloseBoundary = jobAtForcedCloseBoundary.cancellationRequested
         await cleanupGate.open()
         await stop.value
         let result = try await review.value
 
-        #expect(reachedForcedCloseBoundary)
-        #expect(forcedClosedBeforeCleanup)
+        #expect(methodsAtBoundary.contains("thread/backgroundTerminals/clean") == false)
         #expect(methodsAtBoundary.contains("turn/interrupt"))
+        #expect(statusAtForcedCloseBoundary != .failed)
+        #expect(cancellationAtForcedCloseBoundary?.message == "Review runtime stopped.")
+        #expect(cancellationWasPendingAtForcedCloseBoundary || statusAtForcedCloseBoundary == .cancelled)
         #expect(result.core.lifecycle.status == .cancelled)
     }
 

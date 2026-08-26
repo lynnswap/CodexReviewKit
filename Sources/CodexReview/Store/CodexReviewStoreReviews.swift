@@ -451,6 +451,18 @@ extension CodexReviewStore {
         }
     }
 
+    private func interruptActiveAttempt(
+        _ active: StoreReviewActiveAttempt,
+        cancellationRequest receipt: ReviewCancellationRequestReceipt
+    ) async throws -> ReviewInterruptResolution {
+        try await active.admission.interrupt(
+            active.run,
+            cancellationRequest: receipt
+        ) { [backend] requestAdmission, reason in
+            try await backend.interruptReview(requestAdmission, reason: reason)
+        }
+    }
+
     private func interruptActiveAttemptAndRecordTerminal(
         _ active: StoreReviewActiveAttempt,
         cancellation: ReviewCancellation,
@@ -838,7 +850,7 @@ extension CodexReviewStore {
             do {
                 _ = try await interruptActiveAttempt(
                     active,
-                    cancellation: admittedCancellation
+                    cancellationRequest: requestReceipt
                 )
                 reviewWorkerTasks[jobID]?.cancel()
                 await reviewWorkerTasks[jobID]?.value
@@ -850,15 +862,12 @@ extension CodexReviewStore {
                         core: job.core
                     )
                 }
-                switch requestReceipt.rejectionDisposition {
-                case .reportFailure:
+                if requestReceipt.rejectionDisposition == .reportFailure {
                     try recordCancellationFailureAfterRegisteredWorkSuspension(
                         for: job,
                         receipt: requestReceipt,
                         message: error.localizedDescription
                     )
-                case .preserveRuntimeStopIntent:
-                    await active.admission.recordCancellation(admittedCancellation)
                 }
                 throw error
             }

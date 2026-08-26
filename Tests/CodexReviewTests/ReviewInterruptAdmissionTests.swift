@@ -50,11 +50,16 @@ struct ReviewInterruptAdmissionTests {
         let requestGate = AsyncGate()
         let requestFinished = InterruptInvocationCounter()
         let cancellation = ReviewCancellation.system(message: "Stop runtime")
+        let receipt = ReviewCancellationRequestReceipt(
+            id: .init(jobID: "job-1", ordinal: 1),
+            cancellation: cancellation,
+            rejectionDisposition: .preserveRuntimeStopIntent
+        )
 
         let interruption = Task {
             try await admission.interrupt(
                 run,
-                cancellation: cancellation,
+                cancellationRequest: receipt,
                 request: { _, _ in
                     await requestStarted.open()
                     await requestGate.waitIgnoringCancellation()
@@ -78,6 +83,7 @@ struct ReviewInterruptAdmissionTests {
 
         #expect(await requestFinished.count() == 1)
         #expect(resolution.terminal == .canonical(.completed))
+        #expect(resolution.cancellationRequestReceipt?.id == receipt.id)
     }
 
     @Test func duplicateCallersJoinTheFirstCancellationAndRequestResult() async throws {
@@ -130,16 +136,22 @@ struct ReviewInterruptAdmissionTests {
         let rejection = ReviewInterruptRequestFailure(
             outcome: .rejected(code: -32_000, message: "No active turn")
         )
+        let firstReceipt = ReviewCancellationRequestReceipt(
+            id: .init(jobID: "job-1", ordinal: 1),
+            cancellation: .mcpClient(message: "First stop"),
+            rejectionDisposition: .reportFailure
+        )
 
         await #expect(throws: rejection) {
             try await admission.interrupt(
                 run,
-                cancellation: .mcpClient(message: "First stop"),
+                cancellationRequest: firstReceipt,
                 request: { _, _ in throw rejection }
             )
         }
         #expect(await admission.currentPhase() == .active(run))
         #expect(await admission.cancellationRequest() == nil)
+        #expect(await admission.cancellationRequestReceipt() == nil)
 
         let retryStarted = AsyncGate()
         let retryCancellation = ReviewCancellation.system(message: "Retry stop")
