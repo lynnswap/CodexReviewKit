@@ -55,15 +55,21 @@ package protocol ReviewIngestionDiagnosticRecording: Sendable {
 }
 
 package struct ReviewIngestionDiagnosticLogPlan: Equatable, Sendable {
+    // Bound synchronous work on the notification-routing actor before encoding.
+    package static let maximumCapturedRawByteCount = 12 * 1_024
+
     // Keep the variable payload at half of OSLog's 1 KiB message budget so the
     // fixed format, correlation identifier, and decimal counters have headroom.
     package static let maximumBase64ChunkLength = 512
+    package static let maximumChunkCount = 32
 
     package struct Header: Equatable, Sendable {
         package let recordID: String
-        package let rawByteCount: Int
-        package let rawBase64Length: Int
+        package let originalRawByteCount: Int
+        package let capturedRawByteCount: Int
+        package let capturedBase64Length: Int
         package let chunkCount: Int
+        package let isTruncated: Bool
     }
 
     package struct Chunk: Equatable, Sendable {
@@ -77,15 +83,18 @@ package struct ReviewIngestionDiagnosticLogPlan: Equatable, Sendable {
     package let chunks: [Chunk]
 
     package init(rawParams: Data, recordID: String) {
-        let encoded = rawParams.base64EncodedData()
+        let capturedRawParams = Data(rawParams.prefix(Self.maximumCapturedRawByteCount))
+        let encoded = capturedRawParams.base64EncodedData()
         let chunkCount = encoded.isEmpty
             ? 0
             : ((encoded.count - 1) / Self.maximumBase64ChunkLength) + 1
         header = Header(
             recordID: recordID,
-            rawByteCount: rawParams.count,
-            rawBase64Length: encoded.count,
-            chunkCount: chunkCount
+            originalRawByteCount: rawParams.count,
+            capturedRawByteCount: capturedRawParams.count,
+            capturedBase64Length: encoded.count,
+            chunkCount: chunkCount,
+            isTruncated: capturedRawParams.count != rawParams.count
         )
         chunks = stride(
             from: encoded.startIndex,
@@ -112,7 +121,7 @@ package struct OSLogReviewIngestionDiagnosticRecorder: ReviewIngestionDiagnostic
             recordID: UUID().uuidString
         )
         reviewIngestionLogger.error(
-            "Review ingestion failed record_id=\(plan.header.recordID, privacy: .public) raw_byte_count=\(plan.header.rawByteCount, privacy: .private) raw_base64_length=\(plan.header.rawBase64Length, privacy: .private) raw_chunk_count=\(plan.header.chunkCount, privacy: .private) method=\(diagnostic.method, privacy: .public) stage=\(diagnostic.stage.rawValue, privacy: .public) disposition=\(diagnostic.disposition.rawValue, privacy: .public) thread=\(diagnostic.threadID ?? "nil", privacy: .private) turn=\(diagnostic.turnID ?? "nil", privacy: .private) item_type=\(diagnostic.itemType ?? "nil", privacy: .private) error=\(diagnostic.error.localizedDescription, privacy: .private)"
+            "Review ingestion failed record_id=\(plan.header.recordID, privacy: .public) original_raw_byte_count=\(plan.header.originalRawByteCount, privacy: .private) captured_raw_byte_count=\(plan.header.capturedRawByteCount, privacy: .private) captured_base64_length=\(plan.header.capturedBase64Length, privacy: .private) raw_chunk_count=\(plan.header.chunkCount, privacy: .private) raw_is_truncated=\(plan.header.isTruncated, privacy: .private) method=\(diagnostic.method, privacy: .public) stage=\(diagnostic.stage.rawValue, privacy: .public) disposition=\(diagnostic.disposition.rawValue, privacy: .public) thread=\(diagnostic.threadID ?? "nil", privacy: .private) turn=\(diagnostic.turnID ?? "nil", privacy: .private) item_type=\(diagnostic.itemType ?? "nil", privacy: .private) error=\(diagnostic.error.localizedDescription, privacy: .private)"
         )
         for chunk in plan.chunks {
             reviewIngestionLogger.error(
