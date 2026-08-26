@@ -1185,7 +1185,7 @@ struct AppServerClientTests {
         }
     }
 
-    @Test func startupInterruptUsesEmptyTurnID() async throws {
+    @Test func startupInterruptAcceptanceUsesEmptyTurnIDAndAbsorbsLatePhase() async throws {
         let transport = FakeJSONRPCTransport()
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         let client = AppServerClient(transport: transport)
@@ -1194,15 +1194,19 @@ struct AppServerClientTests {
         control.recordThreadStarted(threadID: "thread-1")
         let interruption = try await control.interrupt()
         #expect(interruption == .init(threadID: "thread-1", turnID: ""))
+        control.recordReviewStarted(turnThreadID: "thread-1", turnID: "turn-late")
+        #expect(try await control.interruptOutcome() == .superseded)
 
-        let request = try #require(await transport.recordedRequests().last)
+        let requests = await transport.recordedRequests()
+        #expect(requests.count == 1)
+        let request = try #require(requests.first)
         #expect(request.method == "turn/interrupt")
         let params = try JSONDecoder().decode(AppServerAPI.Turn.Interrupt.Params.self, from: request.params)
         #expect(params.threadID == "thread-1")
         #expect(params.turnID == "")
     }
 
-    @Test func runningInterruptUsesActualTurnID() async throws {
+    @Test func runningInterruptUsesActualTurnIDAndSuppressesDuplicateAfterAcceptance() async throws {
         let transport = FakeJSONRPCTransport()
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         let client = AppServerClient(transport: transport)
@@ -1211,8 +1215,11 @@ struct AppServerClientTests {
         control.recordReviewStarted(turnThreadID: "thread-1", turnID: "turn-1")
         let interruption = try await control.interrupt()
         #expect(interruption == .init(threadID: "thread-1", turnID: "turn-1"))
+        #expect(try await control.interruptOutcome() == .superseded)
 
-        let request = try #require(await transport.recordedRequests().last)
+        let requests = await transport.recordedRequests()
+        #expect(requests.count == 1)
+        let request = try #require(requests.first)
         let params = try JSONDecoder().decode(AppServerAPI.Turn.Interrupt.Params.self, from: request.params)
         #expect(params.turnID == "turn-1")
     }
@@ -1320,6 +1327,42 @@ struct AppServerClientTests {
             turnID: "turn-new"
         )))
         #expect(await transport.recordedRequests().count == 2)
+    }
+
+    @Test func successfulFirstInterruptDoesNotOverwriteNewerPhase() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let firstRequest = RequestBarrier()
+        await transport.beforeReturningNextResponse(method: "turn/interrupt") {
+            await firstRequest.enterAndWait()
+        }
+        let control = AppServerReviewControl(client: .init(transport: transport))
+        control.recordReviewStarted(turnThreadID: "thread-1", turnID: "turn-old")
+
+        let interrupt = Task {
+            try await control.interruptOutcome()
+        }
+        await firstRequest.waitUntilEntered()
+        control.recordTurnStarted(turnThreadID: "thread-1", turnID: "turn-newer")
+        await firstRequest.open()
+
+        #expect(try await interrupt.value == .sent(.init(
+            threadID: "thread-1",
+            turnID: "turn-old"
+        )))
+        #expect(try await control.interruptOutcome() == .sent(.init(
+            threadID: "thread-1",
+            turnID: "turn-newer"
+        )))
+        let requests = await transport.recordedRequests()
+        let turns = try requests.map {
+            try JSONDecoder().decode(
+                AppServerAPI.Turn.Interrupt.Params.self,
+                from: $0.params
+            ).turnID
+        }
+        #expect(turns == ["turn-old", "turn-newer"])
     }
 
     @Test func successfulRetryDoesNotOverwriteNewerPhase() async throws {
@@ -1463,6 +1506,7 @@ struct AppServerClientTests {
         control.recordReviewStarted(turnThreadID: "thread-1", turnID: "turn-old")
         let interruption = try await control.interrupt()
         #expect(interruption == .init(threadID: "thread-1", turnID: "turn-new"))
+        #expect(try await control.interruptOutcome() == .superseded)
 
         let requests = await transport.recordedRequests()
         #expect(requests.map(\.method) == ["turn/interrupt", "turn/interrupt"])
