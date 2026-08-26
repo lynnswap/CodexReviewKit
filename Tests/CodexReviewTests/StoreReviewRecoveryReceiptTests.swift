@@ -27,6 +27,44 @@ struct StoreReviewRecoveryReceiptTests {
         }
         #expect(owned.receipt === prepared.receipt)
     }
+
+    @Test func exactReceiptRegistersBeforeCurrentPreparationCancellation() async throws {
+        let (_, source, candidate, prepared) = try await fixture()
+        let receipt = StoreReviewRecoveryReceipt(source: source)
+        try receipt.startDisposition { .replacement(candidate) }
+        _ = try await receipt.joinOwnedOperation().value
+        let preparationStarted = AsyncGate()
+        let preparationGate = AsyncGate()
+        let preparationCancelled = AsyncGate()
+        try receipt.startPreparation {
+            await preparationStarted.open()
+            await preparationGate.wait()
+            if Task.isCancelled {
+                await preparationCancelled.open()
+                await preparationGate.waitIgnoringCancellation()
+            }
+            return prepared
+        }
+        let preparationJoin = try receipt.joinOwnedOperation()
+        await preparationStarted.wait()
+        let cancellation = ReviewCancellation.system(message: "Runtime stopped")
+        let cancellationRequest = ReviewCancellationRequestReceipt(
+            id: .init(jobID: "job-1", ordinal: 1),
+            cancellation: cancellation,
+            rejectionDisposition: .preserveRuntimeStopIntent
+        )
+
+        await receipt.cancelOwnedOperation(cancellationRequest: cancellationRequest)
+        await preparationCancelled.wait()
+
+        await source.admission.waitForCancellationRequestReceipt(cancellationRequest.id)
+        #expect(await source.admission.cancellationRequest() == cancellation)
+        await preparationGate.open()
+        await #expect(throws: CancellationError.self) {
+            try await preparationJoin.value
+        }
+    }
+
     @Test func ownsDiscardPromotionCancellationAndRelease() async throws {
         let (run, source, candidate, prepared) = try await fixture()
         let invalidPrepared = PreparedReviewRecovery(

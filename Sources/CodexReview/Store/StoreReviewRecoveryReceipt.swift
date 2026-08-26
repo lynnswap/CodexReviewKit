@@ -149,7 +149,7 @@ package final class StoreReviewRecoveryReceipt {
         let admission = cancellationAdmission(for: operation)
         await admission.registerCancellationRequest(receipt)
         cancellation = cancellation ?? receipt.cancellation
-        operation?.cancel()
+        ownedOperation?.cancel()
     }
 
     package func joinOwnedOperation() throws -> Task<Completion, any Error> {
