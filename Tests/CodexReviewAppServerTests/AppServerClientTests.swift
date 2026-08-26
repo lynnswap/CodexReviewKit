@@ -6862,7 +6862,7 @@ struct AppServerClientTests {
         await transport.waitForRequestCount(1)
         await timeoutGate.open()
 
-        await #expect(throws: ReviewRuntimeCloseFailure.cleanup(
+        await #expect(throws: ReviewRuntimeCloseFailure.connection(
             "thread/backgroundTerminals/clean for thread-1: "
                 + "thread/backgroundTerminals/clean cleanup request timed out after 2.0 seconds."
         )) {

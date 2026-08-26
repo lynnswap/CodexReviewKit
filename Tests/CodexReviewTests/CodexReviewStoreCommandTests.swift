@@ -876,7 +876,8 @@ struct CodexReviewStoreCommandTests {
             #expect(cancel.cancelled)
             #expect(final.core.lifecycle.status == .cancelled)
             #expect(await backend.cleanupReviewWasCancelled() == false)
-            #expect(final.logs.contains { $0.text.contains("cleanup failed") })
+            let allLogs = try store.readReview(jobID: "job-1", logFilter: .all).logs
+            #expect(allLogs.contains { $0.text.contains("cleanup failed") })
         }
     }
 

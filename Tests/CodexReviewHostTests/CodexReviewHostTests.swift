@@ -504,6 +504,42 @@ struct CodexReviewHostTests {
         await store.stop()
     }
 
+    @Test func liveCleanupTransportInvalidationTearsDownActiveRuntime() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(transport)
+        try await enqueueLiveRouteReviewStartResponses(
+            transport,
+            threadID: "route-thread",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1"
+        )
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transport: transport
+        )
+        await store.start()
+        let attempt = try await store.backend.startReview(
+            makeLiveRouteReviewStartRequest(jobID: "job-cleanup-invalidation"),
+            admission: ReviewStartAdmission()
+        )
+        await transport.close()
+
+        await #expect(throws: ReviewRuntimeCloseFailure.connection(
+            "thread/backgroundTerminals/clean for route-thread: JSON-RPC transport is closed."
+        )) {
+            try await store.backend.cleanupReview(attempt.run)
+        }
+
+        #expect(store.liveReviewAttemptRouteCountForTesting == 0)
+        await store.waitUntilStopped()
+        #expect(store.serverState == .failed(
+            "Review runtime stopped unexpectedly: App-server connection close failed: "
+                + "thread/backgroundTerminals/clean for route-thread: JSON-RPC transport is closed."
+        ))
+        #expect(store.serverURL == nil)
+    }
+
     @Test func liveCompatibilityOutcomeUnknownStartDoesNotRetainLowerCleanupRoute() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueRuntimeStartResponses(transport)

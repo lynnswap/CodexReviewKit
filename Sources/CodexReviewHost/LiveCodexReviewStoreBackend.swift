@@ -1854,7 +1854,27 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         } catch {
             throw ReviewRuntimeCloseFailure.cleanup(error.localizedDescription)
         }
-        try await runtime.backend.cleanupReview(run)
+        do {
+            try await runtime.backend.cleanupReview(run)
+        } catch let failure as ReviewRuntimeCloseFailure {
+            if case .connection = failure {
+                invalidateRuntimeAfterCleanupFailure(
+                    runtime,
+                    cause: failure.localizedDescription
+                )
+            }
+            throw failure
+        }
+    }
+
+    private func invalidateRuntimeAfterCleanupFailure(
+        _ handle: LiveRuntimeLifecycleHandle,
+        cause: String
+    ) {
+        guard activeRuntimeHandle === handle else {
+            return
+        }
+        attachedStore?.requestRuntimeFailure(handle: handle, cause: cause)
     }
 
     private func reviewRouteBindingFailure(

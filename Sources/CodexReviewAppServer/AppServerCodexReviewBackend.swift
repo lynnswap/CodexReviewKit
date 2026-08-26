@@ -37,9 +37,18 @@ private struct AppServerCleanupRequestFailure: LocalizedError, Sendable {
     }
 }
 
+private struct AppServerCleanupTransportInvalidated: LocalizedError, Sendable {
+    let message: String
+
+    var errorDescription: String? {
+        message
+    }
+}
+
 private enum AppServerCleanupRequestOutcome<Response: Sendable>: Sendable {
     case success(Response)
     case failure(String)
+    case transportInvalidated(String)
     case cancelled
     case timedOut(AppServerCleanupRequestTimeout)
 }
@@ -1084,6 +1093,8 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                 await race.resolve(.success(try await client.send(request)))
             } catch is CancellationError {
                 await race.resolve(.cancelled)
+            } catch let error as JSONRPC.Error where error == .closed {
+                await race.resolve(.transportInvalidated(error.localizedDescription))
             } catch {
                 await race.resolve(.failure(error.localizedDescription))
             }
@@ -1119,6 +1130,17 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             await timeoutTask.value
             await sendTask.value
             throw AppServerCleanupRequestFailure(message: message)
+        case .transportInvalidated(let message):
+            timeoutTask.cancel()
+            await timeoutTask.value
+            sendTask.cancel()
+            let transportCloseFailure = await closeClientForCleanupTermination()
+            await sendTask.value
+            var invalidationMessage = message
+            if let transportCloseFailure {
+                invalidationMessage += " Transport close failed: \(transportCloseFailure)"
+            }
+            throw AppServerCleanupTransportInvalidated(message: invalidationMessage)
         case .cancelled:
             timeoutTask.cancel()
             await timeoutTask.value
@@ -1173,12 +1195,19 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         }
         var failureMessages: [String] = []
         var shouldStopNetworkCleanup = false
+        var runtimeWasInvalidated = false
         do {
             let _: EmptyResponse = try await sendCleanupRequest(AppServerAPI.Thread.BackgroundTerminals.Clean.Request(
                 params: .init(threadID: run.threadID)
             ))
         } catch is CancellationError {
             throw CancellationError()
+        } catch let invalidated as AppServerCleanupTransportInvalidated {
+            failureMessages.append(
+                "thread/backgroundTerminals/clean for \(run.threadID): \(invalidated.localizedDescription)"
+            )
+            shouldStopNetworkCleanup = true
+            runtimeWasInvalidated = true
         } catch let timeout as AppServerCleanupRequestTimeout {
             failureMessages.append(
                 "thread/backgroundTerminals/clean for \(run.threadID): \(timeout.localizedDescription)"
@@ -1196,6 +1225,12 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                 ))
             } catch is CancellationError {
                 throw CancellationError()
+            } catch let invalidated as AppServerCleanupTransportInvalidated {
+                failureMessages.append(
+                    "thread/unsubscribe for \(run.threadID): \(invalidated.localizedDescription)"
+                )
+                shouldStopNetworkCleanup = true
+                runtimeWasInvalidated = true
             } catch let timeout as AppServerCleanupRequestTimeout {
                 failureMessages.append(
                     "thread/unsubscribe for \(run.threadID): \(timeout.localizedDescription)"
@@ -1215,6 +1250,13 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                     ))
                 } catch is CancellationError {
                     throw CancellationError()
+                } catch let invalidated as AppServerCleanupTransportInvalidated {
+                    failureMessages.append(
+                        "thread/delete for \(threadID): \(invalidated.localizedDescription)"
+                    )
+                    shouldStopNetworkCleanup = true
+                    runtimeWasInvalidated = true
+                    break
                 } catch let timeout as AppServerCleanupRequestTimeout {
                     failureMessages.append(
                         "thread/delete for \(threadID): \(timeout.localizedDescription)"
@@ -1229,7 +1271,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             }
         }
         if failureMessages.isEmpty == false {
-            throw ReviewRuntimeCloseFailure.cleanup(failureMessages.joined(separator: "; "))
+            let message = failureMessages.joined(separator: "; ")
+            throw runtimeWasInvalidated
+                ? ReviewRuntimeCloseFailure.connection(message)
+                : ReviewRuntimeCloseFailure.cleanup(message)
         }
     }
 
