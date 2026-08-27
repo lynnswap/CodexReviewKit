@@ -1087,19 +1087,50 @@ private struct AppServerAccountKindDescriptor {
 }
 
 package extension AppServerAPI.Account.Login {
-struct Params: Codable, Equatable, Sendable {
-    package var type: String
-    package var codexStreamlinedLogin: Bool
-    package var nativeWebAuthentication: AppServerAPI.Account.Login.NativeWebAuthentication?
-
-    package init(
-        type: String = "chatgpt",
+enum Params: Encodable, Sendable {
+    case chatGPT(
         codexStreamlinedLogin: Bool = true,
         nativeWebAuthentication: AppServerAPI.Account.Login.NativeWebAuthentication? = nil
-    ) {
-        self.type = type
-        self.codexStreamlinedLogin = codexStreamlinedLogin
-        self.nativeWebAuthentication = nativeWebAuthentication
+    )
+    case apiKey(String)
+
+    private enum Kind: String, Encodable {
+        case apiKey
+        case chatGPT = "chatgpt"
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case type
+        case apiKey
+        case codexStreamlinedLogin
+        case nativeWebAuthentication
+    }
+
+    package func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .chatGPT(let codexStreamlinedLogin, let nativeWebAuthentication):
+            try container.encode(Kind.chatGPT, forKey: .type)
+            try container.encode(codexStreamlinedLogin, forKey: .codexStreamlinedLogin)
+            try container.encodeIfPresent(nativeWebAuthentication, forKey: .nativeWebAuthentication)
+        case .apiKey(let apiKey):
+            try container.encode(Kind.apiKey, forKey: .type)
+            try container.encode(apiKey, forKey: .apiKey)
+        }
+    }
+}
+}
+
+
+package extension AppServerAPI.Account.Login {
+struct Request: AppServerAPI.Request {
+    package typealias Response = AppServerAPI.Account.Login.Response
+
+    package static let method = "account/login/start"
+    package var params: AppServerAPI.Account.Login.Params
+
+    package init(params: AppServerAPI.Account.Login.Params) {
+        self.params = params
     }
 }
 }

@@ -1652,8 +1652,41 @@ struct AppServerClientTests {
         #expect(challenge.nativeWebAuthenticationCallbackScheme == "lynnpd.CodexReviewMonitor.auth")
         let request = try #require(await transport.recordedRequests().last)
         #expect(request.method == "account/login/start")
-        let params = try JSONDecoder().decode(AppServerAPI.Account.Login.Params.self, from: request.params)
-        #expect(params.nativeWebAuthentication?.callbackURLScheme == "lynnpd.CodexReviewMonitor.auth")
+        let params = try #require(JSONSerialization.jsonObject(with: request.params) as? [String: Any])
+        #expect(params["type"] as? String == "chatgpt")
+        #expect(params["codexStreamlinedLogin"] as? Bool == true)
+        let nativeWebAuthentication = try #require(params["nativeWebAuthentication"] as? [String: Any])
+        #expect(nativeWebAuthentication["callbackUrlScheme"] as? String == "lynnpd.CodexReviewMonitor.auth")
+    }
+
+    @Test func apiKeyLoginRequestMatchesCurrentAppServerContract() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(
+            AppServerAPI.Account.Login.Response.apiKey,
+            for: "account/login/start"
+        )
+        let client = AppServerClient(transport: transport)
+        let apiKey = "sk-sensitive-test-value"
+
+        let response = try await client.send(AppServerAPI.Account.Login.Request(
+            params: .apiKey(apiKey)
+        ))
+
+        #expect(response == .apiKey)
+        let requests = await transport.recordedRequests()
+        #expect(requests.count == 1)
+        let request = try #require(requests.first)
+        #expect(request.method == "account/login/start")
+        let params = try #require(JSONSerialization.jsonObject(with: request.params) as? [String: Any])
+        #expect(params.count == 2)
+        #expect(params["type"] as? String == "apiKey")
+        #expect(params["apiKey"] as? String == apiKey)
+
+        let responseData = try JSONEncoder().encode(response)
+        let responseObject = try #require(JSONSerialization.jsonObject(with: responseData) as? [String: Any])
+        #expect(responseObject.count == 1)
+        #expect(responseObject["type"] as? String == "apiKey")
+        #expect(String(decoding: responseData, as: UTF8.self).contains(apiKey) == false)
     }
 
     @Test func loginStartPreservesDeviceCodeUserCode() async throws {

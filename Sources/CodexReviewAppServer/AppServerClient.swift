@@ -181,6 +181,8 @@ package actor AppServerClient {
             var retryAttempt = 0
             while true {
                 let requestID = await self.allocateRequestID()
+                // Request params can contain credentials, including account/login/start API keys.
+                // Keep diagnostics to request identity and method rather than payload values.
                 logger.debug("JSON-RPC request \(requestID, privacy: .public) -> \(method, privacy: .public)")
                 do {
                     let rawResponse: Data
