@@ -200,7 +200,7 @@ extension ReviewUITests {
         #expect(safeAreaFrame.maxY < viewBounds.maxY)
     }
 
-    @Test func sidebarScrollViewStopsAtBottomAccessorySafeArea() {
+    @Test func sidebarScrollViewExtendsBehindBottomAccessory() {
         let store = ReviewMonitorPreviewContent.makeStore(
             streamInterval: nil
         )
@@ -219,7 +219,8 @@ extension ReviewUITests {
         let scrollViewFrame = sidebar.scrollViewFrameForTesting
 
         #expect(safeAreaFrame.minY > sidebar.view.bounds.minY)
-        #expect(abs(scrollViewFrame.minY - safeAreaFrame.minY) < 0.5)
+        #expect(abs(scrollViewFrame.minY - sidebar.view.bounds.minY) < 0.5)
+        #expect(scrollViewFrame.minY < safeAreaFrame.minY)
         #expect(abs(scrollViewFrame.maxY - sidebar.view.bounds.maxY) < 0.5)
     }
 

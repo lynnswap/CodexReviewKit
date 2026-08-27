@@ -531,13 +531,6 @@ extension ReviewMonitorSplitViewController {
         sidebarItem?.bottomAlignedAccessoryViewControllers.first?.isHidden ?? false
     }
 
-    var sidebarBottomAccessoryFrameForTesting: NSRect? {
-        guard let accessoryView = sidebarItem?.bottomAlignedAccessoryViewControllers.first?.view else {
-            return nil
-        }
-        return sidebarViewControllerForTesting.view.convert(accessoryView.bounds, from: accessoryView)
-    }
-
     var contentAccessoryCountForTesting: Int {
         contentItem?.bottomAlignedAccessoryViewControllers.count ?? 0
     }
