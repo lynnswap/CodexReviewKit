@@ -268,6 +268,144 @@ struct DirectoryCapabilityTests {
         }
     }
 
+    @Test func optionalAbsoluteOpenTreatsOnlyENOENTAsAbsence() throws {
+        let fixture = try makePrivateTemporaryDirectory()
+        defer { removeFixture(fixture) }
+        let requirements = DirectoryCapability.Requirements.trustedAnchor(ownerUserID: geteuid())
+        let candidate = try DirectoryCapability.openExistingIfPresent(
+            at: fixture,
+            requirements: requirements
+        )
+        let opened = try #require(candidate)
+        defer { try? opened.close() }
+        let fixtureIdentity = try fileIdentity(at: fixture)
+        #expect(opened.identity.deviceID == fixtureIdentity.deviceID)
+        #expect(opened.identity.inode == fixtureIdentity.inode)
+
+        #expect(try DirectoryCapability.openExistingIfPresent(
+            at: fixture.appendingPathComponent("missing", isDirectory: true),
+            requirements: requirements
+        ) == nil)
+        try Data().write(to: fixture.appendingPathComponent("file"))
+        #expect(symlink("missing", fixture.appendingPathComponent("link").path) == 0)
+        for name in ["file", "link"] {
+            expectDirectoryError(.policyViolation) {
+                _ = try DirectoryCapability.openExistingIfPresent(
+                    at: fixture.appendingPathComponent(name, isDirectory: true),
+                    requirements: requirements
+                )
+            }
+        }
+        expectDirectoryError(.policyViolation) {
+            _ = try DirectoryCapability.openExistingIfPresent(
+                at: fixture,
+                requirements: .trustedAnchor(ownerUserID: geteuid() == 0 ? 1 : 0)
+            )
+        }
+    }
+
+    @Test func createFileIfMissingCreates0600AndPreservesExistingRegularFile() throws {
+        let fixture = try makePrivateTemporaryDirectory()
+        defer { removeFixture(fixture) }
+        let root = try openFixtureRoot(fixture)
+        defer { try? root.close() }
+        let name = try DirectoryCapability.Name("app-server-state")
+        let fileURL = fixture.appendingPathComponent("app-server-state")
+
+        try root.createFileIfMissing(named: name)
+        #expect(try Data(contentsOf: fileURL).isEmpty)
+        #expect(try permissions(at: fileURL) == 0o600)
+
+        let contents = Data("preserve me".utf8)
+        try contents.write(to: fileURL)
+        #expect(chmod(fileURL.path, 0o640) == 0)
+        let identity = try fileIdentity(at: fileURL)
+        try root.createFileIfMissing(named: name)
+
+        #expect(try Data(contentsOf: fileURL) == contents)
+        #expect(try permissions(at: fileURL) == 0o640)
+        #expect(try fileIdentity(at: fileURL) == identity)
+    }
+
+    @Test func leafCreationAndRemovalRejectSymlinksAndNonregularEntries() throws {
+        let fixture = try makePrivateTemporaryDirectory()
+        defer { removeFixture(fixture) }
+        let root = try openFixtureRoot(fixture)
+        defer { try? root.close() }
+        let targetContents = Data("unchanged".utf8)
+        try targetContents.write(to: fixture.appendingPathComponent("target"))
+        #expect(symlink("target", fixture.appendingPathComponent("link").path) == 0)
+        try createDirectory(fixture.appendingPathComponent("directory"), permissions: 0o700)
+        #expect(mkfifo(fixture.appendingPathComponent("fifo").path, 0o600) == 0)
+        let socketDescriptor = try bindUnixSocket(
+            at: fixture.appendingPathComponent("socket").path
+        )
+        defer { _ = Darwin.close(socketDescriptor) }
+
+        for value in ["link", "directory", "fifo", "socket"] {
+            let name = try DirectoryCapability.Name(value)
+            expectDirectoryError(.policyViolation) {
+                try root.createFileIfMissing(named: name)
+            }
+            expectDirectoryError(.policyViolation) {
+                try root.removeFile(named: name)
+            }
+        }
+        #expect(try Data(contentsOf: fixture.appendingPathComponent("target")) == targetContents)
+    }
+
+    @Test func regularFileRemovalIsAbsentAwareAndChangesOnlyTheNamedIdentity() throws {
+        let fixture = try makePrivateTemporaryDirectory()
+        defer { removeFixture(fixture) }
+        let root = try openFixtureRoot(fixture)
+        defer { try? root.close() }
+        try root.removeFile(named: .init("missing"))
+
+        let fileURL = fixture.appendingPathComponent("auth.json")
+        let contents = Data("authenticated".utf8)
+        try contents.write(to: fileURL)
+        let identity = try fileIdentity(at: fileURL)
+        let openHandle = try FileHandle(forReadingFrom: fileURL)
+        defer { try? openHandle.close() }
+
+        try root.removeFile(named: .init("auth.json"))
+        #expect(FileManager.default.fileExists(atPath: fileURL.path) == false)
+        #expect(try openHandle.readToEnd() == contents)
+
+        try Data("replacement".utf8).write(to: fileURL)
+        #expect(try fileIdentity(at: fileURL) != identity)
+    }
+
+    @Test func leafMutationsRemainAnchoredToTheCapabilityIdentityAfterPathSwap() throws {
+        let fixture = try makePrivateTemporaryDirectory()
+        defer { removeFixture(fixture) }
+        let root = try openFixtureRoot(fixture)
+        defer { try? root.close() }
+        let child = try root.directory(
+            named: .init("child"),
+            acquisition: .new,
+            requirements: managedRequirements(root)
+        )
+        defer { try? child.close() }
+        let childURL = fixture.appendingPathComponent("child", isDirectory: true)
+        let movedURL = fixture.appendingPathComponent("moved", isDirectory: true)
+        try Data("original".utf8).write(to: childURL.appendingPathComponent("remove"))
+        try FileManager.default.moveItem(at: childURL, to: movedURL)
+        try createDirectory(childURL, permissions: 0o700)
+        try Data("replacement".utf8).write(to: childURL.appendingPathComponent("remove"))
+
+        try child.createFileIfMissing(named: .init("created"))
+        try child.removeFile(named: .init("remove"))
+
+        #expect(FileManager.default.fileExists(
+            atPath: movedURL.appendingPathComponent("created").path
+        ))
+        #expect(FileManager.default.fileExists(
+            atPath: movedURL.appendingPathComponent("remove").path
+        ) == false)
+        #expect(try Data(contentsOf: childURL.appendingPathComponent("remove")) == Data("replacement".utf8))
+    }
+
     @Test func regularFileReadDistinguishesMissingAndEnforcesBound() throws {
         let fixture = try makePrivateTemporaryDirectory()
         defer { removeFixture(fixture) }
@@ -638,6 +776,12 @@ struct DirectoryCapabilityTests {
             try root.replaceFile(named: .init("file"), with: Data(), maximumByteCount: 0)
         }
         expectDirectoryError(.closed) {
+            try root.createFileIfMissing(named: .init("file"))
+        }
+        expectDirectoryError(.closed) {
+            try root.removeFile(named: .init("file"))
+        }
+        expectDirectoryError(.closed) {
             try root.removeDirectoryRecursively(
                 named: .init("directory"),
                 expectedIdentity: root.identity
@@ -678,11 +822,61 @@ struct DirectoryCapabilityTests {
         }
         try root.close()
     }
+
+    @Test func leafOperationsRaceCloseWithoutUsingAClosedOrReusedDescriptor() async throws {
+        let fixture = try makePrivateTemporaryDirectory()
+        defer { removeFixture(fixture) }
+        let root = try openFixtureRoot(fixture)
+        let workerCount = 32
+        for index in 0..<workerCount where index.isMultiple(of: 2) == false {
+            try Data().write(to: fixture.appendingPathComponent("leaf-\(index)"))
+        }
+        let release = DispatchSemaphore(value: 0)
+        let (entries, entryContinuation) = AsyncStream.makeStream(of: Void.self)
+        let operations = (0..<workerCount).map { index in
+            Task {
+                await withCheckedContinuation { completion in
+                    DispatchQueue.global().async {
+                        entryContinuation.yield()
+                        release.wait()
+                        let result: RaceResult
+                        do {
+                            let name = try DirectoryCapability.Name("leaf-\(index)")
+                            if index.isMultiple(of: 2) {
+                                try root.createFileIfMissing(named: name)
+                            } else {
+                                try root.removeFile(named: name)
+                            }
+                            result = .success
+                        } catch DirectoryCapabilityError.closed {
+                            result = .closed
+                        } catch {
+                            result = .unexpected(error.localizedDescription)
+                        }
+                        completion.resume(returning: result)
+                    }
+                }
+            }
+        }
+        var enteredCount = 0
+        for await _ in entries {
+            enteredCount += 1
+            if enteredCount == workerCount { break }
+        }
+        for _ in 0..<workerCount { release.signal() }
+        try root.close()
+        for operation in operations {
+            let result = await operation.value
+            #expect(result == .success || result == .closed, "Unexpected result: \(result)")
+        }
+        entryContinuation.finish()
+        try root.close()
+    }
 }
 
 private enum ExpectedError { case invalidRequest, policyViolation, userActionRequired, closed }
 
-private enum RaceResult: Equatable, Sendable { case success, unexpected(String) }
+private enum RaceResult: Equatable, Sendable { case success, closed, unexpected(String) }
 
 private enum FixtureError: Error {
     case unableToCreateTemporaryDirectory
