@@ -1372,6 +1372,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
 
     private func startLogin(auth: CodexReviewAuthModel, activation: LoginActivation) async {
         var pendingResources = PendingAuthenticationResources()
+        var admittedLoginClient: AppServerClient?
+        var admittedLoginCodexHomeURL: URL?
         let expectedAdmittedSetupID = authenticationOperation.admittedSetupID
         let expectedRuntimeHandle = activeRuntimeHandle
         do {
@@ -1411,6 +1413,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             guard pendingResources.consume(into: authenticationOperation, activation: activation) else {
                 return
             }
+            admittedLoginClient = loginClient
+            admittedLoginCodexHomeURL = loginCodexHomeURL
             if let loginClient {
                 observeLoginNotifications(client: loginClient, backend: appServerBackend, auth: auth)
             }
@@ -1476,7 +1480,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             logger.error("ChatGPT login failed to start: \(error.localizedDescription, privacy: .public)")
             if let pendingCleanup = pendingResources.takeForCleanup() {
                 await cleanupPendingAuthenticationResources(pendingCleanup)
-                guard authenticationOperation.admittedSetupID == expectedAdmittedSetupID else {
+                guard authenticationOperation.admittedSetupID == expectedAdmittedSetupID,
+                      authenticationOperation.backend == nil
+                else {
                     return
                 }
                 updateAuthenticationFailure(
@@ -1491,9 +1497,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             authenticationOperation.challenge = nil
             authenticationOperation.backend = nil
             authenticationOperation.phase = .waitingForCompletion
-            let loginClient = authenticationOperation.client
+            let loginClient = authenticationOperation.client ?? admittedLoginClient
             authenticationOperation.client = nil
-            let loginCodexHomeURL = authenticationOperation.codexHomeURL
+            let loginCodexHomeURL = authenticationOperation.codexHomeURL ?? admittedLoginCodexHomeURL
             authenticationOperation.codexHomeURL = nil
             authenticationOperation.authenticationSession = nil
             authenticationOperation.monitorTask?.cancel()

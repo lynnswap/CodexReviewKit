@@ -3252,7 +3252,13 @@ struct CodexReviewHostTests {
             AppServerAPI.Account.Login.Cancel.Response(),
             for: "account/login/cancel"
         )
-        var loginTransports = [firstLoginTransport, secondLoginTransport]
+        let laterFailingTransport = FakeJSONRPCTransport()
+        try await laterFailingTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        await laterFailingTransport.enqueueFailure(
+            .responseError(code: -32603, message: "later login unavailable"),
+            for: "account/login/start"
+        )
+        var loginTransports = [firstLoginTransport, secondLoginTransport, laterFailingTransport]
         var isolatedHomeURLs: [URL] = []
         let sessions = FakeWebAuthenticationSessions()
         let store = CodexReviewStore.makeLiveStoreForTesting(
@@ -3293,6 +3299,12 @@ struct CodexReviewHostTests {
         #expect(isolatedHomeURLs.count == 2)
         #expect(FileManager.default.fileExists(atPath: isolatedHomeURLs[0].path) == false)
         #expect(FileManager.default.fileExists(atPath: isolatedHomeURLs[1].path))
+
+        await store.addAccount()
+        #expect(await laterFailingTransport.isClosedForTesting())
+        #expect(store.auth.isAuthenticating)
+        #expect(store.auth.authenticationFailureCount == failureCountBeforeFirstResult)
+        #expect(FileManager.default.fileExists(atPath: isolatedHomeURLs[2].path) == false)
 
         await store.cancelAuthentication()
     }
