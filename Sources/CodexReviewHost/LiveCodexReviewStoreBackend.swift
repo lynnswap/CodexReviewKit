@@ -1386,9 +1386,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             }
             let scope = admission.scope
             admittedScope = scope
-            admission.displacedNotificationTask?.cancel()
             if let loginClient {
-                observeLoginNotifications(client: loginClient, backend: appServerBackend, auth: auth)
+                observeLoginNotifications(scope: scope, client: loginClient, backend: appServerBackend, auth: auth)
             }
             await cleanupDisplacedAuthenticationResources(admission.displacedResources)
             guard authenticationOperation.isCurrent(scope), scope.isOpen else {
@@ -1413,7 +1412,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             let callbackScheme = nativeCallbackScheme ?? nativeAuthenticationConfiguration.callbackScheme
             guard callbackScheme == nativeAuthenticationConfiguration.callbackScheme else {
                 let cleanup = scope.takeForCleanup()
-                takeNotificationTask(ifCurrent: scope)?.cancel()
+                cleanup?.notificationTask?.cancel()
                 if let backend = cleanup?.backend, let challenge = cleanup?.challenge {
                     try? await backend.cancelLogin(challenge)
                 }
@@ -1437,7 +1436,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                   scope.isOpen
             else {
                 let cleanup = scope.takeForCleanup()
-                takeNotificationTask(ifCurrent: scope)?.cancel()
+                cleanup?.notificationTask?.cancel()
                 await session.cancel()
                 try? await appServerBackend.cancelLogin(challenge)
                 await closeIsolatedLoginRuntime(client: cleanup?.client, codexHomeURL: cleanup?.codexHomeURL)
@@ -1475,7 +1474,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             }
             guard let admittedScope else { return }
             let cleanup = admittedScope.takeForCleanup()
-            takeNotificationTask(ifCurrent: admittedScope)?.cancel()
+            cleanup?.notificationTask?.cancel()
             authenticationOperation.phase = .waitingForCompletion
             cleanup?.monitorTask?.cancel()
             if let pendingLoginBackend = cleanup?.backend, let pendingLoginChallenge = cleanup?.challenge {
@@ -1528,7 +1527,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             ))
             let activation = authenticationOperation.activation
             let cleanup = scope.takeForCleanup()
-            takeNotificationTask(ifCurrent: scope)?.cancel()
+            cleanup?.notificationTask?.cancel()
             let loginCodexHomeURL = cleanup?.codexHomeURL
             authenticationOperation.phase = .waitingForCompletion
             let account = applyAuthSnapshot(
@@ -1558,7 +1557,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             }
             logger.error("ChatGPT login failed to complete: \(error.localizedDescription, privacy: .public)")
             let cleanup = scope.takeForCleanup()
-            takeNotificationTask(ifCurrent: scope)?.cancel()
+            cleanup?.notificationTask?.cancel()
             authenticationOperation.phase = .waitingForCompletion
             await closeIsolatedLoginRuntime(client: cleanup?.client, codexHomeURL: cleanup?.codexHomeURL)
             updateAuthenticationFailure(
@@ -1615,7 +1614,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             return
         }
         logger.info("ChatGPT login session was cancelled")
-        takeNotificationTask(ifCurrent: scope)?.cancel()
+        cleanup.notificationTask?.cancel()
         if let loginBackend = cleanup.backend, let challenge = cleanup.challenge {
             do {
                 try await loginBackend.cancelLogin(challenge)
@@ -2119,12 +2118,12 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
     }
 
     private func observeLoginNotifications(
+        scope: LiveAuthenticationOperation.ResourceScope,
         client: AppServerClient,
         backend: AppServerCodexReviewBackend,
         auth: CodexReviewAuthModel
     ) {
-        authenticationOperation.notificationTask?.cancel()
-        authenticationOperation.notificationTask = Task { @MainActor [weak self, weak auth] in
+        let task = Task { @MainActor [weak self, weak auth] in
             guard let self, let auth else {
                 return
             }
@@ -2134,21 +2133,28 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                     where notification.method == "account/login/completed"
                         || notification.method == "account/updated"
                 {
-                    await self.handleLoginRuntimeNotification(notification, backend: backend, auth: auth)
+                    await self.handleLoginRuntimeNotification(
+                        notification,
+                        scope: scope,
+                        backend: backend,
+                        auth: auth
+                    )
                 }
             } catch is CancellationError {
             } catch {
                 logger.error("Login notification stream ended: \(error.localizedDescription, privacy: .public)")
             }
         }
+        scope.install(notificationTask: task)
     }
 
     private func handleLoginRuntimeNotification(
         _ notification: JSONRPC.Notification,
+        scope: LiveAuthenticationOperation.ResourceScope,
         backend: AppServerCodexReviewBackend,
         auth: CodexReviewAuthModel
     ) async {
-        guard let scope = authenticationOperation.resourceScope else { return }
+        guard scope.isOpen, scope.backend === backend else { return }
         switch notification.method {
         case "account/login/completed":
             await handleLoginCompletedNotification(notification, scope: scope, backend: backend, auth: auth)
@@ -2208,7 +2214,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                     activation: authenticationOperation.activation
                 )
                 authenticationOperation.phase = .waitingForCompletion
-                takeNotificationTask(ifCurrent: scope)?.cancel()
+                cleanup?.notificationTask?.cancel()
                 await closeIsolatedLoginRuntime(client: cleanup?.client, codexHomeURL: cleanup?.codexHomeURL)
                 return
             }
@@ -2294,7 +2300,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         }
         let cleanup = scope.takeForCleanup()
         authenticationOperation.phase = .waitingForCompletion
-        takeNotificationTask(ifCurrent: scope)?.cancel()
+        cleanup?.notificationTask?.cancel()
         await closeIsolatedLoginRuntime(client: cleanup?.client, codexHomeURL: cleanup?.codexHomeURL)
     }
 
@@ -2601,20 +2607,13 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         let cleanup = authenticationOperation.resourceScope?.takeForCleanup() ?? .init()
         authenticationOperation.phase = .waitingForCompletion
         cleanup.monitorTask?.cancel()
-        authenticationOperation.notificationTask?.cancel()
-        authenticationOperation.notificationTask = nil
+        cleanup.notificationTask?.cancel()
         return cleanup
-    }
-
-    private func takeNotificationTask(ifCurrent scope: LiveAuthenticationOperation.ResourceScope) -> Task<Void, Never>? {
-        guard authenticationOperation.resourceScope === scope else { return nil }
-        defer { authenticationOperation.notificationTask = nil }
-        return authenticationOperation.notificationTask
     }
 
     private func cleanupAuthenticationScope(_ scope: LiveAuthenticationOperation.ResourceScope) async {
         let cleanup = scope.takeForCleanup()
-        takeNotificationTask(ifCurrent: scope)?.cancel()
+        cleanup?.notificationTask?.cancel()
         await closeIsolatedLoginRuntime(client: cleanup?.client, codexHomeURL: cleanup?.codexHomeURL)
     }
 
@@ -2623,6 +2622,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
     ) async {
         guard let cleanup else { return }
         cleanup.monitorTask?.cancel()
+        cleanup.notificationTask?.cancel()
         await cleanup.authenticationSession?.cancel()
         if let backend = cleanup.backend, let challenge = cleanup.challenge {
             try? await backend.cancelLogin(challenge)
