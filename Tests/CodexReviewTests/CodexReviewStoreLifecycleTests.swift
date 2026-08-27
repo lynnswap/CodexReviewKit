@@ -751,6 +751,86 @@ struct CodexReviewStoreLifecycleTests {
         }
     }
 
+    @Test func registeredWorkCloseJoinsCancelledSettingsMutationAndRejectsLaterWrite() async throws {
+        let reviewBackend = FakeCodexReviewBackend(settings: .init(model: "initial-model"))
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: reviewBackend)
+        )
+        let updateGate = AsyncGate()
+        await reviewBackend.holdNextSettingsUpdate(with: updateGate)
+        let update = Task { @MainActor in
+            await store.updateSettingsModel("admitted-model")
+        }
+        await reviewBackend.waitForSettingsUpdate()
+        update.cancel()
+
+        let closeCompletion = StoreWorkCompletion()
+        let close = Task { @MainActor in
+            let result = await store.closeRegisteredStoreWork(
+                reason: .system(message: "Store work owner closed.")
+            )
+            await closeCompletion.complete()
+            return result
+        }
+        try await waitForStoreWorkStatus(.closing, store: store)
+
+        #expect(store.storeWorkRegistry.activeOrdinals == [1])
+        #expect(await closeCompletion.isComplete() == false)
+        await updateGate.open()
+        await update.value
+        #expect(await close.value == .success)
+
+        let admittedWriteCount = await reviewBackend.recordedCommands().filter {
+            if case .applySettings = $0 { true } else { false }
+        }.count
+        await store.updateSettingsModel("rejected-model")
+        let finalWriteCount = await reviewBackend.recordedCommands().filter {
+            if case .applySettings = $0 { true } else { false }
+        }.count
+
+        #expect(admittedWriteCount == 1)
+        #expect(finalWriteCount == admittedWriteCount)
+        #expect(store.storeWorkRegistry.activeOrdinals.isEmpty)
+    }
+
+    @Test func registeredWorkCloseJoinsAuthenticationMutationAndRejectsLaterRefresh() async throws {
+        let backend = TestingCodexReviewStoreBackend(
+            reviewBackend: FakeCodexReviewBackend()
+        )
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        let refreshGate = AsyncGate()
+        backend.holdAuthRefresh(with: refreshGate)
+        let refresh = Task { @MainActor in
+            await store.refreshAuthentication()
+        }
+        await backend.waitForAuthRefresh()
+
+        let closeCompletion = StoreWorkCompletion()
+        let close = Task { @MainActor in
+            let result = await store.closeRegisteredStoreWork(
+                reason: .system(message: "Store work owner closed.")
+            )
+            await closeCompletion.complete()
+            return result
+        }
+        try await waitForStoreWorkStatus(.closing, store: store)
+
+        #expect(store.storeWorkRegistry.activeOrdinals == [1])
+        #expect(await closeCompletion.isComplete() == false)
+        await refreshGate.open()
+        await refresh.value
+        #expect(await close.value == .success)
+        #expect(backend.authRefreshCallCount == 1)
+
+        await store.refreshAuthentication()
+        await #expect(throws: CodexReviewAPI.Error.self) {
+            try await store.signOutActiveAccount()
+        }
+
+        #expect(backend.authRefreshCallCount == 1)
+        #expect(store.storeWorkRegistry.activeOrdinals.isEmpty)
+    }
+
     @Test func registeredWorkFailuresStayInAdmissionOrder() async throws {
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(

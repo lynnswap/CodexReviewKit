@@ -487,7 +487,10 @@ package final class CodexReviewStoreRateLimitAutoRefreshDriver {
                       let lastFetchAtBeforeRefresh = store.auth.accounts
                           .first(where: { $0.accountKey == accountKey })?
                           .lastRateLimitFetchAt
-                      await store.refreshAccountRateLimits(accountKey: accountKey)
+                      await store.backend.refreshAccountRateLimits(
+                          auth: store.auth,
+                          accountKey: accountKey
+                      )
                       guard Task.isCancelled == false else {
                           return
                       }

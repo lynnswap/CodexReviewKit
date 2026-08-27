@@ -1017,6 +1017,7 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     package var currentSettingsSnapshot: CodexReviewSettings.Snapshot
     package private(set) var isActive = false
     package private(set) var startRequests: [Bool] = []
+    package private(set) var authRefreshCallCount = 0
     package private(set) var reviewRecoveryCommands: [ReviewRecoveryCommand] = []
     package let mcpServerLifecycle: any MCPServerLifecycleOwner
     package private(set) var lastPreparedRuntimeHandle: TestingRuntimeLifecycleHandle?
@@ -1030,6 +1031,8 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     private var runtimePublicationHandle: TestingRuntimeLifecycleHandle?
     private var runtimePublicationEntryWaiters: [CheckedContinuation<Void, Never>] = []
     private var runtimePublicationReleaseWaiters: [CheckedContinuation<Void, Never>] = []
+    private var authRefreshGate: AsyncGate?
+    private var authRefreshStartedGate = AsyncGate()
     private var scriptedReviewRecoveryRoute: ScriptedReviewRecoveryRoute?
     private var reviewRecoveryStageGate: AsyncGate?
     private var reviewRecoveryStageStartedGate = AsyncGate()
@@ -1150,6 +1153,15 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         }
     }
 
+    package func holdAuthRefresh(with gate: AsyncGate) {
+        authRefreshGate = gate
+        authRefreshStartedGate = AsyncGate()
+    }
+
+    package func waitForAuthRefresh() async {
+        await authRefreshStartedGate.wait()
+    }
+
     package func prepareRuntime(
         generation _: ReviewRuntimeGeneration,
         purpose: ReviewRuntimeTransitionPurpose
@@ -1233,6 +1245,10 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     package func waitUntilStopped() async {}
 
     package func refreshAuth(auth: CodexReviewAuthModel) async {
+        authRefreshCallCount += 1
+        await authRefreshStartedGate.open()
+        await authRefreshGate?.waitIgnoringCancellation()
+        authRefreshGate = nil
         do {
             let snapshot = try await reviewBackend.readAuth()
             let accounts = snapshot.accounts.compactMap { account -> CodexAccount? in
