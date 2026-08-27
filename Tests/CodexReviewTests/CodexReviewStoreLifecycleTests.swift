@@ -751,6 +751,163 @@ struct CodexReviewStoreLifecycleTests {
         }
     }
 
+    @Test func registeredWorkCloseJoinsCancelledSettingsMutationAndRejectsLaterWrite() async throws {
+        let reviewBackend = FakeCodexReviewBackend(settings: .init(model: "initial-model"))
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: reviewBackend)
+        )
+        let updateGate = AsyncGate()
+        await reviewBackend.holdNextSettingsUpdate(with: updateGate)
+        let update = Task { @MainActor in
+            await store.updateSettingsModel("admitted-model")
+        }
+        await reviewBackend.waitForSettingsUpdate()
+        update.cancel()
+
+        let closeCompletion = StoreWorkCompletion()
+        let close = Task { @MainActor in
+            let result = await store.closeRegisteredStoreWork(
+                reason: .system(message: "Store work owner closed.")
+            )
+            await closeCompletion.complete()
+            return result
+        }
+        try await waitForStoreWorkStatus(.closing, store: store)
+
+        #expect(store.storeWorkRegistry.activeOrdinals == [1])
+        #expect(await closeCompletion.isComplete() == false)
+        await updateGate.open()
+        await update.value
+        #expect(await close.value == .success)
+
+        let admittedWriteCount = await reviewBackend.recordedCommands().filter {
+            if case .applySettings = $0 { true } else { false }
+        }.count
+        await store.updateSettingsModel("rejected-model")
+        let finalWriteCount = await reviewBackend.recordedCommands().filter {
+            if case .applySettings = $0 { true } else { false }
+        }.count
+
+        #expect(admittedWriteCount == 1)
+        #expect(finalWriteCount == admittedWriteCount)
+        #expect(store.storeWorkRegistry.activeOrdinals.isEmpty)
+    }
+
+    @Test func registeredWorkCloseWaitsForDeferredSettingsSubmissionReplay() async throws {
+        let initial = CodexReviewSettings.Snapshot(model: "initial-model")
+        let reviewBackend = FakeCodexReviewBackend(settings: .init(model: "initial-model"))
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(
+                reviewBackend: reviewBackend,
+                seed: .init(initialSettingsSnapshot: initial)
+            )
+        )
+        let cutoverToken = try await store.settingsService.beginRuntimeCutover()
+        let deferredUpdate = Task { @MainActor in
+            await store.updateSettingsModel("deferred-model")
+        }
+        try await waitForStoreWorkOrdinals([1], store: store)
+
+        let closeCompletion = StoreWorkCompletion()
+        let close = Task { @MainActor in
+            let result = await store.closeRegisteredStoreWork(
+                reason: .system(message: "Store work owner closed.")
+            )
+            await closeCompletion.complete()
+            return result
+        }
+        try await waitForStoreWorkStatus(.closing, store: store)
+        #expect(await closeCompletion.isComplete() == false)
+
+        let replayGate = AsyncGate()
+        await reviewBackend.holdNextSettingsUpdate(with: replayGate)
+        let commit = Task { @MainActor in
+            try await store.settingsService.commitRuntimeSnapshot(
+                token: cutoverToken,
+                snapshot: initial
+            )
+        }
+        await reviewBackend.waitForSettingsUpdate()
+
+        #expect(store.storeWorkRegistry.activeOrdinals == [1])
+        #expect(await closeCompletion.isComplete() == false)
+        await replayGate.open()
+        try await commit.value
+        await deferredUpdate.value
+        #expect(await close.value == .success)
+
+        let admittedWriteCount = await reviewBackend.recordedCommands().filter {
+            if case .applySettings = $0 { true } else { false }
+        }.count
+        await store.updateSettingsModel("rejected-model")
+        let finalWriteCount = await reviewBackend.recordedCommands().filter {
+            if case .applySettings = $0 { true } else { false }
+        }.count
+
+        #expect(admittedWriteCount == 1)
+        #expect(finalWriteCount == admittedWriteCount)
+        #expect(await reviewBackend.settingsSnapshot().model == "deferred-model")
+        #expect(store.settings.selectedModel == "deferred-model")
+        #expect(store.storeWorkRegistry.activeOrdinals.isEmpty)
+    }
+
+    @Test func registeredWorkCloseKeepsFailedCutoverSubmissionUntilRecoveryReplay() async throws {
+        let initial = CodexReviewSettings.Snapshot(model: "initial-model")
+        let reviewBackend = FakeCodexReviewBackend(settings: .init(model: "initial-model"))
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(
+                reviewBackend: reviewBackend,
+                seed: .init(initialSettingsSnapshot: initial)
+            )
+        )
+        let cutoverToken = try await store.settingsService.beginRuntimeCutover()
+        await store.updateSettingsModel("deferred-model")
+        try await waitForStoreWorkOrdinals([1], store: store)
+
+        let closeCompletion = StoreWorkCompletion()
+        let close = Task { @MainActor in
+            let result = await store.closeRegisteredStoreWork(
+                reason: .system(message: "Store work owner closed.")
+            )
+            await closeCompletion.complete()
+            return result
+        }
+        try await waitForStoreWorkStatus(.closing, store: store)
+
+        await reviewBackend.failNextSettingsUpdate(message: "Injected cutover replay failure.")
+        await #expect(throws: (any Error).self) {
+            try await store.settingsService.commitRuntimeSnapshot(
+                token: cutoverToken,
+                snapshot: initial
+            )
+        }
+
+        #expect(store.settingsService.runtimeCutoverStatus == .awaitingRecovery)
+        #expect(store.storeWorkRegistry.activeOrdinals == [1])
+        #expect(await closeCompletion.isComplete() == false)
+
+        let recoveryToken = try await store.settingsService.beginRuntimeCutover()
+        let recoveryGate = AsyncGate()
+        await reviewBackend.holdNextSettingsUpdate(with: recoveryGate)
+        let recovery = Task { @MainActor in
+            try await store.settingsService.commitRuntimeSnapshot(
+                token: recoveryToken,
+                snapshot: initial
+            )
+        }
+        await reviewBackend.waitForSettingsUpdate()
+
+        #expect(store.storeWorkRegistry.activeOrdinals == [1])
+        #expect(await closeCompletion.isComplete() == false)
+        await recoveryGate.open()
+        try await recovery.value
+        #expect(await close.value == .success)
+
+        #expect(await reviewBackend.settingsSnapshot().model == "deferred-model")
+        #expect(store.settings.selectedModel == "deferred-model")
+        #expect(store.storeWorkRegistry.activeOrdinals.isEmpty)
+    }
+
     @Test func registeredWorkFailuresStayInAdmissionOrder() async throws {
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(
@@ -1411,6 +1568,21 @@ private func waitForStoreWorkStatus(
     let clock = ContinuousClock()
     let deadline = clock.now + .seconds(2)
     while store.storeWorkRegistryStatus != expected {
+        guard clock.now < deadline else {
+            throw CancellationError()
+        }
+        await Task.yield()
+    }
+}
+
+@MainActor
+private func waitForStoreWorkOrdinals(
+    _ expected: [UInt64],
+    store: CodexReviewStore
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now + .seconds(2)
+    while store.storeWorkRegistry.activeOrdinals != expected {
         guard clock.now < deadline else {
             throw CancellationError()
         }

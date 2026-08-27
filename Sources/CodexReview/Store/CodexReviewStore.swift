@@ -12,6 +12,37 @@ private struct ReviewRuntimeCancellationRegistration: Sendable {
     let receipt: ReviewCancellationRequestReceipt
 }
 
+@MainActor
+private final class ReviewSettingsSubmissionPublication {
+    private var isPublished = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func publish() {
+        guard isPublished == false else {
+            return
+        }
+        isPublished = true
+        let waiters = waiters
+        self.waiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+
+    func waitUntilPublished() async {
+        if isPublished {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            if isPublished {
+                continuation.resume()
+            } else {
+                waiters.append(continuation)
+            }
+        }
+    }
+}
+
 package enum StoreReviewAttemptOwnership {
     case starting(ReviewStartAdmission)
     case active(StoreReviewActiveAttempt)
@@ -751,6 +782,29 @@ public final class CodexReviewStore {
         }
     }
 
+    private func performRegisteredSettingsSubmission(
+        kind: ReviewStoreWorkKind,
+        submission: @escaping @MainActor @Sendable (
+            CodexReviewStore
+        ) async -> CodexReviewSettingsSubmissionReceipt
+    ) async {
+        let publication = ReviewSettingsSubmissionPublication()
+        guard startRegisteredStoreWork(
+            kind: kind,
+            cancelledBeforeEntry: .runFinalizer { _ in
+                publication.publish()
+            },
+            operation: { @MainActor store in
+                let receipt = await submission(store)
+                publication.publish()
+                await receipt.waitUntilCompleted()
+            }
+        ) != nil else {
+            return
+        }
+        await publication.waitUntilPublished()
+    }
+
     package func performThrowingRegisteredStoreWork<Value: Sendable>(
         kind: ReviewStoreWorkKind,
         operation: @escaping @MainActor @Sendable (CodexReviewStore) async throws -> Value
@@ -1464,27 +1518,51 @@ public final class CodexReviewStore {
     }
 
     package func refreshSettings() async {
-        await settingsService.refresh()
+        await performRegisteredSettingsSubmission(
+            kind: .settingsMutation("refresh")
+        ) { @MainActor store in
+            await store.settingsService.submitRefresh()
+        }
     }
 
     package func updateSettingsModel(_ model: String) async {
-        await settingsService.updateModel(model)
+        await performRegisteredSettingsSubmission(
+            kind: .settingsMutation("update-model")
+        ) { @MainActor store in
+            await store.settingsService.submitModel(model)
+        }
     }
 
     package func clearSettingsModelOverride() async {
-        await settingsService.clearModelOverride()
+        await performRegisteredSettingsSubmission(
+            kind: .settingsMutation("clear-model")
+        ) { @MainActor store in
+            await store.settingsService.submitModel(nil)
+        }
     }
 
     package func updateSettingsReasoningEffort(_ reasoningEffort: CodexReviewSettings.ReasoningEffort?) async {
-        await settingsService.updateReasoningEffort(reasoningEffort)
+        await performRegisteredSettingsSubmission(
+            kind: .settingsMutation("update-reasoning-effort")
+        ) { @MainActor store in
+            await store.settingsService.submitReasoningEffort(reasoningEffort)
+        }
     }
 
     package func clearSettingsReasoningEffort() async {
-        await updateSettingsReasoningEffort(nil)
+        await performRegisteredSettingsSubmission(
+            kind: .settingsMutation("clear-reasoning-effort")
+        ) { @MainActor store in
+            await store.settingsService.submitReasoningEffort(nil)
+        }
     }
 
     package func updateSettingsServiceTier(_ serviceTier: CodexReviewSettings.ServiceTier?) async {
-        await settingsService.updateServiceTier(serviceTier)
+        await performRegisteredSettingsSubmission(
+            kind: .settingsMutation("update-service-tier")
+        ) { @MainActor store in
+            await store.settingsService.submitServiceTier(serviceTier)
+        }
     }
 
     package func transitionToRunning(serverURL: URL?) {
