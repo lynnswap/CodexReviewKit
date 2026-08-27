@@ -2580,6 +2580,7 @@ struct CodexReviewHostTests {
                 )
             },
             mcpHTTPServerBindChecker: { _ in },
+            shutdownCleanupTimeout: .seconds(5),
             transportFactory: { codexHomeURL in
                 #expect(codexHomeURL == mainCodexHomeURL)
                 return transport

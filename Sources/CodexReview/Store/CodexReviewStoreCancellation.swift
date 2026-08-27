@@ -81,11 +81,12 @@ package final class ReviewRuntimeSemanticStopContext {
                     completeLocally(entry.job, cancellation: request.cancellation)
                     entry.workerTask?.cancel()
                 case .active(let active):
-                    _ = try await active.admission.interrupt(
+                    let resolution = try await active.admission.interrupt(
                         active.run,
                         cancellationRequest: request,
                         request: interruptReview
                     )
+                    applyInterruptResolution(resolution, request: request, to: entry.job)
                     entry.workerTask?.cancel()
                     await entry.workerTask?.value
                 case .recovering(let receipt):
@@ -171,6 +172,79 @@ package final class ReviewRuntimeSemanticStopContext {
         job.core.lifecycle.errorMessage = cancellation.message.nilIfEmpty
             ?? job.core.lifecycle.errorMessage
         job.core.lifecycle.endedAt = endedAt
+        job.applyReviewLogLimit()
+    }
+    private func applyInterruptResolution(
+        _ resolution: ReviewInterruptResolution,
+        request: ReviewCancellationRequestReceipt,
+        to job: CodexReviewJob?
+    ) {
+        guard let job, job.isTerminal == false else { return }
+        switch resolution.terminal {
+        case .canonical(.completed):
+            markFailed(job, message: ReviewIngestionError.missingFinalReview.localizedDescription)
+        case .canonical(.failed(let message)):
+            markFailed(job, message: message)
+        case .canonical(.interrupted(let cause)):
+            if case .requested(let cancellation) = cause {
+                completeLocally(job, cancellation: cancellation)
+            } else {
+                markInterrupted(job, cause: cause)
+            }
+        case .connection(let failure):
+            applyStreamFailure(.unexpectedConnection(failure), resolution: resolution, request: request, to: job)
+        case .stream(let failure):
+            applyStreamFailure(failure, resolution: resolution, request: request, to: job)
+        }
+        writeDiagnostics()
+        resumeWaiters(for: job.id)
+    }
+    private func applyStreamFailure(
+        _ failure: ReviewAttemptStreamFailure,
+        resolution: ReviewInterruptResolution,
+        request: ReviewCancellationRequestReceipt,
+        to job: CodexReviewJob
+    ) {
+        if resolution.cancellationRequestReceipt?.id == request.id,
+           let cancellation = resolution.cancellation {
+            completeLocally(job, cancellation: cancellation)
+            return
+        }
+        switch failure {
+        case .protocolViolation, .workerContract:
+            markFailed(job, message: failure.localizedDescription)
+        case .recoverableNetwork, .ownerForcedConnectionClose, .unexpectedConnection, .process:
+            markInterrupted(job, cause: .transport(message: failure.localizedDescription))
+        case .ownerCancellation:
+            completeLocally(job, cancellation: request.cancellation)
+        }
+    }
+    private func markInterrupted(_ job: CodexReviewJob, cause: ReviewInterruptionCause) {
+        let message: String? = switch cause {
+        case .requested(let cancellation): cancellation.message
+        case .server(let message): message
+        case .transport(let message): message
+        case .previousProcessExit: "The previous review process exited before completion."
+        }
+        markFailed(job, message: message, terminal: .interrupted(cause))
+    }
+    private func markFailed(
+        _ job: CodexReviewJob,
+        message: String?,
+        terminal: ReviewTerminalRecord? = nil
+    ) {
+        guard job.isTerminal == false else { return }
+        let endedAt = now()
+        let displayMessage = message?.nilIfEmpty ?? "Review failed."
+        job.pendingCancellationRequest = nil
+        job.core.lifecycle.cancellation = nil
+        job.closeActiveCommandLogEntries(status: "failed", completedAt: endedAt)
+        job.core.lifecycle.terminal = terminal ?? .failed(message: message?.nilIfEmpty)
+        job.core.lifecycle.status = .failed
+        job.core.lifecycle.endedAt = endedAt
+        job.core.lifecycle.errorMessage = message?.nilIfEmpty
+        job.core.output.summary = displayMessage
+        job.appendLogEntry(.init(kind: .error, text: displayMessage, timestamp: endedAt))
         job.applyReviewLogLimit()
     }
     private func resumeWaiters(for jobID: String) {

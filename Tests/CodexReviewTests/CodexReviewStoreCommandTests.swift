@@ -6,6 +6,93 @@ import CodexReviewTesting
 @Suite("Codex review store", .serialized)
 @MainActor
 struct CodexReviewStoreCommandTests {
+    @Test func semanticStopProjectsCanonicalInterruptWithoutStoreOwnership() async throws {
+        let reviewBackend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: reviewBackend)
+        )
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-1",
+            targetSummary: "Review",
+            status: .running,
+            summary: "Running"
+        )
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [.init(cwd: job.cwd)],
+            jobs: [job]
+        )
+        let admission = ReviewStartAdmission()
+        let preparedRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-1",
+            threadID: "thread-1",
+            reviewThreadID: "thread-1"
+        )
+        let activeRun = CodexReviewBackendModel.Review.Run(
+            attemptID: preparedRun.attemptID,
+            threadID: preparedRun.threadID,
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1"
+        )
+        try await admission.admitThreadStartDispatch()
+        try await admission.recordPreparedThread(preparedRun)
+        try await admission.admitReviewStartDispatch(for: preparedRun)
+        try await admission.recordActiveRun(activeRun)
+        store.reviewAttemptOwnerships[job.id] = .active(.init(
+            attempt: .init(run: activeRun),
+            admission: admission
+        ))
+        let context = store.detachRuntimeSemanticStopContext(intent: .explicitStop)
+        let request = try #require(job.pendingCancellationRequest)
+
+        let cancellation = Task { @MainActor in await context.requestCancellations() }
+        try await reviewBackend.waitForInterruptReview(timeout: .seconds(2))
+        try await admission.recordCanonicalTerminal(
+            .interrupted(.requested(request.cancellation)),
+            for: activeRun,
+            cancellationRequest: request
+        )
+        _ = await cancellation.value
+
+        #expect(job.core.lifecycle.status == .cancelled)
+        #expect(job.core.lifecycle.cancellation == request.cancellation)
+    }
+
+    @Test func runtimeTeardownClosesReviewAdmissionBeforeContextTransfer() async throws {
+        let backend = FakeCodexReviewBackend()
+        let startGate = AsyncGate()
+        await backend.holdStartReviewIgnoringCancellation(with: startGate)
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+        let prior = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        try await backend.waitForStartReview(timeout: .seconds(2))
+        let priorJobID = try #require(store.jobs.first?.id)
+
+        store.storeWorkRegistry.closeReviewAdmission()
+        await #expect(throws: (any Error).self) {
+            try await store.startReview(
+                sessionID: "session-2",
+                request: .init(cwd: "/tmp/late", target: .uncommittedChanges)
+            )
+        }
+        let context = store.detachRuntimeSemanticStopContext(intent: .explicitStop)
+        #expect(context.workerJobIDs == [priorJobID])
+        await context.stopUsingDefaultPolicy(intent: .explicitStop)
+
+        await startGate.open()
+        try await backend.waitForInterruptReview(timeout: .seconds(2))
+        await backend.yield(.cancelled("Review runtime stopped."))
+        let priorResult = try await prior.value
+        #expect(await context.drainWorkers(timeout: .seconds(2)))
+        #expect(priorResult.core.lifecycle.status == .cancelled)
+        #expect(store.storeWorkRegistry.activeOrdinals.isEmpty)
+    }
     @Test func storeBackendForwardsExplicitAdmission() async throws {
         let reviewBackend = FakeCodexReviewBackend()
         let storeBackend = TestingCodexReviewStoreBackend(reviewBackend: reviewBackend)
