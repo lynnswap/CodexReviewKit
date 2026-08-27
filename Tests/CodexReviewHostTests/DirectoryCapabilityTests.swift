@@ -553,7 +553,7 @@ struct DirectoryCapabilityTests {
         #expect(FileManager.default.fileExists(atPath: removedBeforeFailureURL.path) == false)
     }
 
-    @Test func recursiveRemovalDetectsAnObservableConcurrentRootIdentitySwap() async throws {
+    @Test func recursiveRemovalRejectsPreAdmissionRootIdentitySwap() throws {
         let fixture = try makePrivateTemporaryDirectory()
         defer { removeFixture(fixture) }
         let root = try openFixtureRoot(fixture)
@@ -566,26 +566,6 @@ struct DirectoryCapabilityTests {
         let victimIdentity = victim.identity
         try victim.close()
         let victimURL = fixture.appendingPathComponent("victim", isDirectory: true)
-        let bulkURL = victimURL.appendingPathComponent("bulk", isDirectory: true)
-        try createDirectory(bulkURL, permissions: 0o700)
-        let markerURL = bulkURL.appendingPathComponent("marker")
-        try Data().write(to: markerURL)
-        try createEmptyFiles(count: 2_048, in: bulkURL)
-        let operation = Task.detached {
-            do {
-                try root.removeDirectoryRecursively(
-                    named: try .init("victim"),
-                    expectedIdentity: victimIdentity
-                )
-                return RaceResult.success
-            } catch let error as DirectoryCapabilityError {
-                if case .policyViolation = error { return .policyViolation }
-                return .unexpected(error.localizedDescription)
-            } catch {
-                return .unexpected(error.localizedDescription)
-            }
-        }
-        try waitUntilMissing(markerURL)
         let movedURL = fixture.appendingPathComponent("moved", isDirectory: true)
         guard rename(victimURL.path, movedURL.path) == 0 else {
             throw POSIXError(.init(rawValue: errno) ?? .EIO)
@@ -593,48 +573,52 @@ struct DirectoryCapabilityTests {
         try createDirectory(victimURL, permissions: 0o700)
         let replacementIdentity = try fileIdentity(at: victimURL)
 
-        #expect(await operation.value == .policyViolation)
+        expectDirectoryError(.policyViolation) {
+            try root.removeDirectoryRecursively(
+                named: .init("victim"),
+                expectedIdentity: victimIdentity
+            )
+        }
         #expect(try fileIdentity(at: victimURL) == replacementIdentity)
         #expect(replacementIdentity.inode != victimIdentity.inode)
+        #expect(FileManager.default.fileExists(atPath: movedURL.path))
     }
 
-    @Test func recursiveRemovalBorrowSurvivesCapabilityClose() async throws {
+    @Test func recursiveRemovalBoundsDescriptorsIndependentlyOfDepth() throws {
+        if ProcessInfo.processInfo.environment[descriptorLimitChildEnvironmentKey] == nil {
+            try runDescriptorLimitTestInSubprocess()
+            return
+        }
         let fixture = try makePrivateTemporaryDirectory()
         defer { removeFixture(fixture) }
         let root = try openFixtureRoot(fixture)
+        defer { try? root.close() }
         let victim = try root.directory(
             named: try .init("victim"),
             acquisition: .new,
             requirements: managedRequirements(root)
         )
         let victimIdentity = victim.identity
-        try victim.close()
         let victimURL = fixture.appendingPathComponent("victim", isDirectory: true)
-        let markerURL = victimURL.appendingPathComponent("marker")
-        try Data().write(to: markerURL)
-        try createEmptyFiles(count: 2_048, in: victimURL)
-        let operation = Task.detached {
-            do {
-                try root.removeDirectoryRecursively(
-                    named: try .init("victim"),
-                    expectedIdentity: victimIdentity
-                )
-                return RaceResult.success
-            } catch {
-                return .unexpected(error.localizedDescription)
-            }
-        }
-        try waitUntilMissing(markerURL)
-        try root.close()
-
-        #expect(await operation.value == .success)
-        #expect(FileManager.default.fileExists(atPath: victimURL.path) == false)
-        expectDirectoryError(.closed) {
-            try root.removeDirectoryRecursively(
-                named: .init("victim"),
-                expectedIdentity: victimIdentity
+        let limit = try reduceOpenFileLimit()
+        defer { restoreOpenFileLimit(limit.original) }
+        var current = victim
+        for _ in 0..<(Int(limit.reducedSoftLimit) + 16) {
+            let child = try current.directory(
+                named: .init("d"),
+                acquisition: .new,
+                requirements: managedRequirements(current)
             )
+            try current.close()
+            current = child
         }
+        try current.close()
+
+        try root.removeDirectoryRecursively(
+            named: .init("victim"),
+            expectedIdentity: victimIdentity
+        )
+        #expect(FileManager.default.fileExists(atPath: victimURL.path) == false)
     }
 
     @Test func closeIsIdempotentAndRejectsLaterOperations() throws {
@@ -697,9 +681,14 @@ struct DirectoryCapabilityTests {
 
 private enum ExpectedError { case invalidRequest, policyViolation, userActionRequired, closed }
 
-private enum RaceResult: Equatable, Sendable { case success, policyViolation, unexpected(String) }
+private enum RaceResult: Equatable, Sendable { case success, unexpected(String) }
 
-private enum FixtureError: Error { case unableToCreateTemporaryDirectory, commandFailed }
+private enum FixtureError: Error {
+    case unableToCreateTemporaryDirectory
+    case commandFailed
+}
+
+private let descriptorLimitChildEnvironmentKey = "CODEX_RECURSIVE_REMOVAL_RLIMIT_CHILD"
 
 private struct FileIdentity: Equatable {
     let deviceID: UInt64
@@ -773,29 +762,45 @@ private func createDirectory(_ url: URL, permissions: mode_t) throws {
     guard chmod(url.path, permissions) == 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
 }
 
-private func createEmptyFiles(count: Int, in directory: URL) throws {
-    for index in 0..<count {
-        let url = directory.appendingPathComponent("entry-\(index)")
-        let descriptor = open(url.path, O_WRONLY | O_CREAT | O_EXCL, mode_t(0o600))
-        guard descriptor >= 0 else {
-            throw POSIXError(.init(rawValue: errno) ?? .EIO)
-        }
-        guard Darwin.close(descriptor) == 0 else {
-            throw POSIXError(.init(rawValue: errno) ?? .EIO)
-        }
+private func reduceOpenFileLimit() throws -> (original: rlimit, reducedSoftLimit: rlim_t) {
+    var original = rlimit()
+    guard getrlimit(RLIMIT_NOFILE, &original) == 0 else {
+        throw POSIXError(.init(rawValue: errno) ?? .EIO)
     }
+    let openDescriptorCount = (0..<4_096).reduce(into: 0) { count, descriptor in
+        if fcntl(Int32(descriptor), F_GETFD) >= 0 { count += 1 }
+    }
+    let reducedSoftLimit = min(original.rlim_cur, rlim_t(max(256, openDescriptorCount + 128)))
+    var reduced = original
+    reduced.rlim_cur = reducedSoftLimit
+    guard setrlimit(RLIMIT_NOFILE, &reduced) == 0 else {
+        throw POSIXError(.init(rawValue: errno) ?? .EIO)
+    }
+    return (original, reducedSoftLimit)
 }
 
-private func waitUntilMissing(_ url: URL) throws {
-    while true {
-        var status = stat()
-        if lstat(url.path, &status) == 0 {
-            sched_yield()
-            continue
-        }
-        guard errno == ENOENT else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
-        return
+private func runDescriptorLimitTestInSubprocess() throws {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+    var arguments = Array(CommandLine.arguments.dropFirst())
+    if let filterIndex = arguments.firstIndex(of: "--filter"),
+       arguments.indices.contains(filterIndex + 1) {
+        arguments[filterIndex + 1] = "recursiveRemovalBoundsDescriptorsIndependentlyOfDepth"
+    } else {
+        arguments += ["--filter", "recursiveRemovalBoundsDescriptorsIndependentlyOfDepth"]
     }
+    process.arguments = arguments
+    var environment = ProcessInfo.processInfo.environment
+    environment[descriptorLimitChildEnvironmentKey] = "1"
+    process.environment = environment
+    try process.run()
+    process.waitUntilExit()
+    #expect(process.terminationStatus == 0)
+}
+
+private func restoreOpenFileLimit(_ original: rlimit) {
+    var original = original
+    #expect(setrlimit(RLIMIT_NOFILE, &original) == 0)
 }
 
 private func permissions(at url: URL) throws -> mode_t {

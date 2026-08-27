@@ -78,6 +78,27 @@ package final class DirectoryCapability: Sendable {
         let descriptor: Int32
     }
 
+    private struct RemovalComponent {
+        let name: Name
+        let identity: Identity
+    }
+
+    private struct RemovalPath {
+        let parentComponents: [RemovalComponent]
+        let leaf: RemovalComponent
+
+        var components: [RemovalComponent] { parentComponents + [leaf] }
+
+        func appending(_ component: RemovalComponent) -> Self {
+            Self(parentComponents: components, leaf: component)
+        }
+    }
+
+    private enum RemovalWork {
+        case enumerate(RemovalPath)
+        case remove(RemovalPath)
+    }
+
     private struct State: Sendable {
         var descriptor: Int32?
         var closeFailure: DirectoryPOSIXFailure?
@@ -281,13 +302,12 @@ package final class DirectoryCapability: Sendable {
         try withBorrowedDescriptor { parent in
             try Self.validateOwned(parent, capability: self)
             let path = url.appendingPathComponent(name.value, isDirectory: true).path
-            try Self.removeDirectoryRecursively(
-                parent: parent,
-                name: name,
-                expectedIdentity: expectedIdentity,
+            try Self.removeDirectoryTree(
+                rootDescriptor: parent,
+                root: RemovalComponent(name: name, identity: expectedIdentity),
                 expectedDeviceID: identity.deviceID,
-                path: path,
-                missingIsNoOp: true
+                directoryURL: url,
+                rootPath: path
             )
         }
     }
@@ -583,149 +603,233 @@ package final class DirectoryCapability: Sendable {
         }
     }
 
-    private static func removeDirectoryRecursively(
-        parent: Int32,
-        name: Name,
-        expectedIdentity: Identity,
+    private static func removeDirectoryTree(
+        rootDescriptor: Int32,
+        root: RemovalComponent,
         expectedDeviceID: UInt64,
-        path: String,
-        missingIsNoOp: Bool
+        directoryURL: URL,
+        rootPath: String
     ) throws {
-        guard let status = try fileStatus(atParent: parent, named: name, path: path) else {
-            if missingIsNoOp { return }
-            throw posixError(operation: "inspect removal entry", code: ENOENT, path: path)
-        }
+        guard let status = try fileStatus(
+            atParent: rootDescriptor,
+            named: root.name,
+            path: rootPath
+        ) else { return }
         try validateRemovalEntry(
             status,
-            expectedIdentity: expectedIdentity,
+            component: root,
             expectedDeviceID: expectedDeviceID,
             expectedType: mode_t(S_IFDIR),
-            path: path
+            path: rootPath
         )
 
-        let descriptor = name.value.withCString { pointer in
-            retryingEINTR { openat(parent, pointer, directoryOpenFlags) }
+        let rootPath = RemovalPath(parentComponents: [], leaf: root)
+        var work: [RemovalWork] = [.enumerate(rootPath)]
+        while let next = work.popLast() {
+            switch next {
+            case .enumerate(let path):
+                var children: [RemovalComponent] = []
+                try withRemovalDirectory(
+                    rootDescriptor: rootDescriptor,
+                    components: path.components,
+                    expectedDeviceID: expectedDeviceID,
+                    directoryURL: directoryURL
+                ) { parent, directoryPath in
+                    let entries = try removalEntries(
+                        from: parent,
+                        expectedDeviceID: expectedDeviceID,
+                        path: directoryPath
+                    )
+                    for entry in entries {
+                        if entry.type == mode_t(S_IFDIR) {
+                            children.append(entry.component)
+                            continue
+                        }
+                        let entryPath = URL(fileURLWithPath: directoryPath, isDirectory: true)
+                            .appendingPathComponent(
+                                entry.component.name.value,
+                                isDirectory: false
+                            ).path
+                        try revalidateRemovalEntry(
+                            parent: parent,
+                            component: entry.component,
+                            expectedDeviceID: expectedDeviceID,
+                            expectedType: entry.type,
+                            path: entryPath
+                        )
+                        let removed = entry.component.name.value.withCString { pointer in
+                            retryingEINTR { unlinkat(parent, pointer, 0) }
+                        }
+                        guard removed == 0 else {
+                            throw posixError(
+                                operation: "remove directory entry",
+                                code: errno,
+                                path: entryPath
+                            )
+                        }
+                    }
+                }
+                work.append(.remove(path))
+                for child in children.reversed() {
+                    work.append(.enumerate(path.appending(child)))
+                }
+            case .remove(let path):
+                try withRemovalDirectory(
+                    rootDescriptor: rootDescriptor,
+                    components: path.parentComponents,
+                    expectedDeviceID: expectedDeviceID,
+                    directoryURL: directoryURL
+                ) { parent, parentPath in
+                    let entryPath = URL(fileURLWithPath: parentPath, isDirectory: true)
+                        .appendingPathComponent(path.leaf.name.value, isDirectory: true).path
+                    try revalidateRemovalEntry(
+                        parent: parent,
+                        component: path.leaf,
+                        expectedDeviceID: expectedDeviceID,
+                        expectedType: mode_t(S_IFDIR),
+                        path: entryPath
+                    )
+                    let removed = path.leaf.name.value.withCString { pointer in
+                        retryingEINTR { unlinkat(parent, pointer, AT_REMOVEDIR) }
+                    }
+                    guard removed == 0 else {
+                        throw posixError(operation: "remove directory", code: errno, path: entryPath)
+                    }
+                }
+            }
         }
-        guard descriptor >= 0 else { throw openError(code: errno, path: path) }
-        var descriptorOwnershipTransferred = false
-        defer {
-            if descriptorOwnershipTransferred == false { _ = Darwin.close(descriptor) }
-        }
-        let openedStatus = try directoryStatus(descriptor, path: path)
-        try validateRemovalEntry(
-            openedStatus,
-            expectedIdentity: expectedIdentity,
-            expectedDeviceID: expectedDeviceID,
-            expectedType: mode_t(S_IFDIR),
-            path: path
-        )
+    }
 
-        guard let stream = fdopendir(descriptor) else {
-            throw posixError(operation: "open directory stream", code: errno, path: path)
+    private static func withRemovalDirectory<Result>(
+        rootDescriptor: Int32,
+        components: [RemovalComponent],
+        expectedDeviceID: UInt64,
+        directoryURL: URL,
+        body: (Int32, String) throws -> Result
+    ) throws -> Result {
+        var descriptor = retryingEINTR { fcntl(rootDescriptor, F_DUPFD_CLOEXEC, 0) }
+        guard descriptor >= 0 else {
+            throw posixError(
+                operation: "duplicate removal root descriptor",
+                code: errno,
+                path: directoryURL.path
+            )
         }
-        descriptorOwnershipTransferred = true
-        var streamNeedsClose = true
-        do {
-            try removeDirectoryContents(
-                stream,
+        var needsClose = true
+        defer { if needsClose { _ = Darwin.close(descriptor) } }
+        var componentURL = directoryURL
+        for component in components {
+            componentURL.appendPathComponent(component.name.value, isDirectory: true)
+            let path = componentURL.path
+            guard let status = try fileStatus(
+                atParent: descriptor,
+                named: component.name,
+                path: path
+            ) else {
+                throw posixError(operation: "inspect removal entry", code: ENOENT, path: path)
+            }
+            try validateRemovalEntry(
+                status,
+                component: component,
                 expectedDeviceID: expectedDeviceID,
+                expectedType: mode_t(S_IFDIR),
                 path: path
             )
+            let next = component.name.value.withCString { pointer in
+                retryingEINTR { openat(descriptor, pointer, directoryOpenFlags) }
+            }
+            guard next >= 0 else { throw openError(code: errno, path: path) }
+            do {
+                let openedStatus = try directoryStatus(next, path: path)
+                try validateRemovalEntry(
+                    openedStatus,
+                    component: component,
+                    expectedDeviceID: expectedDeviceID,
+                    expectedType: mode_t(S_IFDIR),
+                    path: path
+                )
+            } catch {
+                _ = Darwin.close(next)
+                throw error
+            }
+            _ = Darwin.close(descriptor)
+            descriptor = next
+        }
+        let result = try body(descriptor, componentURL.path)
+        let closeResult = Darwin.close(descriptor)
+        needsClose = false
+        guard closeResult == 0 else {
+            throw posixError(
+                operation: "close removal directory",
+                code: errno,
+                path: componentURL.path
+            )
+        }
+        return result
+    }
+
+    private static func removalEntries(
+        from descriptor: Int32,
+        expectedDeviceID: UInt64,
+        path: String
+    ) throws -> [(component: RemovalComponent, type: mode_t)] {
+        let streamDescriptor = retryingEINTR { fcntl(descriptor, F_DUPFD_CLOEXEC, 0) }
+        guard streamDescriptor >= 0 else {
+            throw posixError(operation: "duplicate directory stream", code: errno, path: path)
+        }
+        guard let stream = fdopendir(streamDescriptor) else {
+            let code = errno
+            _ = Darwin.close(streamDescriptor)
+            throw posixError(operation: "open directory stream", code: code, path: path)
+        }
+        var streamNeedsClose = true
+        do {
+            let parent = dirfd(stream)
+            guard parent >= 0 else {
+                throw posixError(operation: "read directory descriptor", code: errno, path: path)
+            }
+            var entries: [(component: RemovalComponent, type: mode_t)] = []
+            while true {
+                errno = 0
+                guard let entry = readdir(stream) else {
+                    guard errno == 0 else {
+                        throw posixError(operation: "read directory entries", code: errno, path: path)
+                    }
+                    break
+                }
+                guard let name = try removalEntryName(entry, directoryPath: path) else { continue }
+                let entryPath = URL(fileURLWithPath: path, isDirectory: true)
+                    .appendingPathComponent(name.value, isDirectory: false).path
+                guard let status = try fileStatus(
+                    atParent: parent,
+                    named: name,
+                    path: entryPath
+                ) else {
+                    throw posixError(operation: "inspect removal entry", code: ENOENT, path: entryPath)
+                }
+                let identity = Identity(status)
+                guard identity.deviceID == expectedDeviceID else {
+                    throw DirectoryCapabilityError.policyViolation(
+                        "Recursive removal cannot cross a device boundary at \(entryPath)."
+                    )
+                }
+                let type = status.st_mode & mode_t(S_IFMT)
+                guard [mode_t(S_IFDIR), mode_t(S_IFREG), mode_t(S_IFLNK)].contains(type) else {
+                    throw DirectoryCapabilityError.policyViolation(
+                        "Recursive removal does not admit this entry type at \(entryPath)."
+                    )
+                }
+                entries.append((RemovalComponent(name: name, identity: identity), type))
+            }
             let closeResult = closedir(stream)
             streamNeedsClose = false
             guard closeResult == 0 else {
                 throw posixError(operation: "close directory stream", code: errno, path: path)
             }
+            return entries
         } catch {
             if streamNeedsClose { _ = closedir(stream) }
             throw error
-        }
-
-        try revalidateRemovalEntry(
-            parent: parent,
-            name: name,
-            expectedIdentity: expectedIdentity,
-            expectedDeviceID: expectedDeviceID,
-            expectedType: mode_t(S_IFDIR),
-            path: path
-        )
-        let removed = name.value.withCString { pointer in
-            retryingEINTR { unlinkat(parent, pointer, AT_REMOVEDIR) }
-        }
-        guard removed == 0 else {
-            throw posixError(operation: "remove directory", code: errno, path: path)
-        }
-    }
-
-    private static func removeDirectoryContents(
-        _ stream: UnsafeMutablePointer<DIR>,
-        expectedDeviceID: UInt64,
-        path: String
-    ) throws {
-        let parent = dirfd(stream)
-        guard parent >= 0 else {
-            throw posixError(operation: "read directory descriptor", code: errno, path: path)
-        }
-        var names: [Name] = []
-        while true {
-            errno = 0
-            guard let entry = readdir(stream) else {
-                guard errno == 0 else {
-                    throw posixError(operation: "read directory entries", code: errno, path: path)
-                }
-                break
-            }
-            if let name = try removalEntryName(entry, directoryPath: path) {
-                names.append(name)
-            }
-        }
-        for name in names {
-            let entryPath = URL(fileURLWithPath: path, isDirectory: true)
-                .appendingPathComponent(name.value, isDirectory: false).path
-            guard let status = try fileStatus(
-                atParent: parent,
-                named: name,
-                path: entryPath
-            ) else {
-                throw posixError(operation: "inspect removal entry", code: ENOENT, path: entryPath)
-            }
-            let identity = Identity(status)
-            let type = status.st_mode & mode_t(S_IFMT)
-            guard identity.deviceID == expectedDeviceID else {
-                throw DirectoryCapabilityError.policyViolation(
-                    "Recursive removal cannot cross a device boundary at \(entryPath)."
-                )
-            }
-            switch type {
-            case mode_t(S_IFDIR):
-                try removeDirectoryRecursively(
-                    parent: parent,
-                    name: name,
-                    expectedIdentity: identity,
-                    expectedDeviceID: expectedDeviceID,
-                    path: entryPath,
-                    missingIsNoOp: false
-                )
-            case mode_t(S_IFREG), mode_t(S_IFLNK):
-                try revalidateRemovalEntry(
-                    parent: parent,
-                    name: name,
-                    expectedIdentity: identity,
-                    expectedDeviceID: expectedDeviceID,
-                    expectedType: type,
-                    path: entryPath
-                )
-                let removed = name.value.withCString { pointer in
-                    retryingEINTR { unlinkat(parent, pointer, 0) }
-                }
-                guard removed == 0 else {
-                    throw posixError(operation: "remove directory entry", code: errno, path: entryPath)
-                }
-            default:
-                throw DirectoryCapabilityError.policyViolation(
-                    "Recursive removal does not admit this entry type at \(entryPath)."
-                )
-            }
         }
     }
 
@@ -756,18 +860,21 @@ package final class DirectoryCapability: Sendable {
 
     private static func revalidateRemovalEntry(
         parent: Int32,
-        name: Name,
-        expectedIdentity: Identity,
+        component: RemovalComponent,
         expectedDeviceID: UInt64,
         expectedType: mode_t,
         path: String
     ) throws {
-        guard let status = try fileStatus(atParent: parent, named: name, path: path) else {
+        guard let status = try fileStatus(
+            atParent: parent,
+            named: component.name,
+            path: path
+        ) else {
             throw posixError(operation: "inspect removal entry", code: ENOENT, path: path)
         }
         try validateRemovalEntry(
             status,
-            expectedIdentity: expectedIdentity,
+            component: component,
             expectedDeviceID: expectedDeviceID,
             expectedType: expectedType,
             path: path
@@ -776,13 +883,13 @@ package final class DirectoryCapability: Sendable {
 
     private static func validateRemovalEntry(
         _ status: stat,
-        expectedIdentity: Identity,
+        component: RemovalComponent,
         expectedDeviceID: UInt64,
         expectedType: mode_t,
         path: String
     ) throws {
         let identity = Identity(status)
-        guard identity == expectedIdentity,
+        guard identity == component.identity,
               identity.deviceID == expectedDeviceID,
               status.st_mode & mode_t(S_IFMT) == expectedType else {
             throw DirectoryCapabilityError.policyViolation(
