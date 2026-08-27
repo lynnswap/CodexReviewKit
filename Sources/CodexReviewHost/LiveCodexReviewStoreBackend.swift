@@ -2405,7 +2405,12 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                     where notification.method == "account/login/completed"
                         || notification.method == "account/updated"
                 {
-                    await self.handleLoginRuntimeNotification(notification, backend: backend, auth: auth)
+                    await self.handleLoginRuntimeNotification(
+                        notification,
+                        backend: backend,
+                        auth: auth,
+                        operationID: operationID
+                    )
                 }
             } catch is CancellationError {
             } catch {
@@ -2426,16 +2431,30 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
     private func handleLoginRuntimeNotification(
         _ notification: JSONRPC.Notification,
         backend: AppServerCodexReviewBackend,
-        auth: CodexReviewAuthModel
+        auth: CodexReviewAuthModel,
+        operationID: UUID
     ) async {
+        guard authenticationOperationAcceptsCallbacks(id: operationID),
+              loginBackend === backend else {
+            return
+        }
         switch notification.method {
         case "account/login/completed":
-            await handleLoginCompletedNotification(notification, backend: backend, auth: auth)
+            await handleLoginCompletedNotification(
+                notification,
+                backend: backend,
+                auth: auth,
+                originatingOperationID: operationID
+            )
         case "account/updated":
             guard loginBackend != nil, isWaitingForLoginAccountUpdate else {
                 return
             }
-            await finishCompletedLoginAfterAccountUpdate(backend: backend, auth: auth)
+            await finishCompletedLoginAfterAccountUpdate(
+                backend: backend,
+                auth: auth,
+                originatingOperationID: operationID
+            )
         default:
             return
         }
@@ -2445,9 +2464,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         _ notification: JSONRPC.Notification,
         backend: AppServerCodexReviewBackend,
         expectedRuntimeHandle: LiveRuntimeLifecycleHandle? = nil,
-        auth: CodexReviewAuthModel
+        auth: CodexReviewAuthModel,
+        originatingOperationID: UUID? = nil
     ) async {
-        guard let operationID = activeAuthenticationOperation?.id,
+        guard let operationID = originatingOperationID ?? activeAuthenticationOperation?.id,
               authenticationOperationAcceptsCallbacks(id: operationID) else {
             return
         }
@@ -2462,7 +2482,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             await handleAccountUpdatedNotification(
                 backend: backend,
                 expectedRuntimeHandle: expectedRuntimeHandle,
-                auth: auth
+                auth: auth,
+                originatingOperationID: originatingOperationID
             )
             return
         }
@@ -2513,9 +2534,16 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
     private func handleAccountUpdatedNotification(
         backend: AppServerCodexReviewBackend,
         expectedRuntimeHandle: LiveRuntimeLifecycleHandle? = nil,
-        auth: CodexReviewAuthModel
+        auth: CodexReviewAuthModel,
+        originatingOperationID: UUID? = nil
     ) async {
-        if activeAuthenticationOperation?.receipt.isCancellationRequested == true { return }
+        if let originatingOperationID {
+            guard authenticationOperationAcceptsCallbacks(id: originatingOperationID) else {
+                return
+            }
+        } else if activeAuthenticationOperation?.receipt.isCancellationRequested == true {
+            return
+        }
         if let expectedRuntimeHandle {
             guard activeRuntimeHandle === expectedRuntimeHandle,
                   acceptsRuntimeRequests
@@ -2534,16 +2562,18 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         await finishCompletedLoginAfterAccountUpdate(
             backend: backend,
             expectedRuntimeHandle: expectedRuntimeHandle,
-            auth: auth
+            auth: auth,
+            originatingOperationID: originatingOperationID
         )
     }
 
     private func finishCompletedLoginAfterAccountUpdate(
         backend: AppServerCodexReviewBackend,
         expectedRuntimeHandle: LiveRuntimeLifecycleHandle? = nil,
-        auth: CodexReviewAuthModel
+        auth: CodexReviewAuthModel,
+        originatingOperationID: UUID? = nil
     ) async {
-        guard let operationID = activeAuthenticationOperation?.id,
+        guard let operationID = originatingOperationID ?? activeAuthenticationOperation?.id,
               authenticationOperationAcceptsCallbacks(id: operationID) else {
             return
         }
