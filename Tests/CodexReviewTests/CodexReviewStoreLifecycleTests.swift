@@ -845,6 +845,8 @@ struct CodexReviewStoreLifecycleTests {
         #expect(await awaitCompletion.isComplete() == false)
 
         await startGate.open()
+        try await backend.waitForInterruptReview(timeout: .seconds(2))
+        await backend.yield(.cancelled(reason.message))
         #expect(await close.value == .success)
         let result = try await review.value
         let awaitedResult = try await awaiter.value
@@ -892,6 +894,8 @@ struct CodexReviewStoreLifecycleTests {
 
         #expect(returnedBeforeWorkerFinalization == false)
         await startGate.open()
+        try await backend.waitForInterruptReview(timeout: .seconds(2))
+        await backend.yield(.cancelled(reason.message))
         #expect(await close.value == .success)
         let result = try await review.value
 
