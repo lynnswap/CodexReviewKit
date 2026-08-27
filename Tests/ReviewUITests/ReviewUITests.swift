@@ -1644,7 +1644,7 @@ struct ReviewUITests {
         #expect(sidebar.sidebarFirstRowRectForTesting.maxY <= sidebar.sidebarVisibleRectForTesting.maxY + 0.5)
     }
 
-    @Test func sidebarBottomRowRemainsVisibleAtMaximumScrollOffset() {
+    @Test func sidebarRowsStayAboveBottomAccessoryAtCompactWindowHeight() throws {
         let jobs = (0..<12).map { index in
             makeJob(
                 id: "job-\(index)",
@@ -1658,19 +1658,35 @@ struct ReviewUITests {
             serverState: .running,
             content: makeSidebarContent(from: jobs)
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
-        let window = NSWindow(contentViewController: viewController)
+        let harness = makeWindowHarness(
+            store: store,
+            contentSize: NSSize(width: 600, height: 400)
+        )
+        let viewController = harness.viewController
+        let window = harness.window
         defer { window.close() }
-        window.setContentSize(NSSize(width: 360, height: 220))
         viewController.loadViewIfNeeded()
-        viewController.attach(to: window)
         window.layoutIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
-        sidebar.scrollSidebarToOffsetForTesting(10_000)
+        sidebar.scrollSidebarToOffsetForTesting(sidebar.sidebarMaximumVerticalScrollOffsetForTesting)
+        let accessoryFrame = try #require(viewController.sidebarBottomAccessoryFrameForTesting)
+        let lastJob = try #require(sidebar.sidebarLastJobForTesting)
+        let unselectedRowFrame = sidebar.sidebarLastRowFrameForTesting
 
+        #expect(sidebar.selectedJobForTesting == nil)
+        #expect(sidebar.scrollViewFrameForTesting.minY >= accessoryFrame.maxY - 0.5)
+        #expect(unselectedRowFrame.minY >= accessoryFrame.maxY - 0.5)
         #expect(sidebar.sidebarLastRowRectForTesting.maxY <= sidebar.sidebarVisibleRectForTesting.maxY + 0.5)
+        #expect(sidebar.jobRowAccessibilityIdentifierForTesting(lastJob) == "review-monitor.job-row")
+
+        sidebar.selectJobForTesting(lastJob)
+        viewController.view.layoutSubtreeIfNeeded()
+
+        #expect(sidebar.selectedJobForTesting === lastJob)
+        #expect(sidebar.sidebarLastRowFrameForTesting.minY >= accessoryFrame.maxY - 0.5)
+        #expect(sidebar.jobRowAccessibilityIdentifierForTesting(lastJob) == "review-monitor.job-row")
     }
 
     @Test func nativeWorkspaceDisclosureKeepsModelAndOutlineExpansionInSync() async throws {
