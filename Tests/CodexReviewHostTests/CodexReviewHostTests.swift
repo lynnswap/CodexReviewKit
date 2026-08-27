@@ -504,7 +504,7 @@ struct CodexReviewHostTests {
         await store.stop()
     }
 
-    @Test func liveCleanupConnectionFailureSchedulesExactRuntimeSuccessor() async throws {
+    @Test func notificationFirstCleanupInvalidationClaimsOneEventualReplacement() async throws {
         let transport = FakeJSONRPCTransport()
         let replacementTransport = FakeJSONRPCTransport()
         try await enqueueRuntimeStartResponses(transport)
@@ -513,6 +513,11 @@ struct CodexReviewHostTests {
             threadID: "route-thread",
             turnID: "turn-1",
             reviewThreadID: "review-thread-1"
+        )
+        let cleanupGate = AsyncGate()
+        await transport.holdNextIgnoringCancellation(
+            method: "thread/backgroundTerminals/clean",
+            gate: cleanupGate
         )
         try await enqueueRuntimeStartResponses(replacementTransport)
         try await enqueueLiveRouteReviewStartResponses(
@@ -539,37 +544,103 @@ struct CodexReviewHostTests {
             }
         )
         await store.start()
+        await transport.waitForNotificationStreamCount(1)
         let attempt = try await store.backend.startReview(
-            makeLiveRouteReviewStartRequest(jobID: "job-cleanup-connection"),
+            makeLiveRouteReviewStartRequest(jobID: "job-cleanup-invalidation"),
             admission: ReviewStartAdmission()
         )
-        await transport.close()
-
-        do {
+        let cleanup = Task { @MainActor in
             try await store.backend.cleanupReview(attempt.run)
-            Issue.record("Closed-transport cleanup unexpectedly succeeded.")
-        } catch let failure as ReviewRuntimeCloseFailure {
-            guard case .connection = failure else {
-                Issue.record("Closed-transport cleanup lost its connection classification.")
-                return
-            }
+        }
+        await transport.waitForActiveRequests(method: "thread/backgroundTerminals/clean")
+
+        await transport.finishNotificationStreams(
+            throwing: JSONRPC.Error.transportTerminated(.ownerClose)
+        )
+        await transport.waitUntilClosedForTesting()
+        await #expect(throws: ReviewRuntimeCloseFailure.self) {
+            try await cleanup.value
         }
         await replacementFactoryStarted.wait()
         guard case .acquiring(_, _, let replacementTask) = store.runtimeState else {
-            Issue.record("Expected connection cleanup to schedule one exact successor.")
+            Issue.record("Expected cleanup recovery to own an eventual replacement task.")
             return
         }
 
+        #expect(await transport.isClosedForTesting())
+        #expect(store.liveReviewAttemptRouteCountForTesting == 0)
         #expect(factoryCallCount == 2)
+        #expect(store.serverState != .running)
+
         await replacementFactoryGate.open()
         await replacementTask.value
         #expect(store.serverState == .running)
-
         let replacementAttempt = try await store.backend.startReview(
-            makeLiveRouteReviewStartRequest(jobID: "job-after-cleanup-connection"),
+            makeLiveRouteReviewStartRequest(jobID: "job-replacement"),
             admission: ReviewStartAdmission()
         )
         try await store.backend.cleanupReview(replacementAttempt.run)
+        #expect(store.liveReviewAttemptRouteCountForTesting == 0)
+        await store.stop()
+    }
+
+    @Test func cleanupFirstTransportInvalidationClaimsOneEventualReplacement() async throws {
+        let transport = FakeJSONRPCTransport()
+        let replacementTransport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(transport)
+        try await enqueueLiveRouteReviewStartResponses(
+            transport,
+            threadID: "route-thread",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1"
+        )
+        await transport.enqueueTransportFailure(
+            message: "raw cleanup I/O failed",
+            for: "thread/backgroundTerminals/clean"
+        )
+        try await enqueueRuntimeStartResponses(replacementTransport)
+        try await enqueueLiveRouteReviewStartResponses(
+            replacementTransport,
+            threadID: "replacement-thread",
+            turnID: "replacement-turn",
+            reviewThreadID: "replacement-review-thread"
+        )
+        try await enqueueReviewCleanupResponses(replacementTransport)
+        var transports = [transport, replacementTransport]
+        var factoryCallCount = 0
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transportFactory: { _ in
+                factoryCallCount += 1
+                return transports.removeFirst()
+            }
+        )
+        await store.start()
+        let attempt = try await store.backend.startReview(
+            makeLiveRouteReviewStartRequest(jobID: "job-cleanup-first"),
+            admission: ReviewStartAdmission()
+        )
+
+        await #expect(throws: ReviewRuntimeCloseFailure.connection(
+            "thread/backgroundTerminals/clean for route-thread: "
+                + "App-server cleanup request failed during transport: raw cleanup I/O failed"
+        )) {
+            try await store.backend.cleanupReview(attempt.run)
+        }
+        await waitForRuntimeLifecycleSettlement(store)
+
+        #expect(await transport.isClosedForTesting())
+        #expect(factoryCallCount == 2)
+        #expect(store.serverState == .running)
+        #expect(store.liveReviewAttemptRouteCountForTesting == 0)
+
+        let replacement = try await store.backend.startReview(
+            makeLiveRouteReviewStartRequest(jobID: "job-after-cleanup-first"),
+            admission: ReviewStartAdmission()
+        )
+        try await store.backend.cleanupReview(replacement.run)
+        #expect(store.liveReviewAttemptRouteCountForTesting == 0)
         await store.stop()
     }
 
@@ -3306,6 +3377,22 @@ private func emitInterruptedTurn(
             turn: .init(id: turnID, error: .init(message: message))
         )
     )
+}
+
+@MainActor
+private func waitForRuntimeLifecycleSettlement(
+    _ store: CodexReviewStore
+) async {
+    while true {
+        switch store.runtimeState {
+        case .acquiring(_, _, let task),
+             .replacing(_, let task),
+             .tearingDown(_, _, _, _, let task):
+            await task.value
+        case .stopped, .running, .failed:
+            return
+        }
+    }
 }
 
 private struct InterruptedTurnNotification: Encodable, Sendable {

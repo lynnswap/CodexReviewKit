@@ -27,6 +27,25 @@ package struct AppServerStartRequestFailure: LocalizedError, Equatable, Sendable
     }
 }
 
+package struct AppServerCleanupRequestFailure: LocalizedError, Equatable, Sendable {
+    package enum Stage: String, Equatable, Sendable {
+        case transport
+        case responseDecoding
+    }
+
+    package var stage: Stage
+    package var underlyingDescription: String
+
+    package init(stage: Stage, underlyingDescription: String) {
+        self.stage = stage
+        self.underlyingDescription = underlyingDescription
+    }
+
+    package var errorDescription: String? {
+        "App-server cleanup request failed during \(stage.rawValue): \(underlyingDescription)"
+    }
+}
+
 package actor AppServerClient {
     private static let appServerOverloadedErrorCode = -32001
     private static let overloadRetryDelays: [Duration] = [
@@ -113,8 +132,21 @@ package actor AppServerClient {
             params: request.params,
             responseType: Request.Response.self,
             scope: request.scope,
-            normalizesStartFailure: true,
+            failureKind: .start,
             overloadRetryAdmission: overloadRetryAdmission
+        )
+    }
+
+    package func sendCleanupRequest<Request: AppServerAPI.Request>(
+        _ request: Request
+    ) async throws -> Request.Response {
+        try await performSend(
+            method: Request.method,
+            params: request.params,
+            responseType: Request.Response.self,
+            scope: request.scope,
+            failureKind: .cleanup,
+            overloadRetryAdmission: nil
         )
     }
 
@@ -129,7 +161,7 @@ package actor AppServerClient {
             params: params,
             responseType: responseType,
             scope: scope,
-            normalizesStartFailure: false,
+            failureKind: .none,
             overloadRetryAdmission: nil
         )
     }
@@ -139,7 +171,7 @@ package actor AppServerClient {
         params: Params,
         responseType: Response.Type,
         scope: AppServerAPI.RequestScope?,
-        normalizesStartFailure: Bool,
+        failureKind: FailureKind,
         overloadRetryAdmission: (@Sendable (AppServerOverloadRetryAdmissionEvent) async throws -> Void)?
     ) async throws -> Response {
         try await serializer.run(scope: scope) { [transport, encoder, decoder, self] in
@@ -161,28 +193,42 @@ package actor AppServerClient {
                     } catch let error as JSONRPC.Error {
                         throw error
                     } catch {
-                        guard normalizesStartFailure else {
+                        switch failureKind {
+                        case .none:
                             throw error
+                        case .start:
+                            logger.error(
+                                "JSON-RPC transport failed for request \(requestID, privacy: .public) -> \(method, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                            )
+                            throw AppServerStartRequestFailure(
+                                stage: .transport,
+                                underlyingDescription: error.localizedDescription
+                            )
+                        case .cleanup:
+                            throw AppServerCleanupRequestFailure(
+                                stage: .transport,
+                                underlyingDescription: error.localizedDescription
+                            )
                         }
-                        logger.error(
-                            "JSON-RPC transport failed for request \(requestID, privacy: .public) -> \(method, privacy: .public): \(error.localizedDescription, privacy: .public)"
-                        )
-                        throw AppServerStartRequestFailure(
-                            stage: .transport,
-                            underlyingDescription: error.localizedDescription
-                        )
                     }
                     let response: Response
                     do {
                         response = try decoder.decode(responseType, from: rawResponse)
                     } catch {
-                        guard normalizesStartFailure else {
+                        switch failureKind {
+                        case .none:
                             throw error
+                        case .start:
+                            throw AppServerStartRequestFailure(
+                                stage: .responseDecoding,
+                                underlyingDescription: error.localizedDescription
+                            )
+                        case .cleanup:
+                            throw AppServerCleanupRequestFailure(
+                                stage: .responseDecoding,
+                                underlyingDescription: error.localizedDescription
+                            )
                         }
-                        throw AppServerStartRequestFailure(
-                            stage: .responseDecoding,
-                            underlyingDescription: error.localizedDescription
-                        )
                     }
                     logger.debug("JSON-RPC response \(requestID, privacy: .public) <- \(method, privacy: .public)")
                     return response
@@ -208,6 +254,12 @@ package actor AppServerClient {
                 }
             }
         }
+    }
+
+    private enum FailureKind: Sendable {
+        case none
+        case start
+        case cleanup
     }
 
     package func notify<Params: Encodable & Sendable>(
