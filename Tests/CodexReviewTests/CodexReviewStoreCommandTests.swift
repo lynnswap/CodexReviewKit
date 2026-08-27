@@ -1699,7 +1699,8 @@ struct CodexReviewStoreCommandTests {
             let runtimeReceipt = ReviewCancellationRequestReceipt(
                 id: .init(jobID: "job-1", ordinal: 1),
                 cancellation: reason,
-                rejectionDisposition: .preserveRuntimeStopIntent
+                rejectionDisposition: .preserveRuntimeStopIntent,
+                registeredWorkAdmission: nil
             )
 
             let close = Task { @MainActor in
@@ -2055,7 +2056,8 @@ struct CodexReviewStoreCommandTests {
             let runtimeReceipt = ReviewCancellationRequestReceipt(
                 id: .init(jobID: "job-1", ordinal: 1),
                 cancellation: reason,
-                rejectionDisposition: .preserveRuntimeStopIntent
+                rejectionDisposition: .preserveRuntimeStopIntent,
+                registeredWorkAdmission: nil
             )
 
             await stageAdmission.waitForCancellationRequestReceipt(runtimeReceipt.id)
@@ -2124,7 +2126,8 @@ struct CodexReviewStoreCommandTests {
             let runtimeReceipt = ReviewCancellationRequestReceipt(
                 id: .init(jobID: "job-1", ordinal: 1),
                 cancellation: reason,
-                rejectionDisposition: .preserveRuntimeStopIntent
+                rejectionDisposition: .preserveRuntimeStopIntent,
+                registeredWorkAdmission: nil
             )
 
             await committedAdmission.waitForCancellationRequestReceipt(runtimeReceipt.id)
@@ -2300,7 +2303,8 @@ struct CodexReviewStoreCommandTests {
         let runtimeReceipt = ReviewCancellationRequestReceipt(
             id: .init(jobID: job.id, ordinal: firstReceipt.id.ordinal + 1),
             cancellation: reason,
-            rejectionDisposition: .preserveRuntimeStopIntent
+            rejectionDisposition: .preserveRuntimeStopIntent,
+            registeredWorkAdmission: nil
         )
         await active.workerAdmission.waitForCancellationRequestReceipt(runtimeReceipt.id)
         #expect(workerTask.isCancelled)
@@ -2311,7 +2315,7 @@ struct CodexReviewStoreCommandTests {
         let final = try await review.value
         let resolution = try #require(await active.admission.activeTerminalResolution())
         let receipt = try #require(resolution.cancellationRequestReceipt)
-        let crossJobReceipt = ReviewCancellationRequestReceipt(id: .init(jobID: "job-2", ordinal: receipt.id.ordinal + 1), cancellation: reason, rejectionDisposition: .preserveRuntimeStopIntent)
+        let crossJobReceipt = ReviewCancellationRequestReceipt(id: .init(jobID: "job-2", ordinal: receipt.id.ordinal + 1), cancellation: reason, rejectionDisposition: .preserveRuntimeStopIntent, registeredWorkAdmission: nil)
 
         #expect(final.core.lifecycle.status == .cancelled && final.core.lifecycle.cancellation == reason)
         #expect(receipt.id == runtimeReceipt.id)

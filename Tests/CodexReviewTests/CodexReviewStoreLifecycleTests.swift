@@ -6,23 +6,34 @@ import CodexReviewTesting
 @Suite("store runtime lifecycle", .serialized)
 @MainActor
 struct CodexReviewStoreLifecycleTests {
-    @Test func reviewAdmissionGenerationDoesNotReopenPriorWork() throws {
+    @Test func reopenedReviewAdmissionCannotReacceptCancelledCaller() async throws {
+        let backend = FakeCodexReviewBackend()
+        let startGate = AsyncGate()
+        await backend.holdStartReviewIgnoringCancellation(with: startGate)
         let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
         )
-        let registry = store.storeWorkRegistry
-        let priorReview = try #require(registry.register(.reviewMutation("prior")))
-        let settings = try #require(registry.register(.settingsMutation("settings")))
+        let review = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        try await backend.waitForStartReview(timeout: .seconds(2))
 
-        registry.closeReviewAdmission()
-        #expect(registry.register(.reviewMutation("late")) == nil)
-        #expect(registry.accepts(priorReview) == false)
-        #expect(registry.accepts(settings))
+        store.storeWorkRegistry.closeReviewAdmission()
+        #expect(store.storeWorkRegistry.register(.reviewMutation("late")) == nil)
+        #expect(store.storeWorkRegistry.register(.settingsMutation("settings")) != nil)
+        store.storeWorkRegistry.openReviewAdmission()
+        review.cancel()
 
-        registry.openReviewAdmission()
-        let nextReview = try #require(registry.register(.reviewMutation("next")))
-        #expect(registry.accepts(priorReview) == false)
-        #expect(registry.accepts(nextReview))
+        await startGate.open()
+        await backend.yield(.completed(summary: "Succeeded.", result: "No findings."))
+        let result = try await review.value
+        #expect(result.core.lifecycle.status == .succeeded)
+        #expect(await backend.recordedCommands().contains {
+            if case .interruptReviewAdmission = $0 { true } else { false }
+        } == false)
     }
 
     @Test func stopInvalidatesHeldRuntimePreparationAndClosesStaleHandleOnce() async throws {

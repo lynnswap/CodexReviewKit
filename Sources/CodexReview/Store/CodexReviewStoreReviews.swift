@@ -63,7 +63,8 @@ extension CodexReviewStore {
             if Task.isCancelled, storeWorkRegistry.accepts(workAdmission) {
                 _ = try await performCancelReview(
                     jobID: jobID,
-                    cancellation: .system()
+                    cancellation: .system(),
+                    workAdmission: workAdmission
                 )
             }
             await reviewWorkerTasks[jobID]?.value
@@ -75,7 +76,7 @@ extension CodexReviewStore {
             jobID: jobID,
             timeout: waitTimeout
         )
-        if storeWorkRegistry.acceptsNewWork == false {
+        if storeWorkRegistry.accepts(workAdmission) == false {
             await workerTask?.value
         }
         return try readReview(sessionID: sessionID, jobID: jobID)
@@ -396,10 +397,9 @@ extension CodexReviewStore {
         for job: CodexReviewJob,
         requested: ReviewCancellation
     ) -> ReviewCancellation {
-        guard storeWorkRegistry.acceptsNewWork == false else {
-            return requested
-        }
-        return job.pendingCancellationRequest?.cancellation ?? requested
+        guard let current = job.pendingCancellationRequest,
+              current.rejectionDisposition == .preserveRuntimeStopIntent else { return requested }
+        return current.cancellation
     }
 
     private func completeCancellationAfterRegisteredWorkSuspension(
@@ -423,7 +423,8 @@ extension CodexReviewStore {
         else {
             return
         }
-        if storeWorkRegistry.acceptsNewWork {
+        let shouldRecordFailure = receipt.registeredWorkAdmission.map(storeWorkRegistry.accepts) ?? true
+        if shouldRecordFailure {
             try recordCancellationFailure(
                 jobID: job.id,
                 sessionID: job.sessionID,
@@ -899,13 +900,14 @@ extension CodexReviewStore {
     ) async throws -> CodexReviewAPI.Cancel.Outcome {
         try await performThrowingRegisteredStoreWork(
             kind: .reviewMutation("cancel")
-        ) { @MainActor store, _ in
+        ) { @MainActor store, workAdmission in
             guard let job = store.job(id: jobID), job.sessionID == sessionID else {
                 throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
             }
             return try await store.performCancelReview(
                 jobID: jobID,
-                cancellation: cancellation
+                cancellation: cancellation,
+                workAdmission: workAdmission
             )
         }
     }
@@ -917,10 +919,11 @@ extension CodexReviewStore {
     ) async throws -> CodexReviewAPI.Cancel.Outcome {
         try await performThrowingRegisteredStoreWork(
             kind: .reviewMutation("cancel")
-        ) { @MainActor store, _ in
+        ) { @MainActor store, workAdmission in
             try await store.performCancelReview(
                 jobID: jobID,
-                cancellation: cancellation
+                cancellation: cancellation,
+                workAdmission: workAdmission
             )
         }
     }
@@ -928,7 +931,8 @@ extension CodexReviewStore {
     func performCancelReview(
         jobID: String,
         cancellation: ReviewCancellation,
-        rejectionDisposition: ReviewCancellationRequestReceipt.RejectionDisposition = .reportFailure
+        rejectionDisposition: ReviewCancellationRequestReceipt.RejectionDisposition = .reportFailure,
+        workAdmission: ReviewStoreWorkRegistry.Admission? = nil
     ) async throws -> CodexReviewAPI.Cancel.Outcome {
         let job = try job(jobID: jobID)
         guard job.isTerminal == false else {
@@ -947,6 +951,7 @@ extension CodexReviewStore {
         guard let requestReceipt = recordCancellationRequest(
             requestedCancellation,
             rejectionDisposition: rejectionDisposition,
+            workAdmission: workAdmission,
             for: job
         ) else {
             return .init(jobID: job.id, cancelled: false, core: job.core)
@@ -1075,7 +1080,11 @@ extension CodexReviewStore {
             into: [String: ReviewCancellationRequestReceipt]()
         ) { result, jobID in
             guard let job = job(id: jobID),
-                  let request = recordCancellationRequest(reason, for: job) else {
+                  let request = recordCancellationRequest(
+                      reason,
+                      workAdmission: admission,
+                      for: job
+                  ) else {
                 return
             }
             result[jobID] = request
@@ -1182,16 +1191,17 @@ extension CodexReviewStore {
     }
 
     package func closeActiveReviewSessions(reason: ReviewCancellation) async {
-        await performRegisteredStoreWork(
+        _ = try? await performThrowingRegisteredStoreWork(
             kind: .reviewMutation("close-active-sessions")
-        ) { @MainActor store in
+        ) { @MainActor store, workAdmission in
             let jobIDs = store.orderedJobs
                 .filter { $0.isTerminal == false }
                 .map(\.id)
             for jobID in jobIDs {
                 _ = try? await store.performCancelReview(
                     jobID: jobID,
-                    cancellation: reason
+                    cancellation: reason,
+                    workAdmission: workAdmission
                 )
             }
         }

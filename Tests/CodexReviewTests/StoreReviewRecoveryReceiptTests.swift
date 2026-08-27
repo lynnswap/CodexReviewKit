@@ -51,7 +51,8 @@ struct StoreReviewRecoveryReceiptTests {
         let cancellationRequest = ReviewCancellationRequestReceipt(
             id: .init(jobID: "job-1", ordinal: 1),
             cancellation: cancellation,
-            rejectionDisposition: .preserveRuntimeStopIntent
+            rejectionDisposition: .preserveRuntimeStopIntent,
+            registeredWorkAdmission: nil
         )
 
         let cancel = Task { @MainActor in

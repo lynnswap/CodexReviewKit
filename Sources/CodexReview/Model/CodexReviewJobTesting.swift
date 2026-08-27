@@ -53,7 +53,8 @@ extension CodexReviewJob {
             pendingCancellationRequest: cancellationRequested ? .init(
                 id: .init(jobID: id, ordinal: 0),
                 cancellation: cancellation ?? .system(),
-                rejectionDisposition: .reportFailure
+                rejectionDisposition: .reportFailure,
+                registeredWorkAdmission: nil
             ) : nil,
             logEntries: logEntries
         )
