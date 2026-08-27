@@ -5,7 +5,8 @@ import CodexReview
 enum ReviewMonitorAPIKeyPrompt {
     static func request(
         window: NSWindow?,
-        submitTitle: String
+        submitTitle: String,
+        didPresent: @MainActor (NSAlert) -> Void = { _ in }
     ) async -> CodexReviewAPIKey? {
         var validationMessage: String?
         while true {
@@ -20,6 +21,7 @@ enum ReviewMonitorAPIKeyPrompt {
             alert.accessoryView = field
             alert.addButton(withTitle: submitTitle)
             alert.addButton(withTitle: "Cancel")
+            didPresent(alert)
 
             let response = await response(to: alert, window: window)
             guard response == .alertFirstButtonReturn else {
@@ -45,7 +47,7 @@ enum ReviewMonitorAPIKeyPrompt {
         to alert: NSAlert,
         window: NSWindow?
     ) async -> NSApplication.ModalResponse {
-        guard let window, window.attachedSheet == nil else {
+        guard let window else {
             return alert.runModal()
         }
         return await withCheckedContinuation { continuation in
