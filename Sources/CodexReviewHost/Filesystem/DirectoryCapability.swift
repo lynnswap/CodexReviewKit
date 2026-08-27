@@ -131,6 +131,26 @@ package final class DirectoryCapability: Sendable {
         )
     }
 
+    /// Returns `nil` only when absolute descriptor acquisition reports `ENOENT`.
+    package static func openExistingIfPresent(
+        at absoluteURL: URL,
+        requirements: Requirements
+    ) throws -> DirectoryCapability? {
+        try validateAbsoluteURL(absoluteURL)
+        guard let descriptor = try walkAbsoluteURLIfPresent(absoluteURL) else { return nil }
+        var transfersDescriptor = false
+        defer { if transfersDescriptor == false { _ = Darwin.close(descriptor) } }
+        let status = try directoryStatus(descriptor, path: absoluteURL.path)
+        try validate(descriptor, status: status, requirements: requirements, path: absoluteURL.path)
+        transfersDescriptor = true
+        return DirectoryCapability(
+            descriptor: descriptor,
+            identity: Identity(status),
+            requirements: requirements,
+            url: absoluteURL
+        )
+    }
+
     package func directory(
         named name: Name,
         acquisition: Acquisition,
@@ -203,6 +223,76 @@ package final class DirectoryCapability: Sendable {
         }
     }
 
+    /// Creates an empty `0600` file, or validates and preserves an existing regular file unchanged.
+    package func createFileIfMissing(named name: Name) throws {
+        try withBorrowedDescriptor { parent in
+            try Self.validateOwned(parent, capability: self)
+            let path = url.appendingPathComponent(name.value, isDirectory: false).path
+            let descriptor = name.value.withCString { pointer in
+                Self.retryingEINTR { openat(
+                    parent, pointer, Self.regularFileCreationFlags, mode_t(0o600)) }
+            }
+            if descriptor < 0 {
+                guard errno == EEXIST else {
+                    throw Self.openFileError(code: errno, path: path)
+                }
+                guard let status = try Self.fileStatus(
+                    atParent: parent,
+                    named: name,
+                    path: path
+                ) else {
+                    throw Self.posixError(
+                        operation: "inspect existing regular file", code: ENOENT, path: path)
+                }
+                try Self.validateRegularFile(status, path: path)
+                return
+            }
+
+            var descriptorIsOpen = true
+            var createdIdentity: Identity?
+            do {
+                let status = try Self.fileStatus(descriptor, path: path)
+                let identity = Identity(status)
+                createdIdentity = identity
+                try Self.validateRegularFile(status, path: path)
+                let changedMode = Self.retryingEINTR { fchmod(descriptor, mode_t(0o600)) }
+                guard changedMode == 0 else {
+                    throw Self.posixError(
+                        operation: "set created regular file permissions", code: errno, path: path)
+                }
+                let finalStatus = try Self.fileStatus(descriptor, path: path)
+                guard Identity(finalStatus) == identity,
+                      finalStatus.st_mode & 0o7777 == 0o600 else {
+                    throw DirectoryCapabilityError.policyViolation(
+                        "The created regular file changed identity or permissions at \(path)."
+                    )
+                }
+                let closeResult = Darwin.close(descriptor)
+                descriptorIsOpen = false
+                guard closeResult == 0 else {
+                    throw Self.posixError(
+                        operation: "close created regular file",
+                        code: errno,
+                        path: path
+                    )
+                }
+            } catch {
+                if descriptorIsOpen { _ = Darwin.close(descriptor) }
+                if let createdIdentity {
+                    try Self.rollbackCreatedFile(
+                        parent: parent,
+                        name: name,
+                        identity: createdIdentity,
+                        path: path
+                    )
+                } else {
+                    try Self.rollbackUninspectedCreatedFile(parent: parent, name: name, path: path)
+                }
+                throw error
+            }
+        }
+    }
+
     package func replaceFile(
         named name: Name,
         with contents: Data,
@@ -270,7 +360,7 @@ package final class DirectoryCapability: Sendable {
             } catch {
                 if descriptorIsOpen { _ = Darwin.close(temporary.descriptor) }
                 if ownsTemporaryName {
-                    try Self.rollbackTemporaryFile(
+                    try Self.rollbackCreatedFile(
                         parent: parent,
                         name: temporary.name,
                         identity: temporary.identity,
@@ -303,6 +393,43 @@ package final class DirectoryCapability: Sendable {
                 directoryURL: url,
                 rootPath: path
             )
+        }
+    }
+
+    /// Removes a regular-file entry after descriptor-relative identity and type revalidation.
+    /// Descriptor-relative `ENOENT` is a no-op.
+    ///
+    /// This operation does not provide identity-conditional unlink against a malicious same-UID
+    /// process that renames an entry in the final `fstatat`-to-`unlinkat` window. Callers requiring
+    /// that stronger guarantee must not use this API.
+    package func removeFile(named name: Name) throws {
+        try withBorrowedDescriptor { parent in
+            try Self.validateOwned(parent, capability: self)
+            let path = url.appendingPathComponent(name.value, isDirectory: false).path
+            guard let inspectedStatus = try Self.fileStatus(
+                atParent: parent,
+                named: name,
+                path: path
+            ) else { return }
+            try Self.validateRegularFile(inspectedStatus, path: path)
+            let inspectedIdentity = Identity(inspectedStatus)
+            guard let finalStatus = try Self.fileStatus(
+                atParent: parent,
+                named: name,
+                path: path
+            ) else { return }
+            try Self.validateRegularFile(finalStatus, path: path)
+            guard Identity(finalStatus) == inspectedIdentity else {
+                throw DirectoryCapabilityError.policyViolation(
+                    "The regular file changed identity before removal at \(path)."
+                )
+            }
+            let removed = name.value.withCString { pointer in
+                Self.retryingEINTR { unlinkat(parent, pointer, 0) }
+            }
+            if removed != 0, errno != ENOENT {
+                throw Self.posixError(operation: "remove regular file", code: errno, path: path)
+            }
         }
     }
 
@@ -510,14 +637,14 @@ package final class DirectoryCapability: Sendable {
                 _ = Darwin.close(descriptor)
                 needsClose = false
                 if let inspectedIdentity {
-                    try rollbackTemporaryFile(
+                    try rollbackCreatedFile(
                         parent: parent,
                         name: name,
                         identity: inspectedIdentity,
                         path: path
                     )
                 } else {
-                    try rollbackUninspectedTemporaryFile(parent: parent, name: name, path: path)
+                    try rollbackUninspectedCreatedFile(parent: parent, name: name, path: path)
                 }
                 throw error
             }
@@ -570,7 +697,7 @@ package final class DirectoryCapability: Sendable {
         }
     }
 
-    private static func rollbackTemporaryFile(
+    private static func rollbackCreatedFile(
         parent: Int32,
         name: Name,
         identity: Identity,
@@ -581,19 +708,19 @@ package final class DirectoryCapability: Sendable {
             retryingEINTR { fstatat(parent, pointer, &status, AT_SYMLINK_NOFOLLOW) }
         }
         guard inspected == 0 else {
-            throw posixError(operation: "inspect temporary file cleanup", code: errno, path: path)
+            throw posixError(operation: "inspect created file cleanup", code: errno, path: path)
         }
         guard Identity(status) == identity,
               status.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) else {
             throw DirectoryCapabilityError.policyViolation(
-                "The temporary file changed identity before cleanup at \(path)."
+                "The created file changed identity before cleanup at \(path)."
             )
         }
         let removed = name.value.withCString { pointer in
             retryingEINTR { unlinkat(parent, pointer, 0) }
         }
         guard removed == 0 else {
-            throw posixError(operation: "remove temporary file", code: errno, path: path)
+            throw posixError(operation: "remove created file", code: errno, path: path)
         }
     }
 
@@ -905,7 +1032,7 @@ package final class DirectoryCapability: Sendable {
         }
     }
 
-    private static func rollbackUninspectedTemporaryFile(
+    private static func rollbackUninspectedCreatedFile(
         parent: Int32,
         name: Name,
         path: String
@@ -916,7 +1043,7 @@ package final class DirectoryCapability: Sendable {
             retryingEINTR { unlinkat(parent, pointer, 0) }
         }
         guard removed == 0 else {
-            throw posixError(operation: "remove uninspected temporary file", code: errno, path: path)
+            throw posixError(operation: "remove uninspected created file", code: errno, path: path)
         }
     }
 
@@ -1064,6 +1191,13 @@ package final class DirectoryCapability: Sendable {
         }
     }
     private static func walkAbsoluteURL(_ url: URL) throws -> Int32 {
+        guard let descriptor = try walkAbsoluteURLIfPresent(url) else {
+            throw posixError(operation: "open directory", code: ENOENT, path: url.path)
+        }
+        return descriptor
+    }
+
+    private static func walkAbsoluteURLIfPresent(_ url: URL) throws -> Int32? {
         try validateAbsoluteURL(url)
         let names = try url.path.split(separator: "/").map { try Name(String($0)) }
         var current = retryingEINTR { Darwin.open("/", directoryOpenFlags) }
@@ -1075,7 +1209,11 @@ package final class DirectoryCapability: Sendable {
         var pathURL = URL(fileURLWithPath: "/", isDirectory: true)
         for name in names {
             pathURL.appendPathComponent(name.value, isDirectory: true)
-            let next = try openChild(parent: current, name: name, path: pathURL.path)
+            guard let next = try openChildIfPresent(
+                parent: current,
+                name: name,
+                path: pathURL.path
+            ) else { return nil }
             _ = Darwin.close(current)
             current = next
         }
@@ -1246,6 +1384,7 @@ package final class DirectoryCapability: Sendable {
     }
     private static let directoryOpenFlags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
     private static let regularFileReadFlags = O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC
+    private static let regularFileCreationFlags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC
     private static let temporaryFileOpenFlags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC
     private static let regularFileIOChunkSize = 64 * 1024
     private static let temporaryNameAttemptLimit = 16
