@@ -500,6 +500,10 @@ extension ReviewMonitorSplitViewController {
         return sidebarViewController
     }
 
+    var windowTitleObservationForTesting: PortableObservationTracking.Token? {
+        windowTitleObservation
+    }
+
     var sidebarPresentationForTesting: SidebarPresentationForTesting {
         switch sidebarViewControllerForTesting.sidebarKindForTesting {
         case .jobList, .empty:
