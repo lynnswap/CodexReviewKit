@@ -51,6 +51,12 @@ package final class RecoveryEnvironmentPlan: Sendable {
             at: configuration.recoveryParentURL, requirements: trusted)
         let legacyHome = try DirectoryCapability.openExistingIfPresent(
             at: configuration.legacyCodexHomeURL, requirements: trusted)
+        let recoveryURL = configuration.recoveryParentURL.appendingPathComponent(
+            "RecoveryV1", isDirectory: true)
+        let recoveryRequirements = managed(
+            for: recoveryParent, ownerUserID: configuration.ownerUserID)
+        let existingRecovery = try DirectoryCapability.openExistingIfPresent(
+            at: recoveryURL, requirements: recoveryRequirements)
 
         let explicitParent: DirectoryCapability?
         let explicitName: DirectoryCapability.Name?
@@ -58,10 +64,14 @@ package final class RecoveryEnvironmentPlan: Sendable {
         if let explicitURL = configuration.explicitCodexHomeURL {
             // Rejection only: acquired identity remains the overlap authority, but identical
             // standardized inputs cannot become disjoint even while both leaves are absent.
-            guard explicitURL.standardizedFileURL
-                != configuration.legacyCodexHomeURL.standardizedFileURL else {
+            guard rejectionKey(explicitURL) != rejectionKey(configuration.legacyCodexHomeURL) else {
                 throw DirectoryCapabilityError.policyViolation(
                     "Legacy and explicit Codex home inputs must be disjoint."
+                )
+            }
+            guard rejectionKey(explicitURL) != rejectionKey(recoveryURL) else {
+                throw DirectoryCapabilityError.policyViolation(
+                    "RecoveryV1 and explicit Codex home inputs must be disjoint."
                 )
             }
             let name = try DirectoryCapability.Name(explicitURL.lastPathComponent)
@@ -85,20 +95,23 @@ package final class RecoveryEnvironmentPlan: Sendable {
         }
         try requireRootDoesNotContain(
             legacyHome, candidateParent: recoveryParent, candidate: "RecoveryV1")
+        if existingExplicitHome == nil, let explicitParent {
+            try requireRootDoesNotContain(
+                legacyHome, candidateParent: explicitParent, candidate: "explicit Codex home")
+            try requireRootDoesNotContain(
+                existingRecovery, candidateParent: explicitParent, candidate: "explicit Codex home")
+        }
+        try existingRecovery?.close()
 
         let recovery = try recoveryParent.directory(
             named: .init("RecoveryV1"),
             acquisition: .existingOrCreate,
-            requirements: managed(for: recoveryParent, ownerUserID: configuration.ownerUserID)
+            requirements: recoveryRequirements
         )
         let codexHome: DirectoryCapability
         if let existingExplicitHome {
             codexHome = existingExplicitHome
         } else if let explicitParent, let explicitName {
-            try requireRootDoesNotContain(
-                legacyHome, candidateParent: explicitParent, candidate: "explicit Codex home")
-            try requireRootDoesNotContain(
-                recovery, candidateParent: explicitParent, candidate: "explicit Codex home")
             codexHome = try explicitParent.directory(
                 named: explicitName, acquisition: .existingOrCreate,
                 requirements: managed(for: explicitParent, ownerUserID: configuration.ownerUserID))
@@ -146,6 +159,10 @@ package final class RecoveryEnvironmentPlan: Sendable {
         ownerUserID: uid_t
     ) -> DirectoryCapability.Requirements {
         .managed(ownerUserID: ownerUserID, deviceID: parent.identity.deviceID)
+    }
+
+    private static func rejectionKey(_ url: URL) -> String {
+        url.standardizedFileURL.path.precomposedStringWithCanonicalMapping.lowercased()
     }
 
     private static func requireDisjoint(

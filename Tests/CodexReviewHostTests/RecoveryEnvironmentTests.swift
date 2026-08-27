@@ -217,6 +217,23 @@ struct RecoveryEnvironmentTests {
                 legacyCodexHomeURL: legacyAncestor
             ).prepare()
         }
+
+        let disjointLegacy = fixture.appendingPathComponent("disjoint-legacy", isDirectory: true)
+        try createRecoveryDirectory(disjointLegacy, permissions: 0o700)
+        let forbiddenParent = disjointLegacy.appendingPathComponent("explicit-parent", isDirectory: true)
+        try createRecoveryDirectory(forbiddenParent, permissions: 0o700)
+        let missingExplicit = forbiddenParent.appendingPathComponent("home", isDirectory: true)
+        expectRecoveryError(.policyViolation) {
+            _ = try RecoveryEnvironmentPlan(
+                recoveryParentURL: fixture,
+                explicitCodexHomeURL: missingExplicit,
+                legacyCodexHomeURL: disjointLegacy
+            ).prepare()
+        }
+        #expect(FileManager.default.fileExists(atPath: missingExplicit.path) == false)
+        #expect(FileManager.default.fileExists(
+            atPath: fixture.appendingPathComponent("RecoveryV1").path
+        ) == false)
     }
 
     @Test func filesystemAliasesCannotBypassIdentityOverlapPolicy() throws {
