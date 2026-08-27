@@ -1253,7 +1253,7 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         }
     }
 
-    package func signIn(auth: CodexReviewAuthModel) async {
+    package func signIn(auth: CodexReviewAuthModel, using _: CodexReviewAuthenticationMethod) async {
         do {
             let challenge = try await reviewBackend.startLogin(.init())
             auth.updatePhase(.signingIn(.init(
@@ -1267,8 +1267,8 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         }
     }
 
-    package func addAccount(auth: CodexReviewAuthModel) async {
-        await signIn(auth: auth)
+    package func addAccount(auth: CodexReviewAuthModel, using method: CodexReviewAuthenticationMethod) async {
+        await signIn(auth: auth, using: method)
     }
 
     package func cancelAuthentication(auth: CodexReviewAuthModel) async {

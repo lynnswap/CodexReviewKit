@@ -182,8 +182,12 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
         }
     }
 
-    func signIn(auth: CodexReviewAuthModel) async {
+    func signIn(auth: CodexReviewAuthModel, using method: CodexReviewAuthenticationMethod) async {
         guard active else { return }
+        guard case .chatGPT = method else {
+            auth.updatePhase(.failed(message: "API key authentication requires the live ReviewMonitor backend."))
+            return
+        }
         do {
             let challenge = try await backend.startLogin(.init())
             loginChallenge = challenge
@@ -198,9 +202,9 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
         }
     }
 
-    func addAccount(auth: CodexReviewAuthModel) async {
+    func addAccount(auth: CodexReviewAuthModel, using method: CodexReviewAuthenticationMethod) async {
         guard active else { return }
-        await signIn(auth: auth)
+        await signIn(auth: auth, using: method)
     }
 
     func cancelAuthentication(auth: CodexReviewAuthModel) async {

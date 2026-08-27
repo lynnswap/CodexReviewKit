@@ -1514,6 +1514,287 @@ struct CodexReviewHostTests {
         ])
     }
 
+    @Test func liveStoreSignsInWithAPIKeyWithoutRetainingTheSecret() async throws {
+        let homeURL = try temporaryHome()
+        let transport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(transport)
+        try await transport.enqueue(
+            AppServerAPI.Account.Login.Response.apiKey,
+            for: "account/login/start"
+        )
+        try await transport.enqueue(
+            TestAccountReadResponse(account: .init(type: "apiKey")),
+            for: "account/read"
+        )
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transport: transport
+        )
+        let sentinel = "sk-sensitive-host-sentinel"
+
+        await store.start(forceRestartIfNeeded: true)
+        await store.signIn(apiKey: try CodexReviewAPIKey(validating: sentinel))
+
+        let account = try #require(store.auth.selectedAccount)
+        #expect(account.accountKey == "api-key")
+        #expect(account.kind == .apiKey)
+        #expect(account.capabilities.supportsRateLimitRefresh == false)
+        #expect(store.auth.errorMessage?.contains(sentinel) != true)
+        #expect(try activeAccountKey(homeURL: homeURL) == "api-key")
+        let registry = try Data(contentsOf: homeURL
+            .appendingPathComponent(".codex_review/accounts/registry.json"))
+        #expect(String(decoding: registry, as: UTF8.self).contains(sentinel) == false)
+
+        let requests = await transport.recordedRequests()
+        let methods = requests.map(\.method)
+        #expect(methods.filter { $0 == "account/login/start" }.count == 1)
+        #expect(methods.contains("account/rateLimits/read") == false)
+        let login = try #require(requests.first { $0.method == "account/login/start" })
+        let params = try #require(JSONSerialization.jsonObject(with: login.params) as? [String: Any])
+        #expect(params["type"] as? String == "apiKey")
+        #expect(params["apiKey"] as? String == sentinel)
+    }
+
+    @Test func liveStoreRejectsDuplicateAPIKeyBeforeDispatch() async throws {
+        let homeURL = try temporaryHome()
+        try writeRegistryRecords(
+            homeURL: homeURL,
+            activeAccountKey: "api-key",
+            records: [[
+                "accountKey": "api-key",
+                "kind": "apiKey",
+                "email": "API Key",
+            ]]
+        )
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(
+            TestAccountReadResponse(account: .init(type: "apiKey")),
+            for: "account/read"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transport: transport
+        )
+        let sentinel = "sk-duplicate-sensitive-sentinel"
+
+        await store.start(forceRestartIfNeeded: true)
+        await store.signIn(apiKey: try CodexReviewAPIKey(validating: sentinel))
+
+        #expect(failedMessage(from: store.auth.phase) == "An API key account is already added.")
+        #expect(store.auth.errorMessage?.contains(sentinel) != true)
+        let requests = await transport.recordedRequests()
+        #expect(requests.contains {
+            $0.method == "account/login/start"
+        } == false)
+    }
+
+    @Test func liveStoreAddsAPIKeyWithoutSwitchingTheActiveAccount() async throws {
+        let homeURL = try temporaryHome()
+        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "active@example.com",
+            accounts: ["active@example.com"]
+        )
+        let mainTransport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(mainTransport, accountEmail: "active@example.com")
+        let loginTransport = FakeJSONRPCTransport()
+        try await loginTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await loginTransport.enqueue(
+            AppServerAPI.Account.Login.Response.apiKey,
+            for: "account/login/start"
+        )
+        try await loginTransport.enqueue(
+            TestAccountReadResponse(account: .init(type: "apiKey")),
+            for: "account/read"
+        )
+        var isolatedCodexHomeURL: URL?
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transportFactory: { codexHomeURL in
+                if codexHomeURL == mainCodexHomeURL {
+                    return mainTransport
+                }
+                isolatedCodexHomeURL = codexHomeURL
+                try FileManager.default.createDirectory(at: codexHomeURL, withIntermediateDirectories: true)
+                return loginTransport
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        await store.addAccount(apiKey: try CodexReviewAPIKey(validating: "sk-add-account"))
+
+        #expect(store.auth.selectedAccount?.accountKey == "active@example.com")
+        #expect(store.auth.persistedActiveAccountKey == "active@example.com")
+        #expect(store.auth.persistedAccounts.contains {
+            $0.accountKey == "api-key" && $0.kind == .apiKey
+        })
+        let loginMethods = await loginTransport.recordedRequests().map(\.method)
+        #expect(loginMethods == [
+            "initialize",
+            "account/login/start",
+            "account/read",
+        ])
+        #expect(await loginTransport.isClosedForTesting())
+        let resolvedIsolatedCodexHomeURL = try #require(isolatedCodexHomeURL)
+        #expect(FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path) == false)
+    }
+
+    @Test func liveStoreConfirmedAPIKeyLoginWinsOverLateCancellation() async throws {
+        let homeURL = try temporaryHome()
+        let transport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(transport)
+        try await transport.enqueue(
+            AppServerAPI.Account.Login.Response.apiKey,
+            for: "account/login/start"
+        )
+        try await transport.enqueue(
+            TestAccountReadResponse(account: .init(type: "apiKey")),
+            for: "account/read"
+        )
+        let requestGate = AsyncGate()
+        await transport.holdNextIgnoringCancellation(
+            method: "account/login/start",
+            gate: requestGate
+        )
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transport: transport
+        )
+        await store.start(forceRestartIfNeeded: true)
+
+        let apiKey = try CodexReviewAPIKey(validating: "sk-held")
+        let login = Task { @MainActor in
+            await store.signIn(apiKey: apiKey)
+        }
+        await transport.waitForActiveRequests(method: "account/login/start")
+        #expect(store.auth.isAuthenticating)
+        try await transport.emitServerNotification(
+            method: "account/updated",
+            params: EmptyResponse()
+        )
+        await Task.yield()
+        let cancellation = Task { @MainActor in
+            await store.cancelAuthentication()
+        }
+        await requestGate.open()
+        await login.value
+        await cancellation.value
+
+        #expect(store.auth.selectedAccount?.kind == .apiKey)
+        #expect(store.auth.persistedActiveAccountKey == "api-key")
+        let methods = await transport.recordedRequests().map(\.method)
+        #expect(methods.filter {
+            $0 == "account/login/start"
+        }.count == 1)
+        #expect(methods.filter {
+            $0 == "account/read"
+        }.count == 2)
+    }
+
+    @Test func liveStoreReconcilesOutcomeUnknownAPIKeyLoginWithoutResendingSecret() async throws {
+        let homeURL = try temporaryHome()
+        let transport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(transport)
+        await transport.enqueueFailure(
+            .closed,
+            for: "account/login/start"
+        )
+        try await transport.enqueue(
+            TestAccountReadResponse(account: .init(type: "apiKey")),
+            for: "account/read"
+        )
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        await store.signIn(apiKey: try CodexReviewAPIKey(validating: "sk-outcome-unknown"))
+
+        #expect(store.auth.selectedAccount?.kind == .apiKey)
+        #expect(store.auth.errorMessage == nil)
+        let methods = await transport.recordedRequests().map(\.method)
+        #expect(methods.filter {
+            $0 == "account/login/start"
+        }.count == 1)
+        #expect(methods.filter {
+            $0 == "account/read"
+        }.count == 2)
+    }
+
+    @Test func liveStoreFailsPrimaryRuntimeWhenAPIKeyOutcomeCannotBeRead() async throws {
+        let homeURL = try temporaryHome()
+        let transport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(transport)
+        await transport.enqueueFailure(.closed, for: "account/login/start")
+        await transport.enqueueFailure(.closed, for: "account/read")
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        await store.signIn(apiKey: try CodexReviewAPIKey(validating: "sk-unresolved"))
+
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            if case .failed = store.serverState { return true }
+            return false
+        })
+        #expect(failedMessage(from: store.auth.phase) == "API key sign-in could not be confirmed.")
+        #expect(store.auth.errorMessage?.contains("sk-unresolved") != true)
+        let methods = await transport.recordedRequests().map(\.method)
+        #expect(methods.filter {
+            $0 == "account/login/start"
+        }.count == 1)
+    }
+
+    @Test func liveStoreBoundsCancellationOfHeldAPIKeyRequest() async throws {
+        let homeURL = try temporaryHome()
+        let transport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(transport)
+        try await transport.enqueue(
+            AppServerAPI.Account.Login.Response.apiKey,
+            for: "account/login/start"
+        )
+        let requestGate = AsyncGate()
+        await transport.holdNextIgnoringCancellation(
+            method: "account/login/start",
+            gate: requestGate
+        )
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            shutdownCleanupTimeout: .milliseconds(20),
+            transport: transport
+        )
+        await store.start(forceRestartIfNeeded: true)
+        let apiKey = try CodexReviewAPIKey(validating: "sk-held-cancellation")
+        let login = Task { @MainActor in await store.signIn(apiKey: apiKey) }
+        await transport.waitForActiveRequests(method: "account/login/start")
+
+        let startedAt = ContinuousClock.now
+        await store.cancelAuthentication()
+        let elapsed = startedAt.duration(to: .now)
+
+        #expect(elapsed < .seconds(1))
+        #expect(store.auth.isAuthenticating == false)
+        await requestGate.open()
+        await login.value
+    }
+
     @Test func liveStoreCancelsLoginWhenAuthenticationSessionIsClosed() async throws {
         let transport = FakeJSONRPCTransport()
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")

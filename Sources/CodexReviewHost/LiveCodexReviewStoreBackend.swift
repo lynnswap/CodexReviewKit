@@ -1078,7 +1078,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         let appServerBackend = appServerBackend
         let operation = activeAuthenticationOperation
         operation?.cancelSetup()
-        await operation?.waitForSetup()
+        if await waitForAuthenticationSetup(operation) == false {
+            logger.warning("Authentication setup did not stop before runtime teardown continued")
+        }
         let loginCleanup = takeLoginRuntimeForCleanup(operation)
         guard appServerBackend != nil || loginCleanup.isEmpty == false else {
             removeActiveAuthenticationOperation(operation)
@@ -1189,32 +1191,43 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         }
     }
 
-    func signIn(auth: CodexReviewAuthModel) async {
+    func signIn(auth: CodexReviewAuthModel, using method: CodexReviewAuthenticationMethod) async {
         await startOrJoinAuthenticationOperation(
             auth: auth,
-            activation: .activateAuthenticatedAccount
+            activation: .activateAuthenticatedAccount,
+            method: method
         )
     }
 
-    func addAccount(auth: CodexReviewAuthModel) async {
+    func addAccount(auth: CodexReviewAuthModel, using method: CodexReviewAuthenticationMethod) async {
         let activeAccountKey = auth.persistedActiveAccountKey ?? auth.selectedAccount?.accountKey
         await startOrJoinAuthenticationOperation(
             auth: auth,
             activation: activeAccountKey != nil
                 ? .preserveActiveAccount(activeAccountKey)
-                : .activateAuthenticatedAccount
+                : .activateAuthenticatedAccount,
+            method: method
         )
     }
 
     func cancelAuthentication(auth: CodexReviewAuthModel) async {
         let operation = activeAuthenticationOperation
         operation?.cancelSetup()
-        await operation?.waitForSetup()
+        let didStopSetup = await waitForAuthenticationSetup(operation)
+        if didStopSetup == false,
+           operation?.hasAdmittedAPIKeyRequest == true,
+           let activeRuntimeHandle
+        {
+            _ = attachedStore?.requestRuntimeFailure(
+                handle: activeRuntimeHandle,
+                cause: "API key authentication did not stop after cancellation."
+            )
+        }
         let scope = operation?.resourceScope
         let cleanup = takeLoginRuntimeForCleanup(operation)
         await cleanup.authenticationSession?.cancel()
         guard let loginBackend = cleanup.backend, let loginChallenge = cleanup.challenge else {
-            if isActiveAuthenticationOperation(operation), auth.selectedAccount == nil {
+            if isActiveAuthenticationOperation(operation) {
                 auth.updatePhase(.signedOut)
             }
             await closeIsolatedLoginRuntime(client: cleanup.client, codexHomeURL: cleanup.codexHomeURL)
@@ -1362,13 +1375,14 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
 
     private func startOrJoinAuthenticationOperation(
         auth: CodexReviewAuthModel,
-        activation: LoginActivation
+        activation: LoginActivation,
+        method: CodexReviewAuthenticationMethod
     ) async {
         if let activeAuthenticationOperation {
             await activeAuthenticationOperation.waitForSetup()
             return
         }
-        let operation = LiveAuthenticationOperation(activation: activation)
+        let operation = LiveAuthenticationOperation(activation: activation, method: method)
         activeAuthenticationOperation = operation
         let setupTask = Task { @MainActor [weak self, weak auth, operation] in
             guard let self, let auth else { return }
@@ -1383,6 +1397,23 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         auth: CodexReviewAuthModel
     ) async {
         let activation = operation.activation
+        if case .apiKey = operation.method,
+           auth.persistedAccounts.contains(where: { $0.kind == .apiKey })
+        {
+            updateAuthenticationFailure(
+                "An API key account is already added.",
+                auth: auth,
+                activation: activation
+            )
+            removeActiveAuthenticationOperation(operation)
+            return
+        }
+        if case .apiKey = operation.method {
+            auth.updatePhase(.signingIn(.init(
+                title: "Sign in with API key",
+                detail: "Signing in with API key."
+            )))
+        }
         var pendingResources = PendingAuthenticationResources()
         var admittedScope: LiveAuthenticationOperation.ResourceScope?
         let expectedRuntimeHandle = activeRuntimeHandle
@@ -1419,6 +1450,26 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 if Task.isCancelled == false {
                     removeActiveAuthenticationOperation(operation)
                 }
+                return
+            }
+            if case .apiKey(let apiKey) = operation.method {
+                guard let scope = pendingResources.consume(into: operation) else {
+                    await cleanupPendingAuthenticationResources(pendingResources.takeForCleanup())
+                    if Task.isCancelled == false {
+                        removeActiveAuthenticationOperation(operation)
+                    }
+                    return
+                }
+                admittedScope = scope
+                await runAPIKeyAuthenticationSetup(
+                    operation: operation,
+                    scope: scope,
+                    apiKey: apiKey,
+                    backend: appServerBackend,
+                    usesPrimaryRuntime: runtime.usesPrimaryRuntime,
+                    expectedRuntimeHandle: expectedRuntimeHandle,
+                    auth: auth
+                )
                 return
             }
             logger.info("Starting ChatGPT login")
@@ -1579,6 +1630,145 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 activation: activation
             )
             removeActiveAuthenticationOperation(operation)
+        }
+    }
+
+    private func runAPIKeyAuthenticationSetup(
+        operation: LiveAuthenticationOperation,
+        scope: LiveAuthenticationOperation.ResourceScope,
+        apiKey: CodexReviewAPIKey,
+        backend: AppServerCodexReviewBackend,
+        usesPrimaryRuntime: Bool,
+        expectedRuntimeHandle: LiveRuntimeLifecycleHandle?,
+        auth: CodexReviewAuthModel
+    ) async {
+        guard operation.admitAPIKeyRequest() else {
+            let cleanup = scope.takeForCleanup()
+            await closeIsolatedLoginRuntime(
+                client: cleanup?.client,
+                codexHomeURL: cleanup?.codexHomeURL
+            )
+            if activeAuthenticationOperation === operation,
+               operation.isCurrent(scope)
+            {
+                auth.updatePhase(.signedOut)
+                removeActiveAuthenticationOperation(operation)
+            }
+            return
+        }
+
+        logger.info("Starting API key login")
+        var requestFailed = false
+        do {
+            try await backend.login(apiKey: apiKey)
+        } catch {
+            requestFailed = true
+            // The app-server owns the credential payload. Do not surface an upstream error that
+            // could echo it; reconcile the write outcome from the same runtime instead.
+            logger.error("API key login request failed; reconciling account state")
+        }
+
+        let snapshot: CodexReviewBackendModel.Auth.Snapshot
+        do {
+            snapshot = try await backend.readAuth()
+        } catch {
+            if usesPrimaryRuntime, let expectedRuntimeHandle {
+                _ = attachedStore?.requestRuntimeFailure(
+                    handle: expectedRuntimeHandle,
+                    cause: "API key authentication outcome could not be reconciled."
+                )
+            }
+            await finishAPIKeyAuthenticationFailure(
+                operation: operation,
+                scope: scope,
+                auth: auth,
+                message: "API key sign-in could not be confirmed."
+            )
+            return
+        }
+        guard Self.isAPIKeyAuthentication(snapshot) else {
+            await finishAPIKeyAuthenticationFailure(
+                operation: operation,
+                scope: scope,
+                auth: auth,
+                message: requestFailed
+                    ? "API key sign-in could not be confirmed."
+                    : "API key sign-in did not produce an API key account."
+            )
+            return
+        }
+        guard activeAuthenticationOperation === operation,
+              operation.isCurrent(scope),
+              isCurrentRuntime(expectedRuntimeHandle),
+              let cleanup = scope.takeForCleanup()
+        else {
+            let cleanup = scope.takeForCleanup()
+            await closeIsolatedLoginRuntime(
+                client: cleanup?.client,
+                codexHomeURL: cleanup?.codexHomeURL
+            )
+            removeActiveAuthenticationOperation(operation)
+            return
+        }
+
+        let loginCodexHomeURL = cleanup.codexHomeURL
+        let account = applyAuthSnapshot(
+            snapshot,
+            to: auth,
+            activation: operation.activation,
+            authSourceCodexHomeURL: loginCodexHomeURL
+        )
+        await closeIsolatedLoginRuntime(
+            client: cleanup.client,
+            codexHomeURL: loginCodexHomeURL
+        )
+        guard account?.kind == .apiKey,
+              activeAuthenticationOperation === operation,
+              operation.isCurrent(scope)
+        else {
+            updateAuthenticationFailure(
+                "API key sign-in did not produce an API key account.",
+                auth: auth,
+                activation: operation.activation
+            )
+            removeActiveAuthenticationOperation(operation)
+            return
+        }
+        removeActiveAuthenticationOperation(operation)
+    }
+
+    private func finishAPIKeyAuthenticationFailure(
+        operation: LiveAuthenticationOperation,
+        scope: LiveAuthenticationOperation.ResourceScope,
+        auth: CodexReviewAuthModel,
+        message: String
+    ) async {
+        let cleanup = scope.takeForCleanup()
+        await closeIsolatedLoginRuntime(
+            client: cleanup?.client,
+            codexHomeURL: cleanup?.codexHomeURL
+        )
+        guard activeAuthenticationOperation === operation,
+              operation.isCurrent(scope)
+        else {
+            return
+        }
+        updateAuthenticationFailure(
+            message,
+            auth: auth,
+            activation: operation.activation
+        )
+        removeActiveAuthenticationOperation(operation)
+    }
+
+    private static func isAPIKeyAuthentication(
+        _ snapshot: CodexReviewBackendModel.Auth.Snapshot
+    ) -> Bool {
+        guard let activeAccountID = snapshot.activeAccountID else {
+            return false
+        }
+        return snapshot.accounts.contains {
+            $0.id == activeAccountID && $0.kind == .apiKey
         }
     }
 
@@ -2223,6 +2413,17 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 logger.error("Failed to decode account login completion: \(error.localizedDescription, privacy: .public)")
             }
         case "account/updated":
+            if let operation = activeAuthenticationOperation,
+               let scope = operation.resourceScope,
+               operation.usesAPIKey,
+               operation.isCurrent(scope),
+               scope.isOpen,
+               scope.backend === backend
+            {
+                // API-key login is synchronous; its setup task owns the authoritative account/read
+                // and commit. The notification is only an edge, not a second commit owner.
+                return
+            }
             guard let operation = activeAuthenticationOperation,
                   let scope = operation.resourceScope,
                   scope.backend === backend,
@@ -2851,6 +3052,23 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         cleanup.monitorTask?.cancel()
         cleanup.notificationTask?.cancel()
         return cleanup
+    }
+
+    private func waitForAuthenticationSetup(
+        _ operation: LiveAuthenticationOperation?
+    ) async -> Bool {
+        guard let operation else {
+            return true
+        }
+        switch await runRuntimeShutdownCleanup(
+            timeout: shutdownCleanupTimeout,
+            operation: { @MainActor in await operation.waitForSetup() }
+        ) {
+        case .completed:
+            return true
+        case .timedOut:
+            return false
+        }
     }
 
     private func cleanupAuthenticationScope(_ scope: LiveAuthenticationOperation.ResourceScope) async {
