@@ -56,6 +56,14 @@ package final class RecoveryEnvironmentPlan: Sendable {
         let explicitName: DirectoryCapability.Name?
         let existingExplicitHome: DirectoryCapability?
         if let explicitURL = configuration.explicitCodexHomeURL {
+            // Rejection only: acquired identity remains the overlap authority, but identical
+            // standardized inputs cannot become disjoint even while both leaves are absent.
+            guard explicitURL.standardizedFileURL
+                != configuration.legacyCodexHomeURL.standardizedFileURL else {
+                throw DirectoryCapabilityError.policyViolation(
+                    "Legacy and explicit Codex home inputs must be disjoint."
+                )
+            }
             let name = try DirectoryCapability.Name(explicitURL.lastPathComponent)
             let parent = try DirectoryCapability.openExisting(
                 at: explicitURL.deletingLastPathComponent(),

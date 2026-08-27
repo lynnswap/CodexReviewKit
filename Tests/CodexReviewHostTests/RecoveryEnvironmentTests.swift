@@ -120,6 +120,25 @@ struct RecoveryEnvironmentTests {
         #expect(FileManager.default.fileExists(atPath: missingParentHome.path) == false)
     }
 
+    @Test func identicalMissingExplicitAndLegacyInputsFailBeforeCreation() throws {
+        let fixture = try makePrivateRecoveryRoot()
+        defer { removeRecoveryFixture(fixture) }
+        let missingHome = fixture.appendingPathComponent("missing-home", isDirectory: true)
+
+        expectRecoveryError(.policyViolation) {
+            _ = try RecoveryEnvironmentPlan(
+                recoveryParentURL: fixture,
+                explicitCodexHomeURL: missingHome,
+                legacyCodexHomeURL: missingHome
+            ).prepare()
+        }
+
+        #expect(FileManager.default.fileExists(atPath: missingHome.path) == false)
+        #expect(FileManager.default.fileExists(
+            atPath: fixture.appendingPathComponent("RecoveryV1").path
+        ) == false)
+    }
+
     @Test func anchorPoliciesRejectSymlinksAndWrongOwnershipBeforeMutation() throws {
         let fixture = try makePrivateRecoveryRoot()
         defer { removeRecoveryFixture(fixture) }
