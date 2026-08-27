@@ -362,6 +362,29 @@ struct DirectoryCapabilityTests {
         #expect(try replacementTemporaryNames(in: fixture).isEmpty)
     }
 
+    @Test func replacementFailureRemovesOnlyItsTemporaryFileAndPreservesDestination() throws {
+        let fixture = try makePrivateTemporaryDirectory()
+        defer { removeFixture(fixture) }
+        let root = try openFixtureRoot(fixture)
+        defer { try? root.close() }
+        let destination = fixture.appendingPathComponent("payload")
+        let original = Data("unchanged".utf8)
+        try original.write(to: destination)
+        #expect(chflags(destination.path, UInt32(UF_IMMUTABLE)) == 0)
+        defer { _ = chflags(destination.path, 0) }
+
+        expectDirectoryError(.userActionRequired) {
+            try root.replaceFile(
+                named: .init("payload"),
+                with: Data("replacement".utf8),
+                maximumByteCount: 32
+            )
+        }
+
+        #expect(try Data(contentsOf: destination) == original)
+        #expect(try replacementTemporaryNames(in: fixture).isEmpty)
+    }
+
     @Test func replacementRejectsSymlinkAndNonregularDestinationsWithoutTemporaryFiles() throws {
         let fixture = try makePrivateTemporaryDirectory()
         defer { removeFixture(fixture) }
