@@ -2837,6 +2837,12 @@ struct ReviewUITests {
         try await waitForCondition {
             sidebar.selectedWorkspaceSectionForTesting?.workspaceCWDs == [firstWorkspace.cwd]
         }
+        try await waitForObservedValue(
+            from: viewController.windowTitleObservationForTesting,
+            firstWorkspace.cwd
+        ) {
+            window.subtitle
+        }
 
         #expect(sidebar.displayedSectionTitlesForTesting == ["CodexReviewKit"])
         #expect(window.title == "CodexReviewKit")
