@@ -1345,11 +1345,19 @@ public final class CodexReviewStore {
     }
 
     public func signIn() async {
-        await backend.signIn(auth: auth)
+        await backend.signIn(auth: auth, using: .chatGPT)
+    }
+
+    package func signIn(apiKey: CodexReviewAPIKey) async {
+        await backend.signIn(auth: auth, using: .apiKey(apiKey))
     }
 
     public func addAccount() async {
-        await backend.addAccount(auth: auth)
+        await backend.addAccount(auth: auth, using: .chatGPT)
+    }
+
+    package func addAccount(apiKey: CodexReviewAPIKey) async {
+        await backend.addAccount(auth: auth, using: .apiKey(apiKey))
     }
 
     public func cancelAuthentication() async {
@@ -1357,6 +1365,16 @@ public final class CodexReviewStore {
     }
 
     package func performPrimaryAuthenticationAction() async {
+        await performPrimaryAuthenticationAction(using: .chatGPT)
+    }
+
+    package func performPrimaryAuthenticationAction(apiKey: CodexReviewAPIKey) async {
+        await performPrimaryAuthenticationAction(using: .apiKey(apiKey))
+    }
+
+    private func performPrimaryAuthenticationAction(
+        using method: CodexReviewAuthenticationMethod
+    ) async {
         if auth.isAuthenticating {
             await cancelAuthentication()
             return
@@ -1372,7 +1390,7 @@ public final class CodexReviewStore {
         else {
             return
         }
-        await signIn()
+        await backend.signIn(auth: auth, using: method)
     }
 
     public func logout() async {

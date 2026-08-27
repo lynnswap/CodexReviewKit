@@ -76,12 +76,17 @@ final class LiveAuthenticationOperation {
     }
 
     let activation: Activation
+    let method: CodexReviewAuthenticationMethod
+    var usesAPIKey: Bool { if case .apiKey = method { true } else { false } }
     private(set) var resourceScope: ResourceScope?
     private(set) var setupTask: Task<Void, Never>?
+    private var apiKeyRequestWasAdmitted = false
+    var hasAdmittedAPIKeyRequest: Bool { apiKeyRequestWasAdmitted }
     var phase = Phase.waitingForCompletion
 
-    init(activation: Activation) {
+    init(activation: Activation, method: CodexReviewAuthenticationMethod) {
         self.activation = activation
+        self.method = method
     }
 
     func install(setupTask: Task<Void, Never>) {
@@ -94,6 +99,12 @@ final class LiveAuthenticationOperation {
 
     func waitForSetup() async {
         await setupTask?.value
+    }
+
+    func admitAPIKeyRequest() -> Bool {
+        guard setupTask?.isCancelled == false else { return false }
+        apiKeyRequestWasAdmitted = true
+        return true
     }
 
     func installResources(_ resources: ResourceCleanup) -> ResourceScope? {

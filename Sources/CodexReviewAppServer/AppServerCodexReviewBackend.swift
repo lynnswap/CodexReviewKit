@@ -408,6 +408,18 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         return try response.backendChallenge
     }
 
+    package func login(apiKey: CodexReviewAPIKey) async throws {
+        _ = try await client.initialize()
+        let response = try await apiKey.withValue { value in
+            try await client.send(AppServerAPI.Account.Login.Request(
+                params: .apiKey(value)
+            ))
+        }
+        guard case .apiKey = response else {
+            throw CodexReviewAPI.Error.io("Unexpected response to API key login.")
+        }
+    }
+
     package func cancelLogin(_ challenge: CodexReviewBackendModel.Login.Challenge) async throws {
         _ = try await client.initialize()
         let _: AppServerAPI.Account.Login.Cancel.Response = try await client.send(
