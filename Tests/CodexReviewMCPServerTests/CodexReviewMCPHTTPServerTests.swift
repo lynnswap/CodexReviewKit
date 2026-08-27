@@ -2199,6 +2199,187 @@ struct CodexReviewMCPHTTPServerTests {
         }
     }
 
+    @Test func duplicateDeletesJoinOneSemanticSessionClose() async throws {
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        )
+
+        try await withHTTPServer(store: store) { server in
+            let endpoint = await server.url
+            let sessionID = try await initializeSession(endpoint: endpoint)
+            await server.holdNextSessionCloseCompletionForTesting()
+            let firstDelete = Task {
+                try await deleteSession(endpoint: endpoint, sessionID: sessionID)
+            }
+            await server.waitUntilSessionCloseCompletionIsHeldForTesting()
+            let receiptIdentity = await server.sessionCloseReceiptIdentityForTesting(sessionID: sessionID)
+            let initialJoinCount = await server.sessionCloseJoinCountForTesting()
+
+            let secondDelete = Task {
+                try await deleteSession(endpoint: endpoint, sessionID: sessionID)
+            }
+            let didJoin = await waitUntil(timeout: .seconds(2)) {
+                await server.sessionCloseJoinCountForTesting() == initialJoinCount + 1
+            }
+
+            #expect(didJoin)
+            #expect(receiptIdentity != nil)
+            #expect(await server.sessionCloseReceiptIdentityForTesting(sessionID: sessionID) == receiptIdentity)
+            #expect(await server.sessionCountForTesting() == 1)
+            await server.releaseSessionCloseCompletionForTesting()
+
+            #expect(try await firstDelete.value.statusCode == 200)
+            #expect(try await secondDelete.value.statusCode == 200)
+            #expect(await server.sessionCountForTesting() == 0)
+        }
+    }
+
+    @Test func deleteAndServerStopJoinStoreBackedSemanticSessionClose() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-running" })
+        )
+
+        try await withHTTPServer(store: store) { server in
+            let endpoint = await server.url
+            let sessionID = try await initializeSession(endpoint: endpoint)
+            let review = Task { @MainActor in
+                try await store.startReview(
+                    sessionID: sessionID,
+                    request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+                )
+            }
+            try #require(await StoreSnapshotProbe(store: store).waitUntilRunAttempt(
+                "attempt-1",
+                jobID: "job-running"
+            ) != nil)
+            let deletion = Task {
+                try? await deleteSession(endpoint: endpoint, sessionID: sessionID)
+            }
+            try await backend.waitForInterruptReview(timeout: .seconds(2))
+            let receiptIdentity = await server.sessionCloseReceiptIdentityForTesting(sessionID: sessionID)
+            let storeReceipt = store.sessionCloseReceipts[sessionID]
+            let initialJoinCount = await server.sessionCloseJoinCountForTesting()
+            let stop = Task {
+                try await server.stop()
+            }
+            let didJoin = await waitUntil(timeout: .seconds(2)) {
+                await server.sessionCloseJoinCountForTesting() == initialJoinCount + 1
+            }
+
+            #expect(didJoin)
+            #expect(receiptIdentity != nil)
+            #expect(await server.sessionCloseReceiptIdentityForTesting(sessionID: sessionID) == receiptIdentity)
+            #expect(storeReceipt != nil)
+            #expect(store.sessionCloseReceipts[sessionID] === storeReceipt)
+            #expect(await server.eventLoopGroupShutdownCountForTesting() == 0)
+            await backend.yield(.cancelled(
+                "Cancellation requested because the MCP session closed."
+            ))
+
+            try await stop.value
+            _ = await deletion.value
+            let result = try await review.value
+            let interruptCount = await backend.recordedCommands().filter { command in
+                if case .interruptReviewAdmission = command {
+                    return true
+                }
+                return false
+            }.count
+
+            #expect(result.core.lifecycle.status == .cancelled)
+            #expect(interruptCount == 1)
+            #expect(store.sessionCloseReceipts[sessionID] == nil)
+            #expect(await server.sessionCountForTesting() == 0)
+        }
+    }
+
+    @Test func expiryAndServerStopJoinOneSemanticSessionClose() async throws {
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        )
+
+        try await withHTTPServer(
+            store: store,
+            configuration: .init(port: 0, sessionTimeout: 1)
+        ) { server in
+            let sessionID = try await initializeSession(endpoint: await server.url)
+            try #require(await waitUntil(timeout: .seconds(2)) {
+                await server.sessionRequestLeaseCountForTesting(sessionID: sessionID) == 0
+            })
+            await server.holdNextSessionCloseCompletionForTesting()
+            let cleanup = Task {
+                await server.runSessionCleanupForTesting(now: .distantFuture)
+            }
+            await server.waitUntilSessionCloseCompletionIsHeldForTesting()
+            let receiptIdentity = await server.sessionCloseReceiptIdentityForTesting(sessionID: sessionID)
+            let initialJoinCount = await server.sessionCloseJoinCountForTesting()
+            let stop = Task {
+                try await server.stop()
+            }
+            let didJoin = await waitUntil(timeout: .seconds(2)) {
+                await server.sessionCloseJoinCountForTesting() == initialJoinCount + 1
+            }
+
+            #expect(didJoin)
+            #expect(receiptIdentity != nil)
+            #expect(await server.sessionCloseReceiptIdentityForTesting(sessionID: sessionID) == receiptIdentity)
+            #expect(await server.eventLoopGroupShutdownCountForTesting() == 0)
+            await server.releaseSessionCloseCompletionForTesting()
+
+            await cleanup.value
+            try await stop.value
+            #expect(await server.sessionCountForTesting() == 0)
+            #expect(await server.eventLoopGroupShutdownCountForTesting() == 1)
+        }
+    }
+
+    @Test func cancelledDeleteCannotCancelCloseOwnerOrHideStopFailure() async throws {
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        )
+        let server = CodexReviewMCPHTTPServer(
+            adapter: CodexReviewMCPServer(store: store),
+            configuration: .init(host: "127.0.0.1", port: 0)
+        )
+        try await server.start()
+        let endpoint = await server.url
+        let sessionID = try await initializeSession(endpoint: endpoint)
+        await server.holdNextSessionCloseCompletionForTesting()
+        let deletion = Task {
+            try await deleteSession(endpoint: endpoint, sessionID: sessionID)
+        }
+        await server.waitUntilSessionCloseCompletionIsHeldForTesting()
+        let receiptIdentity = await server.sessionCloseReceiptIdentityForTesting(sessionID: sessionID)
+
+        deletion.cancel()
+        _ = await deletion.result
+        #expect(receiptIdentity != nil)
+        #expect(await server.sessionCloseReceiptIdentityForTesting(sessionID: sessionID) == receiptIdentity)
+        #expect(await server.sessionCountForTesting() == 1)
+        await server.injectNextListenerCloseFailureForTesting("injected close transport failure")
+        let initialJoinCount = await server.sessionCloseJoinCountForTesting()
+        let stop = Task {
+            await lifecycleError {
+                try await server.stop()
+            }
+        }
+        let didJoin = await waitUntil(timeout: .seconds(2)) {
+            await server.sessionCloseJoinCountForTesting() == initialJoinCount + 1
+        }
+
+        #expect(didJoin)
+        await server.releaseSessionCloseCompletionForTesting()
+        let stopError = await stop.value
+
+        #expect(stopError == .init(
+            first: .init(resource: .listener, message: "injected close transport failure")
+        ))
+        #expect(await server.sessionCountForTesting() == 0)
+        #expect(await server.eventLoopGroupShutdownCountForTesting() == 1)
+    }
+
     @Test func streamableHTTPListsAndReadsDiscoveryResources() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
