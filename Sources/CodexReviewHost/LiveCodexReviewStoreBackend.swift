@@ -83,6 +83,7 @@ private struct PendingLoginRuntimeCleanup {
 }
 
 private struct PendingAuthenticationResources {
+    let id = UUID()
     private(set) var isOwned = true
     var backend: AppServerCodexReviewBackend?
     var challenge: CodexReviewBackendModel.Login.Challenge?
@@ -111,6 +112,7 @@ private struct PendingAuthenticationResources {
             return false
         }
         operation.backend = resources.backend
+        operation.admittedSetupID = resources.id
         operation.challenge = resources.challenge
         operation.client = resources.client
         operation.codexHomeURL = resources.codexHomeURL
@@ -1370,6 +1372,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
 
     private func startLogin(auth: CodexReviewAuthModel, activation: LoginActivation) async {
         var pendingResources = PendingAuthenticationResources()
+        let expectedAdmittedSetupID = authenticationOperation.admittedSetupID
         let expectedRuntimeHandle = activeRuntimeHandle
         do {
             let runtime = try await loginRuntime(for: activation)
@@ -1473,6 +1476,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             logger.error("ChatGPT login failed to start: \(error.localizedDescription, privacy: .public)")
             if let pendingCleanup = pendingResources.takeForCleanup() {
                 await cleanupPendingAuthenticationResources(pendingCleanup)
+                guard authenticationOperation.admittedSetupID == expectedAdmittedSetupID else {
+                    return
+                }
                 updateAuthenticationFailure(
                     error.localizedDescription,
                     auth: auth,

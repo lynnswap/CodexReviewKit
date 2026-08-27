@@ -3279,6 +3279,8 @@ struct CodexReviewHostTests {
         await store.addAccount()
         let secondSession = await sessions.waitForSession()
         await secondSession.waitUntilWaitingForCallback()
+        let failureCountBeforeFirstResult = store.auth.authenticationFailureCount
+        #expect(store.auth.isAuthenticating)
 
         await firstStartGate.open()
         await firstStart
@@ -3286,6 +3288,8 @@ struct CodexReviewHostTests {
         #expect(await firstLoginTransport.isClosedForTesting())
         #expect(await secondLoginTransport.isClosedForTesting() == false)
         #expect(secondSession.isCancelled == false)
+        #expect(store.auth.isAuthenticating)
+        #expect(store.auth.authenticationFailureCount == failureCountBeforeFirstResult)
         #expect(isolatedHomeURLs.count == 2)
         #expect(FileManager.default.fileExists(atPath: isolatedHomeURLs[0].path) == false)
         #expect(FileManager.default.fileExists(atPath: isolatedHomeURLs[1].path))

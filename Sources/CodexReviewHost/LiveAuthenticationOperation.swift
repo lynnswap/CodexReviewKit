@@ -31,6 +31,7 @@ final class LiveAuthenticationOperation {
     }
 
     var activation = Activation.activateAuthenticatedAccount
+    var admittedSetupID = UUID()
     var challenge: CodexReviewBackendModel.Login.Challenge?
     var backend: AppServerCodexReviewBackend?
     var client: AppServerClient?
