@@ -1345,6 +1345,7 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         #expect(try await failedAttempt.events.next() == .failed(
             "Malformed app-server notification item/completed: durationMs must be an integer"
         ))
+        await backend.waitForReviewNotificationCompletionForTesting(1)
         #expect(try await collectEvents(from: healthyAttempt.events).last == .completed(
             summary: "Succeeded.",
             result: "Healthy review"
@@ -1391,6 +1392,7 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         #expect(try await attempt.events.next() == .failed(
             "Malformed app-server notification item/started: review must be a string"
         ))
+        await backend.waitForReviewNotificationCompletionForTesting(1)
         #expect(await backend.notificationRouterMetricsForTesting().attemptFailures == 1)
         #expect(await transport.isClosedForTesting() == false)
     }
