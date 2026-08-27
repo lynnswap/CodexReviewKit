@@ -268,6 +268,54 @@ struct DirectoryCapabilityTests {
         }
     }
 
+    @Test func regularFileReadDistinguishesMissingAndEnforcesBound() throws {
+        let fixture = try makePrivateTemporaryDirectory()
+        defer { removeFixture(fixture) }
+        let root = try openFixtureRoot(fixture)
+        defer { try? root.close() }
+        let name = try DirectoryCapability.Name("payload")
+
+        #expect(try root.readFile(named: name, maximumByteCount: 8) == nil)
+        expectDirectoryError(.invalidRequest) {
+            _ = try root.readFile(named: name, maximumByteCount: -1)
+        }
+
+        let contents = Data(repeating: 0x5A, count: 64 * 1024 + 7)
+        try contents.write(to: fixture.appendingPathComponent("payload"))
+        #expect(try root.readFile(named: name, maximumByteCount: contents.count + 1) == contents)
+        #expect(try root.readFile(named: name, maximumByteCount: contents.count) == contents)
+        expectDirectoryError(.policyViolation) {
+            _ = try root.readFile(named: name, maximumByteCount: contents.count - 1)
+        }
+
+        try Data().write(to: fixture.appendingPathComponent("empty"))
+        #expect(try root.readFile(named: .init("empty"), maximumByteCount: 0) == Data())
+    }
+
+    @Test func regularFileReadRejectsSymbolicLinksAndNonregularEntries() throws {
+        let fixture = try makePrivateTemporaryDirectory()
+        defer { removeFixture(fixture) }
+        let root = try openFixtureRoot(fixture)
+        defer { try? root.close() }
+        let targetContents = Data("unchanged".utf8)
+        try targetContents.write(to: fixture.appendingPathComponent("target"))
+        #expect(symlink("target", fixture.appendingPathComponent("link").path) == 0)
+        try createDirectory(fixture.appendingPathComponent("directory"), permissions: 0o700)
+        #expect(mkfifo(fixture.appendingPathComponent("fifo").path, 0o600) == 0)
+        let socketDescriptor = try bindUnixSocket(
+            at: fixture.appendingPathComponent("socket").path
+        )
+        defer { _ = Darwin.close(socketDescriptor) }
+
+        for value in ["link", "directory", "fifo", "socket"] {
+            let name = try DirectoryCapability.Name(value)
+            expectDirectoryError(.policyViolation) {
+                _ = try root.readFile(named: name, maximumByteCount: 32)
+            }
+        }
+        #expect(try Data(contentsOf: fixture.appendingPathComponent("target")) == targetContents)
+    }
+
     @Test func closeIsIdempotentAndRejectsLaterOperations() throws {
         let fixture = try makePrivateTemporaryDirectory()
         defer { removeFixture(fixture) }
@@ -276,6 +324,9 @@ struct DirectoryCapabilityTests {
         try root.close()
         expectDirectoryError(.closed) {
             try root.withRevalidatedPath { _ in }
+        }
+        expectDirectoryError(.closed) {
+            _ = try root.readFile(named: .init("file"), maximumByteCount: 0)
         }
     }
 
@@ -385,6 +436,45 @@ private func addAllowACL(to url: URL) throws {
     try process.run()
     process.waitUntilExit()
     guard process.terminationStatus == 0 else { throw FixtureError.commandFailed }
+}
+
+private func bindUnixSocket(at path: String) throws -> Int32 {
+    let descriptor = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+    guard descriptor >= 0 else {
+        throw POSIXError(.init(rawValue: errno) ?? .EIO)
+    }
+    var transfersDescriptor = false
+    defer { if transfersDescriptor == false { _ = Darwin.close(descriptor) } }
+
+    var address = sockaddr_un()
+    address.sun_family = sa_family_t(AF_UNIX)
+    address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+    let pathByteCount = path.utf8CString.count
+    guard pathByteCount <= MemoryLayout.size(ofValue: address.sun_path) else {
+        throw POSIXError(.ENAMETOOLONG)
+    }
+    withUnsafeMutableBytes(of: &address.sun_path) { destination in
+        path.withCString { source in
+            destination.copyBytes(from: UnsafeRawBufferPointer(
+                start: source,
+                count: pathByteCount
+            ))
+        }
+    }
+    let bound = withUnsafePointer(to: &address) { pointer in
+        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+            Darwin.bind(
+                descriptor,
+                socketAddress,
+                socklen_t(MemoryLayout<sockaddr_un>.size)
+            )
+        }
+    }
+    guard bound == 0 else {
+        throw POSIXError(.init(rawValue: errno) ?? .EIO)
+    }
+    transfersDescriptor = true
+    return descriptor
 }
 
 private func removeFixture(_ url: URL) {
