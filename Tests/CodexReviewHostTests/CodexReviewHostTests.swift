@@ -3473,6 +3473,8 @@ struct CodexReviewHostTests {
         #expect(await staleTransport.isClosedForTesting())
         #expect(await replacementTransport.isClosedForTesting() == false)
         #expect(replacementSession.isCancelled == false)
+        let failureCount = store.auth.authenticationFailureCount
+        #expect(store.auth.isAuthenticating)
 
         await displacedCleanupGate.open()
         await staleStart
@@ -3484,6 +3486,8 @@ struct CodexReviewHostTests {
         #expect(await replacementTransport.isClosedForTesting() == false)
         #expect(await replacementTransport.recordedRequests().map(\.method).contains("account/login/cancel") == false)
         #expect(replacementSession.isCancelled == false)
+        #expect(store.auth.isAuthenticating)
+        #expect(store.auth.authenticationFailureCount == failureCount)
 
         await store.cancelAuthentication()
         #expect(await replacementTransport.isClosedForTesting())

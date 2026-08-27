@@ -1391,6 +1391,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 observeLoginNotifications(client: loginClient, backend: appServerBackend, auth: auth)
             }
             await cleanupDisplacedAuthenticationResources(admission.displacedResources)
+            guard authenticationOperation.isCurrent(scope), scope.isOpen else {
+                return
+            }
             logger.info("Received ChatGPT login challenge")
             let nativeCallbackScheme = challenge.nativeWebAuthenticationCallbackScheme
             let usesNativeAuthentication = nativeAuthenticationConfiguration != nil && challenge.verificationURL != nil
