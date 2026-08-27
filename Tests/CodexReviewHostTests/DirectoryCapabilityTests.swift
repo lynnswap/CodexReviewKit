@@ -19,6 +19,12 @@ struct DirectoryCapabilityTests {
                 requirements: .trustedAnchor(ownerUserID: geteuid())
             )
         }
+        expectDirectoryError(.invalidRequest) {
+            _ = try DirectoryCapability.openExisting(
+                at: URL(string: "http://:80/path")!,
+                requirements: .trustedAnchor(ownerUserID: geteuid())
+            )
+        }
     }
 
     @Test func absoluteAndChildWalksRejectSymbolicLinks() throws {
