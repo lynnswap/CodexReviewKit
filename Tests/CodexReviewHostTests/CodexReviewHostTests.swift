@@ -1547,8 +1547,9 @@ struct CodexReviewHostTests {
         #expect(String(decoding: registry, as: UTF8.self).contains(sentinel) == false)
 
         let requests = await transport.recordedRequests()
-        #expect(requests.map(\.method).filter { $0 == "account/login/start" }.count == 1)
-        #expect(requests.map(\.method).contains("account/rateLimits/read") == false)
+        let methods = requests.map(\.method)
+        #expect(methods.filter { $0 == "account/login/start" }.count == 1)
+        #expect(methods.contains("account/rateLimits/read") == false)
         let login = try #require(requests.first { $0.method == "account/login/start" })
         let params = try #require(JSONSerialization.jsonObject(with: login.params) as? [String: Any])
         #expect(params["type"] as? String == "apiKey")
@@ -1589,7 +1590,8 @@ struct CodexReviewHostTests {
 
         #expect(failedMessage(from: store.auth.phase) == "An API key account is already added.")
         #expect(store.auth.errorMessage?.contains(sentinel) != true)
-        #expect(await transport.recordedRequests().contains {
+        let requests = await transport.recordedRequests()
+        #expect(requests.contains {
             $0.method == "account/login/start"
         } == false)
     }
@@ -1636,7 +1638,8 @@ struct CodexReviewHostTests {
         #expect(store.auth.persistedAccounts.contains {
             $0.accountKey == "api-key" && $0.kind == .apiKey
         })
-        #expect(await loginTransport.recordedRequests().map(\.method) == [
+        let loginMethods = await loginTransport.recordedRequests().map(\.method)
+        #expect(loginMethods == [
             "initialize",
             "account/login/start",
             "account/read",
@@ -1690,10 +1693,11 @@ struct CodexReviewHostTests {
 
         #expect(store.auth.selectedAccount?.kind == .apiKey)
         #expect(store.auth.persistedActiveAccountKey == "api-key")
-        #expect(await transport.recordedRequests().map(\.method).filter {
+        let methods = await transport.recordedRequests().map(\.method)
+        #expect(methods.filter {
             $0 == "account/login/start"
         }.count == 1)
-        #expect(await transport.recordedRequests().map(\.method).filter {
+        #expect(methods.filter {
             $0 == "account/read"
         }.count == 2)
     }
@@ -1721,10 +1725,11 @@ struct CodexReviewHostTests {
 
         #expect(store.auth.selectedAccount?.kind == .apiKey)
         #expect(store.auth.errorMessage == nil)
-        #expect(await transport.recordedRequests().map(\.method).filter {
+        let methods = await transport.recordedRequests().map(\.method)
+        #expect(methods.filter {
             $0 == "account/login/start"
         }.count == 1)
-        #expect(await transport.recordedRequests().map(\.method).filter {
+        #expect(methods.filter {
             $0 == "account/read"
         }.count == 2)
     }
@@ -1750,7 +1755,8 @@ struct CodexReviewHostTests {
         })
         #expect(failedMessage(from: store.auth.phase) == "API key sign-in could not be confirmed.")
         #expect(store.auth.errorMessage?.contains("sk-unresolved") != true)
-        #expect(await transport.recordedRequests().map(\.method).filter {
+        let methods = await transport.recordedRequests().map(\.method)
+        #expect(methods.filter {
             $0 == "account/login/start"
         }.count == 1)
     }
