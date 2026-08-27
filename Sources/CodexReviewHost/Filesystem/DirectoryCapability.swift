@@ -54,7 +54,7 @@ package final class DirectoryCapability: Sendable {
     }
 
     package struct Requirements: Equatable, Sendable {
-        fileprivate enum Policy: Equatable, Sendable { case trustedAnchor, managed }
+        fileprivate enum Policy: Equatable, Sendable { case namespace, trustedAnchor, managed }
         fileprivate let policy: Policy
         fileprivate let ownerUserID: uid_t
         fileprivate let deviceID: UInt64?
@@ -66,11 +66,155 @@ package final class DirectoryCapability: Sendable {
         package static func managed(ownerUserID: uid_t, deviceID: UInt64) -> Self {
             Self(policy: .managed, ownerUserID: ownerUserID, deviceID: deviceID)
         }
+
+        fileprivate static var namespace: Self {
+            Self(policy: .namespace, ownerUserID: 0, deviceID: nil)
+        }
         fileprivate var creationMode: mode_t? { policy == .managed ? 0o700 : nil }
     }
 
     package enum Acquisition: Equatable, Sendable { case existing, existingOrCreate, new }
-    package enum Relationship: Equatable, Sendable { case same, ancestor, descendant, disjoint }
+    package enum Relationship: Equatable, Sendable {
+        case same, ancestor, descendant, disjoint, indeterminate
+    }
+
+    package final class ResolvedDirectoryLocation: Sendable {
+        private let anchor: DirectoryCapability
+        private let target: Target
+
+        private enum Target: Sendable {
+            case existing
+            case pending(first: Name, rest: [Name])
+        }
+
+        private enum Revalidation: Sendable {
+            case valid(Snapshot)
+            case invalidated
+
+            func relationship(to other: Self) -> Relationship {
+                switch (self, other) {
+                case (.valid(let lhs), .valid(let rhs)): lhs.relationship(to: rhs)
+                case (.invalidated, _), (_, .invalidated): .indeterminate
+                }
+            }
+        }
+
+        private struct Snapshot: Sendable {
+            let anchorIdentity: Identity
+            let ancestorIdentities: Set<Identity>
+            let target: SnapshotTarget
+
+            func relationship(to other: Self) -> Relationship {
+                let anchorRelationship: Relationship
+                if anchorIdentity == other.anchorIdentity { anchorRelationship = .same }
+                else if other.ancestorIdentities.contains(anchorIdentity) { anchorRelationship = .ancestor }
+                else if ancestorIdentities.contains(other.anchorIdentity) { anchorRelationship = .descendant }
+                else { anchorRelationship = .disjoint }
+
+                switch anchorRelationship {
+                case .same:
+                    return target.relationship(to: other.target)
+                case .ancestor:
+                    if case .existing = target { return .ancestor }
+                    return .indeterminate
+                case .descendant:
+                    if case .existing = other.target { return .descendant }
+                    return .indeterminate
+                case .disjoint:
+                    return .disjoint
+                case .indeterminate:
+                    return .indeterminate
+                }
+            }
+        }
+
+        private enum SnapshotTarget: Sendable {
+            case existing
+            case pending(first: Name, rest: [Name], semantics: EntryNameSemantics)
+
+            func relationship(to other: Self) -> Relationship {
+                switch (self, other) {
+                case (.existing, .existing):
+                    return .same
+                case (.existing, .pending):
+                    return .ancestor
+                case (.pending, .existing):
+                    return .descendant
+                case let (.pending(lhsFirst, lhsRest, lhsSemantics),
+                          .pending(rhsFirst, rhsRest, rhsSemantics)):
+                    let lhs = [lhsFirst] + lhsRest
+                    let rhs = [rhsFirst] + rhsRest
+                    for (lhsName, rhsName) in zip(lhs, rhs) {
+                        switch DirectoryCapability.entryNameRelationship(
+                            lhsName, rhsName,
+                            lhsSemantics: lhsSemantics,
+                            rhsSemantics: rhsSemantics
+                        ) {
+                        case .same: continue
+                        case .distinct: return .disjoint
+                        case .indeterminate: return .indeterminate
+                        }
+                    }
+                    if lhs.count == rhs.count { return .same }
+                    return lhs.count < rhs.count ? .ancestor : .descendant
+                }
+            }
+        }
+
+        fileprivate init(anchor: DirectoryCapability, remainingNames: [Name]) {
+            self.anchor = anchor
+            target = remainingNames.isEmpty
+                ? .existing
+                : .pending(first: remainingNames[0], rest: Array(remainingNames.dropFirst()))
+        }
+
+        package func relationship(to other: ResolvedDirectoryLocation) throws -> Relationship {
+            let lhs = try revalidateForRelationship()
+            let rhs = try other.revalidateForRelationship()
+            return lhs.relationship(to: rhs)
+        }
+
+        package func close() throws {
+            try anchor.close()
+        }
+
+        private func revalidateForRelationship() throws -> Revalidation {
+            try anchor.withBorrowedDescriptor { descriptor in
+                try DirectoryCapability.validateOwned(descriptor, capability: anchor)
+                let ancestors = try DirectoryCapability.ancestryIdentities(
+                    of: descriptor, path: anchor.url.path)
+                let snapshotTarget: SnapshotTarget
+                switch target {
+                case .existing:
+                    snapshotTarget = .existing
+                case .pending(let first, let rest):
+                    let semantics = try DirectoryCapability.entryNameSemantics(
+                        parent: descriptor, path: anchor.url.path)
+                    if try DirectoryCapability.entryExists(
+                        first, parent: descriptor, path: anchor.url.path) {
+                        return .invalidated
+                    }
+                    snapshotTarget = .pending(first: first, rest: rest, semantics: semantics)
+                }
+                return .valid(Snapshot(
+                    anchorIdentity: anchor.identity,
+                    ancestorIdentities: ancestors,
+                    target: snapshotTarget
+                ))
+            }
+        }
+    }
+
+    private enum EntryNameRelationship { case same, distinct, indeterminate }
+    private enum EntryNameSemantics: Equatable, Sendable {
+        case caseSensitive, caseInsensitive, unknown
+    }
+
+    private struct AbsoluteResolution {
+        let descriptor: Int32
+        let anchorURL: URL
+        let remainingNames: [Name]
+    }
 
     private struct TemporaryFile {
         let name: Name
@@ -148,6 +292,45 @@ package final class DirectoryCapability: Sendable {
             identity: Identity(status),
             requirements: requirements,
             url: absoluteURL
+        )
+    }
+
+    package static func resolveLocation(
+        at absoluteURL: URL,
+        requirements: Requirements
+    ) throws -> ResolvedDirectoryLocation {
+        let resolution = try resolveAbsoluteURL(absoluteURL)
+        var transfersDescriptor = false
+        defer { if transfersDescriptor == false { _ = Darwin.close(resolution.descriptor) } }
+        let status = try directoryStatus(resolution.descriptor, path: resolution.anchorURL.path)
+        let anchorRequirements: Requirements
+        if resolution.remainingNames.isEmpty {
+            try validate(
+                resolution.descriptor,
+                status: status,
+                requirements: requirements,
+                path: resolution.anchorURL.path
+            )
+            anchorRequirements = requirements
+        } else {
+            anchorRequirements = .namespace
+            try validate(
+                resolution.descriptor,
+                status: status,
+                requirements: anchorRequirements,
+                path: resolution.anchorURL.path
+            )
+        }
+        let anchor = DirectoryCapability(
+            descriptor: resolution.descriptor,
+            identity: Identity(status),
+            requirements: anchorRequirements,
+            url: resolution.anchorURL
+        )
+        transfersDescriptor = true
+        return ResolvedDirectoryLocation(
+            anchor: anchor,
+            remainingNames: resolution.remainingNames
         )
     }
 
@@ -1198,6 +1381,15 @@ package final class DirectoryCapability: Sendable {
     }
 
     private static func walkAbsoluteURLIfPresent(_ url: URL) throws -> Int32? {
+        let resolution = try resolveAbsoluteURL(url)
+        guard resolution.remainingNames.isEmpty else {
+            _ = Darwin.close(resolution.descriptor)
+            return nil
+        }
+        return resolution.descriptor
+    }
+
+    private static func resolveAbsoluteURL(_ url: URL) throws -> AbsoluteResolution {
         try validateAbsoluteURL(url)
         let names = try url.path.split(separator: "/").map { try Name(String($0)) }
         var current = retryingEINTR { Darwin.open("/", directoryOpenFlags) }
@@ -1207,18 +1399,29 @@ package final class DirectoryCapability: Sendable {
         var transfersDescriptor = false
         defer { if transfersDescriptor == false { _ = Darwin.close(current) } }
         var pathURL = URL(fileURLWithPath: "/", isDirectory: true)
-        for name in names {
+        for (index, name) in names.enumerated() {
             pathURL.appendPathComponent(name.value, isDirectory: true)
             guard let next = try openChildIfPresent(
                 parent: current,
                 name: name,
                 path: pathURL.path
-            ) else { return nil }
+            ) else {
+                transfersDescriptor = true
+                return AbsoluteResolution(
+                    descriptor: current,
+                    anchorURL: pathURL.deletingLastPathComponent(),
+                    remainingNames: Array(names[index...])
+                )
+            }
             _ = Darwin.close(current)
             current = next
         }
         transfersDescriptor = true
-        return current
+        return AbsoluteResolution(
+            descriptor: current,
+            anchorURL: pathURL,
+            remainingNames: []
+        )
     }
 
     private static func validateAbsoluteURL(_ url: URL) throws {
@@ -1251,18 +1454,23 @@ package final class DirectoryCapability: Sendable {
         guard status.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else {
             throw DirectoryCapabilityError.policyViolation("Expected a directory at \(path).")
         }
-        guard status.st_uid == requirements.ownerUserID else {
-            throw DirectoryCapabilityError.policyViolation("Directory owner mismatch at \(path).")
-        }
         let permissions = status.st_mode & 0o7777
         switch requirements.policy {
+        case .namespace:
+            return
         case .trustedAnchor:
+            guard status.st_uid == requirements.ownerUserID else {
+                throw DirectoryCapabilityError.policyViolation("Directory owner mismatch at \(path).")
+            }
             guard permissions & 0o022 == 0 else {
                 throw DirectoryCapabilityError.policyViolation(
                     "Trusted directory is writable by another principal at \(path)."
                 )
             }
         case .managed:
+            guard status.st_uid == requirements.ownerUserID else {
+                throw DirectoryCapabilityError.policyViolation("Directory owner mismatch at \(path).")
+            }
             guard Identity(status).deviceID == requirements.deviceID, permissions == 0o700 else {
                 throw DirectoryCapabilityError.policyViolation(
                     "Managed directory device or permissions mismatch at \(path)."
@@ -1313,14 +1521,19 @@ package final class DirectoryCapability: Sendable {
     }
 
     private static func isAncestor(_ ancestor: Identity, of descriptor: Int32, path: String) throws -> Bool {
+        try ancestryIdentities(of: descriptor, path: path).contains(ancestor)
+    }
+
+    private static func ancestryIdentities(of descriptor: Int32, path: String) throws -> Set<Identity> {
         var current = retryingEINTR { fcntl(descriptor, F_DUPFD_CLOEXEC, 0) }
         guard current >= 0 else {
             throw posixError(operation: "duplicate directory for ancestry", code: errno, path: path)
         }
         defer { _ = Darwin.close(current) }
+        var identities: Set<Identity> = []
         while true {
             let currentIdentity = Identity(try directoryStatus(current, path: path))
-            if currentIdentity == ancestor { return true }
+            identities.insert(currentIdentity)
             let parent = retryingEINTR { openat(current, "..", directoryOpenFlags) }
             guard parent >= 0 else { throw openError(code: errno, path: path) }
             let parentStatus: stat
@@ -1333,10 +1546,74 @@ package final class DirectoryCapability: Sendable {
             let parentIdentity = Identity(parentStatus)
             if parentIdentity == currentIdentity {
                 _ = Darwin.close(parent)
-                return false
+                return identities
             }
             _ = Darwin.close(current)
             current = parent
+        }
+    }
+
+    private static func entryNameRelationship(
+        _ lhs: Name,
+        _ rhs: Name,
+        lhsSemantics: EntryNameSemantics,
+        rhsSemantics: EntryNameSemantics
+    ) -> EntryNameRelationship {
+        if lhs.value.utf8.elementsEqual(rhs.value.utf8) { return .same }
+        guard lhsSemantics == rhsSemantics else { return .indeterminate }
+        switch lhsSemantics {
+        case .caseSensitive:
+            return .distinct
+        case .unknown:
+            return .indeterminate
+        case .caseInsensitive:
+            guard let lhsASCII = asciiCaseFolded(lhs.value),
+                  let rhsASCII = asciiCaseFolded(rhs.value) else {
+                return .indeterminate
+            }
+            return lhsASCII == rhsASCII ? .same : .distinct
+        }
+    }
+
+    private static func entryNameSemantics(
+        parent: Int32,
+        path: String
+    ) throws -> EntryNameSemantics {
+        errno = 0
+        let caseSensitive = fpathconf(parent, _PC_CASE_SENSITIVE)
+        let code = errno
+        if caseSensitive == -1 {
+            if code == 0 { return .unknown }
+            throw posixError(operation: "read directory case sensitivity", code: code, path: path)
+        }
+        if caseSensitive == 1 { return .caseSensitive }
+        if caseSensitive == 0 { return .caseInsensitive }
+        return .unknown
+    }
+
+    private static func entryExists(
+        _ name: Name,
+        parent: Int32,
+        path: String
+    ) throws -> Bool {
+        var status = stat()
+        let inspected = name.value.withCString { pointer in
+            retryingEINTR { fstatat(parent, pointer, &status, AT_SYMLINK_NOFOLLOW) }
+        }
+        if inspected == 0 { return true }
+        if errno == ENOENT { return false }
+        throw posixError(
+            operation: "inspect unresolved directory entry",
+            code: errno,
+            path: URL(fileURLWithPath: path).appendingPathComponent(name.value).path
+        )
+    }
+
+    private static func asciiCaseFolded(_ value: String) -> [UInt8]? {
+        let bytes = Array(value.utf8)
+        guard bytes.allSatisfy({ $0 < 0x80 }) else { return nil }
+        return bytes.map { byte in
+            (0x41...0x5A).contains(byte) ? byte + 0x20 : byte
         }
     }
 
