@@ -436,7 +436,6 @@ package actor CodexReviewMCPHTTPServer {
         var lastAccessedAt: Date
         let initialRequestLease: RequestLease
         private(set) var requestLeases: [UUID: RequestLease] = [:]
-        private var requestDrainWaiters: [CheckedContinuation<Void, Never>] = []
         var closeReceipt: CloseReceipt?
 
         init(
@@ -479,27 +478,7 @@ package actor CodexReviewMCPHTTPServer {
             }
             requestLeases.removeValue(forKey: lease.operation.id)
             lastAccessedAt = now
-            if requestLeases.isEmpty {
-                let waiters = requestDrainWaiters
-                requestDrainWaiters.removeAll(keepingCapacity: false)
-                for waiter in waiters {
-                    waiter.resume()
-                }
-            }
             return true
-        }
-
-        func waitUntilRequestsDrain() async {
-            if requestLeases.isEmpty {
-                return
-            }
-            await withCheckedContinuation { continuation in
-                if requestLeases.isEmpty {
-                    continuation.resume()
-                } else {
-                    requestDrainWaiters.append(continuation)
-                }
-            }
         }
 
         func owns(_ lease: RequestLease) -> Bool {
@@ -521,6 +500,7 @@ package actor CodexReviewMCPHTTPServer {
     private var nextGenerationID: UInt64 = 0
     private var nextSessionOrdinal: UInt64 = 0
     private var sessions: [String: MCPSemanticSession] = [:]
+    private var sessionRequestDrainWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
     private let startCompletionGate = MCPHTTPLifecycleCompletionGate()
     private let joinedStartCompletionGate = MCPHTTPLifecycleCompletionGate()
     private let stopCompletionGate = MCPHTTPLifecycleCompletionGate()
@@ -1676,6 +1656,7 @@ package actor CodexReviewMCPHTTPServer {
             return
         }
         sessions.removeValue(forKey: sessionID)
+        resumeSessionRequestDrainWaiters(sessionID: sessionID)
         logger.info("Closed MCP HTTP session \(sessionID, privacy: .public)")
     }
 
@@ -1725,6 +1706,9 @@ package actor CodexReviewMCPHTTPServer {
               session.finishRequest(lease, now: Date()) else {
             return
         }
+        if session.requestLeases.isEmpty {
+            resumeSessionRequestDrainWaiters(sessionID: session.identity.sessionID)
+        }
         await sessionRequestRetirementGate.waitIfNeeded()
         if lease.role == .initialize, terminalCause != nil {
             await closeSession(session)
@@ -1758,7 +1742,24 @@ package actor CodexReviewMCPHTTPServer {
     }
 
     package func waitUntilSessionRequestsDrainForTesting(sessionID: String) async {
-        await sessions[sessionID]?.waitUntilRequestsDrain()
+        guard let session = sessions[sessionID], session.requestLeases.isEmpty == false else {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            guard sessions[sessionID] === session,
+                  session.requestLeases.isEmpty == false else {
+                continuation.resume()
+                return
+            }
+            sessionRequestDrainWaiters[sessionID, default: []].append(continuation)
+        }
+    }
+
+    private func resumeSessionRequestDrainWaiters(sessionID: String) {
+        let waiters = sessionRequestDrainWaiters.removeValue(forKey: sessionID) ?? []
+        for waiter in waiters {
+            waiter.resume()
+        }
     }
 
     private func closeExpiredSessions(now: Date) async {
