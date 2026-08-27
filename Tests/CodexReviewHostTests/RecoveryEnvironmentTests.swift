@@ -236,6 +236,47 @@ struct RecoveryEnvironmentTests {
         ) == false)
     }
 
+    @Test func rootSetValidationUsesStablePairPriorityWithoutMutation() throws {
+        let first = try makePrivateRecoveryRoot()
+        defer { removeRecoveryFixture(first) }
+        let firstRecovery = first.appendingPathComponent("RecoveryV1", isDirectory: true)
+        try createRecoveryDirectory(firstRecovery, permissions: 0o700)
+        try expectRejectedTreeUnchanged(
+            RecoveryEnvironmentPlan(
+                recoveryParentURL: first,
+                explicitCodexHomeURL: firstRecovery.appendingPathComponent("pending"),
+                legacyCodexHomeURL: first.appendingPathComponent("legacy")
+            ),
+            in: first,
+            expectedPair: "RecoveryV1 and explicit Codex home"
+        )
+
+        let second = try makePrivateRecoveryRoot()
+        defer { removeRecoveryFixture(second) }
+        try expectRejectedTreeUnchanged(
+            RecoveryEnvironmentPlan(
+                recoveryParentURL: second,
+                explicitCodexHomeURL: second.appendingPathComponent("explicit"),
+                legacyCodexHomeURL: second
+            ),
+            in: second,
+            expectedPair: "RecoveryV1 and legacy Codex home"
+        )
+
+        let third = try makePrivateRecoveryRoot()
+        defer { removeRecoveryFixture(third) }
+        let shared = third.appendingPathComponent("shared", isDirectory: true)
+        try expectRejectedTreeUnchanged(
+            RecoveryEnvironmentPlan(
+                recoveryParentURL: third,
+                explicitCodexHomeURL: shared,
+                legacyCodexHomeURL: shared
+            ),
+            in: third,
+            expectedPair: "explicit Codex home and legacy Codex home"
+        )
+    }
+
     @Test func filesystemAliasesCannotBypassIdentityOverlapPolicy() throws {
         let fixture = try makePrivateRecoveryRoot()
         defer { removeRecoveryFixture(fixture) }
@@ -338,6 +379,24 @@ private func expectRecoveryError(
     } catch {
         Issue.record("Unexpected error type: \(error)")
     }
+}
+
+private func expectRejectedTreeUnchanged(
+    _ plan: RecoveryEnvironmentPlan,
+    in root: URL,
+    expectedPair: String
+) throws {
+    let before = try FileManager.default.subpathsOfDirectory(atPath: root.path).sorted()
+    do {
+        _ = try plan.prepare()
+        Issue.record("Expected protected recovery roots to be rejected.")
+    } catch DirectoryCapabilityError.policyViolation(let message) {
+        #expect(message.contains(expectedPair), "Unexpected priority: \(message)")
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
+    let after = try FileManager.default.subpathsOfDirectory(atPath: root.path).sorted()
+    #expect(after == before)
 }
 
 private func makePrivateRecoveryRoot(in parent: String = "/private/tmp") throws -> URL {
