@@ -1,9 +1,17 @@
-import AppKit
 import SwiftUI
 import CodexReview
 
 struct SignInView: View {
     let store: CodexReviewStore
+    let startAPIKeySignIn: () -> Void
+
+    init(
+        store: CodexReviewStore,
+        startAPIKeySignIn: @escaping () -> Void = {}
+    ) {
+        self.store = store
+        self.startAPIKeySignIn = startAPIKeySignIn
+    }
 
     var body: some View {
         ContentUnavailableView {
@@ -39,15 +47,7 @@ struct SignInView: View {
 
             if store.auth.isAuthenticating == false {
                 Button("Sign in with API Key") {
-                    Task { @MainActor in
-                        guard let apiKey = await ReviewMonitorAPIKeyPrompt.request(
-                            window: NSApp.keyWindow ?? NSApp.mainWindow,
-                            submitTitle: "Sign In"
-                        ) else {
-                            return
-                        }
-                        await store.performPrimaryAuthenticationAction(apiKey: apiKey)
-                    }
+                    startAPIKeySignIn()
                 }
                 .buttonStyle(.link)
                 .disabled(store.canPerformPrimaryAuthenticationAction == false)
