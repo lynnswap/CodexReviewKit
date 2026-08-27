@@ -1266,6 +1266,49 @@ struct CodexReviewStoreLifecycleTests {
         #expect(store.runtimeLifecycleAdmissionGeneration == replacementGeneration.rawValue)
         await store.stop()
     }
+
+    @Test func cleanupRecoveryJoinsAccountRecycleReplacementGeneration() async throws {
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+        let sourceHandle = try #require(backend.lastPreparedRuntimeHandle)
+        let sourceGeneration = ReviewRuntimeGeneration(
+            rawValue: store.runtimeLifecycleAdmissionGeneration
+        )
+        let preparationGate = AsyncGate()
+        backend.holdRuntimePreparation(with: preparationGate)
+
+        _ = store.requestRuntimeCleanupRecovery(
+            sourceHandle: sourceHandle,
+            sourceGeneration: sourceGeneration,
+            cause: "Cleanup closed the transport."
+        )
+        await backend.waitForRuntimePreparation()
+
+        let recycle = Task { @MainActor in
+            await store.recycleRuntimeAfterAccountChange()
+        }
+        let recycledGeneration = sourceGeneration.successor().successor().successor()
+        try #require(await waitForRuntimeGeneration(
+            recycledGeneration,
+            store: store
+        ))
+        #expect(store.requestRuntimeCleanupRecovery(
+            sourceHandle: sourceHandle,
+            sourceGeneration: sourceGeneration,
+            cause: "Concurrent late cleanup failure."
+        ) == .joined(
+            sourceGeneration: sourceGeneration,
+            successorGeneration: recycledGeneration
+        ))
+
+        await preparationGate.open()
+        await recycle.value
+
+        #expect(store.serverState == .running)
+        #expect(store.runtimeLifecycleAdmissionGeneration == recycledGeneration.rawValue)
+        await store.stop()
+    }
 }
 
 private enum StoreWorkTestFailure: LocalizedError, Sendable {

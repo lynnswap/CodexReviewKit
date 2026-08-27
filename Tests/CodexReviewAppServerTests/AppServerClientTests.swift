@@ -6936,6 +6936,31 @@ struct AppServerClientTests {
         #expect(try await serializer.run(scope: .thread("thread-1")) { "next" } == "next")
     }
 
+    @Test func backendCleanupPreservesJSONRPCConnectionFailureClassification() async throws {
+        let transport = FakeJSONRPCTransport()
+        await transport.enqueueFailure(
+            .closed,
+            for: "thread/backgroundTerminals/clean"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Thread.Unsubscribe.Response(status: .unsubscribed),
+            for: "thread/unsubscribe"
+        )
+        try await transport.enqueue(EmptyResponse(), for: "thread/delete")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let run = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "thread-1"
+        )
+
+        await #expect(throws: ReviewRuntimeCloseFailure.connection(
+            "thread/backgroundTerminals/clean for thread-1: JSON-RPC transport is closed."
+        )) {
+            try await backend.cleanupReview(run)
+        }
+    }
+
     @Test func cancelledQueuedSameScopeWaiterIsRemovedBeforeGrant() async throws {
         let firstGate = AsyncGate()
         let (waiterQueuedStream, waiterQueuedContinuation) = AsyncStream<Void>.makeStream()
