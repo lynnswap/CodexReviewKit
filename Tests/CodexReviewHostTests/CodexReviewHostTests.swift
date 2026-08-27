@@ -1811,8 +1811,13 @@ struct CodexReviewHostTests {
         let loginRequest = try #require(await authTransport.recordedRequests().first {
             $0.method == "account/login/start"
         })
-        let loginParams = try JSONDecoder().decode(AppServerAPI.Account.Login.Params.self, from: loginRequest.params)
-        #expect(loginParams.nativeWebAuthentication?.callbackURLScheme == "lynnpd.CodexReviewMonitor.auth")
+        let loginParams = try #require(
+            JSONSerialization.jsonObject(with: loginRequest.params) as? [String: Any]
+        )
+        let nativeWebAuthentication = try #require(
+            loginParams["nativeWebAuthentication"] as? [String: Any]
+        )
+        #expect(nativeWebAuthentication["callbackUrlScheme"] as? String == "lynnpd.CodexReviewMonitor.auth")
         try await authTransport.emitServerNotification(
             method: "account/updated",
             params: EmptyResponse()

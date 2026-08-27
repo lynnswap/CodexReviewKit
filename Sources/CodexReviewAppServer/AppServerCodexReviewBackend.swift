@@ -402,11 +402,9 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         _ = try await client.initialize()
         let nativeWebAuthentication = request.nativeWebAuthenticationCallbackScheme
             .map(AppServerAPI.Account.Login.NativeWebAuthentication.init(callbackURLScheme:))
-        let response: AppServerAPI.Account.Login.Response = try await client.send(
-            method: "account/login/start",
-            params: AppServerAPI.Account.Login.Params(nativeWebAuthentication: nativeWebAuthentication),
-            responseType: AppServerAPI.Account.Login.Response.self
-        )
+        let response = try await client.send(AppServerAPI.Account.Login.Request(
+            params: .chatGPT(nativeWebAuthentication: nativeWebAuthentication)
+        ))
         return try response.backendChallenge
     }
 
