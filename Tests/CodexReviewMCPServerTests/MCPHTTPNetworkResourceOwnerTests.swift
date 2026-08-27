@@ -257,11 +257,11 @@ struct MCPHTTPNetworkResourceOwnerTests {
         #expect(admitted.operation.bindSession(sessionID))
         var publicationCount = 0
 
-        #expect(admitted.operation.publishSessionIfActive(for: sessionID) {
+        #expect(admitted.operation.withActiveSessionRequest(for: sessionID) {
             publicationCount += 1
         })
         let closing = owner.beginClosing(.serverStop)
-        #expect(admitted.operation.publishSessionIfActive(for: sessionID) {
+        #expect(admitted.operation.withActiveSessionRequest(for: sessionID) {
             publicationCount += 1
         } == false)
         #expect(publicationCount == 1)
@@ -281,7 +281,7 @@ struct MCPHTTPNetworkResourceOwnerTests {
         var publicationCount = 0
 
         let closing = owner.beginClosing(.serverStop)
-        #expect(admitted.operation.publishSessionIfActive(for: sessionID) {
+        #expect(admitted.operation.withActiveSessionRequest(for: sessionID) {
             publicationCount += 1
         } == false)
         #expect(publicationCount == 0)
@@ -289,6 +289,42 @@ struct MCPHTTPNetworkResourceOwnerTests {
         admitted.lease.acknowledgeCompletion()
         resource.acknowledgeClose()
         await closing.waitUntilClosed()
+    }
+
+    @Test func peerCloseRejectsActiveSessionRequestBody() async throws {
+        let owner = MCPHTTPNetworkResourceOwner(generationID: 26)
+        let resource = TestingConnectionResource()
+        let connection = try #require(owner.admitConnection(resource))
+        let admitted = try #require(connection.admitRequest())
+        let sessionID = "session-peer-close"
+        #expect(admitted.operation.bindSession(sessionID))
+
+        connection.peerClosed()
+        #expect(admitted.operation.withActiveSessionRequest(for: sessionID) {
+            Issue.record("A peer-closed request cannot enter its active session body.")
+        } == false)
+
+        admitted.lease.acknowledgeCompletion()
+        resource.acknowledgeClose()
+        await connection.waitUntilClosed()
+    }
+
+    @Test func transportFailureRejectsActiveSessionRequestBody() async throws {
+        let owner = MCPHTTPNetworkResourceOwner(generationID: 27)
+        let resource = TestingConnectionResource()
+        let connection = try #require(owner.admitConnection(resource))
+        let admitted = try #require(connection.admitRequest())
+        let sessionID = "session-transport-failure"
+        #expect(admitted.operation.bindSession(sessionID))
+
+        connection.transportFailed("broken pipe")
+        #expect(admitted.operation.withActiveSessionRequest(for: sessionID) {
+            Issue.record("A transport-failed request cannot enter its active session body.")
+        } == false)
+
+        admitted.lease.acknowledgeCompletion()
+        resource.acknowledgeClose()
+        await connection.waitUntilClosed()
     }
 
     @Test func operationIdentityResolvesOnlyItsBoundSessionAndActiveOwner() async throws {
