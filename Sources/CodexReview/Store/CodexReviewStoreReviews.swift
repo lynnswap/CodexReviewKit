@@ -948,11 +948,43 @@ extension CodexReviewStore {
         ) else {
             return .init(jobID: job.id, cancelled: false, core: job.core)
         }
-        let admittedCancellation = requestReceipt.cancellation
+        return try await performCancelReview(
+            job: job,
+            ownership: ownership,
+            cancellationRequest: requestReceipt
+        )
+    }
 
+    private func performCancelReview(
+        jobID: String,
+        cancellationRequest: ReviewCancellationRequestReceipt
+    ) async throws -> CodexReviewAPI.Cancel.Outcome {
+        let job = try job(jobID: jobID)
+        guard job.isTerminal == false else {
+            return .init(jobID: job.id, cancelled: false, core: job.core)
+        }
+        guard let ownership = reviewAttemptOwnerships[jobID] else {
+            throw ReviewAttemptContractFailure(
+                message: "Review cancellation requires its exact Store attempt owner."
+            )
+        }
+        return try await performCancelReview(
+            job: job,
+            ownership: ownership,
+            cancellationRequest: cancellationRequest
+        )
+    }
+
+    private func performCancelReview(
+        job: CodexReviewJob,
+        ownership: StoreReviewAttemptOwnership,
+        cancellationRequest requestReceipt: ReviewCancellationRequestReceipt
+    ) async throws -> CodexReviewAPI.Cancel.Outcome {
+        let jobID = job.id
+        let admittedCancellation = requestReceipt.cancellation
         switch ownership {
         case .recovering(let receipt):
-            await receipt.cancelOwnedOperation(admittedCancellation)
+            await receipt.cancelOwnedOperation(cancellationRequest: requestReceipt)
             reviewWorkerTasks[jobID]?.cancel()
             await reviewWorkerTasks[jobID]?.value
         case .active(let active):
@@ -985,7 +1017,7 @@ extension CodexReviewStore {
                 throw error
             }
         case .starting(let admission):
-            await admission.recordCancellation(admittedCancellation)
+            await admission.registerCancellationRequest(requestReceipt)
             let startupCancellation = await admission.cancellationRequest()
                 ?? admittedCancellation
             try completeCancellationAfterRegisteredWorkSuspension(
@@ -1005,21 +1037,145 @@ extension CodexReviewStore {
         _ sessionID: String,
         reason: ReviewCancellation = .sessionClosed()
     ) async {
-        await performRegisteredStoreWork(
-            kind: .reviewMutation("close-session")
-        ) { @MainActor store in
-            await store.performCloseSession(sessionID, reason: reason)
+        guard let receipt = await beginCloseSession(sessionID, reason: reason) else {
+            return
+        }
+        await receipt.waitUntilClosed()
+    }
+
+    package func beginCloseSession(
+        _ sessionID: String,
+        reason: ReviewCancellation = .sessionClosed()
+    ) async -> ReviewStoreSessionCloseReceipt? {
+        if let receipt = sessionCloseReceipts[sessionID] {
+            await receipt.waitUntilCancellationPublished()
+            return receipt
+        }
+        guard closedSessions.contains(sessionID) == false,
+              let admission = storeWorkRegistry.register(.reviewMutation("close-session")) else {
+            return nil
+        }
+
+        let operationID = UUID()
+        let cancellationPublication = ReviewStoreSessionCloseCancellationPublication()
+        let jobIDs = activeJobIDs(for: sessionID)
+        let workerTasks = jobIDs.reduce(into: [String: Task<Void, Never>]()) { result, jobID in
+            result[jobID] = reviewWorkerTasks[jobID]
+        }
+        let startingWorkerJobIDs = Set(jobIDs.filter { jobID in
+            if case .starting = reviewAttemptOwnerships[jobID] {
+                return true
+            }
+            return false
+        })
+        let cancellationRequests = jobIDs.reduce(
+            into: [String: ReviewCancellationRequestReceipt]()
+        ) { result, jobID in
+            guard let job = job(id: jobID),
+                  let request = recordCancellationRequest(reason, for: job) else {
+                return
+            }
+            result[jobID] = request
+        }
+        closedSessions.insert(sessionID)
+
+        let task = Task<Void, Never> { @MainActor [weak self] in
+            await cancellationPublication.wait()
+            guard let self else {
+                return
+            }
+            defer {
+                self.storeWorkRegistry.finish(admission)
+                self.retireSessionCloseReceipt(
+                    sessionID: sessionID,
+                    operationID: operationID
+                )
+            }
+            await self.performCloseSession(
+                jobIDs: jobIDs,
+                cancellationRequests: cancellationRequests,
+                workerTasks: workerTasks
+            )
+        }
+        let receipt = ReviewStoreSessionCloseReceipt(
+            operationID: operationID,
+            cancellationPublication: cancellationPublication,
+            task: task
+        )
+        sessionCloseReceipts[sessionID] = receipt
+        storeWorkRegistry.install(task, for: admission)
+
+        for jobID in jobIDs {
+            guard let request = cancellationRequests[jobID] else {
+                continue
+            }
+            await publishSessionCloseCancellation(request, for: jobID)
+        }
+        for jobID in startingWorkerJobIDs {
+            workerTasks[jobID]?.cancel()
+        }
+        await cancellationPublication.publish()
+        return receipt
+    }
+
+    private func publishSessionCloseCancellation(
+        _ cancellationRequest: ReviewCancellationRequestReceipt,
+        for jobID: String
+    ) async {
+        while let ownership = reviewAttemptOwnerships[jobID] {
+            switch ownership {
+            case .starting(let admission):
+                await admission.registerCancellationRequest(cancellationRequest)
+            case .active(let active):
+                await active.admission.registerCancellationRequest(cancellationRequest)
+            case .recovering(let receipt):
+                await receipt.cancelOwnedOperation(
+                    cancellationRequest: cancellationRequest
+                )
+            }
+            guard let current = reviewAttemptOwnerships[jobID] else {
+                return
+            }
+            if current.matches(ownership) {
+                return
+            }
         }
     }
 
     private func performCloseSession(
-        _ sessionID: String,
-        reason: ReviewCancellation
+        jobIDs: [String],
+        cancellationRequests: [String: ReviewCancellationRequestReceipt],
+        workerTasks: [String: Task<Void, Never>]
     ) async {
-        closedSessions.insert(sessionID)
-        for jobID in activeJobIDs(for: sessionID) {
-            _ = try? await performCancelReview(jobID: jobID, cancellation: reason)
+        for jobID in jobIDs {
+            guard let request = cancellationRequests[jobID] else {
+                continue
+            }
+            guard let job = job(id: jobID), job.isTerminal == false else {
+                continue
+            }
+            _ = try? await performCancelReview(
+                jobID: jobID,
+                cancellationRequest: request
+            )
         }
+        for jobID in jobIDs {
+            guard let workerTask = workerTasks[jobID] else {
+                continue
+            }
+            workerTask.cancel()
+            await workerTask.value
+        }
+    }
+
+    private func retireSessionCloseReceipt(
+        sessionID: String,
+        operationID: UUID
+    ) {
+        guard sessionCloseReceipts[sessionID]?.operationID == operationID else {
+            return
+        }
+        sessionCloseReceipts.removeValue(forKey: sessionID)
     }
 
     package func closeActiveReviewSessions(reason: ReviewCancellation) async {
