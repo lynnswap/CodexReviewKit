@@ -3309,6 +3309,96 @@ struct CodexReviewHostTests {
         await store.cancelAuthentication()
     }
 
+    @Test func liveStoreLateNativeSessionCleansItsAdmittedScopeNotReplacement() async throws {
+        let homeURL = try temporaryHome()
+        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "active@example.com",
+            accounts: ["active@example.com"]
+        )
+        let mainTransport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(mainTransport, accountEmail: "active@example.com")
+        let firstLoginTransport = FakeJSONRPCTransport()
+        let secondLoginTransport = FakeJSONRPCTransport()
+        for (transport, loginID) in [(firstLoginTransport, "login-a"), (secondLoginTransport, "login-b")] {
+            try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+            try await transport.enqueue(
+                AppServerAPI.Account.Login.Response.chatgpt(
+                    loginID: loginID,
+                    authURL: "https://example.com/auth",
+                    nativeWebAuthentication: .init(callbackURLScheme: "lynnpd.CodexReviewMonitor.auth")
+                ),
+                for: "account/login/start"
+            )
+            try await transport.enqueue(
+                AppServerAPI.Account.Login.Cancel.Response(),
+                for: "account/login/cancel"
+            )
+        }
+        var loginTransports = [firstLoginTransport, secondLoginTransport]
+        var isolatedHomeURLs: [URL] = []
+        var sessions: [FakeWebAuthenticationSession] = []
+        let firstFactoryStarted = AsyncGate()
+        let firstFactoryGate = AsyncGate()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            nativeAuthenticationConfiguration: .init(
+                callbackScheme: "lynnpd.CodexReviewMonitor.auth",
+                browserSessionPolicy: .ephemeral,
+                presentationAnchorProvider: { NSWindow() }
+            ),
+            webAuthenticationSessionFactory: { _, _, _, _ in
+                let session = FakeWebAuthenticationSession()
+                sessions.append(session)
+                if sessions.count == 1 {
+                    await firstFactoryStarted.open()
+                    await firstFactoryGate.waitIgnoringCancellation()
+                }
+                return session
+            },
+            transportFactory: { codexHomeURL in
+                if codexHomeURL == mainCodexHomeURL {
+                    return mainTransport
+                }
+                isolatedHomeURLs.append(codexHomeURL)
+                try FileManager.default.createDirectory(at: codexHomeURL, withIntermediateDirectories: true)
+                return loginTransports.removeFirst()
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        async let firstStart: Void = store.addAccount()
+        await firstFactoryStarted.wait()
+        await store.addAccount()
+        let replacementSession = sessions[1]
+        await replacementSession.waitUntilWaitingForCallback()
+        let failureCount = store.auth.authenticationFailureCount
+
+        await firstFactoryGate.open()
+        await firstStart
+
+        #expect(sessions[0].isCancelled)
+        #expect(replacementSession.isCancelled == false)
+        #expect(await firstLoginTransport.isClosedForTesting())
+        #expect(await secondLoginTransport.isClosedForTesting() == false)
+        #expect(await firstLoginTransport.recordedRequests().map(\.method).count { $0 == "account/login/cancel" } == 1)
+        #expect(await secondLoginTransport.recordedRequests().map(\.method).contains("account/login/cancel") == false)
+        #expect(store.auth.isAuthenticating)
+        #expect(store.auth.authenticationFailureCount == failureCount)
+        #expect(isolatedHomeURLs.count == 2)
+        #expect(FileManager.default.fileExists(atPath: isolatedHomeURLs[0].path) == false)
+        #expect(FileManager.default.fileExists(atPath: isolatedHomeURLs[1].path))
+
+        await store.cancelAuthentication()
+        #expect(replacementSession.isCancelled)
+        #expect(await secondLoginTransport.isClosedForTesting())
+        #expect(FileManager.default.fileExists(atPath: isolatedHomeURLs[1].path) == false)
+        #expect(await secondLoginTransport.recordedRequests().map(\.method).count { $0 == "account/login/cancel" } == 1)
+        #expect(store.auth.selectedAccount?.accountKey == "active@example.com")
+        #expect(store.auth.authenticationFailureCount == failureCount)
+    }
+
     @Test func liveStoreClosesIsolatedLoginRuntimeWhenLoginCompletionFails() async throws {
         let homeURL = try temporaryHome()
         let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
