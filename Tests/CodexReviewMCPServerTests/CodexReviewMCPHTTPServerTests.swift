@@ -841,6 +841,7 @@ struct CodexReviewMCPHTTPServerTests {
         )) { server in
             let endpoint = await server.url
             let sessionID = try await initializeSession(endpoint: endpoint)
+            await server.waitUntilSessionRequestsDrainForTesting(sessionID: sessionID)
             await server.holdNextWriterCompletionForTesting()
             await server.holdNextSessionRequestRetirementForTesting()
             let response = Task {
@@ -1107,8 +1108,9 @@ struct CodexReviewMCPHTTPServerTests {
         try await server.start()
         let endpoint = await server.url
         let sessionID = try await initializeSession(endpoint: endpoint)
+        await server.waitUntilSessionRequestsDrainForTesting(sessionID: sessionID)
         await server.holdNextFiniteSourceCompletionForTesting()
-        await server.holdNextWriterCompletionForTesting()
+        await server.holdNextWriterFinalizationForTesting()
         let connection = try await RawHTTPConnection.connect(to: endpoint)
         try await connection.send(rawHTTPRequest(
             endpoint: endpoint,
@@ -1117,18 +1119,24 @@ struct CodexReviewMCPHTTPServerTests {
         ))
         await server.waitUntilFiniteSourceCompletionIsHeldForTesting()
         _ = try await connection.readResponseHead()
+        let requestID = try #require(await server.networkResourceSnapshotForTesting()?
+            .connections.flatMap(\.requests).first?.id)
         connection.reset()
+        await server.releaseFiniteSourceCompletionForTesting()
+        await server.waitUntilWriterFinalizationIsHeldForTesting()
+        let terminalCause = await server.waitUntilNetworkRequestTerminalForTesting(requestID: requestID)
+        #expect(terminalCause == .peerClosed || terminalCause.map {
+            if case .transportFailure = $0 { true } else { false }
+        } == true)
         #expect(try #require(await server.networkResourceSnapshotForTesting())
             .connections.flatMap(\.requests).count == 1)
-        await server.releaseFiniteSourceCompletionForTesting()
-        await server.waitUntilWriterCompletionIsHeldForTesting()
         let closing = try #require(await server.networkResourceSnapshotForTesting()?
             .connections.flatMap(\.requests).first)
         #expect(closing.responseEnd == .closed)
         #expect(closing.terminalCause == .peerClosed || closing.terminalCause.map {
             if case .transportFailure = $0 { true } else { false }
         } == true)
-        await server.releaseWriterCompletionForTesting()
+        await server.releaseWriterFinalizationForTesting()
         #expect(await waitUntil(timeout: .seconds(2)) {
             await server.networkResourceSnapshotForTesting()?.connections
                 .flatMap(\.requests).isEmpty == true

@@ -500,10 +500,12 @@ package actor CodexReviewMCPHTTPServer {
     private var nextGenerationID: UInt64 = 0
     private var nextSessionOrdinal: UInt64 = 0
     private var sessions: [String: MCPSemanticSession] = [:]
+    private var sessionRequestDrainWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
     private let startCompletionGate = MCPHTTPLifecycleCompletionGate()
     private let joinedStartCompletionGate = MCPHTTPLifecycleCompletionGate()
     private let stopCompletionGate = MCPHTTPLifecycleCompletionGate()
     private let finiteSourceCompletionGate = MCPHTTPLifecycleCompletionGate()
+    private let writerFinalizationGate = MCPHTTPLifecycleCompletionGate()
     private let writerCompletionGate = MCPHTTPLifecycleCompletionGate()
     private let responseEndAcknowledgementGate = MCPHTTPLifecycleCompletionGate()
     private let responseEndWriteGate = MCPHTTPLifecycleCompletionGate()
@@ -1185,6 +1187,23 @@ package actor CodexReviewMCPHTTPServer {
         }
     }
 
+    package func waitUntilNetworkRequestTerminalForTesting(
+        requestID: UUID
+    ) async -> MCPHTTPNetworkResourceOwner.TerminalCause? {
+        let networkResources: MCPHTTPNetworkResourceOwner?
+        switch lifecycleState {
+        case .starting(let operation):
+            networkResources = operation.networkResources
+        case .running(let resources):
+            networkResources = resources.networkResources
+        case .stopping(_, let resources?, _):
+            networkResources = resources.networkResources
+        case .stopping, .stopped:
+            networkResources = nil
+        }
+        return await networkResources?.waitUntilRequestTerminalForTesting(requestID: requestID)
+    }
+
     package func waitForNetworkCloseWaiterRegistrationForTesting()
         async -> MCPHTTPNetworkResourceOwner.CloseWaiterRegistration
     {
@@ -1219,6 +1238,18 @@ package actor CodexReviewMCPHTTPServer {
 
     package func holdNextWriterCompletionForTesting() async {
         await writerCompletionGate.holdNextCompletion()
+    }
+
+    package func holdNextWriterFinalizationForTesting() async {
+        await writerFinalizationGate.holdNextCompletion()
+    }
+
+    package func waitUntilWriterFinalizationIsHeldForTesting() async {
+        await writerFinalizationGate.waitUntilHolding()
+    }
+
+    package func releaseWriterFinalizationForTesting() async {
+        await writerFinalizationGate.release()
     }
 
     package func waitUntilWriterCompletionIsHeldForTesting() async {
@@ -1304,6 +1335,10 @@ package actor CodexReviewMCPHTTPServer {
 
     fileprivate func waitAfterWriterCompletionForTesting() async {
         await writerCompletionGate.waitIfNeeded()
+    }
+
+    fileprivate func waitBeforeWriterFinalizationForTesting() async {
+        await writerFinalizationGate.waitIfNeeded()
     }
 
     fileprivate func waitAfterResponseEndAcknowledgementForTesting() async {
@@ -1655,6 +1690,7 @@ package actor CodexReviewMCPHTTPServer {
             return
         }
         sessions.removeValue(forKey: sessionID)
+        resumeSessionRequestDrainWaiters(sessionID: sessionID)
         logger.info("Closed MCP HTTP session \(sessionID, privacy: .public)")
     }
 
@@ -1704,6 +1740,9 @@ package actor CodexReviewMCPHTTPServer {
               session.finishRequest(lease, now: Date()) else {
             return
         }
+        if session.requestLeases.isEmpty {
+            resumeSessionRequestDrainWaiters(sessionID: session.identity.sessionID)
+        }
         await sessionRequestRetirementGate.waitIfNeeded()
         if lease.role == .initialize, terminalCause != nil {
             await closeSession(session)
@@ -1734,6 +1773,27 @@ package actor CodexReviewMCPHTTPServer {
 
     package func sessionRequestLeaseCountForTesting(sessionID: String) -> Int? {
         sessions[sessionID]?.requestLeases.count
+    }
+
+    package func waitUntilSessionRequestsDrainForTesting(sessionID: String) async {
+        guard let session = sessions[sessionID], session.requestLeases.isEmpty == false else {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            guard sessions[sessionID] === session,
+                  session.requestLeases.isEmpty == false else {
+                continuation.resume()
+                return
+            }
+            sessionRequestDrainWaiters[sessionID, default: []].append(continuation)
+        }
+    }
+
+    private func resumeSessionRequestDrainWaiters(sessionID: String) {
+        let waiters = sessionRequestDrainWaiters.removeValue(forKey: sessionID) ?? []
+        for waiter in waiters {
+            waiter.resume()
+        }
     }
 
     private func closeExpiredSessions(now: Date) async {
@@ -2527,13 +2587,7 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
         }
 
         switch result {
-        case .responded:
-            operation.acknowledgeResponseEnd()
-            if closeAfterResponse {
-                await connection.closeAfterResponse()
-            }
-            await server.waitAfterResponseEndAcknowledgementForTesting()
-        case .cancelled:
+        case .responded, .cancelled:
             break
         case .sourceFailed(let message):
             logger.error("MCP SSE source failed: \(message, privacy: .public)")
@@ -2541,6 +2595,14 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
         case .transportFailed(let message):
             logger.error("MCP HTTP response failed: \(message, privacy: .public)")
             connection.transportFailed(message)
+        }
+        await server.waitBeforeWriterFinalizationForTesting()
+        if case .responded = result {
+            operation.acknowledgeResponseEnd()
+            if closeAfterResponse {
+                await connection.closeAfterResponse()
+            }
+            await server.waitAfterResponseEndAcknowledgementForTesting()
         }
         await server.waitAfterWriterCompletionForTesting()
     }
