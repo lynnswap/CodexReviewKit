@@ -624,6 +624,8 @@ public final class CodexReviewStore {
             return nil
         }
 
+        _ = context.failureIncident?.admitSuccessor(generation: generation)
+
         serverState = .starting
         serverURL = nil
         writeDiagnosticsIfNeeded()
