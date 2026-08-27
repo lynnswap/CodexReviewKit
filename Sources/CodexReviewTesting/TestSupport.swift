@@ -197,6 +197,8 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     private var interruptRejectionMessage: String?
     private var recoveryFailureMessage: String?
     private var cleanupFailure: ReviewRuntimeCloseFailure?
+    private var cleanupReviewTaskWasCancelled = false
+    private var cleanupReviewStartedGate = AsyncGate()
     private var interruptReviewGate: AsyncGate?
     private var cleanupReviewGate: AsyncGate?
     private var interruptReviewWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
@@ -303,6 +305,15 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
 
     package func holdCleanupReview(with gate: AsyncGate) {
         cleanupReviewGate = gate
+        cleanupReviewStartedGate = AsyncGate()
+    }
+
+    package func waitForCleanupReview() async {
+        await cleanupReviewStartedGate.wait()
+    }
+
+    package func cleanupReviewWasCancelled() -> Bool {
+        cleanupReviewTaskWasCancelled
     }
 
     package func holdResumeReviewRecovery(with gate: AsyncGate) {
@@ -665,9 +676,11 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
 
     package func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws {
         commands.append(.cleanupReview(run))
+        await cleanupReviewStartedGate.open()
         if let cleanupReviewGate {
-            await cleanupReviewGate.wait()
+            await cleanupReviewGate.waitIgnoringCancellation()
         }
+        cleanupReviewTaskWasCancelled = Task.isCancelled
         if let cleanupFailure {
             throw cleanupFailure
         }

@@ -277,14 +277,21 @@ extension CodexReviewStore {
                 markReviewFailed(job, message: error.localizedDescription)
             }
         }
-        if let cleanupFailure = await cleanupReviewAttemptOwnership(
-            jobID: jobID,
-            job: job,
-            workerAdmission: admission,
-            unpublishedAttempt: unpublishedAttempt,
-            cancellationRequest: cleanupCancellationRequest,
-            inputs: inputs
-        ) {
+        // Cleanup RPCs remain owned by a fresh task so a worker cancelled to wake
+        // a pending-outage wait cannot carry cancellation into backend cleanup.
+        let workerWasCancelled = Task.isCancelled
+        let cleanupTask = Task { @MainActor [self] in
+            await self.cleanupReviewAttemptOwnership(
+                jobID: jobID,
+                job: job,
+                workerAdmission: admission,
+                unpublishedAttempt: unpublishedAttempt,
+                cancellationRequest: cleanupCancellationRequest,
+                inputs: inputs,
+                workerWasCancelled: workerWasCancelled
+            )
+        }
+        if let cleanupFailure = await cleanupTask.value {
             retainCleanupFailure(cleanupFailure, for: job)
         }
         await inputs?.cancelAndWait()
@@ -467,7 +474,8 @@ extension CodexReviewStore {
     private func interruptActiveAttemptAndRecordTerminal(
         _ active: StoreReviewActiveAttempt,
         cancellation: ActiveAttemptCancellation,
-        inputs: ReviewWorkerInputs?
+        inputs: ReviewWorkerInputs?,
+        drainCancellation: Bool
     ) async throws -> ReviewInterruptResolution {
         guard let inputs else { throw recoveryOwnershipFailure("drain active cancellation") }
         let interrupt = Task<Result<ReviewInterruptResolution, any Error>, Never> { @MainActor in
@@ -479,7 +487,12 @@ extension CodexReviewStore {
             }
         }
         if try await active.admission.hasRecordedActiveTerminal(for: active.run) == false {
-            try await recordNextTerminal(for: active, cancellationRequest: cancellation.requestReceipt, inputs: inputs)
+            try await recordNextTerminal(
+                for: active,
+                cancellationRequest: cancellation.requestReceipt,
+                inputs: inputs,
+                drainCancellation: drainCancellation
+            )
         }
         return try await interrupt.value.get()
     }
@@ -493,11 +506,12 @@ extension CodexReviewStore {
     private func recordNextTerminal(
         for active: StoreReviewActiveAttempt,
         cancellationRequest: ReviewCancellationRequestReceipt?,
-        inputs: ReviewWorkerInputs
+        inputs: ReviewWorkerInputs,
+        drainCancellation: Bool
     ) async throws {
         while true {
             let input: ReviewWorkerInput?
-            if Task.isCancelled {
+            if drainCancellation || Task.isCancelled {
                 input = await inputs.nextBuffered()
                 if input == nil {
                     try await active.admission.recordStreamTerminal(.ownerCancellation, for: active.run, cancellationRequest: cancellationRequest)
@@ -541,7 +555,8 @@ extension CodexReviewStore {
         workerAdmission: ReviewStartAdmission,
         unpublishedAttempt: StoreReviewActiveAttempt?,
         cancellationRequest capturedCancellationRequest: ReviewCancellationRequestReceipt?,
-        inputs: ReviewWorkerInputs?
+        inputs: ReviewWorkerInputs?,
+        workerWasCancelled: Bool
     ) async -> ReviewRuntimeCloseFailure? {
         let cancellationRequest = latestCleanupCancellationRequest(capturedCancellationRequest, job.pendingCancellationRequest)
         if let unpublishedAttempt {
@@ -567,13 +582,14 @@ extension CodexReviewStore {
             }
         case .active(let active):
             let cancellation = cancellationRequest.map(ActiveAttemptCancellation.receipt)
-                ?? (job.core.lifecycle.cancellation ?? (Task.isCancelled ? .system() : nil)).map(ActiveAttemptCancellation.semantic)
+                ?? (job.core.lifecycle.cancellation ?? (workerWasCancelled ? .system() : nil)).map(ActiveAttemptCancellation.semantic)
             if let cancellation {
                 do {
                     let resolution = try await interruptActiveAttemptAndRecordTerminal(
                         active,
                         cancellation: cancellation,
-                        inputs: inputs
+                        inputs: inputs,
+                        drainCancellation: workerWasCancelled
                     )
                     failure = cleanupFailure(from: resolution.requestFailure)
                 } catch {
@@ -586,7 +602,7 @@ extension CodexReviewStore {
         case .recovering(let receipt):
             if let cancellation = cancellationRequest?.cancellation
                 ?? job.core.lifecycle.cancellation
-                ?? (Task.isCancelled ? .system() : nil) {
+                ?? (workerWasCancelled ? .system() : nil) {
                 await receipt.cancelOwnedOperation(cancellation)
             }
             do {
@@ -594,7 +610,12 @@ extension CodexReviewStore {
                 if dispositionJoin != nil,
                    await receipt.source.admission.activeTerminalResolution() == nil {
                     guard let inputs else { throw recoveryOwnershipFailure("drain recovery cancellation") }
-                    try await recordNextTerminal(for: receipt.source, cancellationRequest: cancellationRequest, inputs: inputs)
+                    try await recordNextTerminal(
+                        for: receipt.source,
+                        cancellationRequest: cancellationRequest,
+                        inputs: inputs,
+                        drainCancellation: workerWasCancelled
+                    )
                 }
                 let join = try dispositionJoin ?? receipt.joinOwnedOperationIfPresent()
                 if let join {
