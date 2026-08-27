@@ -54,7 +54,7 @@ package final class DirectoryCapability: Sendable {
     }
 
     package struct Requirements: Equatable, Sendable {
-        fileprivate enum Policy: Equatable, Sendable { case trustedAnchor, managed }
+        fileprivate enum Policy: Equatable, Sendable { case namespace, trustedAnchor, managed }
         fileprivate let policy: Policy
         fileprivate let ownerUserID: uid_t
         fileprivate let deviceID: UInt64?
@@ -66,11 +66,176 @@ package final class DirectoryCapability: Sendable {
         package static func managed(ownerUserID: uid_t, deviceID: UInt64) -> Self {
             Self(policy: .managed, ownerUserID: ownerUserID, deviceID: deviceID)
         }
+
+        fileprivate static var namespace: Self {
+            Self(policy: .namespace, ownerUserID: 0, deviceID: nil)
+        }
         fileprivate var creationMode: mode_t? { policy == .managed ? 0o700 : nil }
     }
 
     package enum Acquisition: Equatable, Sendable { case existing, existingOrCreate, new }
-    package enum Relationship: Equatable, Sendable { case same, ancestor, descendant, disjoint }
+    package enum Relationship: Equatable, Sendable {
+        case same, ancestor, descendant, disjoint, indeterminate
+    }
+
+    package final class ResolvedDirectoryLocation: Sendable {
+        private let anchor: DirectoryCapability
+        private let target: Target
+
+        private enum Target: Sendable {
+            case existing
+            case pending(first: Name, rest: [Name])
+        }
+
+        private enum Revalidation: Sendable {
+            case valid(Snapshot)
+            case invalidated
+
+            func relationship(to other: Self) -> Relationship {
+                switch (self, other) {
+                case (.valid(let lhs), .valid(let rhs)): lhs.relationship(to: rhs)
+                case (.invalidated, _), (_, .invalidated): .indeterminate
+                }
+            }
+        }
+
+        private struct Snapshot: Sendable {
+            let anchorIdentity: Identity
+            let ancestorIdentities: Set<Identity>
+            let target: SnapshotTarget
+
+            func relationship(to other: Self) -> Relationship {
+                let anchorRelationship: Relationship
+                if anchorIdentity == other.anchorIdentity { anchorRelationship = .same }
+                else if other.ancestorIdentities.contains(anchorIdentity) { anchorRelationship = .ancestor }
+                else if ancestorIdentities.contains(other.anchorIdentity) { anchorRelationship = .descendant }
+                else { anchorRelationship = .disjoint }
+
+                switch anchorRelationship {
+                case .same:
+                    return target.relationship(to: other.target)
+                case .ancestor:
+                    if case .existing = target { return .ancestor }
+                    return .indeterminate
+                case .descendant:
+                    if case .existing = other.target { return .descendant }
+                    return .indeterminate
+                case .disjoint:
+                    return .disjoint
+                case .indeterminate:
+                    return .indeterminate
+                }
+            }
+        }
+
+        private enum SnapshotTarget: Sendable {
+            case existing
+            case pending(first: Name, rest: [Name], semantics: EntryNameSemantics)
+
+            func relationship(to other: Self) -> Relationship {
+                switch (self, other) {
+                case (.existing, .existing):
+                    return .same
+                case (.existing, .pending):
+                    return .ancestor
+                case (.pending, .existing):
+                    return .descendant
+                case let (.pending(lhsFirst, lhsRest, lhsSemantics),
+                          .pending(rhsFirst, rhsRest, rhsSemantics)):
+                    let lhs = [lhsFirst] + lhsRest
+                    let rhs = [rhsFirst] + rhsRest
+                    for (lhsName, rhsName) in zip(lhs, rhs) {
+                        switch DirectoryCapability.entryNameRelationship(
+                            lhsName, rhsName,
+                            lhsSemantics: lhsSemantics,
+                            rhsSemantics: rhsSemantics
+                        ) {
+                        case .same: continue
+                        case .distinct: return .disjoint
+                        case .indeterminate: return .indeterminate
+                        }
+                    }
+                    if lhs.count == rhs.count { return .same }
+                    return lhs.count < rhs.count ? .ancestor : .descendant
+                }
+            }
+        }
+
+        fileprivate init(anchor: DirectoryCapability, remainingNames: [Name]) {
+            self.anchor = anchor
+            target = remainingNames.isEmpty
+                ? .existing
+                : .pending(first: remainingNames[0], rest: Array(remainingNames.dropFirst()))
+        }
+
+        package func relationship(to other: ResolvedDirectoryLocation) throws -> Relationship {
+            let lhs = try revalidateForRelationship()
+            let rhs = try other.revalidateForRelationship()
+            return lhs.relationship(to: rhs)
+        }
+
+        package func close() throws {
+            try anchor.close()
+        }
+
+        private func revalidateForRelationship() throws -> Revalidation {
+            try anchor.withBorrowedDescriptor { descriptor in
+                try DirectoryCapability.validateOwned(descriptor, capability: anchor)
+                let ancestors = try DirectoryCapability.ancestryIdentities(
+                    of: descriptor, path: anchor.url.path)
+                let snapshotTarget: SnapshotTarget
+                switch target {
+                case .existing:
+                    snapshotTarget = .existing
+                case .pending(let first, let rest):
+                    let semantics = try DirectoryCapability.entryNameSemantics(
+                        parent: descriptor, path: anchor.url.path)
+                    if try DirectoryCapability.entryExists(
+                        first, parent: descriptor, path: anchor.url.path) {
+                        return .invalidated
+                    }
+                    snapshotTarget = .pending(first: first, rest: rest, semantics: semantics)
+                }
+                return .valid(Snapshot(
+                    anchorIdentity: anchor.identity,
+                    ancestorIdentities: ancestors,
+                    target: snapshotTarget
+                ))
+            }
+        }
+    }
+
+    private enum EntryNameRelationship { case same, distinct, indeterminate }
+    private enum EntryNameSemantics: Equatable, Sendable {
+        case caseSensitive, caseInsensitive, unknown
+    }
+
+    private struct AbsoluteResolution {
+        let descriptor: Int32
+        let anchorURL: URL
+        let remainingNames: [Name]
+    }
+
+    private struct TemporaryFile {
+        let name: Name
+        let identity: Identity
+        let descriptor: Int32
+    }
+
+    private struct RemovalComponent {
+        let name: Name
+        let identity: Identity
+    }
+
+    private struct RemovalNode {
+        let parentIndex: Int?
+        let component: RemovalComponent
+    }
+
+    private enum RemovalWork {
+        case enumerate(Int)
+        case remove(Int)
+    }
 
     private struct State: Sendable {
         var descriptor: Int32?
@@ -107,6 +272,65 @@ package final class DirectoryCapability: Sendable {
             identity: Identity(status),
             requirements: requirements,
             url: absoluteURL
+        )
+    }
+
+    /// Returns `nil` only when absolute descriptor acquisition reports `ENOENT`.
+    package static func openExistingIfPresent(
+        at absoluteURL: URL,
+        requirements: Requirements
+    ) throws -> DirectoryCapability? {
+        try validateAbsoluteURL(absoluteURL)
+        guard let descriptor = try walkAbsoluteURLIfPresent(absoluteURL) else { return nil }
+        var transfersDescriptor = false
+        defer { if transfersDescriptor == false { _ = Darwin.close(descriptor) } }
+        let status = try directoryStatus(descriptor, path: absoluteURL.path)
+        try validate(descriptor, status: status, requirements: requirements, path: absoluteURL.path)
+        transfersDescriptor = true
+        return DirectoryCapability(
+            descriptor: descriptor,
+            identity: Identity(status),
+            requirements: requirements,
+            url: absoluteURL
+        )
+    }
+
+    package static func resolveLocation(
+        at absoluteURL: URL,
+        requirements: Requirements
+    ) throws -> ResolvedDirectoryLocation {
+        let resolution = try resolveAbsoluteURL(absoluteURL)
+        var transfersDescriptor = false
+        defer { if transfersDescriptor == false { _ = Darwin.close(resolution.descriptor) } }
+        let status = try directoryStatus(resolution.descriptor, path: resolution.anchorURL.path)
+        let anchorRequirements: Requirements
+        if resolution.remainingNames.isEmpty {
+            try validate(
+                resolution.descriptor,
+                status: status,
+                requirements: requirements,
+                path: resolution.anchorURL.path
+            )
+            anchorRequirements = requirements
+        } else {
+            anchorRequirements = .namespace
+            try validate(
+                resolution.descriptor,
+                status: status,
+                requirements: anchorRequirements,
+                path: resolution.anchorURL.path
+            )
+        }
+        let anchor = DirectoryCapability(
+            descriptor: resolution.descriptor,
+            identity: Identity(status),
+            requirements: anchorRequirements,
+            url: resolution.anchorURL
+        )
+        transfersDescriptor = true
+        return ResolvedDirectoryLocation(
+            anchor: anchor,
+            remainingNames: resolution.remainingNames
         )
     }
 
@@ -179,6 +403,216 @@ package final class DirectoryCapability: Sendable {
                 throw Self.posixError(operation: "close regular file", code: errno, path: path)
             }
             return contents
+        }
+    }
+
+    /// Creates an empty `0600` file, or validates and preserves an existing regular file unchanged.
+    package func createFileIfMissing(named name: Name) throws {
+        try withBorrowedDescriptor { parent in
+            try Self.validateOwned(parent, capability: self)
+            let path = url.appendingPathComponent(name.value, isDirectory: false).path
+            let descriptor = name.value.withCString { pointer in
+                Self.retryingEINTR { openat(
+                    parent, pointer, Self.regularFileCreationFlags, mode_t(0o600)) }
+            }
+            if descriptor < 0 {
+                guard errno == EEXIST else {
+                    throw Self.openFileError(code: errno, path: path)
+                }
+                guard let status = try Self.fileStatus(
+                    atParent: parent,
+                    named: name,
+                    path: path
+                ) else {
+                    throw Self.posixError(
+                        operation: "inspect existing regular file", code: ENOENT, path: path)
+                }
+                try Self.validateRegularFile(status, path: path)
+                return
+            }
+
+            var descriptorIsOpen = true
+            var createdIdentity: Identity?
+            do {
+                let status = try Self.fileStatus(descriptor, path: path)
+                let identity = Identity(status)
+                createdIdentity = identity
+                try Self.validateRegularFile(status, path: path)
+                let changedMode = Self.retryingEINTR { fchmod(descriptor, mode_t(0o600)) }
+                guard changedMode == 0 else {
+                    throw Self.posixError(
+                        operation: "set created regular file permissions", code: errno, path: path)
+                }
+                let finalStatus = try Self.fileStatus(descriptor, path: path)
+                guard Identity(finalStatus) == identity,
+                      finalStatus.st_mode & 0o7777 == 0o600 else {
+                    throw DirectoryCapabilityError.policyViolation(
+                        "The created regular file changed identity or permissions at \(path)."
+                    )
+                }
+                let closeResult = Darwin.close(descriptor)
+                descriptorIsOpen = false
+                guard closeResult == 0 else {
+                    throw Self.posixError(
+                        operation: "close created regular file",
+                        code: errno,
+                        path: path
+                    )
+                }
+            } catch {
+                if descriptorIsOpen { _ = Darwin.close(descriptor) }
+                if let createdIdentity {
+                    try Self.rollbackCreatedFile(
+                        parent: parent,
+                        name: name,
+                        identity: createdIdentity,
+                        path: path
+                    )
+                } else {
+                    try Self.rollbackUninspectedCreatedFile(parent: parent, name: name, path: path)
+                }
+                throw error
+            }
+        }
+    }
+
+    package func replaceFile(
+        named name: Name,
+        with contents: Data,
+        maximumByteCount: Int
+    ) throws {
+        guard maximumByteCount >= 0 else {
+            throw DirectoryCapabilityError.invalidRequest("A file replacement bound cannot be negative.")
+        }
+        guard contents.count <= maximumByteCount else {
+            throw DirectoryCapabilityError.invalidRequest("The replacement contents exceed the bound.")
+        }
+        try withBorrowedDescriptor { parent in
+            try Self.validateOwned(parent, capability: self)
+            let destinationPath = url.appendingPathComponent(
+                name.value, isDirectory: false
+            ).path
+            try Self.validateReplacementDestination(
+                parent: parent,
+                name: name,
+                path: destinationPath
+            )
+            let temporary = try Self.createTemporaryFile(parent: parent, directoryURL: url)
+            let temporaryPath = url.appendingPathComponent(
+                temporary.name.value, isDirectory: false
+            ).path
+            var descriptorIsOpen = true
+            var ownsTemporaryName = true
+            do {
+                try Self.writeContents(contents, to: temporary.descriptor, path: temporaryPath)
+                try Self.synchronize(
+                    temporary.descriptor,
+                    operation: "synchronize temporary file",
+                    path: temporaryPath
+                )
+                let closeResult = Darwin.close(temporary.descriptor)
+                descriptorIsOpen = false
+                guard closeResult == 0 else {
+                    throw Self.posixError(operation: "close temporary file", code: errno, path: temporaryPath)
+                }
+                try Self.validateTemporaryFile(
+                    parent: parent,
+                    name: temporary.name,
+                    identity: temporary.identity,
+                    path: temporaryPath
+                )
+                try Self.validateReplacementDestination(
+                    parent: parent,
+                    name: name,
+                    path: destinationPath
+                )
+                let renamed = temporary.name.value.withCString { temporaryPointer in
+                    name.value.withCString { destinationPointer in
+                        Self.retryingEINTR {
+                            renameat(parent, temporaryPointer, parent, destinationPointer)
+                        }
+                    }
+                }
+                guard renamed == 0 else {
+                    throw Self.posixError(
+                        operation: "replace regular file", code: errno, path: destinationPath
+                    )
+                }
+                ownsTemporaryName = false
+                try Self.synchronize(parent, operation: "synchronize directory", path: url.path)
+            } catch {
+                if descriptorIsOpen { _ = Darwin.close(temporary.descriptor) }
+                if ownsTemporaryName {
+                    try Self.rollbackCreatedFile(
+                        parent: parent,
+                        name: temporary.name,
+                        identity: temporary.identity,
+                        path: temporaryPath
+                    )
+                }
+                throw error
+            }
+        }
+    }
+
+    /// Recursively removes a directory after descriptor-relative identity validation, without
+    /// following symbolic links. A root missing at initial inspection is a no-op; observable identity
+    /// changes, mount boundaries, and unsupported entries fail after any completed removals.
+    ///
+    /// This operation does not provide identity-conditional unlink against a malicious same-UID
+    /// process that renames an entry in the final `fstatat`-to-`unlinkat` window. Callers requiring
+    /// that stronger guarantee must not use this API.
+    package func removeDirectoryRecursively(
+        named name: Name,
+        expectedIdentity: Identity
+    ) throws {
+        try withBorrowedDescriptor { parent in
+            try Self.validateOwned(parent, capability: self)
+            let path = url.appendingPathComponent(name.value, isDirectory: true).path
+            try Self.removeDirectoryTree(
+                rootDescriptor: parent,
+                root: RemovalComponent(name: name, identity: expectedIdentity),
+                expectedDeviceID: identity.deviceID,
+                directoryURL: url,
+                rootPath: path
+            )
+        }
+    }
+
+    /// Removes a regular-file entry after descriptor-relative identity and type revalidation.
+    /// Descriptor-relative `ENOENT` is a no-op.
+    ///
+    /// This operation does not provide identity-conditional unlink against a malicious same-UID
+    /// process that renames an entry in the final `fstatat`-to-`unlinkat` window. Callers requiring
+    /// that stronger guarantee must not use this API.
+    package func removeFile(named name: Name) throws {
+        try withBorrowedDescriptor { parent in
+            try Self.validateOwned(parent, capability: self)
+            let path = url.appendingPathComponent(name.value, isDirectory: false).path
+            guard let inspectedStatus = try Self.fileStatus(
+                atParent: parent,
+                named: name,
+                path: path
+            ) else { return }
+            try Self.validateRegularFile(inspectedStatus, path: path)
+            let inspectedIdentity = Identity(inspectedStatus)
+            guard let finalStatus = try Self.fileStatus(
+                atParent: parent,
+                named: name,
+                path: path
+            ) else { return }
+            try Self.validateRegularFile(finalStatus, path: path)
+            guard Identity(finalStatus) == inspectedIdentity else {
+                throw DirectoryCapabilityError.policyViolation(
+                    "The regular file changed identity before removal at \(path)."
+                )
+            }
+            let removed = name.value.withCString { pointer in
+                Self.retryingEINTR { unlinkat(parent, pointer, 0) }
+            }
+            if removed != 0, errno != ENOENT {
+                throw Self.posixError(operation: "remove regular file", code: errno, path: path)
+            }
         }
     }
 
@@ -289,7 +723,7 @@ package final class DirectoryCapability: Sendable {
         var contents = Data()
         var buffer = [UInt8](
             repeating: 0,
-            count: max(1, min(64 * 1024, maximumByteCount))
+            count: max(1, min(regularFileIOChunkSize, maximumByteCount))
         )
         while contents.count < maximumByteCount {
             let requestedCount = min(buffer.count, maximumByteCount - contents.count)
@@ -317,6 +751,483 @@ package final class DirectoryCapability: Sendable {
             )
         }
         return contents
+    }
+
+    private static func validateReplacementDestination(
+        parent: Int32,
+        name: Name,
+        path: String
+    ) throws {
+        guard let status = try fileStatus(atParent: parent, named: name, path: path) else {
+            return
+        }
+        try validateRegularFile(status, path: path)
+    }
+
+    private static func validateTemporaryFile(
+        parent: Int32,
+        name: Name,
+        identity: Identity,
+        path: String
+    ) throws {
+        guard let status = try fileStatus(atParent: parent, named: name, path: path),
+              Identity(status) == identity,
+              status.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) else {
+            throw DirectoryCapabilityError.policyViolation(
+                "The temporary file changed identity before publication at \(path)."
+            )
+        }
+    }
+
+    private static func createTemporaryFile(
+        parent: Int32,
+        directoryURL: URL
+    ) throws -> TemporaryFile {
+        for _ in 0..<temporaryNameAttemptLimit {
+            let name = try Name(".codex-replace-\(UUID().uuidString)")
+            let path = directoryURL.appendingPathComponent(name.value, isDirectory: false).path
+            let descriptor = name.value.withCString { pointer in
+                retryingEINTR {
+                    openat(parent, pointer, temporaryFileOpenFlags, mode_t(0o600))
+                }
+            }
+            if descriptor < 0 {
+                if errno == EEXIST { continue }
+                throw posixError(operation: "create temporary file", code: errno, path: path)
+            }
+            var needsClose = true
+            defer { if needsClose { _ = Darwin.close(descriptor) } }
+            var inspectedIdentity: Identity?
+            do {
+                let status = try fileStatus(descriptor, path: path)
+                let identity = Identity(status)
+                inspectedIdentity = identity
+                try validateRegularFile(status, path: path)
+                let changedMode = retryingEINTR { fchmod(descriptor, mode_t(0o600)) }
+                guard changedMode == 0 else {
+                    throw posixError(operation: "set temporary file permissions", code: errno, path: path)
+                }
+                let finalStatus = try fileStatus(descriptor, path: path)
+                guard Identity(finalStatus) == identity,
+                      finalStatus.st_mode & 0o7777 == 0o600 else {
+                    throw DirectoryCapabilityError.policyViolation(
+                        "The temporary file changed identity or permissions at \(path)."
+                    )
+                }
+                needsClose = false
+                return TemporaryFile(name: name, identity: identity, descriptor: descriptor)
+            } catch {
+                _ = Darwin.close(descriptor)
+                needsClose = false
+                if let inspectedIdentity {
+                    try rollbackCreatedFile(
+                        parent: parent,
+                        name: name,
+                        identity: inspectedIdentity,
+                        path: path
+                    )
+                } else {
+                    try rollbackUninspectedCreatedFile(parent: parent, name: name, path: path)
+                }
+                throw error
+            }
+        }
+        throw DirectoryCapabilityError.retryable(
+            DirectoryPOSIXFailure(
+                operation: "create unique temporary file",
+                code: EEXIST,
+                path: directoryURL.path
+            )
+        )
+    }
+
+    private static func writeContents(
+        _ contents: Data,
+        to descriptor: Int32,
+        path: String
+    ) throws {
+        try contents.withUnsafeBytes { bytes in
+            var offset = 0
+            while offset < bytes.count {
+                let requestedCount = min(regularFileIOChunkSize, bytes.count - offset)
+                let writtenCount = retryingEINTRCount {
+                    Darwin.write(
+                        descriptor,
+                        bytes.baseAddress?.advanced(by: offset),
+                        requestedCount
+                    )
+                }
+                guard writtenCount > 0 else {
+                    throw posixError(
+                        operation: "write temporary file",
+                        code: writtenCount == 0 ? EIO : errno,
+                        path: path
+                    )
+                }
+                offset += writtenCount
+            }
+        }
+    }
+
+    private static func synchronize(
+        _ descriptor: Int32,
+        operation: String,
+        path: String
+    ) throws {
+        let result = retryingEINTR { fsync(descriptor) }
+        guard result == 0 else {
+            throw posixError(operation: operation, code: errno, path: path)
+        }
+    }
+
+    private static func rollbackCreatedFile(
+        parent: Int32,
+        name: Name,
+        identity: Identity,
+        path: String
+    ) throws {
+        var status = stat()
+        let inspected = name.value.withCString { pointer in
+            retryingEINTR { fstatat(parent, pointer, &status, AT_SYMLINK_NOFOLLOW) }
+        }
+        guard inspected == 0 else {
+            throw posixError(operation: "inspect created file cleanup", code: errno, path: path)
+        }
+        guard Identity(status) == identity,
+              status.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) else {
+            throw DirectoryCapabilityError.policyViolation(
+                "The created file changed identity before cleanup at \(path)."
+            )
+        }
+        let removed = name.value.withCString { pointer in
+            retryingEINTR { unlinkat(parent, pointer, 0) }
+        }
+        guard removed == 0 else {
+            throw posixError(operation: "remove created file", code: errno, path: path)
+        }
+    }
+
+    private static func removeDirectoryTree(
+        rootDescriptor: Int32,
+        root: RemovalComponent,
+        expectedDeviceID: UInt64,
+        directoryURL: URL,
+        rootPath: String
+    ) throws {
+        guard let status = try fileStatus(
+            atParent: rootDescriptor,
+            named: root.name,
+            path: rootPath
+        ) else { return }
+        try validateRemovalEntry(
+            status,
+            component: root,
+            expectedDeviceID: expectedDeviceID,
+            expectedType: mode_t(S_IFDIR),
+            path: rootPath
+        )
+
+        var arena = [RemovalNode(parentIndex: nil, component: root)]
+        var work: [RemovalWork] = [.enumerate(0)]
+        while let next = work.popLast() {
+            switch next {
+            case .enumerate(let nodeIndex):
+                var children: [RemovalComponent] = []
+                try withRemovalDirectory(
+                    rootDescriptor: rootDescriptor,
+                    nodeIndex: nodeIndex,
+                    arena: arena,
+                    expectedDeviceID: expectedDeviceID,
+                    directoryURL: directoryURL
+                ) { parent, directoryPath in
+                    let entries = try removalEntries(
+                        from: parent,
+                        expectedDeviceID: expectedDeviceID,
+                        path: directoryPath
+                    )
+                    for entry in entries {
+                        if entry.type == mode_t(S_IFDIR) {
+                            children.append(entry.component)
+                            continue
+                        }
+                        let entryPath = URL(fileURLWithPath: directoryPath, isDirectory: true)
+                            .appendingPathComponent(
+                                entry.component.name.value,
+                                isDirectory: false
+                            ).path
+                        try revalidateRemovalEntry(
+                            parent: parent,
+                            component: entry.component,
+                            expectedDeviceID: expectedDeviceID,
+                            expectedType: entry.type,
+                            path: entryPath
+                        )
+                        let removed = entry.component.name.value.withCString { pointer in
+                            retryingEINTR { unlinkat(parent, pointer, 0) }
+                        }
+                        guard removed == 0 else {
+                            throw posixError(
+                                operation: "remove directory entry",
+                                code: errno,
+                                path: entryPath
+                            )
+                        }
+                    }
+                }
+                work.append(.remove(nodeIndex))
+                for child in children.reversed() {
+                    let childIndex = arena.count
+                    arena.append(RemovalNode(parentIndex: nodeIndex, component: child))
+                    work.append(.enumerate(childIndex))
+                }
+            case .remove(let nodeIndex):
+                let node = arena[nodeIndex]
+                try withRemovalDirectory(
+                    rootDescriptor: rootDescriptor,
+                    nodeIndex: node.parentIndex,
+                    arena: arena,
+                    expectedDeviceID: expectedDeviceID,
+                    directoryURL: directoryURL
+                ) { parent, parentPath in
+                    let entryPath = URL(fileURLWithPath: parentPath, isDirectory: true)
+                        .appendingPathComponent(node.component.name.value, isDirectory: true).path
+                    try revalidateRemovalEntry(
+                        parent: parent,
+                        component: node.component,
+                        expectedDeviceID: expectedDeviceID,
+                        expectedType: mode_t(S_IFDIR),
+                        path: entryPath
+                    )
+                    let removed = node.component.name.value.withCString { pointer in
+                        retryingEINTR { unlinkat(parent, pointer, AT_REMOVEDIR) }
+                    }
+                    guard removed == 0 else {
+                        throw posixError(operation: "remove directory", code: errno, path: entryPath)
+                    }
+                }
+            }
+        }
+    }
+
+    private static func withRemovalDirectory<Result>(
+        rootDescriptor: Int32,
+        nodeIndex: Int?,
+        arena: [RemovalNode],
+        expectedDeviceID: UInt64,
+        directoryURL: URL,
+        body: (Int32, String) throws -> Result
+    ) throws -> Result {
+        var descriptor = retryingEINTR { fcntl(rootDescriptor, F_DUPFD_CLOEXEC, 0) }
+        guard descriptor >= 0 else {
+            throw posixError(
+                operation: "duplicate removal root descriptor",
+                code: errno,
+                path: directoryURL.path
+            )
+        }
+        var needsClose = true
+        defer { if needsClose { _ = Darwin.close(descriptor) } }
+        var reversedComponents: [RemovalComponent] = []
+        var currentIndex = nodeIndex
+        while let index = currentIndex {
+            let node = arena[index]
+            reversedComponents.append(node.component)
+            currentIndex = node.parentIndex
+        }
+        var componentURL = directoryURL
+        for component in reversedComponents.reversed() {
+            componentURL.appendPathComponent(component.name.value, isDirectory: true)
+            let path = componentURL.path
+            guard let status = try fileStatus(
+                atParent: descriptor,
+                named: component.name,
+                path: path
+            ) else {
+                throw posixError(operation: "inspect removal entry", code: ENOENT, path: path)
+            }
+            try validateRemovalEntry(
+                status,
+                component: component,
+                expectedDeviceID: expectedDeviceID,
+                expectedType: mode_t(S_IFDIR),
+                path: path
+            )
+            let next = component.name.value.withCString { pointer in
+                retryingEINTR { openat(descriptor, pointer, directoryOpenFlags) }
+            }
+            guard next >= 0 else { throw openError(code: errno, path: path) }
+            do {
+                let openedStatus = try directoryStatus(next, path: path)
+                try validateRemovalEntry(
+                    openedStatus,
+                    component: component,
+                    expectedDeviceID: expectedDeviceID,
+                    expectedType: mode_t(S_IFDIR),
+                    path: path
+                )
+            } catch {
+                _ = Darwin.close(next)
+                throw error
+            }
+            _ = Darwin.close(descriptor)
+            descriptor = next
+        }
+        let result = try body(descriptor, componentURL.path)
+        let closeResult = Darwin.close(descriptor)
+        needsClose = false
+        guard closeResult == 0 else {
+            throw posixError(
+                operation: "close removal directory",
+                code: errno,
+                path: componentURL.path
+            )
+        }
+        return result
+    }
+
+    private static func removalEntries(
+        from descriptor: Int32,
+        expectedDeviceID: UInt64,
+        path: String
+    ) throws -> [(component: RemovalComponent, type: mode_t)] {
+        let streamDescriptor = retryingEINTR { fcntl(descriptor, F_DUPFD_CLOEXEC, 0) }
+        guard streamDescriptor >= 0 else {
+            throw posixError(operation: "duplicate directory stream", code: errno, path: path)
+        }
+        guard let stream = fdopendir(streamDescriptor) else {
+            let code = errno
+            _ = Darwin.close(streamDescriptor)
+            throw posixError(operation: "open directory stream", code: code, path: path)
+        }
+        var streamNeedsClose = true
+        do {
+            let parent = dirfd(stream)
+            guard parent >= 0 else {
+                throw posixError(operation: "read directory descriptor", code: errno, path: path)
+            }
+            var entries: [(component: RemovalComponent, type: mode_t)] = []
+            while true {
+                errno = 0
+                guard let entry = readdir(stream) else {
+                    guard errno == 0 else {
+                        throw posixError(operation: "read directory entries", code: errno, path: path)
+                    }
+                    break
+                }
+                guard let name = try removalEntryName(entry, directoryPath: path) else { continue }
+                let entryPath = URL(fileURLWithPath: path, isDirectory: true)
+                    .appendingPathComponent(name.value, isDirectory: false).path
+                guard let status = try fileStatus(
+                    atParent: parent,
+                    named: name,
+                    path: entryPath
+                ) else {
+                    throw posixError(operation: "inspect removal entry", code: ENOENT, path: entryPath)
+                }
+                let identity = Identity(status)
+                guard identity.deviceID == expectedDeviceID else {
+                    throw DirectoryCapabilityError.policyViolation(
+                        "Recursive removal cannot cross a device boundary at \(entryPath)."
+                    )
+                }
+                let type = status.st_mode & mode_t(S_IFMT)
+                guard [mode_t(S_IFDIR), mode_t(S_IFREG), mode_t(S_IFLNK)].contains(type) else {
+                    throw DirectoryCapabilityError.policyViolation(
+                        "Recursive removal does not admit this entry type at \(entryPath)."
+                    )
+                }
+                entries.append((RemovalComponent(name: name, identity: identity), type))
+            }
+            let closeResult = closedir(stream)
+            streamNeedsClose = false
+            guard closeResult == 0 else {
+                throw posixError(operation: "close directory stream", code: errno, path: path)
+            }
+            return entries
+        } catch {
+            if streamNeedsClose { _ = closedir(stream) }
+            throw error
+        }
+    }
+
+    private static func removalEntryName(
+        _ entry: UnsafeMutablePointer<dirent>,
+        directoryPath: String
+    ) throws -> Name? {
+        let byteCapacity = MemoryLayout.size(ofValue: entry.pointee.d_name)
+        let value = withUnsafePointer(to: &entry.pointee.d_name) { pointer in
+            pointer.withMemoryRebound(to: CChar.self, capacity: byteCapacity) {
+                String(validatingCString: $0)
+            }
+        }
+        guard let value else {
+            throw DirectoryCapabilityError.policyViolation(
+                "Recursive removal encountered a non-UTF-8 entry in \(directoryPath)."
+            )
+        }
+        if value == "." || value == ".." { return nil }
+        do {
+            return try Name(value)
+        } catch {
+            throw DirectoryCapabilityError.policyViolation(
+                "Recursive removal encountered an invalid entry name in \(directoryPath)."
+            )
+        }
+    }
+
+    private static func revalidateRemovalEntry(
+        parent: Int32,
+        component: RemovalComponent,
+        expectedDeviceID: UInt64,
+        expectedType: mode_t,
+        path: String
+    ) throws {
+        guard let status = try fileStatus(
+            atParent: parent,
+            named: component.name,
+            path: path
+        ) else {
+            throw posixError(operation: "inspect removal entry", code: ENOENT, path: path)
+        }
+        try validateRemovalEntry(
+            status,
+            component: component,
+            expectedDeviceID: expectedDeviceID,
+            expectedType: expectedType,
+            path: path
+        )
+    }
+
+    private static func validateRemovalEntry(
+        _ status: stat,
+        component: RemovalComponent,
+        expectedDeviceID: UInt64,
+        expectedType: mode_t,
+        path: String
+    ) throws {
+        let identity = Identity(status)
+        guard identity == component.identity,
+              identity.deviceID == expectedDeviceID,
+              status.st_mode & mode_t(S_IFMT) == expectedType else {
+            throw DirectoryCapabilityError.policyViolation(
+                "The recursive removal entry changed identity, device, or type at \(path)."
+            )
+        }
+    }
+
+    private static func rollbackUninspectedCreatedFile(
+        parent: Int32,
+        name: Name,
+        path: String
+    ) throws {
+        // openat(O_EXCL) created this exact name under the validated parent. The RecoveryV1
+        // threat boundary excludes a malicious same-UID replacement before this cleanup.
+        let removed = name.value.withCString { pointer in
+            retryingEINTR { unlinkat(parent, pointer, 0) }
+        }
+        guard removed == 0 else {
+            throw posixError(operation: "remove uninspected created file", code: errno, path: path)
+        }
     }
 
     private static func acquireChild(
@@ -463,6 +1374,22 @@ package final class DirectoryCapability: Sendable {
         }
     }
     private static func walkAbsoluteURL(_ url: URL) throws -> Int32 {
+        guard let descriptor = try walkAbsoluteURLIfPresent(url) else {
+            throw posixError(operation: "open directory", code: ENOENT, path: url.path)
+        }
+        return descriptor
+    }
+
+    private static func walkAbsoluteURLIfPresent(_ url: URL) throws -> Int32? {
+        let resolution = try resolveAbsoluteURL(url)
+        guard resolution.remainingNames.isEmpty else {
+            _ = Darwin.close(resolution.descriptor)
+            return nil
+        }
+        return resolution.descriptor
+    }
+
+    private static func resolveAbsoluteURL(_ url: URL) throws -> AbsoluteResolution {
         try validateAbsoluteURL(url)
         let names = try url.path.split(separator: "/").map { try Name(String($0)) }
         var current = retryingEINTR { Darwin.open("/", directoryOpenFlags) }
@@ -472,14 +1399,29 @@ package final class DirectoryCapability: Sendable {
         var transfersDescriptor = false
         defer { if transfersDescriptor == false { _ = Darwin.close(current) } }
         var pathURL = URL(fileURLWithPath: "/", isDirectory: true)
-        for name in names {
+        for (index, name) in names.enumerated() {
             pathURL.appendPathComponent(name.value, isDirectory: true)
-            let next = try openChild(parent: current, name: name, path: pathURL.path)
+            guard let next = try openChildIfPresent(
+                parent: current,
+                name: name,
+                path: pathURL.path
+            ) else {
+                transfersDescriptor = true
+                return AbsoluteResolution(
+                    descriptor: current,
+                    anchorURL: pathURL.deletingLastPathComponent(),
+                    remainingNames: Array(names[index...])
+                )
+            }
             _ = Darwin.close(current)
             current = next
         }
         transfersDescriptor = true
-        return current
+        return AbsoluteResolution(
+            descriptor: current,
+            anchorURL: pathURL,
+            remainingNames: []
+        )
     }
 
     private static func validateAbsoluteURL(_ url: URL) throws {
@@ -512,18 +1454,23 @@ package final class DirectoryCapability: Sendable {
         guard status.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else {
             throw DirectoryCapabilityError.policyViolation("Expected a directory at \(path).")
         }
-        guard status.st_uid == requirements.ownerUserID else {
-            throw DirectoryCapabilityError.policyViolation("Directory owner mismatch at \(path).")
-        }
         let permissions = status.st_mode & 0o7777
         switch requirements.policy {
+        case .namespace:
+            return
         case .trustedAnchor:
+            guard status.st_uid == requirements.ownerUserID else {
+                throw DirectoryCapabilityError.policyViolation("Directory owner mismatch at \(path).")
+            }
             guard permissions & 0o022 == 0 else {
                 throw DirectoryCapabilityError.policyViolation(
                     "Trusted directory is writable by another principal at \(path)."
                 )
             }
         case .managed:
+            guard status.st_uid == requirements.ownerUserID else {
+                throw DirectoryCapabilityError.policyViolation("Directory owner mismatch at \(path).")
+            }
             guard Identity(status).deviceID == requirements.deviceID, permissions == 0o700 else {
                 throw DirectoryCapabilityError.policyViolation(
                     "Managed directory device or permissions mismatch at \(path)."
@@ -574,14 +1521,19 @@ package final class DirectoryCapability: Sendable {
     }
 
     private static func isAncestor(_ ancestor: Identity, of descriptor: Int32, path: String) throws -> Bool {
+        try ancestryIdentities(of: descriptor, path: path).contains(ancestor)
+    }
+
+    private static func ancestryIdentities(of descriptor: Int32, path: String) throws -> Set<Identity> {
         var current = retryingEINTR { fcntl(descriptor, F_DUPFD_CLOEXEC, 0) }
         guard current >= 0 else {
             throw posixError(operation: "duplicate directory for ancestry", code: errno, path: path)
         }
         defer { _ = Darwin.close(current) }
+        var identities: Set<Identity> = []
         while true {
             let currentIdentity = Identity(try directoryStatus(current, path: path))
-            if currentIdentity == ancestor { return true }
+            identities.insert(currentIdentity)
             let parent = retryingEINTR { openat(current, "..", directoryOpenFlags) }
             guard parent >= 0 else { throw openError(code: errno, path: path) }
             let parentStatus: stat
@@ -594,10 +1546,74 @@ package final class DirectoryCapability: Sendable {
             let parentIdentity = Identity(parentStatus)
             if parentIdentity == currentIdentity {
                 _ = Darwin.close(parent)
-                return false
+                return identities
             }
             _ = Darwin.close(current)
             current = parent
+        }
+    }
+
+    private static func entryNameRelationship(
+        _ lhs: Name,
+        _ rhs: Name,
+        lhsSemantics: EntryNameSemantics,
+        rhsSemantics: EntryNameSemantics
+    ) -> EntryNameRelationship {
+        if lhs.value.utf8.elementsEqual(rhs.value.utf8) { return .same }
+        guard lhsSemantics == rhsSemantics else { return .indeterminate }
+        switch lhsSemantics {
+        case .caseSensitive:
+            return .distinct
+        case .unknown:
+            return .indeterminate
+        case .caseInsensitive:
+            guard let lhsASCII = asciiCaseFolded(lhs.value),
+                  let rhsASCII = asciiCaseFolded(rhs.value) else {
+                return .indeterminate
+            }
+            return lhsASCII == rhsASCII ? .same : .distinct
+        }
+    }
+
+    private static func entryNameSemantics(
+        parent: Int32,
+        path: String
+    ) throws -> EntryNameSemantics {
+        errno = 0
+        let caseSensitive = fpathconf(parent, _PC_CASE_SENSITIVE)
+        let code = errno
+        if caseSensitive == -1 {
+            if code == 0 { return .unknown }
+            throw posixError(operation: "read directory case sensitivity", code: code, path: path)
+        }
+        if caseSensitive == 1 { return .caseSensitive }
+        if caseSensitive == 0 { return .caseInsensitive }
+        return .unknown
+    }
+
+    private static func entryExists(
+        _ name: Name,
+        parent: Int32,
+        path: String
+    ) throws -> Bool {
+        var status = stat()
+        let inspected = name.value.withCString { pointer in
+            retryingEINTR { fstatat(parent, pointer, &status, AT_SYMLINK_NOFOLLOW) }
+        }
+        if inspected == 0 { return true }
+        if errno == ENOENT { return false }
+        throw posixError(
+            operation: "inspect unresolved directory entry",
+            code: errno,
+            path: URL(fileURLWithPath: path).appendingPathComponent(name.value).path
+        )
+    }
+
+    private static func asciiCaseFolded(_ value: String) -> [UInt8]? {
+        let bytes = Array(value.utf8)
+        guard bytes.allSatisfy({ $0 < 0x80 }) else { return nil }
+        return bytes.map { byte in
+            (0x41...0x5A).contains(byte) ? byte + 0x20 : byte
         }
     }
 
@@ -645,4 +1661,8 @@ package final class DirectoryCapability: Sendable {
     }
     private static let directoryOpenFlags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
     private static let regularFileReadFlags = O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC
+    private static let regularFileCreationFlags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC
+    private static let temporaryFileOpenFlags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC
+    private static let regularFileIOChunkSize = 64 * 1024
+    private static let temporaryNameAttemptLimit = 16
 }
