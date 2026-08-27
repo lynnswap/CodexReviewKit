@@ -219,6 +219,7 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         private var domainWork: [UUID: DomainWorkState] = [:]
         private var sessionDomainPhase: SessionDomainPhase = .unbound
         private var closeWaiters: [CheckedContinuation<TerminalCause?, Never>] = []
+        private var terminalCauseWaiters: [CheckedContinuation<TerminalCause?, Never>] = []
 
         fileprivate init(admissionOrdinal: UInt64, connection: Connection) {
             let id = UUID()
@@ -237,6 +238,7 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         fileprivate func beginClosing(_ cause: TerminalCause) {
             var cancellations: [@Sendable () -> Void] = []
             var waiters: [CheckedContinuation<Bool, Never>] = []
+            var terminalCauseWaiters: [CheckedContinuation<TerminalCause?, Never>] = []
             lock.lock()
             for id in Array(domainWork.keys) {
                 domainWork[id]?.cancellationWasRequested = true
@@ -250,6 +252,8 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             }
             if terminalCause == nil, responseEnd != .acknowledged {
                 terminalCause = cause
+                terminalCauseWaiters = self.terminalCauseWaiters
+                self.terminalCauseWaiters.removeAll(keepingCapacity: false)
                 responseEnd = .closed
                 switch workState {
                 case .installed(let cancel), .running(let cancel):
@@ -263,6 +267,7 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             lock.unlock()
             cancellations.forEach { $0() }
             waiters.forEach { $0.resume(returning: false) }
+            terminalCauseWaiters.forEach { $0.resume(returning: cause) }
             finishIfPossible()
         }
 
@@ -381,6 +386,22 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
                     continuation.resume(returning: cause)
                 } else {
                     closeWaiters.append(continuation)
+                    lock.unlock()
+                }
+            }
+        }
+
+        fileprivate func waitUntilTerminalCause() async -> TerminalCause? {
+            await withCheckedContinuation { continuation in
+                lock.lock()
+                if let terminalCause {
+                    lock.unlock()
+                    continuation.resume(returning: terminalCause)
+                } else if didClose {
+                    lock.unlock()
+                    continuation.resume(returning: nil)
+                } else {
+                    terminalCauseWaiters.append(continuation)
                     lock.unlock()
                 }
             }
@@ -552,6 +573,7 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
 
         private func finishIfPossible() {
             let waiters: [CheckedContinuation<TerminalCause?, Never>]
+            let terminalCauseWaiters: [CheckedContinuation<TerminalCause?, Never>]
             let cause: TerminalCause?
             lock.lock()
             guard didClose == false,
@@ -565,8 +587,13 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             cause = terminalCause
             waiters = closeWaiters
             closeWaiters.removeAll(keepingCapacity: false)
+            terminalCauseWaiters = self.terminalCauseWaiters
+            self.terminalCauseWaiters.removeAll(keepingCapacity: false)
             lock.unlock()
             for waiter in waiters {
+                waiter.resume(returning: cause)
+            }
+            for waiter in terminalCauseWaiters {
                 waiter.resume(returning: cause)
             }
             connection?.requestDidClose(self)
@@ -1115,6 +1142,19 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
                 lock.unlock()
             }
         }
+    }
+
+    package func waitUntilRequestTerminalForTesting(requestID: UUID) async -> TerminalCause? {
+        let connections: [Connection] = lock.withLock {
+            switch state {
+            case .accepting(let current), .admissionClosed(let current), .closing(let current, _):
+                Array(current.connections.values)
+            case .closed:
+                []
+            }
+        }
+        let operation = connections.lazy.compactMap { $0.resolve(requestID: requestID) }.first
+        return await operation?.waitUntilTerminalCause()
     }
 
     package func resolve(_ token: OperationToken, sessionID: String) -> RequestOperation? {

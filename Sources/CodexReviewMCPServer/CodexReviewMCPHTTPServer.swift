@@ -505,6 +505,7 @@ package actor CodexReviewMCPHTTPServer {
     private let joinedStartCompletionGate = MCPHTTPLifecycleCompletionGate()
     private let stopCompletionGate = MCPHTTPLifecycleCompletionGate()
     private let finiteSourceCompletionGate = MCPHTTPLifecycleCompletionGate()
+    private let writerFinalizationGate = MCPHTTPLifecycleCompletionGate()
     private let writerCompletionGate = MCPHTTPLifecycleCompletionGate()
     private let responseEndAcknowledgementGate = MCPHTTPLifecycleCompletionGate()
     private let responseEndWriteGate = MCPHTTPLifecycleCompletionGate()
@@ -1186,6 +1187,23 @@ package actor CodexReviewMCPHTTPServer {
         }
     }
 
+    package func waitUntilNetworkRequestTerminalForTesting(
+        requestID: UUID
+    ) async -> MCPHTTPNetworkResourceOwner.TerminalCause? {
+        let networkResources: MCPHTTPNetworkResourceOwner?
+        switch lifecycleState {
+        case .starting(let operation):
+            networkResources = operation.networkResources
+        case .running(let resources):
+            networkResources = resources.networkResources
+        case .stopping(_, let resources?, _):
+            networkResources = resources.networkResources
+        case .stopping, .stopped:
+            networkResources = nil
+        }
+        return await networkResources?.waitUntilRequestTerminalForTesting(requestID: requestID)
+    }
+
     package func waitForNetworkCloseWaiterRegistrationForTesting()
         async -> MCPHTTPNetworkResourceOwner.CloseWaiterRegistration
     {
@@ -1220,6 +1238,18 @@ package actor CodexReviewMCPHTTPServer {
 
     package func holdNextWriterCompletionForTesting() async {
         await writerCompletionGate.holdNextCompletion()
+    }
+
+    package func holdNextWriterFinalizationForTesting() async {
+        await writerFinalizationGate.holdNextCompletion()
+    }
+
+    package func waitUntilWriterFinalizationIsHeldForTesting() async {
+        await writerFinalizationGate.waitUntilHolding()
+    }
+
+    package func releaseWriterFinalizationForTesting() async {
+        await writerFinalizationGate.release()
     }
 
     package func waitUntilWriterCompletionIsHeldForTesting() async {
@@ -1305,6 +1335,10 @@ package actor CodexReviewMCPHTTPServer {
 
     fileprivate func waitAfterWriterCompletionForTesting() async {
         await writerCompletionGate.waitIfNeeded()
+    }
+
+    fileprivate func waitBeforeWriterFinalizationForTesting() async {
+        await writerFinalizationGate.waitIfNeeded()
     }
 
     fileprivate func waitAfterResponseEndAcknowledgementForTesting() async {
@@ -2553,13 +2587,7 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
         }
 
         switch result {
-        case .responded:
-            operation.acknowledgeResponseEnd()
-            if closeAfterResponse {
-                await connection.closeAfterResponse()
-            }
-            await server.waitAfterResponseEndAcknowledgementForTesting()
-        case .cancelled:
+        case .responded, .cancelled:
             break
         case .sourceFailed(let message):
             logger.error("MCP SSE source failed: \(message, privacy: .public)")
@@ -2567,6 +2595,14 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
         case .transportFailed(let message):
             logger.error("MCP HTTP response failed: \(message, privacy: .public)")
             connection.transportFailed(message)
+        }
+        await server.waitBeforeWriterFinalizationForTesting()
+        if case .responded = result {
+            operation.acknowledgeResponseEnd()
+            if closeAfterResponse {
+                await connection.closeAfterResponse()
+            }
+            await server.waitAfterResponseEndAcknowledgementForTesting()
         }
         await server.waitAfterWriterCompletionForTesting()
     }
