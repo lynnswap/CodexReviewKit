@@ -80,6 +80,7 @@ package final class DirectoryCapability: Sendable {
 
     package final class ResolvedDirectoryLocation: Sendable {
         private let anchor: DirectoryCapability
+        private let namedAncestry: [NamedAncestryEdge]
         private let target: Target
 
         private enum Target: Sendable {
@@ -102,6 +103,7 @@ package final class DirectoryCapability: Sendable {
         private struct Snapshot: Sendable {
             let anchorIdentity: Identity
             let ancestorIdentities: Set<Identity>
+            let namedAncestry: [NamedAncestryEdge]
             let target: SnapshotTarget
 
             func relationship(to other: Self) -> Relationship {
@@ -116,15 +118,25 @@ package final class DirectoryCapability: Sendable {
                     return target.relationship(to: other.target)
                 case .ancestor:
                     if case .existing = target { return .ancestor }
-                    return .indeterminate
+                    guard let edge = other.firstEdge(descendingFrom: anchorIdentity) else {
+                        return .indeterminate
+                    }
+                    return target.relationship(toExistingChild: edge)
                 case .descendant:
                     if case .existing = other.target { return .descendant }
-                    return .indeterminate
+                    guard let edge = firstEdge(descendingFrom: other.anchorIdentity) else {
+                        return .indeterminate
+                    }
+                    return other.target.relationship(toExistingChild: edge)
                 case .disjoint:
                     return .disjoint
                 case .indeterminate:
                     return .indeterminate
                 }
+            }
+
+            private func firstEdge(descendingFrom identity: Identity) -> NamedAncestryEdge? {
+                namedAncestry.first { $0.parentIdentity == identity }
             }
         }
 
@@ -159,10 +171,30 @@ package final class DirectoryCapability: Sendable {
                     return lhs.count < rhs.count ? .ancestor : .descendant
                 }
             }
+
+            func relationship(toExistingChild edge: NamedAncestryEdge) -> Relationship {
+                guard case .pending(let first, _, let semantics) = self else {
+                    return .indeterminate
+                }
+                return switch DirectoryCapability.entryNameRelationship(
+                    first,
+                    edge.childName,
+                    lhsSemantics: semantics,
+                    rhsSemantics: edge.parentSemantics
+                ) {
+                case .distinct: .disjoint
+                case .same, .indeterminate: .indeterminate
+                }
+            }
         }
 
-        fileprivate init(anchor: DirectoryCapability, remainingNames: [Name]) {
+        fileprivate init(
+            anchor: DirectoryCapability,
+            namedAncestry: [NamedAncestryEdge],
+            remainingNames: [Name]
+        ) {
             self.anchor = anchor
+            self.namedAncestry = namedAncestry
             target = remainingNames.isEmpty
                 ? .existing
                 : .pending(first: remainingNames[0], rest: Array(remainingNames.dropFirst()))
@@ -182,7 +214,14 @@ package final class DirectoryCapability: Sendable {
             try anchor.withBorrowedDescriptor { descriptor in
                 try DirectoryCapability.validateOwned(descriptor, capability: anchor)
                 let ancestors = try DirectoryCapability.ancestryIdentities(
-                    of: descriptor, path: anchor.url.path)
+                    of: descriptor,
+                    path: anchor.url.path
+                )
+                let revalidatedNamedAncestry = try DirectoryCapability.revalidateNamedAncestry(
+                    from: descriptor,
+                    expected: namedAncestry,
+                    path: anchor.url.path
+                )
                 let snapshotTarget: SnapshotTarget
                 switch target {
                 case .existing:
@@ -199,6 +238,7 @@ package final class DirectoryCapability: Sendable {
                 return .valid(Snapshot(
                     anchorIdentity: anchor.identity,
                     ancestorIdentities: ancestors,
+                    namedAncestry: revalidatedNamedAncestry,
                     target: snapshotTarget
                 ))
             }
@@ -206,13 +246,22 @@ package final class DirectoryCapability: Sendable {
     }
 
     private enum EntryNameRelationship { case same, distinct, indeterminate }
-    private enum EntryNameSemantics: Equatable, Sendable {
+    fileprivate enum EntryNameSemantics: Equatable, Sendable {
         case caseSensitive, caseInsensitive, unknown
+    }
+
+    fileprivate struct NamedAncestryEdge: Sendable {
+        let parentIdentity: Identity
+        let childName: Name
+        let childIdentity: Identity
+        let parentSemantics: EntryNameSemantics
+        let diagnosticPath: String
     }
 
     private struct AbsoluteResolution {
         let descriptor: Int32
         let anchorURL: URL
+        let namedAncestry: [NamedAncestryEdge]
         let remainingNames: [Name]
     }
 
@@ -299,7 +348,10 @@ package final class DirectoryCapability: Sendable {
         at absoluteURL: URL,
         requirements: Requirements
     ) throws -> ResolvedDirectoryLocation {
-        let resolution = try resolveAbsoluteURL(absoluteURL)
+        let resolution = try resolveAbsoluteURL(
+            absoluteURL,
+            collectsNamedAncestry: true
+        )
         var transfersDescriptor = false
         defer { if transfersDescriptor == false { _ = Darwin.close(resolution.descriptor) } }
         let status = try directoryStatus(resolution.descriptor, path: resolution.anchorURL.path)
@@ -330,6 +382,7 @@ package final class DirectoryCapability: Sendable {
         transfersDescriptor = true
         return ResolvedDirectoryLocation(
             anchor: anchor,
+            namedAncestry: resolution.namedAncestry,
             remainingNames: resolution.remainingNames
         )
     }
@@ -1389,7 +1442,10 @@ package final class DirectoryCapability: Sendable {
         return resolution.descriptor
     }
 
-    private static func resolveAbsoluteURL(_ url: URL) throws -> AbsoluteResolution {
+    private static func resolveAbsoluteURL(
+        _ url: URL,
+        collectsNamedAncestry: Bool = false
+    ) throws -> AbsoluteResolution {
         try validateAbsoluteURL(url)
         let names = try url.path.split(separator: "/").map { try Name(String($0)) }
         var current = retryingEINTR { Darwin.open("/", directoryOpenFlags) }
@@ -1399,6 +1455,7 @@ package final class DirectoryCapability: Sendable {
         var transfersDescriptor = false
         defer { if transfersDescriptor == false { _ = Darwin.close(current) } }
         var pathURL = URL(fileURLWithPath: "/", isDirectory: true)
+        var namedAncestry: [NamedAncestryEdge] = []
         for (index, name) in names.enumerated() {
             pathURL.appendPathComponent(name.value, isDirectory: true)
             guard let next = try openChildIfPresent(
@@ -1410,8 +1467,31 @@ package final class DirectoryCapability: Sendable {
                 return AbsoluteResolution(
                     descriptor: current,
                     anchorURL: pathURL.deletingLastPathComponent(),
+                    namedAncestry: namedAncestry,
                     remainingNames: Array(names[index...])
                 )
+            }
+            if collectsNamedAncestry {
+                do {
+                    let parentStatus = try directoryStatus(
+                        current,
+                        path: pathURL.deletingLastPathComponent().path
+                    )
+                    let childStatus = try directoryStatus(next, path: pathURL.path)
+                    namedAncestry.append(.init(
+                        parentIdentity: Identity(parentStatus),
+                        childName: name,
+                        childIdentity: Identity(childStatus),
+                        parentSemantics: try entryNameSemantics(
+                            parent: current,
+                            path: pathURL.deletingLastPathComponent().path
+                        ),
+                        diagnosticPath: pathURL.path
+                    ))
+                } catch {
+                    _ = Darwin.close(next)
+                    throw error
+                }
             }
             _ = Darwin.close(current)
             current = next
@@ -1420,6 +1500,7 @@ package final class DirectoryCapability: Sendable {
         return AbsoluteResolution(
             descriptor: current,
             anchorURL: pathURL,
+            namedAncestry: namedAncestry,
             remainingNames: []
         )
     }
@@ -1551,6 +1632,56 @@ package final class DirectoryCapability: Sendable {
             _ = Darwin.close(current)
             current = parent
         }
+    }
+
+    private static func revalidateNamedAncestry(
+        from descriptor: Int32,
+        expected edges: [NamedAncestryEdge],
+        path: String
+    ) throws -> [NamedAncestryEdge] {
+        var current = retryingEINTR { fcntl(descriptor, F_DUPFD_CLOEXEC, 0) }
+        guard current >= 0 else {
+            throw posixError(operation: "duplicate directory for named ancestry", code: errno, path: path)
+        }
+        defer { _ = Darwin.close(current) }
+
+        var validSuffix: [NamedAncestryEdge] = []
+        for edge in edges.reversed() {
+            let currentStatus = try directoryStatus(current, path: path)
+            guard Identity(currentStatus) == edge.childIdentity else { break }
+
+            let parent = retryingEINTR { openat(current, "..", directoryOpenFlags) }
+            guard parent >= 0 else { throw openError(code: errno, path: path) }
+            var transfersParent = false
+            defer { if transfersParent == false { _ = Darwin.close(parent) } }
+
+            let parentStatus = try directoryStatus(parent, path: path)
+            guard Identity(parentStatus) == edge.parentIdentity else { break }
+
+            var namedStatus = stat()
+            let inspected = edge.childName.value.withCString { pointer in
+                retryingEINTR { fstatat(parent, pointer, &namedStatus, AT_SYMLINK_NOFOLLOW) }
+            }
+            if inspected != 0 {
+                if errno == ENOENT { break }
+                throw posixError(
+                    operation: "revalidate named directory ancestry",
+                    code: errno,
+                    path: edge.diagnosticPath
+                )
+            }
+            guard namedStatus.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR),
+                  Identity(namedStatus) == edge.childIdentity,
+                  try entryNameSemantics(parent: parent, path: path) == edge.parentSemantics else {
+                break
+            }
+
+            validSuffix.append(edge)
+            _ = Darwin.close(current)
+            current = parent
+            transfersParent = true
+        }
+        return Array(validSuffix.reversed())
     }
 
     private static func entryNameRelationship(

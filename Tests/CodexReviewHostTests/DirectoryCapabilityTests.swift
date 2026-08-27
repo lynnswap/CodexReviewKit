@@ -159,6 +159,78 @@ struct DirectoryCapabilityTests {
         #expect(try grandchildLocation.relationship(to: childLocation) == .descendant)
     }
 
+    @Test func resolvedLocationsCompareExistingAndPendingSiblingsByNamedAncestry() throws {
+        let fixture = try makePrivateTemporaryDirectory()
+        defer { removeFixture(fixture) }
+        let requirements = DirectoryCapability.Requirements.trustedAnchor(ownerUserID: geteuid())
+        let existingURL = fixture.appendingPathComponent("Existing", isDirectory: true)
+        try createDirectory(existingURL, permissions: 0o700)
+
+        let existing = try DirectoryCapability.resolveLocation(
+            at: existingURL,
+            requirements: requirements
+        )
+        defer { try? existing.close() }
+        let pending = try DirectoryCapability.resolveLocation(
+            at: fixture.appendingPathComponent("Pending", isDirectory: true),
+            requirements: requirements
+        )
+        defer { try? pending.close() }
+
+        #expect(try existing.relationship(to: pending) == .disjoint)
+        #expect(try pending.relationship(to: existing) == .disjoint)
+
+        let sensitivity = try directoryCaseSensitivity(at: fixture)
+        let spelling = try DirectoryCapability.resolveLocation(
+            at: fixture.appendingPathComponent("existing", isDirectory: true),
+            requirements: requirements
+        )
+        defer { try? spelling.close() }
+        let expectedSpellingRelationship: DirectoryCapability.Relationship = switch sensitivity {
+        case true: .disjoint
+        case false: .same
+        case nil: .indeterminate
+        }
+        #expect(try existing.relationship(to: spelling) == expectedSpellingRelationship)
+    }
+
+    @Test func resolvedNamedAncestryFailsClosedAfterEdgeReplacement() throws {
+        let cases: [(String, (URL) throws -> Void)] = [
+            ("file", { try Data().write(to: $0) }),
+            ("directory", { try createDirectory($0, permissions: 0o700) }),
+            ("symlink", { url in
+                guard symlink("missing-target", url.path) == 0 else {
+                    throw POSIXError(.init(rawValue: errno) ?? .EIO)
+                }
+            }),
+        ]
+
+        for (_, createReplacement) in cases {
+            let fixture = try makePrivateTemporaryDirectory()
+            defer { removeFixture(fixture) }
+            let requirements = DirectoryCapability.Requirements.trustedAnchor(ownerUserID: geteuid())
+            let existingURL = fixture.appendingPathComponent("Existing", isDirectory: true)
+            let movedURL = fixture.appendingPathComponent("Moved", isDirectory: true)
+            try createDirectory(existingURL, permissions: 0o700)
+            let existing = try DirectoryCapability.resolveLocation(
+                at: existingURL,
+                requirements: requirements
+            )
+            defer { try? existing.close() }
+            let pending = try DirectoryCapability.resolveLocation(
+                at: fixture.appendingPathComponent("Pending", isDirectory: true),
+                requirements: requirements
+            )
+            defer { try? pending.close() }
+            #expect(try existing.relationship(to: pending) == .disjoint)
+
+            try FileManager.default.moveItem(at: existingURL, to: movedURL)
+            try createReplacement(existingURL)
+            #expect(try existing.relationship(to: pending) == .indeterminate)
+            #expect(try pending.relationship(to: existing) == .indeterminate)
+        }
+    }
+
     @Test func partiallyResolvedLocationsFailClosedAfterNamespaceMutation() throws {
         let fixture = try makePrivateTemporaryDirectory()
         defer { removeFixture(fixture) }
@@ -340,6 +412,23 @@ struct DirectoryCapabilityTests {
         )
         defer { try? dataUsersLocation.close() }
         #expect(try usersLocation.relationship(to: dataUsersLocation) == .same)
+
+        let missingName = ".codex-location-\(UUID().uuidString)"
+        let pendingUser = try DirectoryCapability.resolveLocation(
+            at: URL(fileURLWithPath: "/Users/\(missingName)", isDirectory: true),
+            requirements: .trustedAnchor(ownerUserID: geteuid())
+        )
+        defer { try? pendingUser.close() }
+        let currentUser = try DirectoryCapability.resolveLocation(
+            at: URL(
+                fileURLWithPath: "/System/Volumes/Data/Users/\(NSUserName())",
+                isDirectory: true
+            ),
+            requirements: .trustedAnchor(ownerUserID: geteuid())
+        )
+        defer { try? currentUser.close() }
+        #expect(try pendingUser.relationship(to: currentUser) == .disjoint)
+        #expect(try currentUser.relationship(to: pendingUser) == .disjoint)
     }
 
     @Test func createReopensAndExistingOrCreatePreservesIdentity() throws {
