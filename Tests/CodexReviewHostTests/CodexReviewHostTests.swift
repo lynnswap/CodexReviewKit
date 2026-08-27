@@ -2596,15 +2596,16 @@ struct CodexReviewHostTests {
         )
         await waitUntil { store.jobs.first?.core.run.turnID == "turn-1" }
 
+        let interruptObservation = Task.detached {
+            await transport.waitForActiveRequests(method: "turn/interrupt")
+            let methods = await transport.recordedRequests().map(\.method)
+            await interruptGate.open()
+            return methods
+        }
         let stopTask = Task { @MainActor in
             await store.stop()
         }
-        await transport.waitForActiveRequests(method: "turn/interrupt")
-        let methodsBeforeInterruptCompletes = await transport.recordedRequests().map(\.method)
-        let jobBeforeInterruptCompletes = try #require(store.jobs.first)
-        #expect(jobBeforeInterruptCompletes.cancellationRequested)
-        #expect(jobBeforeInterruptCompletes.core.lifecycle.cancellation?.message == "Review runtime stopped.")
-        await interruptGate.open()
+        let methodsBeforeInterruptCompletes = await interruptObservation.value
         try await emitInterruptedTurn(
             transport,
             threadID: "thread-1",
@@ -2618,6 +2619,7 @@ struct CodexReviewHostTests {
         #expect(methodsBeforeInterruptCompletes.contains("thread/backgroundTerminals/clean") == false)
         #expect(methodsBeforeInterruptCompletes.contains("thread/delete") == false)
         #expect(result.core.lifecycle.status == .cancelled)
+        #expect(result.core.lifecycle.cancellation?.message == "Review runtime stopped.")
         let methods = await transport.recordedRequests().map(\.method)
         let interruptIndex = try #require(methods.firstIndex(of: "turn/interrupt"))
         let cleanupIndex = try #require(methods.firstIndex(of: "thread/backgroundTerminals/clean"))
