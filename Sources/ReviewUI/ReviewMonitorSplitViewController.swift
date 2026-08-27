@@ -655,6 +655,14 @@ extension ReviewMonitorSplitViewController {
         addAccountToolbarItem?.menuTitleForTesting
     }
 
+    var addAccountProviderMenuTitlesForTesting: [String] {
+        addAccountToolbarItem?.providerMenuTitlesForTesting ?? []
+    }
+
+    var addAccountAPIKeyProviderIsEnabledForTesting: Bool {
+        addAccountToolbarItem?.apiKeyProviderIsEnabledForTesting == true
+    }
+
     func waitForAddAccountToolbarItemModeForTesting(
         _ mode: AddAccountToolbarItemModeForTesting
     ) async {

@@ -1106,6 +1106,8 @@ struct ReviewUITests {
         try await waitForAddAccountToolbarMode(viewController, .add)
 
         #expect(viewController.addAccountToolbarMenuTitleForTesting == "Add Account")
+        #expect(viewController.addAccountProviderMenuTitlesForTesting == ["ChatGPT", "API Key"])
+        #expect(viewController.addAccountAPIKeyProviderIsEnabledForTesting)
 
         store.auth.updatePhase(
             .signingIn(
@@ -1118,6 +1120,34 @@ struct ReviewUITests {
 
         try await waitForAddAccountToolbarMode(viewController, .progress)
         #expect(viewController.addAccountToolbarMenuTitleForTesting == "Cancel Sign-In")
+    }
+
+    @Test func addAccountToolbarDisablesDuplicateAPIKeyProvider() async throws {
+        let store = CodexReviewStore.makePreviewStore()
+        let activeAccount = CodexAccount(email: "first@example.com", planType: "pro")
+        let apiKeyAccount = CodexAccount(
+            accountKey: "api-key",
+            email: "API Key",
+            kind: .apiKey
+        )
+        store.loadForTesting(
+            serverState: .running,
+            authPhase: .signedOut,
+            account: activeAccount,
+            persistedAccounts: [activeAccount, apiKeyAccount],
+            workspaces: []
+        )
+
+        let uiState = ReviewMonitorUIState(auth: store.auth)
+        uiState.sidebarSelection = .account
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        viewController.attach(to: window)
+        try await waitForAddAccountToolbarItemHidden(viewController, false)
+
+        #expect(viewController.addAccountProviderMenuTitlesForTesting == ["ChatGPT", "API Key"])
+        #expect(viewController.addAccountAPIKeyProviderIsEnabledForTesting == false)
     }
 
     @Test func addAccountToolbarItemStaysVisibleDuringAuthenticationOutsideAccountSidebar() async throws {
