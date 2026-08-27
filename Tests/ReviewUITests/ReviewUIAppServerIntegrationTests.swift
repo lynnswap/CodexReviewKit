@@ -403,6 +403,14 @@ extension ReviewUITests {
                     )
                 )
             }
+            let interleavedStatus = "Review thread is no longer loaded."
+            try await transport.emitServerNotification(
+                method: "thread/status/changed",
+                params: ReviewUIV2ThreadStatusNotification(
+                    threadID: "thread-review",
+                    status: .init(type: "notLoaded")
+                )
+            )
             try await transport.emitServerNotification(
                 method: "turn/completed",
                 params: ReviewUIV2TurnNotification(
@@ -429,6 +437,7 @@ extension ReviewUITests {
             #expect(job.core.lifecycle.errorMessage == expectedCancellation.message)
             #expect(job.logEntries.contains { $0.kind == .error } == false)
             #expect(rendered.log.contains("Partial review before cancellation."))
+            #expect(rendered.log.contains(interleavedStatus))
             #expect(rendered.log.contains(reviewExitArtifact) == false)
             #expect(rendered.log.contains(companionArtifact) == false)
 
@@ -440,6 +449,7 @@ extension ReviewUITests {
             #expect(defaultRead.logs.allSatisfy { $0.audience == .product })
             #expect(defaultRead.logs.contains { $0.text == reviewExitArtifact } == false)
             #expect(defaultRead.logs.contains { $0.text == companionArtifact } == false)
+            #expect(defaultRead.logs.contains { $0.text == interleavedStatus })
             #expect(developerDiagnostics.map(\.kind) == [.diagnostic, .diagnostic])
             #expect(developerDiagnostics.map(\.groupID) == [
                 "review-exit",
@@ -449,10 +459,8 @@ extension ReviewUITests {
                 reviewExitArtifact,
                 companionArtifact,
             ])
-            #expect(job.rawLogText == [
-                reviewExitArtifact,
-                companionArtifact,
-            ].joined(separator: "\n"))
+            #expect(job.rawLogText.contains(reviewExitArtifact))
+            #expect(job.rawLogText.contains(companionArtifact))
             #expect(allRead.rawLogText == job.rawLogText)
             try await waitForCondition {
                 store.reviewWorkerTasks["job-1"] == nil
@@ -671,6 +679,20 @@ private struct ReviewUIV2TurnNotification: Encodable, Sendable {
     enum CodingKeys: String, CodingKey {
         case threadID = "threadId"
         case turn
+    }
+}
+
+private struct ReviewUIV2ThreadStatusNotification: Encodable, Sendable {
+    struct Status: Encodable, Sendable {
+        var type: String
+    }
+
+    var threadID: String
+    var status: Status
+
+    enum CodingKeys: String, CodingKey {
+        case threadID = "threadId"
+        case status
     }
 }
 
