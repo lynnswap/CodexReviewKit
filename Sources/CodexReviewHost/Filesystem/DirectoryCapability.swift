@@ -72,11 +72,6 @@ package final class DirectoryCapability: Sendable {
     package enum Acquisition: Equatable, Sendable { case existing, existingOrCreate, new }
     package enum Relationship: Equatable, Sendable { case same, ancestor, descendant, disjoint }
 
-    private enum DestinationIdentity: Equatable {
-        case missing
-        case regular(Identity)
-    }
-
     private struct TemporaryFile {
         let name: Name
         let identity: Identity
@@ -154,6 +149,14 @@ package final class DirectoryCapability: Sendable {
         return try withBorrowedDescriptor { parent in
             try Self.validateOwned(parent, capability: self)
             let path = url.appendingPathComponent(name.value, isDirectory: false).path
+            guard let inspectedStatus = try Self.fileStatus(
+                atParent: parent,
+                named: name,
+                path: path
+            ) else {
+                return nil
+            }
+            try Self.validateRegularFile(inspectedStatus, path: path)
             let descriptor = name.value.withCString { pointer in
                 Self.retryingEINTR { openat(parent, pointer, Self.regularFileReadFlags) }
             }
@@ -166,6 +169,11 @@ package final class DirectoryCapability: Sendable {
 
             let openedStatus = try Self.fileStatus(descriptor, path: path)
             try Self.validateRegularFile(openedStatus, path: path)
+            guard Identity(openedStatus) == Identity(inspectedStatus) else {
+                throw DirectoryCapabilityError.policyViolation(
+                    "The regular file changed identity before opening at \(path)."
+                )
+            }
             let contents = try Self.readContents(
                 descriptor,
                 maximumByteCount: maximumByteCount,
@@ -196,7 +204,7 @@ package final class DirectoryCapability: Sendable {
             let destinationPath = url.appendingPathComponent(
                 name.value, isDirectory: false
             ).path
-            let destinationIdentity = try Self.destinationIdentity(
+            try Self.validateReplacementDestination(
                 parent: parent,
                 name: name,
                 path: destinationPath
@@ -219,8 +227,13 @@ package final class DirectoryCapability: Sendable {
                 guard closeResult == 0 else {
                     throw Self.posixError(operation: "close temporary file", code: errno, path: temporaryPath)
                 }
-                try Self.revalidateDestination(
-                    destinationIdentity,
+                try Self.validateTemporaryFile(
+                    parent: parent,
+                    name: temporary.name,
+                    identity: temporary.identity,
+                    path: temporaryPath
+                )
+                try Self.validateReplacementDestination(
                     parent: parent,
                     name: name,
                     path: destinationPath
@@ -364,6 +377,20 @@ package final class DirectoryCapability: Sendable {
         return status
     }
 
+    private static func fileStatus(
+        atParent parent: Int32,
+        named name: Name,
+        path: String
+    ) throws -> stat? {
+        var status = stat()
+        let inspected = name.value.withCString { pointer in
+            retryingEINTR { fstatat(parent, pointer, &status, AT_SYMLINK_NOFOLLOW) }
+        }
+        if inspected == 0 { return status }
+        if errno == ENOENT { return nil }
+        throw posixError(operation: "inspect regular file entry", code: errno, path: path)
+    }
+
     private static func readContents(
         _ descriptor: Int32,
         maximumByteCount: Int,
@@ -402,33 +429,28 @@ package final class DirectoryCapability: Sendable {
         return contents
     }
 
-    private static func destinationIdentity(
-        parent: Int32,
-        name: Name,
-        path: String
-    ) throws -> DestinationIdentity {
-        var status = stat()
-        let inspected = name.value.withCString { pointer in
-            retryingEINTR { fstatat(parent, pointer, &status, AT_SYMLINK_NOFOLLOW) }
-        }
-        if inspected == 0 {
-            try validateRegularFile(status, path: path)
-            return .regular(Identity(status))
-        }
-        if errno == ENOENT { return .missing }
-        throw posixError(operation: "inspect replacement destination", code: errno, path: path)
-    }
-
-    private static func revalidateDestination(
-        _ expected: DestinationIdentity,
+    private static func validateReplacementDestination(
         parent: Int32,
         name: Name,
         path: String
     ) throws {
-        let current = try destinationIdentity(parent: parent, name: name, path: path)
-        guard current == expected else {
+        guard let status = try fileStatus(atParent: parent, named: name, path: path) else {
+            return
+        }
+        try validateRegularFile(status, path: path)
+    }
+
+    private static func validateTemporaryFile(
+        parent: Int32,
+        name: Name,
+        identity: Identity,
+        path: String
+    ) throws {
+        guard let status = try fileStatus(atParent: parent, named: name, path: path),
+              Identity(status) == identity,
+              status.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) else {
             throw DirectoryCapabilityError.policyViolation(
-                "The replacement destination changed identity at \(path)."
+                "The temporary file changed identity before publication at \(path)."
             )
         }
     }
@@ -451,9 +473,11 @@ package final class DirectoryCapability: Sendable {
             }
             var needsClose = true
             defer { if needsClose { _ = Darwin.close(descriptor) } }
-            let status = try fileStatus(descriptor, path: path)
-            let identity = Identity(status)
+            var inspectedIdentity: Identity?
             do {
+                let status = try fileStatus(descriptor, path: path)
+                let identity = Identity(status)
+                inspectedIdentity = identity
                 try validateRegularFile(status, path: path)
                 let changedMode = retryingEINTR { fchmod(descriptor, mode_t(0o600)) }
                 guard changedMode == 0 else {
@@ -466,14 +490,23 @@ package final class DirectoryCapability: Sendable {
                         "The temporary file changed identity or permissions at \(path)."
                     )
                 }
+                needsClose = false
+                return TemporaryFile(name: name, identity: identity, descriptor: descriptor)
             } catch {
                 _ = Darwin.close(descriptor)
                 needsClose = false
-                try rollbackTemporaryFile(parent: parent, name: name, identity: identity, path: path)
+                if let inspectedIdentity {
+                    try rollbackTemporaryFile(
+                        parent: parent,
+                        name: name,
+                        identity: inspectedIdentity,
+                        path: path
+                    )
+                } else {
+                    try rollbackUninspectedTemporaryFile(parent: parent, name: name, path: path)
+                }
                 throw error
             }
-            needsClose = false
-            return TemporaryFile(name: name, identity: identity, descriptor: descriptor)
         }
         throw DirectoryCapabilityError.retryable(
             DirectoryPOSIXFailure(
@@ -558,12 +591,9 @@ package final class DirectoryCapability: Sendable {
         path: String,
         missingIsNoOp: Bool
     ) throws {
-        let status: stat
-        do {
-            status = try removalEntryStatus(parent: parent, name: name, path: path)
-        } catch DirectoryCapabilityError.userActionRequired(let failure)
-            where missingIsNoOp && failure.code == ENOENT {
-            return
+        guard let status = try fileStatus(atParent: parent, named: name, path: path) else {
+            if missingIsNoOp { return }
+            throw posixError(operation: "inspect removal entry", code: ENOENT, path: path)
         }
         try validateRemovalEntry(
             status,
@@ -647,7 +677,13 @@ package final class DirectoryCapability: Sendable {
             guard let name = try removalEntryName(entry, directoryPath: path) else { continue }
             let entryPath = URL(fileURLWithPath: path, isDirectory: true)
                 .appendingPathComponent(name.value, isDirectory: false).path
-            let status = try removalEntryStatus(parent: parent, name: name, path: entryPath)
+            guard let status = try fileStatus(
+                atParent: parent,
+                named: name,
+                path: entryPath
+            ) else {
+                throw posixError(operation: "inspect removal entry", code: ENOENT, path: entryPath)
+            }
             let identity = Identity(status)
             let type = status.st_mode & mode_t(S_IFMT)
             guard identity.deviceID == expectedDeviceID else {
@@ -713,21 +749,6 @@ package final class DirectoryCapability: Sendable {
         }
     }
 
-    private static func removalEntryStatus(
-        parent: Int32,
-        name: Name,
-        path: String
-    ) throws -> stat {
-        var status = stat()
-        let inspected = name.value.withCString { pointer in
-            retryingEINTR { fstatat(parent, pointer, &status, AT_SYMLINK_NOFOLLOW) }
-        }
-        guard inspected == 0 else {
-            throw posixError(operation: "inspect removal entry", code: errno, path: path)
-        }
-        return status
-    }
-
     private static func revalidateRemovalEntry(
         parent: Int32,
         name: Name,
@@ -736,7 +757,9 @@ package final class DirectoryCapability: Sendable {
         expectedType: mode_t,
         path: String
     ) throws {
-        let status = try removalEntryStatus(parent: parent, name: name, path: path)
+        guard let status = try fileStatus(atParent: parent, named: name, path: path) else {
+            throw posixError(operation: "inspect removal entry", code: ENOENT, path: path)
+        }
         try validateRemovalEntry(
             status,
             expectedIdentity: expectedIdentity,
@@ -760,6 +783,21 @@ package final class DirectoryCapability: Sendable {
             throw DirectoryCapabilityError.policyViolation(
                 "The recursive removal entry changed identity, device, or type at \(path)."
             )
+        }
+    }
+
+    private static func rollbackUninspectedTemporaryFile(
+        parent: Int32,
+        name: Name,
+        path: String
+    ) throws {
+        // openat(O_EXCL) created this exact name under the validated parent. The RecoveryV1
+        // threat boundary excludes a malicious same-UID replacement before this cleanup.
+        let removed = name.value.withCString { pointer in
+            retryingEINTR { unlinkat(parent, pointer, 0) }
+        }
+        guard removed == 0 else {
+            throw posixError(operation: "remove uninspected temporary file", code: errno, path: path)
         }
     }
 
