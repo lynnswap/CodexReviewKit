@@ -37,6 +37,7 @@ extension CodexReviewStore {
     package func recordCancellationRequest(
         _ cancellation: ReviewCancellation,
         rejectionDisposition: ReviewCancellationRequestReceipt.RejectionDisposition = .reportFailure,
+        workAdmission: ReviewStoreWorkRegistry.Admission? = nil,
         for job: CodexReviewJob
     ) -> ReviewCancellationRequestReceipt? {
         guard job.isTerminal == false else {
@@ -53,7 +54,8 @@ extension CodexReviewStore {
         let receipt = ReviewCancellationRequestReceipt(
             id: .init(jobID: job.id, ordinal: nextCancellationRequestOrdinal),
             cancellation: cancellation,
-            rejectionDisposition: rejectionDisposition
+            rejectionDisposition: rejectionDisposition,
+            registeredWorkAdmission: workAdmission
         )
         job.pendingCancellationRequest = receipt
         job.core.lifecycle.cancellation = cancellation
@@ -152,13 +154,17 @@ extension CodexReviewStore {
         )
         try await performThrowingRegisteredStoreWork(
             kind: .reviewMutation("cancel-all")
-        ) { @MainActor store in
-            try await store.performCancelAllRunningJobs(cancellation: cancellation)
+        ) { @MainActor store, workAdmission in
+            try await store.performCancelAllRunningJobs(
+                cancellation: cancellation,
+                workAdmission: workAdmission
+            )
         }
     }
 
     private func performCancelAllRunningJobs(
-        cancellation: ReviewCancellation
+        cancellation: ReviewCancellation,
+        workAdmission: ReviewStoreWorkRegistry.Admission
     ) async throws {
         let cancellableJobs = orderedJobs.filter { $0.isTerminal == false }
         var firstError: (any Error)?
@@ -166,7 +172,8 @@ extension CodexReviewStore {
             do {
                 _ = try await performCancelReview(
                     jobID: job.id,
-                    cancellation: cancellation
+                    cancellation: cancellation,
+                    workAdmission: workAdmission
                 )
             } catch {
                 if firstError == nil {

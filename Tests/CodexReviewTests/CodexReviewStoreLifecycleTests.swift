@@ -6,6 +6,36 @@ import CodexReviewTesting
 @Suite("store runtime lifecycle", .serialized)
 @MainActor
 struct CodexReviewStoreLifecycleTests {
+    @Test func reopenedReviewAdmissionCannotReacceptCancelledCaller() async throws {
+        let backend = FakeCodexReviewBackend()
+        let startGate = AsyncGate()
+        await backend.holdStartReviewIgnoringCancellation(with: startGate)
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+        let review = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        try await backend.waitForStartReview(timeout: .seconds(2))
+
+        store.storeWorkRegistry.closeReviewAdmission()
+        #expect(store.storeWorkRegistry.register(.reviewMutation("late")) == nil)
+        #expect(store.storeWorkRegistry.register(.settingsMutation("settings")) != nil)
+        store.storeWorkRegistry.openReviewAdmission()
+        review.cancel()
+
+        await startGate.open()
+        await backend.yield(.completed(summary: "Succeeded.", result: "No findings."))
+        let result = try await review.value
+        #expect(result.core.lifecycle.status == .succeeded)
+        #expect(await backend.recordedCommands().contains {
+            if case .interruptReviewAdmission = $0 { true } else { false }
+        } == false)
+    }
+
     @Test func stopInvalidatesHeldRuntimePreparationAndClosesStaleHandleOnce() async throws {
         let preparationGate = AsyncGate()
         let mcpOwner = TestingMCPServerLifecycleOwner()
@@ -921,7 +951,7 @@ struct CodexReviewStoreLifecycleTests {
         let first = Task { @MainActor in
             try? await store.performThrowingRegisteredStoreWork(
                 kind: .testing("first work")
-            ) { _ in
+            ) { _, _ in
                 await firstEntered.open()
                 await firstRelease.waitIgnoringCancellation()
                 throw StoreWorkTestFailure.first
@@ -931,7 +961,7 @@ struct CodexReviewStoreLifecycleTests {
         let second = Task { @MainActor in
             try? await store.performThrowingRegisteredStoreWork(
                 kind: .testing("second work")
-            ) { _ in
+            ) { _, _ in
                 await secondEntered.open()
                 await secondRelease.waitIgnoringCancellation()
                 throw StoreWorkTestFailure.second
@@ -1136,7 +1166,7 @@ struct CodexReviewStoreLifecycleTests {
         let throwingTask = Task { @MainActor in
             try await store.performThrowingRegisteredStoreWork(
                 kind: .testing("individually cancelled throwing work")
-            ) { _ in
+            ) { _, _ in
                 throwingOperationRan = true
             }
         }
