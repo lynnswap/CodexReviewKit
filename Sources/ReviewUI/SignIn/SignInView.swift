@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import CodexReview
 
@@ -35,6 +36,23 @@ struct SignInView: View {
             .disabled(store.canPerformPrimaryAuthenticationAction == false)
             .animation(.default,value:store.canPerformPrimaryAuthenticationAction)
             .accessibilityIdentifier("review-monitor.sign-in-button")
+
+            if store.auth.isAuthenticating == false {
+                Button("Sign in with API Key") {
+                    Task { @MainActor in
+                        guard let apiKey = await ReviewMonitorAPIKeyPrompt.request(
+                            window: NSApp.keyWindow ?? NSApp.mainWindow,
+                            submitTitle: "Sign In"
+                        ) else {
+                            return
+                        }
+                        await store.performPrimaryAuthenticationAction(apiKey: apiKey)
+                    }
+                }
+                .buttonStyle(.link)
+                .disabled(store.canPerformPrimaryAuthenticationAction == false)
+                .accessibilityIdentifier("review-monitor.api-key-sign-in-button")
+            }
             
         } description: {
             if let descriptionText {
