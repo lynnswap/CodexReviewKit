@@ -180,6 +180,41 @@ struct DirectoryCapabilityTests {
         #expect(try appeared.relationship(to: pending) == .indeterminate)
     }
 
+    @Test func sameAnchorPendingRelationshipsFailClosedWhenFirstEntryAppears() throws {
+        let fixture = try makePrivateTemporaryDirectory()
+        defer { removeFixture(fixture) }
+        let requirements = DirectoryCapability.Requirements.trustedAnchor(ownerUserID: geteuid())
+        let cases: [(String, (URL) throws -> Void)] = [
+            ("file", { try Data().write(to: $0) }),
+            ("directory", { try createDirectory($0, permissions: 0o700) }),
+            ("symlink", { url in
+                guard symlink("missing-target", url.path) == 0 else {
+                    throw POSIXError(.init(rawValue: errno) ?? .EIO)
+                }
+            }),
+        ]
+
+        for (name, createEntry) in cases {
+            let anchorURL = fixture.appendingPathComponent(name, isDirectory: true)
+            try createDirectory(anchorURL, permissions: 0o700)
+            let appearedURL = anchorURL.appendingPathComponent("appeared", isDirectory: true)
+            let pending = try DirectoryCapability.resolveLocation(
+                at: appearedURL,
+                requirements: requirements
+            )
+            defer { try? pending.close() }
+            let descendant = try DirectoryCapability.resolveLocation(
+                at: appearedURL.appendingPathComponent("child", isDirectory: true),
+                requirements: requirements
+            )
+            defer { try? descendant.close() }
+            try createEntry(appearedURL)
+
+            #expect(try pending.relationship(to: descendant) == .indeterminate)
+            #expect(try descendant.relationship(to: pending) == .indeterminate)
+        }
+    }
+
     @Test func resolvedEntryNamesUseDescriptorScopedCaseAndUnicodeSemantics() throws {
         let fixture = try makePrivateTemporaryDirectory()
         defer { removeFixture(fixture) }

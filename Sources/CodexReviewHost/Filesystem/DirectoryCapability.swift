@@ -111,6 +111,15 @@ package final class DirectoryCapability: Sendable {
         ) throws -> Relationship {
             try anchor.withBorrowedDescriptor { descriptor in
                 try DirectoryCapability.validateOwned(descriptor, capability: anchor)
+                if let lhs = remainingNames.first,
+                   let rhs = other.remainingNames.first,
+                   try DirectoryCapability.entryExists(
+                       lhs, parent: descriptor, path: anchor.url.path
+                   ) || DirectoryCapability.entryExists(
+                       rhs, parent: descriptor, path: anchor.url.path
+                   ) {
+                    return .indeterminate
+                }
                 for (lhs, rhs) in zip(remainingNames, other.remainingNames) {
                     switch try DirectoryCapability.entryNameRelationship(
                         lhs, rhs, parent: descriptor, path: anchor.url.path
@@ -1484,13 +1493,31 @@ package final class DirectoryCapability: Sendable {
             if code == 0 { return .indeterminate }
             throw posixError(operation: "read directory case sensitivity", code: code, path: path)
         }
+        if caseSensitive == 1 { return .distinct }
         guard let lhsASCII = asciiCaseFolded(lhs.value),
               let rhsASCII = asciiCaseFolded(rhs.value) else {
             return .indeterminate
         }
-        if caseSensitive == 1 { return .distinct }
         guard caseSensitive == 0 else { return .indeterminate }
         return lhsASCII == rhsASCII ? .same : .distinct
+    }
+
+    private static func entryExists(
+        _ name: Name,
+        parent: Int32,
+        path: String
+    ) throws -> Bool {
+        var status = stat()
+        let inspected = name.value.withCString { pointer in
+            retryingEINTR { fstatat(parent, pointer, &status, AT_SYMLINK_NOFOLLOW) }
+        }
+        if inspected == 0 { return true }
+        if errno == ENOENT { return false }
+        throw posixError(
+            operation: "inspect unresolved directory entry",
+            code: errno,
+            path: URL(fileURLWithPath: path).appendingPathComponent(name.value).path
+        )
     }
 
     private static func asciiCaseFolded(_ value: String) -> [UInt8]? {
