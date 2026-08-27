@@ -666,15 +666,20 @@ package final class DirectoryCapability: Sendable {
         guard parent >= 0 else {
             throw posixError(operation: "read directory descriptor", code: errno, path: path)
         }
+        var names: [Name] = []
         while true {
             errno = 0
             guard let entry = readdir(stream) else {
                 guard errno == 0 else {
                     throw posixError(operation: "read directory entries", code: errno, path: path)
                 }
-                return
+                break
             }
-            guard let name = try removalEntryName(entry, directoryPath: path) else { continue }
+            if let name = try removalEntryName(entry, directoryPath: path) {
+                names.append(name)
+            }
+        }
+        for name in names {
             let entryPath = URL(fileURLWithPath: path, isDirectory: true)
                 .appendingPathComponent(name.value, isDirectory: false).path
             guard let status = try fileStatus(
