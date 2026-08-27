@@ -504,6 +504,75 @@ struct CodexReviewHostTests {
         await store.stop()
     }
 
+    @Test func liveCleanupConnectionFailureSchedulesExactRuntimeSuccessor() async throws {
+        let transport = FakeJSONRPCTransport()
+        let replacementTransport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(transport)
+        try await enqueueLiveRouteReviewStartResponses(
+            transport,
+            threadID: "route-thread",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1"
+        )
+        try await enqueueRuntimeStartResponses(replacementTransport)
+        try await enqueueLiveRouteReviewStartResponses(
+            replacementTransport,
+            threadID: "replacement-thread",
+            turnID: "replacement-turn",
+            reviewThreadID: "replacement-review-thread"
+        )
+        try await enqueueReviewCleanupResponses(replacementTransport)
+        let replacementFactoryStarted = AsyncGate()
+        let replacementFactoryGate = AsyncGate()
+        var transports = [transport, replacementTransport]
+        var factoryCallCount = 0
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transportFactory: { _ in
+                factoryCallCount += 1
+                if factoryCallCount == 2 {
+                    await replacementFactoryStarted.open()
+                    await replacementFactoryGate.waitIgnoringCancellation()
+                }
+                return transports.removeFirst()
+            }
+        )
+        await store.start()
+        let attempt = try await store.backend.startReview(
+            makeLiveRouteReviewStartRequest(jobID: "job-cleanup-connection"),
+            admission: ReviewStartAdmission()
+        )
+        await transport.close()
+
+        do {
+            try await store.backend.cleanupReview(attempt.run)
+            Issue.record("Closed-transport cleanup unexpectedly succeeded.")
+        } catch let failure as ReviewRuntimeCloseFailure {
+            guard case .connection = failure else {
+                Issue.record("Closed-transport cleanup lost its connection classification.")
+                return
+            }
+        }
+        await replacementFactoryStarted.wait()
+        guard case .acquiring(_, _, let replacementTask) = store.runtimeState else {
+            Issue.record("Expected connection cleanup to schedule one exact successor.")
+            return
+        }
+
+        #expect(factoryCallCount == 2)
+        await replacementFactoryGate.open()
+        await replacementTask.value
+        #expect(store.serverState == .running)
+
+        let replacementAttempt = try await store.backend.startReview(
+            makeLiveRouteReviewStartRequest(jobID: "job-after-cleanup-connection"),
+            admission: ReviewStartAdmission()
+        )
+        try await store.backend.cleanupReview(replacementAttempt.run)
+        await store.stop()
+    }
+
     @Test func liveCompatibilityOutcomeUnknownStartDoesNotRetainLowerCleanupRoute() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueRuntimeStartResponses(transport)

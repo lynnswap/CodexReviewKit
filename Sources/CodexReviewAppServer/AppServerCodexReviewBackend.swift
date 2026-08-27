@@ -1039,11 +1039,13 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             }
         }
         var failureMessages: [String] = []
+        var didLoseConnection = false
         do {
             let _: EmptyResponse = try await client.send(AppServerAPI.Thread.BackgroundTerminals.Clean.Request(
                 params: .init(threadID: run.threadID)
             ))
         } catch {
+            didLoseConnection = Self.connectionFailure(for: error) != nil
             failureMessages.append(
                 "thread/backgroundTerminals/clean for \(run.threadID): \(error.localizedDescription)"
             )
@@ -1053,6 +1055,8 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                 params: .init(threadID: run.threadID)
             ))
         } catch {
+            didLoseConnection = didLoseConnection
+                || Self.connectionFailure(for: error) != nil
             failureMessages.append(
                 "thread/unsubscribe for \(run.threadID): \(error.localizedDescription)"
             )
@@ -1063,6 +1067,8 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                     params: .init(threadID: threadID)
                 ))
             } catch {
+                didLoseConnection = didLoseConnection
+                    || Self.connectionFailure(for: error) != nil
                 failureMessages.append(
                     "thread/delete for \(threadID): \(error.localizedDescription)"
                 )
@@ -1073,7 +1079,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         }
         reviewThreadIDsForCleanupByThreadID.removeValue(forKey: run.threadID)
         if failureMessages.isEmpty == false {
-            throw ReviewRuntimeCloseFailure.cleanup(failureMessages.joined(separator: "; "))
+            let message = failureMessages.joined(separator: "; ")
+            throw didLoseConnection
+                ? ReviewRuntimeCloseFailure.connection(message)
+                : ReviewRuntimeCloseFailure.cleanup(message)
         }
     }
 
