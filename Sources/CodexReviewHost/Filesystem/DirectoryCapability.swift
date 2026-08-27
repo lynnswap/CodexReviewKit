@@ -72,11 +72,6 @@ package final class DirectoryCapability: Sendable {
     package enum Acquisition: Equatable, Sendable { case existing, existingOrCreate, new }
     package enum Relationship: Equatable, Sendable { case same, ancestor, descendant, disjoint }
 
-    private enum DestinationIdentity: Equatable {
-        case missing
-        case regular(Identity)
-    }
-
     private struct TemporaryFile {
         let name: Name
         let identity: Identity
@@ -209,7 +204,7 @@ package final class DirectoryCapability: Sendable {
             let destinationPath = url.appendingPathComponent(
                 name.value, isDirectory: false
             ).path
-            let destinationIdentity = try Self.destinationIdentity(
+            try Self.validateReplacementDestination(
                 parent: parent,
                 name: name,
                 path: destinationPath
@@ -232,8 +227,13 @@ package final class DirectoryCapability: Sendable {
                 guard closeResult == 0 else {
                     throw Self.posixError(operation: "close temporary file", code: errno, path: temporaryPath)
                 }
-                try Self.revalidateDestination(
-                    destinationIdentity,
+                try Self.validateTemporaryFile(
+                    parent: parent,
+                    name: temporary.name,
+                    identity: temporary.identity,
+                    path: temporaryPath
+                )
+                try Self.validateReplacementDestination(
                     parent: parent,
                     name: name,
                     path: destinationPath
@@ -404,28 +404,28 @@ package final class DirectoryCapability: Sendable {
         return contents
     }
 
-    private static func destinationIdentity(
-        parent: Int32,
-        name: Name,
-        path: String
-    ) throws -> DestinationIdentity {
-        guard let status = try fileStatus(atParent: parent, named: name, path: path) else {
-            return .missing
-        }
-        try validateRegularFile(status, path: path)
-        return .regular(Identity(status))
-    }
-
-    private static func revalidateDestination(
-        _ expected: DestinationIdentity,
+    private static func validateReplacementDestination(
         parent: Int32,
         name: Name,
         path: String
     ) throws {
-        let current = try destinationIdentity(parent: parent, name: name, path: path)
-        guard current == expected else {
+        guard let status = try fileStatus(atParent: parent, named: name, path: path) else {
+            return
+        }
+        try validateRegularFile(status, path: path)
+    }
+
+    private static func validateTemporaryFile(
+        parent: Int32,
+        name: Name,
+        identity: Identity,
+        path: String
+    ) throws {
+        guard let status = try fileStatus(atParent: parent, named: name, path: path),
+              Identity(status) == identity,
+              status.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) else {
             throw DirectoryCapabilityError.policyViolation(
-                "The replacement destination changed identity at \(path)."
+                "The temporary file changed identity before publication at \(path)."
             )
         }
     }
