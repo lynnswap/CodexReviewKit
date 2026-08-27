@@ -7358,6 +7358,8 @@ struct AppServerClientTests {
         #expect(try await result.value.core.lifecycle.status == .cancelled)
 
         await startGate.open()
+        try await backend.waitForInterruptReview(timeout: .seconds(2))
+        await backend.yield(.cancelled("Review runtime stopped."))
         #expect(await store.drainRuntimeStopDetachedReviewWorkers(timeout: .seconds(2)))
         await backend.finishEventMailboxes()
         await store.cancelAndDrainReviewWorkersForTesting()
