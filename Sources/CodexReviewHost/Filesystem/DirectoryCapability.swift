@@ -409,16 +409,11 @@ package final class DirectoryCapability: Sendable {
         name: Name,
         path: String
     ) throws -> DestinationIdentity {
-        var status = stat()
-        let inspected = name.value.withCString { pointer in
-            retryingEINTR { fstatat(parent, pointer, &status, AT_SYMLINK_NOFOLLOW) }
+        guard let status = try fileStatus(atParent: parent, named: name, path: path) else {
+            return .missing
         }
-        if inspected == 0 {
-            try validateRegularFile(status, path: path)
-            return .regular(Identity(status))
-        }
-        if errno == ENOENT { return .missing }
-        throw posixError(operation: "inspect replacement destination", code: errno, path: path)
+        try validateRegularFile(status, path: path)
+        return .regular(Identity(status))
     }
 
     private static func revalidateDestination(

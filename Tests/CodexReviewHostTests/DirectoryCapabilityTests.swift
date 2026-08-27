@@ -399,8 +399,12 @@ struct DirectoryCapabilityTests {
         #expect(symlink("target", fixture.appendingPathComponent("link").path) == 0)
         try createDirectory(fixture.appendingPathComponent("directory"), permissions: 0o700)
         #expect(mkfifo(fixture.appendingPathComponent("fifo").path, 0o600) == 0)
+        let socketDescriptor = try bindUnixSocket(
+            at: fixture.appendingPathComponent("socket").path
+        )
+        defer { _ = Darwin.close(socketDescriptor) }
 
-        for value in ["link", "directory", "fifo"] {
+        for value in ["link", "directory", "fifo", "socket"] {
             expectDirectoryError(.policyViolation) {
                 try root.replaceFile(
                     named: .init(value),
