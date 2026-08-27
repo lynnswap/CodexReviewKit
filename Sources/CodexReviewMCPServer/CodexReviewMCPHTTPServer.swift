@@ -436,6 +436,7 @@ package actor CodexReviewMCPHTTPServer {
         var lastAccessedAt: Date
         let initialRequestLease: RequestLease
         private(set) var requestLeases: [UUID: RequestLease] = [:]
+        private var requestDrainWaiters: [CheckedContinuation<Void, Never>] = []
         var closeReceipt: CloseReceipt?
 
         init(
@@ -478,7 +479,27 @@ package actor CodexReviewMCPHTTPServer {
             }
             requestLeases.removeValue(forKey: lease.operation.id)
             lastAccessedAt = now
+            if requestLeases.isEmpty {
+                let waiters = requestDrainWaiters
+                requestDrainWaiters.removeAll(keepingCapacity: false)
+                for waiter in waiters {
+                    waiter.resume()
+                }
+            }
             return true
+        }
+
+        func waitUntilRequestsDrain() async {
+            if requestLeases.isEmpty {
+                return
+            }
+            await withCheckedContinuation { continuation in
+                if requestLeases.isEmpty {
+                    continuation.resume()
+                } else {
+                    requestDrainWaiters.append(continuation)
+                }
+            }
         }
 
         func owns(_ lease: RequestLease) -> Bool {
@@ -1734,6 +1755,10 @@ package actor CodexReviewMCPHTTPServer {
 
     package func sessionRequestLeaseCountForTesting(sessionID: String) -> Int? {
         sessions[sessionID]?.requestLeases.count
+    }
+
+    package func waitUntilSessionRequestsDrainForTesting(sessionID: String) async {
+        await sessions[sessionID]?.waitUntilRequestsDrain()
     }
 
     private func closeExpiredSessions(now: Date) async {
