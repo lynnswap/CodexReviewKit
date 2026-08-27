@@ -2219,6 +2219,11 @@ private actor AppServerReviewEventSession {
     }
 
     private struct RequestedCancellationArtifacts {
+        private static let interruptedReviewFallback =
+            "Reviewer failed to output a response."
+        private static let interruptedReviewCompanion =
+            "Review was interrupted. Please re-run /review and wait for it to complete."
+
         enum Phase {
             case reviewExitStarted
             case awaitingCompanionStart
@@ -2238,7 +2243,9 @@ private actor AppServerReviewEventSession {
             guard case .ready = phase,
                   let reviewExitText = reviewExit.completedText,
                   let companion,
-                  let companionText = companion.completedText
+                  let companionText = companion.completedText,
+                  reviewExitText == Self.interruptedReviewFallback,
+                  companionText == Self.interruptedReviewCompanion
             else {
                 return nil
             }
@@ -2793,10 +2800,17 @@ private actor AppServerReviewEventSession {
         }
         requestedCancellationArtifacts = nil
 
-        if case .interrupted = terminal,
-           cancellationRequests.acceptedMessage != nil,
+        // The app-server can complete the outer turn after cancelling the review task.
+        // Match its exact interruption pair so genuine completed review text stays product-visible.
+        if let acceptedCancellationMessage = cancellationRequests.acceptedMessage,
            let developerEvents = artifacts.developerEvents {
-            return (developerEvents, terminal)
+            let resolvedTerminal: ReviewAttemptTerminal
+            if case .completed = terminal {
+                resolvedTerminal = .interrupted(message: acceptedCancellationMessage)
+            } else {
+                resolvedTerminal = terminal
+            }
+            return (developerEvents, resolvedTerminal)
         }
 
         return (artifacts.originalEvents, terminal)
