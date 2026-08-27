@@ -3158,11 +3158,10 @@ private actor AppServerReviewEventSession {
     }
 
     private func emitPrecedingEvents(_ events: [CodexReviewBackendModel.Review.Event]) async {
-        for event in events {
-            if await mailbox.append(event) {
-                noteEmission(event)
-                recordReviewEvent(event)
-            }
+        let acceptedCount = await mailbox.append(contentsOf: events)
+        for event in events.prefix(acceptedCount) {
+            noteEmission(event)
+            recordReviewEvent(event)
         }
     }
 
