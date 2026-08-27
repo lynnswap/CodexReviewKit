@@ -412,6 +412,23 @@ struct DirectoryCapabilityTests {
         )
         defer { try? dataUsersLocation.close() }
         #expect(try usersLocation.relationship(to: dataUsersLocation) == .same)
+
+        let missingName = ".codex-location-\(UUID().uuidString)"
+        let pendingUser = try DirectoryCapability.resolveLocation(
+            at: URL(fileURLWithPath: "/Users/\(missingName)", isDirectory: true),
+            requirements: .trustedAnchor(ownerUserID: geteuid())
+        )
+        defer { try? pendingUser.close() }
+        let currentUser = try DirectoryCapability.resolveLocation(
+            at: URL(
+                fileURLWithPath: "/System/Volumes/Data/Users/\(NSUserName())",
+                isDirectory: true
+            ),
+            requirements: .trustedAnchor(ownerUserID: geteuid())
+        )
+        defer { try? currentUser.close() }
+        #expect(try pendingUser.relationship(to: currentUser) == .disjoint)
+        #expect(try currentUser.relationship(to: pendingUser) == .disjoint)
     }
 
     @Test func createReopensAndExistingOrCreatePreservesIdentity() throws {
