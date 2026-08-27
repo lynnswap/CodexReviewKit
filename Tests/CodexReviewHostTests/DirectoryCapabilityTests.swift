@@ -190,6 +190,18 @@ struct DirectoryCapabilityTests {
                 )
             )
         }
+        let rollbackURL = fixture.appendingPathComponent("rollback", isDirectory: true)
+        expectDirectoryError(.policyViolation) {
+            _ = try root.directory(
+                named: .init("rollback"),
+                acquisition: .new,
+                requirements: .managed(
+                    ownerUserID: geteuid(),
+                    deviceID: root.identity.deviceID &+ 1
+                )
+            )
+        }
+        #expect(FileManager.default.fileExists(atPath: rollbackURL.path) == false)
 
         let childURL = fixture.appendingPathComponent("child", isDirectory: true)
         try addAllowACL(to: childURL)

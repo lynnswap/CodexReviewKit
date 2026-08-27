@@ -30,7 +30,6 @@ package enum DirectoryCapabilityError: Error, Equatable, LocalizedError, Sendabl
 package final class DirectoryCapability: Sendable {
     package struct Name: Hashable, Sendable {
         fileprivate let value: String
-
         package init(_ value: String) throws {
             guard value.isEmpty == false, value != ".", value != "..",
                   value.contains("/") == false, value.utf8.contains(0) == false else {
@@ -45,7 +44,6 @@ package final class DirectoryCapability: Sendable {
     package struct Identity: Hashable, Sendable {
         package let deviceID: UInt64
         package let inode: UInt64
-
         fileprivate init(_ status: stat) {
             deviceID = UInt64(bitPattern: Int64(status.st_dev))
             inode = UInt64(status.st_ino)
@@ -57,38 +55,30 @@ package final class DirectoryCapability: Sendable {
         fileprivate let policy: Policy
         fileprivate let ownerUserID: uid_t
         fileprivate let deviceID: UInt64?
-
         package static func trustedAnchor(ownerUserID: uid_t) -> Self {
             Self(policy: .trustedAnchor, ownerUserID: ownerUserID, deviceID: nil)
         }
-
         package static func managed(ownerUserID: uid_t, deviceID: UInt64) -> Self {
             Self(policy: .managed, ownerUserID: ownerUserID, deviceID: deviceID)
         }
-
         fileprivate var creationMode: mode_t? { policy == .managed ? 0o700 : nil }
     }
-
     package enum Acquisition: Equatable, Sendable { case existing, existingOrCreate, new }
     package enum Relationship: Equatable, Sendable { case same, ancestor, descendant, disjoint }
-
     private struct State: Sendable {
         var descriptor: Int32?
         var closeFailure: DirectoryPOSIXFailure?
     }
-
     package let identity: Identity
     private let requirements: Requirements
     private let url: URL
     private let state: Mutex<State>
-
     private init(descriptor: Int32, identity: Identity, requirements: Requirements, url: URL) {
         self.identity = identity
         self.requirements = requirements
         self.url = url
         state = Mutex(.init(descriptor: descriptor, closeFailure: nil))
     }
-
     deinit { try? close() }
 
     package static func openExisting(
@@ -208,38 +198,47 @@ package final class DirectoryCapability: Sendable {
         path: String
     ) throws -> (descriptor: Int32, identity: Identity) {
         let mode = requirements.creationMode
-        var created = false
+        var createdIdentity: Identity?
         let descriptor: Int32
-        switch acquisition {
-        case .existing:
-            descriptor = try openChild(parent: parent, name: name, path: path)
-        case .new:
-            guard let mode else {
-                throw DirectoryCapabilityError.invalidRequest("Only managed directories can be created.")
-            }
-            _ = try createChild(parent: parent, name: name, mode: mode, allowExisting: false, path: path)
-            created = true
-            descriptor = try openChild(parent: parent, name: name, path: path)
-        case .existingOrCreate:
-            if let opened = try openChildIfPresent(parent: parent, name: name, path: path) {
-                descriptor = opened
-            } else {
+        do {
+            switch acquisition {
+            case .existing:
+                descriptor = try openChild(parent: parent, name: name, path: path)
+            case .new:
                 guard let mode else {
                     throw DirectoryCapabilityError.invalidRequest("Only managed directories can be created.")
                 }
-                created = try createChild(
-                    parent: parent, name: name, mode: mode, allowExisting: true, path: path
-                )
+                createdIdentity = try createChild(
+                    parent: parent, name: name, mode: mode, allowExisting: false, path: path)
                 descriptor = try openChild(parent: parent, name: name, path: path)
+            case .existingOrCreate:
+                if let opened = try openChildIfPresent(parent: parent, name: name, path: path) {
+                    descriptor = opened
+                } else {
+                    guard let mode else {
+                        throw DirectoryCapabilityError.invalidRequest("Only managed directories can be created.")
+                    }
+                    createdIdentity = try createChild(
+                        parent: parent, name: name, mode: mode, allowExisting: true, path: path)
+                    descriptor = try openChild(parent: parent, name: name, path: path)
+                }
             }
+        } catch {
+            if let createdIdentity {
+                try rollbackChild(parent: parent, name: name, identity: createdIdentity, path: path)
+            }
+            throw error
         }
-
         var transfersDescriptor = false
         defer { if transfersDescriptor == false { _ = Darwin.close(descriptor) } }
         var status = try directoryStatus(descriptor, path: path)
         let identity = Identity(status)
         do {
-            if created, let mode {
+            guard createdIdentity == nil || createdIdentity == identity else {
+                throw DirectoryCapabilityError.policyViolation(
+                    "The created directory changed identity before reopening at \(path).")
+            }
+            if createdIdentity != nil, let mode {
                 let result = retryingEINTR { fchmod(descriptor, mode) }
                 guard result == 0 else {
                     throw posixError(operation: "set created directory permissions", code: errno, path: path)
@@ -250,13 +249,14 @@ package final class DirectoryCapability: Sendable {
         } catch {
             _ = Darwin.close(descriptor)
             transfersDescriptor = true
-            if created { try rollbackChild(parent: parent, name: name, identity: identity, path: path) }
+            if let createdIdentity {
+                try rollbackChild(parent: parent, name: name, identity: createdIdentity, path: path)
+            }
             throw error
         }
         transfersDescriptor = true
         return (descriptor, identity)
     }
-
     private static func openChildIfPresent(parent: Int32, name: Name, path: String) throws -> Int32? {
         let result = name.value.withCString { pointer in
             retryingEINTR { openat(parent, pointer, directoryOpenFlags) }
@@ -265,32 +265,39 @@ package final class DirectoryCapability: Sendable {
         if errno == ENOENT { return nil }
         throw openError(code: errno, path: path)
     }
-
     private static func openChild(parent: Int32, name: Name, path: String) throws -> Int32 {
         if let descriptor = try openChildIfPresent(parent: parent, name: name, path: path) {
             return descriptor
         }
         throw posixError(operation: "open directory", code: ENOENT, path: path)
     }
-
     private static func createChild(
         parent: Int32,
         name: Name,
         mode: mode_t,
         allowExisting: Bool,
         path: String
-    ) throws -> Bool {
+    ) throws -> Identity? {
         let result = name.value.withCString { pointer in
             retryingEINTR { mkdirat(parent, pointer, mode) }
         }
-        if result == 0 { return true }
-        if errno == EEXIST, allowExisting { return false }
+        if result == 0 {
+            var status = stat()
+            let inspected = name.value.withCString { pointer in
+                retryingEINTR { fstatat(parent, pointer, &status, AT_SYMLINK_NOFOLLOW) }
+            }
+            guard inspected == 0,
+                  status.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else {
+                throw posixError(operation: "inspect created directory", code: errno, path: path)
+            }
+            return Identity(status)
+        }
+        if errno == EEXIST, allowExisting { return nil }
         if errno == EEXIST {
             throw DirectoryCapabilityError.policyViolation("A directory already exists at \(path).")
         }
         throw posixError(operation: "create directory", code: errno, path: path)
     }
-
     private static func rollbackChild(
         parent: Int32,
         name: Name,
@@ -317,7 +324,6 @@ package final class DirectoryCapability: Sendable {
             throw posixError(operation: "roll back created directory", code: errno, path: path)
         }
     }
-
     private static func walkAbsoluteURL(_ url: URL) throws -> Int32 {
         try validateAbsoluteURL(url)
         let names = try url.path.split(separator: "/").map { try Name(String($0)) }
@@ -345,7 +351,6 @@ package final class DirectoryCapability: Sendable {
             )
         }
     }
-
     private static func validateOwned(_ descriptor: Int32, capability: DirectoryCapability) throws {
         let status = try directoryStatus(descriptor, path: capability.url.path)
         guard Identity(status) == capability.identity else {
@@ -360,7 +365,6 @@ package final class DirectoryCapability: Sendable {
             path: capability.url.path
         )
     }
-
     private static func validate(
         _ descriptor: Int32,
         status: stat,
@@ -390,7 +394,6 @@ package final class DirectoryCapability: Sendable {
         }
         try validateACL(descriptor, policy: requirements.policy, path: path)
     }
-
     private static func validateACL(
         _ descriptor: Int32,
         policy: Requirements.Policy,
@@ -476,7 +479,6 @@ package final class DirectoryCapability: Sendable {
         }
         return posixError(operation: "open directory", code: code, path: path)
     }
-
     private static func posixError(
         operation: String,
         code: Int32,
@@ -489,12 +491,10 @@ package final class DirectoryCapability: Sendable {
         }
         return .ioFailure(failure)
     }
-
     private static func retryingEINTR(_ operation: () -> Int32) -> Int32 {
         var result: Int32
         repeat { result = operation() } while result == -1 && errno == EINTR
         return result
     }
-
     private static let directoryOpenFlags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
 }
