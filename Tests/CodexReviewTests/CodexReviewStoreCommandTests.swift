@@ -6,6 +6,42 @@ import CodexReviewTesting
 @Suite("Codex review store", .serialized)
 @MainActor
 struct CodexReviewStoreCommandTests {
+    @Test func runtimeTeardownClosesReviewAdmissionBeforeContextTransfer() async throws {
+        let backend = FakeCodexReviewBackend()
+        let startGate = AsyncGate()
+        await backend.holdStartReviewIgnoringCancellation(with: startGate)
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+        let prior = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        try await backend.waitForStartReview(timeout: .seconds(2))
+        let priorJobID = try #require(store.jobs.first?.id)
+
+        store.storeWorkRegistry.closeReviewAdmission()
+        await #expect(throws: (any Error).self) {
+            try await store.startReview(
+                sessionID: "session-2",
+                request: .init(cwd: "/tmp/late", target: .uncommittedChanges)
+            )
+        }
+        let context = store.detachRuntimeSemanticStopContext(intent: .explicitStop)
+        #expect(context.workerJobIDs == [priorJobID])
+        await context.stopUsingDefaultPolicy(intent: .explicitStop)
+
+        await startGate.open()
+        try await backend.waitForInterruptReview(timeout: .seconds(2))
+        await backend.yield(.cancelled("Review runtime stopped."))
+        let priorResult = try await prior.value
+        #expect(await context.drainWorkers(timeout: .seconds(2)))
+        #expect(priorResult.core.lifecycle.status == .cancelled)
+        #expect(store.storeWorkRegistry.activeOrdinals.isEmpty)
+    }
+
     @Test func storeBackendForwardsExplicitAdmission() async throws {
         let reviewBackend = FakeCodexReviewBackend()
         let storeBackend = TestingCodexReviewStoreBackend(reviewBackend: reviewBackend)

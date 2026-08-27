@@ -30,6 +30,13 @@ package enum ReviewStoreWorkKind: Hashable, Sendable {
             label
         }
     }
+
+    package var isReviewWork: Bool {
+        switch self {
+        case .reviewMutation, .reviewWorker, .reviewWaiter: true
+        case .rateLimitWakeUp, .rateLimitRefresh, .settingsMutation, .accountAction, .testing: false
+        }
+    }
 }
 
 package enum ReviewStoreWorkCancelledBeforeEntryPolicy: Sendable {
@@ -158,6 +165,7 @@ package final class ReviewStoreWorkRegistry {
 
     private var state: State = .open
     private var admissionIsOpen = true
+    private var reviewAdmissionIsOpen = true
     private var nextWorkOrdinal: UInt64 = 0
     private var nextCloseID: UInt64 = 0
     private var registeredTasks: [UInt64: RegisteredTask] = [:]
@@ -184,7 +192,7 @@ package final class ReviewStoreWorkRegistry {
     }
 
     package func register(_ kind: ReviewStoreWorkKind) -> Admission? {
-        guard admissionIsOpen else {
+        guard admissionIsOpen, reviewAdmissionIsOpen || kind.isReviewWork == false else {
             return nil
         }
         guard nextWorkOrdinal < UInt64.max else {
@@ -210,6 +218,18 @@ package final class ReviewStoreWorkRegistry {
 
     package func finish(_ admission: Admission) {
         registeredTasks.removeValue(forKey: admission.ordinal)
+    }
+
+    package func accepts(_ admission: Admission) -> Bool {
+        admissionIsOpen && (reviewAdmissionIsOpen || admission.kind.isReviewWork == false)
+    }
+
+    package func closeReviewAdmission() {
+        reviewAdmissionIsOpen = false
+    }
+
+    package func openReviewAdmission() {
+        if admissionIsOpen { reviewAdmissionIsOpen = true }
     }
 
     package func beginClosing(
@@ -280,6 +300,7 @@ package final class ReviewStoreWorkRegistry {
 
     package func cancelWithoutWaiting() {
         admissionIsOpen = false
+        reviewAdmissionIsOpen = false
         for task in registeredTasks.values {
             task.cancel()
         }
