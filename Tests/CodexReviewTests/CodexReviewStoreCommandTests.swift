@@ -2665,6 +2665,42 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func runtimeStopCleansUnpublishedRunAfterInterruptRejection() async throws {
+        let backend = FakeCodexReviewBackend()
+        let startGate = AsyncGate()
+        await backend.holdStartReviewIgnoringCancellation(with: startGate)
+        await backend.rejectInterrupts(message: "Interrupt rejected.")
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        let review = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        try await backend.waitForStartReview(timeout: .seconds(2))
+        let context = store.detachRuntimeSemanticStopContext(intent: .explicitStop)
+        let stop = Task { @MainActor in
+            await context.stopUsingDefaultPolicy(intent: .explicitStop)
+        }
+
+        await startGate.open()
+        try await backend.waitForInterruptReview(timeout: .seconds(2))
+        await stop.value
+        _ = try await review.value
+        #expect(await context.drainWorkers(timeout: .seconds(2)))
+
+        let run = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1"
+        )
+        let commands = await backend.recordedCommands()
+        #expect(commands.contains(.cleanupReview(run)))
+    }
+
     @Test func registeredWorkCloseAwaitsCurrentAndRetiringNetworkDebounceTasks() async throws {
         let backend = FakeCodexReviewBackend()
         let networkMonitor = ManualCodexReviewNetworkMonitor()

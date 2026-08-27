@@ -1,9 +1,65 @@
+import Foundation
 import Testing
 @testable import CodexReview
 import CodexReviewTesting
 @Suite("Store recovery receipt")
 @MainActor
 struct StoreReviewRecoveryReceiptTests {
+    @Test func semanticStopRetriesSuppressionAfterWorkerOwnedJoin() async throws {
+        let (_, source, candidate, prepared) = try await fixture()
+        let receipt = StoreReviewRecoveryReceipt(source: source)
+        try receipt.startDisposition { .replacement(candidate) }
+        _ = try await receipt.joinOwnedOperation().value
+        let preparationGate = AsyncGate()
+        try receipt.startPreparation {
+            await preparationGate.waitIgnoringCancellation()
+            return prepared
+        }
+        let workerStarted = AsyncGate()
+        let worker = Task { @MainActor in
+            do {
+                let join = try receipt.joinOwnedOperation()
+                await workerStarted.open()
+                _ = try? await join.value
+            } catch {
+                Issue.record("Worker failed to reserve the recovery join: \(error)")
+            }
+        }
+        await workerStarted.wait()
+        var cleanupCount = 0
+        let context = ReviewRuntimeSemanticStopContext(
+            entries: ["job-1": .init(
+                job: nil,
+                ownership: .recovering(receipt),
+                cancellationRequest: nil,
+                workerTask: worker,
+                waiters: []
+            )],
+            interruptReview: { _, _ in },
+            cleanupRecovery: { target in
+                guard case .prepared(let exact) = target else {
+                    Issue.record("Semantic stop lost the prepared recovery target.")
+                    return
+                }
+                #expect(exact.receipt === prepared.receipt)
+                cleanupCount += 1
+            },
+            now: Date.init,
+            writeDiagnostics: {}
+        )
+        let cancellation = Task { @MainActor in
+            await context.cancelWorkers(
+                jobIDs: ["job-1"],
+                reason: .system(message: "Runtime stopped")
+            )
+        }
+        await preparationGate.open()
+        await cancellation.value
+
+        #expect(cleanupCount == 1)
+        #expect(throws: ReviewAttemptContractFailure.self) { try receipt.suppress() }
+    }
+
     @Test func reentrantJoinCannotClearTheSuccessorPhase() async throws {
         let (_, source, candidate, prepared) = try await fixture()
         let receipt = StoreReviewRecoveryReceipt(source: source)

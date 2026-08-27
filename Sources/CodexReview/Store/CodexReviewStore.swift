@@ -555,11 +555,14 @@ public final class CodexReviewStore {
 
         case .replacing(let replacement, let task):
             task.cancel()
+            var retiringSemanticStopContext = semanticStopContext
             if let publishedRuntime = replacement.takePublishedRuntime() {
                 await stopPublishedRuntimeSemantics(
                     intent: intent,
-                    context: semanticStopContext ?? detachRuntimeSemanticStopContext(intent: intent)
+                    context: retiringSemanticStopContext
+                        ?? detachRuntimeSemanticStopContext(intent: intent)
                 )
+                retiringSemanticStopContext = nil
                 await closeRuntime(
                     publishedRuntime,
                     purpose: runtimeTransitionPurpose(for: intent),
@@ -567,7 +570,10 @@ public final class CodexReviewStore {
                 )
             }
             await task.value
-            await closeRetiringRuntime(for: replacement)
+            await closeRetiringRuntime(
+                for: replacement,
+                semanticStopContext: retiringSemanticStopContext
+            )
             await stopMCPServer()
 
         case .running(_, let runtime, _):
@@ -1151,11 +1157,13 @@ public final class CodexReviewStore {
     }
 
     private func closePublishedRuntimeForReplacement(
-        _ runtime: PreparedRuntime
+        _ runtime: PreparedRuntime,
+        semanticStopContext: ReviewRuntimeSemanticStopContext? = nil
     ) async -> ReviewRuntimeCloseFailure? {
         await stopPublishedRuntimeSemantics(
             intent: .explicitStop,
-            context: detachRuntimeSemanticStopContext(intent: .explicitStop)
+            context: semanticStopContext
+                ?? detachRuntimeSemanticStopContext(intent: .explicitStop)
         )
         return await closeRuntime(
             runtime,
@@ -1165,13 +1173,17 @@ public final class CodexReviewStore {
     }
 
     private func closeRetiringRuntime(
-        for replacement: ReviewRuntimeRecoveryReplacement
+        for replacement: ReviewRuntimeRecoveryReplacement,
+        semanticStopContext: ReviewRuntimeSemanticStopContext? = nil
     ) async {
         guard let retiringRuntime = replacement.takeRetiringRuntime() else {
             replacement.finishSourceClose(.closed)
             return
         }
-        let failure = await closePublishedRuntimeForReplacement(retiringRuntime)
+        let failure = await closePublishedRuntimeForReplacement(
+            retiringRuntime,
+            semanticStopContext: semanticStopContext
+        )
         if let failure {
             replacement.finishSourceClose(.failed(failure))
         } else {

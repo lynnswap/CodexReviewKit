@@ -301,6 +301,28 @@ struct CodexReviewStoreLifecycleTests {
         let store = CodexReviewStore.makeTestingStore(backend: backend)
         await store.start()
         let firstHandle = try #require(backend.lastPreparedRuntimeHandle)
+        let workerGate = AsyncGate()
+        let workerCancelled = AsyncGate()
+        let job = CodexReviewJob(
+            id: "job-1",
+            sessionID: "session-1",
+            cwd: "/tmp/project",
+            targetSummary: "Review",
+            core: .init(
+                lifecycle: .init(status: .running),
+                output: .init(summary: "Running")
+            ),
+            logEntries: []
+        )
+        store.jobs.insert(job)
+        store.reviewAttemptOwnerships[job.id] = .starting(ReviewStartAdmission())
+        store.reviewWorkerTasks[job.id] = Task {
+            await withTaskCancellationHandler {
+                await workerGate.waitIgnoringCancellation()
+            } onCancel: {
+                Task { await workerCancelled.open() }
+            }
+        }
 
         let preparationGate = AsyncGate()
         backend.holdRuntimePreparation(with: preparationGate)
@@ -321,6 +343,8 @@ struct CodexReviewStoreLifecycleTests {
         #expect(store.serverURL == endpoint)
 
         await preparationGate.open()
+        await workerCancelled.wait()
+        await workerGate.open()
         await store.stop()
         _ = await restart.value
 
@@ -330,6 +354,7 @@ struct CodexReviewStoreLifecycleTests {
         #expect(staleReplacement.closePurposes == [.restartSameAccount])
         #expect(staleReplacement.waitUntilClosedCallCount == 1)
         #expect(mcpOwner.stopCallCount == 1)
+        #expect(job.core.lifecycle.status == .cancelled)
         #expect(store.settings.lastErrorMessage == nil)
     }
 

@@ -660,8 +660,8 @@ extension CodexReviewStore {
                     failure = .cleanup(error.localizedDescription)
                 }
             }
-            if failure == nil {
-                failure = await cleanupReviewFailure(unpublishedAttempt.run)
+            if let cleanup = await cleanupReviewFailure(unpublishedAttempt.run) {
+                failure = failure ?? cleanup
             }
             let starting = StoreReviewAttemptOwnership.starting(workerAdmission)
             if reviewAttemptOwnerships[jobID]?.matches(starting) == true {

@@ -124,17 +124,33 @@ package final class ReviewRuntimeSemanticStopContext {
                 }
             case .recovering(let receipt):
                 await receipt.cancelOwnedOperation(reason)
-                if let join = try? receipt.joinOwnedOperationIfPresent() { _ = try? await join.value }
-                if let target = try? receipt.suppress() {
-                    switch target {
-                    case .source where entry.workerTask != nil: break
-                    default: try? await cleanupRecovery(target)
-                    }
-                }
+                entry.workerTask?.cancel()
+                await settleAndSuppressRecovery(
+                    receipt,
+                    workerTask: entry.workerTask
+                )
             case .active, nil: break
             }
             entry.workerTask?.cancel()
             resumeWaiters(for: jobID)
+        }
+    }
+    private func settleAndSuppressRecovery(
+        _ receipt: StoreReviewRecoveryReceipt,
+        workerTask: Task<Void, Never>?
+    ) async {
+        do {
+            if let join = try receipt.joinOwnedOperationIfPresent() {
+                _ = try? await join.value
+            }
+        } catch {
+            await workerTask?.value
+        }
+        if let target = try? receipt.suppress() {
+            switch target {
+            case .source where workerTask != nil: break
+            default: try? await cleanupRecovery(target)
+            }
         }
     }
     package func drainWorkers(timeout: Duration) async -> Bool {

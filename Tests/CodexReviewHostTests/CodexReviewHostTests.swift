@@ -480,9 +480,11 @@ struct CodexReviewHostTests {
         )
         store.jobs.insert(job)
         store.reviewAttemptOwnerships[job.id] = .recovering(receipt)
-        store.reviewWorkerTasks[job.id] = Task {
+        store.reviewWorkerTasks[job.id] = Task { @MainActor in
+            let join = try? receipt.joinOwnedOperationIfPresent()
             await workerStarted.open()
             await workerGate.waitIgnoringCancellation()
+            if let join { _ = try? await join.value }
         }
         await recoveryStarted.wait()
         await workerStarted.wait()
