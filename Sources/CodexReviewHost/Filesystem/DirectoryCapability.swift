@@ -72,6 +72,17 @@ package final class DirectoryCapability: Sendable {
     package enum Acquisition: Equatable, Sendable { case existing, existingOrCreate, new }
     package enum Relationship: Equatable, Sendable { case same, ancestor, descendant, disjoint }
 
+    private enum DestinationIdentity: Equatable {
+        case missing
+        case regular(Identity)
+    }
+
+    private struct TemporaryFile {
+        let name: Name
+        let identity: Identity
+        let descriptor: Int32
+    }
+
     private struct State: Sendable {
         var descriptor: Int32?
         var closeFailure: DirectoryPOSIXFailure?
@@ -169,6 +180,80 @@ package final class DirectoryCapability: Sendable {
         }
     }
 
+    package func replaceFile(
+        named name: Name,
+        with contents: Data,
+        maximumByteCount: Int
+    ) throws {
+        guard maximumByteCount >= 0 else {
+            throw DirectoryCapabilityError.invalidRequest("A file replacement bound cannot be negative.")
+        }
+        guard contents.count <= maximumByteCount else {
+            throw DirectoryCapabilityError.invalidRequest("The replacement contents exceed the bound.")
+        }
+        try withBorrowedDescriptor { parent in
+            try Self.validateOwned(parent, capability: self)
+            let destinationPath = url.appendingPathComponent(
+                name.value, isDirectory: false
+            ).path
+            let destinationIdentity = try Self.destinationIdentity(
+                parent: parent,
+                name: name,
+                path: destinationPath
+            )
+            let temporary = try Self.createTemporaryFile(parent: parent, directoryURL: url)
+            let temporaryPath = url.appendingPathComponent(
+                temporary.name.value, isDirectory: false
+            ).path
+            var descriptorIsOpen = true
+            var ownsTemporaryName = true
+            do {
+                try Self.writeContents(contents, to: temporary.descriptor, path: temporaryPath)
+                try Self.synchronize(
+                    temporary.descriptor,
+                    operation: "synchronize temporary file",
+                    path: temporaryPath
+                )
+                let closeResult = Darwin.close(temporary.descriptor)
+                descriptorIsOpen = false
+                guard closeResult == 0 else {
+                    throw Self.posixError(operation: "close temporary file", code: errno, path: temporaryPath)
+                }
+                try Self.revalidateDestination(
+                    destinationIdentity,
+                    parent: parent,
+                    name: name,
+                    path: destinationPath
+                )
+                let renamed = temporary.name.value.withCString { temporaryPointer in
+                    name.value.withCString { destinationPointer in
+                        Self.retryingEINTR {
+                            renameat(parent, temporaryPointer, parent, destinationPointer)
+                        }
+                    }
+                }
+                guard renamed == 0 else {
+                    throw Self.posixError(
+                        operation: "replace regular file", code: errno, path: destinationPath
+                    )
+                }
+                ownsTemporaryName = false
+                try Self.synchronize(parent, operation: "synchronize directory", path: url.path)
+            } catch {
+                if descriptorIsOpen { _ = Darwin.close(temporary.descriptor) }
+                if ownsTemporaryName {
+                    try Self.rollbackTemporaryFile(
+                        parent: parent,
+                        name: temporary.name,
+                        identity: temporary.identity,
+                        path: temporaryPath
+                    )
+                }
+                throw error
+            }
+        }
+    }
+
     package func relationship(to other: DirectoryCapability) throws -> Relationship {
         try withBorrowedDescriptor { lhs in
             try other.withBorrowedDescriptor { rhs in
@@ -262,7 +347,7 @@ package final class DirectoryCapability: Sendable {
         var contents = Data()
         var buffer = [UInt8](
             repeating: 0,
-            count: max(1, min(64 * 1024, maximumByteCount))
+            count: max(1, min(regularFileIOChunkSize, maximumByteCount))
         )
         while contents.count < maximumByteCount {
             let requestedCount = min(buffer.count, maximumByteCount - contents.count)
@@ -290,6 +375,154 @@ package final class DirectoryCapability: Sendable {
             )
         }
         return contents
+    }
+
+    private static func destinationIdentity(
+        parent: Int32,
+        name: Name,
+        path: String
+    ) throws -> DestinationIdentity {
+        var status = stat()
+        let inspected = name.value.withCString { pointer in
+            retryingEINTR { fstatat(parent, pointer, &status, AT_SYMLINK_NOFOLLOW) }
+        }
+        if inspected == 0 {
+            try validateRegularFile(status, path: path)
+            return .regular(Identity(status))
+        }
+        if errno == ENOENT { return .missing }
+        throw posixError(operation: "inspect replacement destination", code: errno, path: path)
+    }
+
+    private static func revalidateDestination(
+        _ expected: DestinationIdentity,
+        parent: Int32,
+        name: Name,
+        path: String
+    ) throws {
+        let current = try destinationIdentity(parent: parent, name: name, path: path)
+        guard current == expected else {
+            throw DirectoryCapabilityError.policyViolation(
+                "The replacement destination changed identity at \(path)."
+            )
+        }
+    }
+
+    private static func createTemporaryFile(
+        parent: Int32,
+        directoryURL: URL
+    ) throws -> TemporaryFile {
+        for _ in 0..<temporaryNameAttemptLimit {
+            let name = try Name(".codex-replace-\(UUID().uuidString)")
+            let path = directoryURL.appendingPathComponent(name.value, isDirectory: false).path
+            let descriptor = name.value.withCString { pointer in
+                retryingEINTR {
+                    openat(parent, pointer, temporaryFileOpenFlags, mode_t(0o600))
+                }
+            }
+            if descriptor < 0 {
+                if errno == EEXIST { continue }
+                throw posixError(operation: "create temporary file", code: errno, path: path)
+            }
+            var needsClose = true
+            defer { if needsClose { _ = Darwin.close(descriptor) } }
+            let status = try fileStatus(descriptor, path: path)
+            let identity = Identity(status)
+            do {
+                try validateRegularFile(status, path: path)
+                let changedMode = retryingEINTR { fchmod(descriptor, mode_t(0o600)) }
+                guard changedMode == 0 else {
+                    throw posixError(operation: "set temporary file permissions", code: errno, path: path)
+                }
+                let finalStatus = try fileStatus(descriptor, path: path)
+                guard Identity(finalStatus) == identity,
+                      finalStatus.st_mode & 0o7777 == 0o600 else {
+                    throw DirectoryCapabilityError.policyViolation(
+                        "The temporary file changed identity or permissions at \(path)."
+                    )
+                }
+            } catch {
+                _ = Darwin.close(descriptor)
+                needsClose = false
+                try rollbackTemporaryFile(parent: parent, name: name, identity: identity, path: path)
+                throw error
+            }
+            needsClose = false
+            return TemporaryFile(name: name, identity: identity, descriptor: descriptor)
+        }
+        throw DirectoryCapabilityError.retryable(
+            DirectoryPOSIXFailure(
+                operation: "create unique temporary file",
+                code: EEXIST,
+                path: directoryURL.path
+            )
+        )
+    }
+
+    private static func writeContents(
+        _ contents: Data,
+        to descriptor: Int32,
+        path: String
+    ) throws {
+        try contents.withUnsafeBytes { bytes in
+            var offset = 0
+            while offset < bytes.count {
+                let requestedCount = min(regularFileIOChunkSize, bytes.count - offset)
+                let writtenCount = retryingEINTRCount {
+                    Darwin.write(
+                        descriptor,
+                        bytes.baseAddress?.advanced(by: offset),
+                        requestedCount
+                    )
+                }
+                guard writtenCount > 0 else {
+                    throw posixError(
+                        operation: "write temporary file",
+                        code: writtenCount == 0 ? EIO : errno,
+                        path: path
+                    )
+                }
+                offset += writtenCount
+            }
+        }
+    }
+
+    private static func synchronize(
+        _ descriptor: Int32,
+        operation: String,
+        path: String
+    ) throws {
+        let result = retryingEINTR { fsync(descriptor) }
+        guard result == 0 else {
+            throw posixError(operation: operation, code: errno, path: path)
+        }
+    }
+
+    private static func rollbackTemporaryFile(
+        parent: Int32,
+        name: Name,
+        identity: Identity,
+        path: String
+    ) throws {
+        var status = stat()
+        let inspected = name.value.withCString { pointer in
+            retryingEINTR { fstatat(parent, pointer, &status, AT_SYMLINK_NOFOLLOW) }
+        }
+        guard inspected == 0 else {
+            throw posixError(operation: "inspect temporary file cleanup", code: errno, path: path)
+        }
+        guard Identity(status) == identity,
+              status.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) else {
+            throw DirectoryCapabilityError.policyViolation(
+                "The temporary file changed identity before cleanup at \(path)."
+            )
+        }
+        let removed = name.value.withCString { pointer in
+            retryingEINTR { unlinkat(parent, pointer, 0) }
+        }
+        guard removed == 0 else {
+            throw posixError(operation: "remove temporary file", code: errno, path: path)
+        }
     }
 
     private static func acquireChild(
@@ -618,4 +851,7 @@ package final class DirectoryCapability: Sendable {
     }
     private static let directoryOpenFlags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
     private static let regularFileReadFlags = O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC
+    private static let temporaryFileOpenFlags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC
+    private static let regularFileIOChunkSize = 64 * 1024
+    private static let temporaryNameAttemptLimit = 16
 }

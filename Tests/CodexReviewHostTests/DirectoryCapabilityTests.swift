@@ -312,6 +312,81 @@ struct DirectoryCapabilityTests {
         #expect(try Data(contentsOf: fixture.appendingPathComponent("target")) == targetContents)
     }
 
+    @Test func replacementPublishesOneNewRegularFileWithBoundedChunkedContents() throws {
+        let fixture = try makePrivateTemporaryDirectory()
+        defer { removeFixture(fixture) }
+        let root = try openFixtureRoot(fixture)
+        defer { try? root.close() }
+        let destination = fixture.appendingPathComponent("payload")
+        let original = Data("original".utf8)
+        try original.write(to: destination)
+        let originalHandle = try FileHandle(forReadingFrom: destination)
+        defer { try? originalHandle.close() }
+        let originalIdentity = try fileIdentity(at: destination)
+        let replacement = Data(repeating: 0xA5, count: 64 * 1024 + 7)
+
+        try root.replaceFile(
+            named: .init("payload"),
+            with: replacement,
+            maximumByteCount: replacement.count
+        )
+
+        #expect(try originalHandle.readToEnd() == original)
+        #expect(try fileIdentity(at: destination) != originalIdentity)
+        #expect(try Data(contentsOf: destination) == replacement)
+        #expect(try permissions(at: destination) == 0o600)
+        #expect(try replacementTemporaryNames(in: fixture).isEmpty)
+    }
+
+    @Test func replacementBoundsFailBeforeMutationAndPreserveDestination() throws {
+        let fixture = try makePrivateTemporaryDirectory()
+        defer { removeFixture(fixture) }
+        let root = try openFixtureRoot(fixture)
+        defer { try? root.close() }
+        let destination = fixture.appendingPathComponent("payload")
+        let original = Data("unchanged".utf8)
+        try original.write(to: destination)
+
+        expectDirectoryError(.invalidRequest) {
+            try root.replaceFile(
+                named: .init("payload"),
+                with: Data("too large".utf8),
+                maximumByteCount: 3
+            )
+        }
+        expectDirectoryError(.invalidRequest) {
+            try root.replaceFile(named: .init("payload"), with: Data(), maximumByteCount: -1)
+        }
+
+        #expect(try Data(contentsOf: destination) == original)
+        #expect(try replacementTemporaryNames(in: fixture).isEmpty)
+    }
+
+    @Test func replacementRejectsSymlinkAndNonregularDestinationsWithoutTemporaryFiles() throws {
+        let fixture = try makePrivateTemporaryDirectory()
+        defer { removeFixture(fixture) }
+        let root = try openFixtureRoot(fixture)
+        defer { try? root.close() }
+        let targetContents = Data("unchanged".utf8)
+        try targetContents.write(to: fixture.appendingPathComponent("target"))
+        #expect(symlink("target", fixture.appendingPathComponent("link").path) == 0)
+        try createDirectory(fixture.appendingPathComponent("directory"), permissions: 0o700)
+        #expect(mkfifo(fixture.appendingPathComponent("fifo").path, 0o600) == 0)
+
+        for value in ["link", "directory", "fifo"] {
+            expectDirectoryError(.policyViolation) {
+                try root.replaceFile(
+                    named: .init(value),
+                    with: Data("replacement".utf8),
+                    maximumByteCount: 32
+                )
+            }
+        }
+
+        #expect(try Data(contentsOf: fixture.appendingPathComponent("target")) == targetContents)
+        #expect(try replacementTemporaryNames(in: fixture).isEmpty)
+    }
+
     @Test func closeIsIdempotentAndRejectsLaterOperations() throws {
         let fixture = try makePrivateTemporaryDirectory()
         defer { removeFixture(fixture) }
@@ -323,6 +398,9 @@ struct DirectoryCapabilityTests {
         }
         expectDirectoryError(.closed) {
             _ = try root.readFile(named: .init("file"), maximumByteCount: 0)
+        }
+        expectDirectoryError(.closed) {
+            try root.replaceFile(named: .init("file"), with: Data(), maximumByteCount: 0)
         }
     }
 
@@ -366,6 +444,11 @@ private enum ExpectedError { case invalidRequest, policyViolation, userActionReq
 private enum RaceResult: Equatable, Sendable { case success, unexpected(String) }
 
 private enum FixtureError: Error { case unableToCreateTemporaryDirectory, commandFailed }
+
+private struct FileIdentity: Equatable {
+    let deviceID: UInt64
+    let inode: UInt64
+}
 
 private func expectDirectoryError(
     _ expected: ExpectedError,
@@ -423,6 +506,21 @@ private func permissions(at url: URL) throws -> mode_t {
     var status = stat()
     guard stat(url.path, &status) == 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
     return status.st_mode & 0o7777
+}
+
+private func fileIdentity(at url: URL) throws -> FileIdentity {
+    var status = stat()
+    guard stat(url.path, &status) == 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
+    return FileIdentity(
+        deviceID: UInt64(bitPattern: Int64(status.st_dev)),
+        inode: UInt64(status.st_ino)
+    )
+}
+
+private func replacementTemporaryNames(in directory: URL) throws -> [String] {
+    try FileManager.default.contentsOfDirectory(atPath: directory.path).filter {
+        $0.hasPrefix(".codex-replace-")
+    }
 }
 
 private func addAllowACL(to url: URL) throws {
