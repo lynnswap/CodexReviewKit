@@ -45,6 +45,7 @@ extension ReviewUITests {
         try await withReviewUIAppServerCleanup(
             store: store,
             backend: backend,
+            transport: transport,
             reviewTask: review
         ) {
             try #require(await StoreSnapshotProbe(store: store).waitUntil { snapshot in
@@ -225,6 +226,7 @@ extension ReviewUITests {
             try await withReviewUIAppServerCleanup(
                 store: store,
                 backend: backend,
+                transport: transport,
                 reviewTask: review
             ) {
                 try #require(await StoreSnapshotProbe(store: store).waitUntil { snapshot in
@@ -288,6 +290,7 @@ extension ReviewUITests {
         try await withReviewUIAppServerCleanup(
             store: store,
             backend: backend,
+            transport: transport,
             reviewTask: review
         ) {
             try #require(await StoreSnapshotProbe(store: store).waitUntil { snapshot in
@@ -468,6 +471,7 @@ private enum ReviewUIAppServerIntegrationError: Error {
 private func withReviewUIAppServerCleanup<Value>(
     store: CodexReviewStore,
     backend: AppServerCodexReviewBackend,
+    transport: FakeJSONRPCTransport,
     reviewTask: Task<CodexReviewAPI.Read.Result, any Error>,
     operation: () async throws -> Value
 ) async throws -> Value {
@@ -476,8 +480,15 @@ private func withReviewUIAppServerCleanup<Value>(
         value = try await operation()
     } catch {
         let operationError = error
-        reviewTask.cancel()
-        await store.cancelAndDrainReviewWorkersForTesting()
+        do {
+            try await finishReviewForCleanup(
+                store: store,
+                transport: transport,
+                reviewTask: reviewTask
+            )
+        } catch {
+            Issue.record("Review cleanup terminal also failed: \(error.localizedDescription)")
+        }
         _ = await reviewTask.result
         do {
             try await backend.runtimeOwnerLifecycleHandle.closeAndWait()
@@ -486,11 +497,48 @@ private func withReviewUIAppServerCleanup<Value>(
         }
         throw operationError
     }
-    reviewTask.cancel()
-    await store.cancelAndDrainReviewWorkersForTesting()
+    try await finishReviewForCleanup(
+        store: store,
+        transport: transport,
+        reviewTask: reviewTask
+    )
     _ = await reviewTask.result
     try await backend.runtimeOwnerLifecycleHandle.closeAndWait()
     return value
+}
+
+@MainActor
+private func finishReviewForCleanup(
+    store: CodexReviewStore,
+    transport: FakeJSONRPCTransport,
+    reviewTask: Task<CodexReviewAPI.Read.Result, any Error>
+) async throws {
+    reviewTask.cancel()
+    if let job = store.orderedJobs.first(where: { $0.isTerminal == false }),
+       let threadID = job.core.run.reviewThreadID,
+       let turnID = job.core.run.turnID {
+        try await withTestTimeout {
+            while await transport.recordedRequests().contains(where: {
+                $0.method == "turn/interrupt"
+            }) == false {
+                try Task.checkCancellation()
+                await Task.yield()
+            }
+        }
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: ReviewUIV2TurnNotification(
+                threadID: threadID,
+                turn: .init(
+                    id: turnID,
+                    items: [],
+                    itemsView: "notLoaded",
+                    status: "interrupted"
+                )
+            )
+        )
+    }
+    await store.cancelAndDrainReviewWorkersForTesting()
 }
 
 @MainActor
