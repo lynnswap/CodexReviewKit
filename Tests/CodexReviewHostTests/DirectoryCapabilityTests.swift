@@ -99,6 +99,140 @@ struct DirectoryCapabilityTests {
         #expect(try child.relationship(to: sibling) == .disjoint)
     }
 
+    @Test func resolvedLocationsRetainMissingEntryChainsWithoutCreation() throws {
+        let fixture = try makePrivateTemporaryDirectory()
+        defer { removeFixture(fixture) }
+        let requirements = DirectoryCapability.Requirements.trustedAnchor(ownerUserID: geteuid())
+        let missingURL = fixture.appendingPathComponent("missing", isDirectory: true)
+        let same = try DirectoryCapability.resolveLocation(at: missingURL, requirements: requirements)
+        defer { try? same.close() }
+        let alias = try DirectoryCapability.resolveLocation(at: missingURL, requirements: requirements)
+        defer { try? alias.close() }
+        let descendant = try DirectoryCapability.resolveLocation(
+            at: missingURL.appendingPathComponent("child", isDirectory: true),
+            requirements: requirements
+        )
+        defer { try? descendant.close() }
+        let sibling = try DirectoryCapability.resolveLocation(
+            at: fixture.appendingPathComponent("sibling", isDirectory: true),
+            requirements: requirements
+        )
+        defer { try? sibling.close() }
+
+        #expect(try same.relationship(to: alias) == .same)
+        #expect(try same.relationship(to: descendant) == .ancestor)
+        #expect(try descendant.relationship(to: same) == .descendant)
+        #expect(try same.relationship(to: sibling) == .disjoint)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.path).isEmpty)
+    }
+
+    @Test func resolvedLocationsUseExistingIdentityAndAncestry() throws {
+        let fixture = try makePrivateTemporaryDirectory()
+        defer { removeFixture(fixture) }
+        let root = try openFixtureRoot(fixture)
+        defer { try? root.close() }
+        let child = try root.directory(
+            named: .init("child"),
+            acquisition: .new,
+            requirements: managedRequirements(root)
+        )
+        let grandchild = try child.directory(
+            named: .init("grandchild"),
+            acquisition: .new,
+            requirements: managedRequirements(child)
+        )
+        try grandchild.close()
+        try child.close()
+        let managed = managedRequirements(root)
+        let childLocation = try DirectoryCapability.resolveLocation(
+            at: fixture.appendingPathComponent("child", isDirectory: true),
+            requirements: managed
+        )
+        defer { try? childLocation.close() }
+        let grandchildLocation = try DirectoryCapability.resolveLocation(
+            at: fixture.appendingPathComponent("child/grandchild", isDirectory: true),
+            requirements: managed
+        )
+        defer { try? grandchildLocation.close() }
+
+        #expect(try childLocation.relationship(to: grandchildLocation) == .ancestor)
+        #expect(try grandchildLocation.relationship(to: childLocation) == .descendant)
+    }
+
+    @Test func partiallyResolvedLocationsFailClosedAfterNamespaceMutation() throws {
+        let fixture = try makePrivateTemporaryDirectory()
+        defer { removeFixture(fixture) }
+        let requirements = DirectoryCapability.Requirements.trustedAnchor(ownerUserID: geteuid())
+        let ancestorURL = fixture.appendingPathComponent("appeared", isDirectory: true)
+        let pending = try DirectoryCapability.resolveLocation(
+            at: ancestorURL.appendingPathComponent("child", isDirectory: true),
+            requirements: requirements
+        )
+        defer { try? pending.close() }
+        try createDirectory(ancestorURL, permissions: 0o700)
+        let appeared = try DirectoryCapability.resolveLocation(
+            at: ancestorURL,
+            requirements: requirements
+        )
+        defer { try? appeared.close() }
+
+        #expect(try pending.relationship(to: appeared) == .indeterminate)
+        #expect(try appeared.relationship(to: pending) == .indeterminate)
+    }
+
+    @Test func resolvedEntryNamesUseDescriptorScopedCaseAndUnicodeSemantics() throws {
+        let fixture = try makePrivateTemporaryDirectory()
+        defer { removeFixture(fixture) }
+        let requirements = DirectoryCapability.Requirements.trustedAnchor(ownerUserID: geteuid())
+        let upper = try DirectoryCapability.resolveLocation(
+            at: fixture.appendingPathComponent("Pending", isDirectory: true),
+            requirements: requirements
+        )
+        defer { try? upper.close() }
+        let lower = try DirectoryCapability.resolveLocation(
+            at: fixture.appendingPathComponent("pending", isDirectory: true),
+            requirements: requirements
+        )
+        defer { try? lower.close() }
+        let sensitivity = try directoryCaseSensitivity(at: fixture)
+        let expectedCaseRelationship: DirectoryCapability.Relationship = switch sensitivity {
+        case true: .disjoint
+        case false: .same
+        case nil: .indeterminate
+        }
+        #expect(try upper.relationship(to: lower) == expectedCaseRelationship)
+
+        let composedName = "Caf\u{00E9}"
+        let composed = try DirectoryCapability.resolveLocation(
+            at: fixture.appendingPathComponent(composedName, isDirectory: true),
+            requirements: requirements
+        )
+        defer { try? composed.close() }
+        let decomposed = try DirectoryCapability.resolveLocation(
+            at: fixture.appendingPathComponent(
+                composedName.decomposedStringWithCanonicalMapping,
+                isDirectory: true
+            ),
+            requirements: requirements
+        )
+        defer { try? decomposed.close() }
+        #expect(try composed.relationship(to: decomposed) == .same)
+
+        let nonASCIIUpper = try DirectoryCapability.resolveLocation(
+            at: fixture.appendingPathComponent("\u{00C6}ther", isDirectory: true),
+            requirements: requirements
+        )
+        defer { try? nonASCIIUpper.close() }
+        let nonASCIILower = try DirectoryCapability.resolveLocation(
+            at: fixture.appendingPathComponent("\u{00E6}ther", isDirectory: true),
+            requirements: requirements
+        )
+        defer { try? nonASCIILower.close() }
+        #expect(try nonASCIIUpper.relationship(to: nonASCIILower) == (
+            sensitivity == true ? .disjoint : .indeterminate
+        ))
+    }
+
     @Test func firmlinkAliasesResolveToOneIdentity() throws {
         let users = try DirectoryCapability.openExisting(
             at: URL(fileURLWithPath: "/Users", isDirectory: true),
@@ -113,6 +247,18 @@ struct DirectoryCapabilityTests {
 
         #expect(users.identity == dataUsers.identity)
         #expect(try users.relationship(to: dataUsers) == .same)
+
+        let usersLocation = try DirectoryCapability.resolveLocation(
+            at: URL(fileURLWithPath: "/Users", isDirectory: true),
+            requirements: .trustedAnchor(ownerUserID: 0)
+        )
+        defer { try? usersLocation.close() }
+        let dataUsersLocation = try DirectoryCapability.resolveLocation(
+            at: URL(fileURLWithPath: "/System/Volumes/Data/Users", isDirectory: true),
+            requirements: .trustedAnchor(ownerUserID: 0)
+        )
+        defer { try? dataUsersLocation.close() }
+        #expect(try usersLocation.relationship(to: dataUsersLocation) == .same)
     }
 
     @Test func createReopensAndExistingOrCreatePreservesIdentity() throws {
@@ -872,6 +1018,61 @@ struct DirectoryCapabilityTests {
         entryContinuation.finish()
         try root.close()
     }
+
+    @Test func resolvedLocationCloseIsIdempotentAndRejectsLaterRelationships() throws {
+        let fixture = try makePrivateTemporaryDirectory()
+        defer { removeFixture(fixture) }
+        let requirements = DirectoryCapability.Requirements.trustedAnchor(ownerUserID: geteuid())
+        let location = try DirectoryCapability.resolveLocation(
+            at: fixture.appendingPathComponent("missing", isDirectory: true),
+            requirements: requirements
+        )
+        let peer = try DirectoryCapability.resolveLocation(
+            at: fixture.appendingPathComponent("peer", isDirectory: true),
+            requirements: requirements
+        )
+        defer { try? peer.close() }
+
+        try location.close()
+        try location.close()
+        expectDirectoryError(.closed) {
+            _ = try location.relationship(to: peer)
+        }
+    }
+
+    @Test func resolvedLocationRelationshipsRaceCloseWithoutDescriptorReuse() async throws {
+        let fixture = try makePrivateTemporaryDirectory()
+        defer { removeFixture(fixture) }
+        let requirements = DirectoryCapability.Requirements.trustedAnchor(ownerUserID: geteuid())
+        let location = try DirectoryCapability.resolveLocation(
+            at: fixture.appendingPathComponent("missing", isDirectory: true),
+            requirements: requirements
+        )
+        let peer = try DirectoryCapability.resolveLocation(
+            at: fixture.appendingPathComponent("peer", isDirectory: true),
+            requirements: requirements
+        )
+        defer { try? peer.close() }
+        let operations = (0..<32).map { _ in
+            Task {
+                do {
+                    _ = try location.relationship(to: peer)
+                    return RaceResult.success
+                } catch DirectoryCapabilityError.closed {
+                    return RaceResult.closed
+                } catch {
+                    return RaceResult.unexpected(error.localizedDescription)
+                }
+            }
+        }
+
+        try location.close()
+        for operation in operations {
+            let result = await operation.value
+            #expect(result == .success || result == .closed, "Unexpected result: \(result)")
+        }
+        try location.close()
+    }
 }
 
 private enum ExpectedError { case invalidRequest, policyViolation, userActionRequired, closed }
@@ -950,6 +1151,21 @@ private func managedRequirements(
     _ parent: DirectoryCapability
 ) -> DirectoryCapability.Requirements {
     .managed(ownerUserID: geteuid(), deviceID: parent.identity.deviceID)
+}
+
+private func directoryCaseSensitivity(at url: URL) throws -> Bool? {
+    let descriptor = open(url.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    guard descriptor >= 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
+    defer { _ = close(descriptor) }
+    errno = 0
+    let value = fpathconf(descriptor, _PC_CASE_SENSITIVE)
+    if value == -1 {
+        guard errno == 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
+        return nil
+    }
+    if value == 0 { return false }
+    if value == 1 { return true }
+    return nil
 }
 
 private func createDirectory(_ url: URL, permissions: mode_t) throws {
