@@ -80,7 +80,42 @@ struct AppServerInterruptAdmissionTests {
         ])
     }
 
-    @Test func completedCancellationRaceFlushesOriginalProductArtifacts() async throws {
+    @Test func completedCancellationClassifiesExactInterruptionArtifactsAsDeveloperDiagnostics() async throws {
+        let transport = FakeJSONRPCTransport()
+        let responseGate = AsyncGate()
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        await transport.hold(method: "turn/interrupt", gate: responseGate)
+        let fixture = try await makeCancellationArtifactFixture(transport)
+        let accepted = AsyncGate()
+        let cancellation = ReviewCancellation.mcpClient(message: "Stop")
+        let interrupt = Task {
+            try await fixture.admission.interrupt(
+                fixture.run,
+                cancellation: cancellation,
+                request: { requestAdmission, reason in
+                    try await fixture.backend.interruptReview(requestAdmission, reason: reason)
+                    await accepted.open()
+                }
+            )
+        }
+        await transport.waitForRequestCount(4)
+        try await emitCancellationArtifactSequence(transport, terminal: .completed)
+        #expect(await fixture.attempt.events.isFinished() == false)
+        await responseGate.open()
+        await accepted.wait()
+        let events = try await collectCancellationArtifactEvents(fixture.attempt)
+        try await fixture.admission.recordCanonicalTerminal(
+            .interrupted(.server(message: cancellation.message)),
+            for: fixture.run
+        )
+        let resolution = try await interrupt.value
+
+        assertDeveloperCancellationArtifacts(events)
+        #expect(resolution.terminal == .canonical(.interrupted(.requested(cancellation))))
+        #expect(events.last == .cancelled(cancellation.message))
+    }
+
+    @Test func completedCancellationRaceKeepsRealReviewTextProductVisible() async throws {
         let transport = FakeJSONRPCTransport()
         let responseGate = AsyncGate()
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
@@ -98,7 +133,13 @@ struct AppServerInterruptAdmissionTests {
             )
         }
         await transport.waitForRequestCount(4)
-        try await emitCancellationArtifactSequence(transport, terminal: .completed)
+        let reviewText = "One actionable finding."
+        try await emitCancellationArtifactSequence(
+            transport,
+            terminal: .completed,
+            reviewExitText: reviewText,
+            companionText: reviewText
+        )
         #expect(await fixture.attempt.events.isFinished() == false)
         await responseGate.open()
         await accepted.wait()
@@ -106,24 +147,14 @@ struct AppServerInterruptAdmissionTests {
         try await fixture.admission.recordCanonicalTerminal(.completed, for: fixture.run)
         _ = try await interrupt.value
 
-        assertProductCancellationArtifacts(events)
-        #expect(events.contains { event in
-            guard case .logEntry(
-                .agentMessage,
-                "",
-                let groupID,
-                true,
-                let metadata,
-                .product
-            ) = event else {
-                return false
-            }
-            return groupID == "cancellation-companion"
-                && metadata?.sourceType == "suppressedFinalReviewCompanion"
-        })
+        assertProductCancellationArtifacts(
+            events,
+            reviewExitText: reviewText,
+            companionText: reviewText
+        )
         #expect(events.last == .completed(
             summary: "Succeeded.",
-            result: cancellationReviewFallback
+            result: reviewText
         ))
     }
 
@@ -275,7 +306,7 @@ struct AppServerInterruptAdmissionTests {
         await transport.close()
     }
 
-    @Test func failedTerminalFlushesOriginalProductArtifacts() async throws {
+    @Test func failedTerminalClassifiesExactInterruptionArtifactsAsDeveloperDiagnostics() async throws {
         let transport = FakeJSONRPCTransport()
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         let fixture = try await makeCancellationArtifactFixture(transport)
@@ -303,7 +334,7 @@ struct AppServerInterruptAdmissionTests {
         )
         _ = try await interrupt.value
 
-        assertProductCancellationArtifacts(events)
+        assertDeveloperCancellationArtifacts(events)
         #expect(events.last == .failed("Upstream failed"))
     }
 
@@ -898,8 +929,9 @@ struct AppServerInterruptAdmissionTests {
     }
 }
 
-private let cancellationReviewFallback = "Review mode exited after cancellation."
-private let cancellationCompanionMessage = "Review was interrupted before completion."
+private let cancellationReviewFallback = "Reviewer failed to output a response."
+private let cancellationCompanionMessage =
+    "Review was interrupted. Please re-run /review and wait for it to complete."
 
 private struct CancellationArtifactFixture {
     var backend: AppServerCodexReviewBackend
@@ -950,14 +982,26 @@ private func makeCancellationArtifactFixture(
 
 private func emitCancellationArtifactSequence(
     _ transport: FakeJSONRPCTransport,
-    terminal: CancellationArtifactTerminal
+    terminal: CancellationArtifactTerminal,
+    reviewExitText: String = cancellationReviewFallback,
+    companionText: String = cancellationCompanionMessage
 ) async throws {
-    try await emitCancellationArtifactItems(transport)
-    try await emitCancellationTerminal(transport, terminal: terminal)
+    try await emitCancellationArtifactItems(
+        transport,
+        reviewExitText: reviewExitText,
+        companionText: companionText
+    )
+    try await emitCancellationTerminal(
+        transport,
+        terminal: terminal,
+        companionText: companionText
+    )
 }
 
 private func emitCancellationArtifactItems(
-    _ transport: FakeJSONRPCTransport
+    _ transport: FakeJSONRPCTransport,
+    reviewExitText: String = cancellationReviewFallback,
+    companionText: String = cancellationCompanionMessage
 ) async throws {
     for method in ["item/started", "item/completed"] {
         try await transport.emitServerNotification(
@@ -968,7 +1012,7 @@ private func emitCancellationArtifactItems(
                 item: .init(
                     type: "exitedReviewMode",
                     id: "review-exit",
-                    review: cancellationReviewFallback
+                    review: reviewExitText
                 ),
                 startedAtMs: method == "item/started" ? 1 : nil,
                 completedAtMs: method == "item/completed" ? 2 : nil
@@ -984,7 +1028,7 @@ private func emitCancellationArtifactItems(
                 item: .init(
                     type: "agentMessage",
                     id: "cancellation-companion",
-                    text: cancellationCompanionMessage
+                    text: companionText
                 ),
                 startedAtMs: method == "item/started" ? 3 : nil,
                 completedAtMs: method == "item/completed" ? 4 : nil
@@ -995,7 +1039,8 @@ private func emitCancellationArtifactItems(
 
 private func emitCancellationTerminal(
     _ transport: FakeJSONRPCTransport,
-    terminal: CancellationArtifactTerminal
+    terminal: CancellationArtifactTerminal,
+    companionText: String = cancellationCompanionMessage
 ) async throws {
     let status: String
     let items: [CancellationArtifactItem]
@@ -1007,7 +1052,7 @@ private func emitCancellationTerminal(
         items = [.init(
             type: "agentMessage",
             id: "cancellation-companion",
-            text: cancellationCompanionMessage
+            text: companionText
         )]
         itemsView = "summary"
         error = nil
@@ -1048,7 +1093,9 @@ private func collectCancellationArtifactEvents(
 }
 
 private func assertProductCancellationArtifacts(
-    _ events: [CodexReviewBackendModel.Review.Event]
+    _ events: [CodexReviewBackendModel.Review.Event],
+    reviewExitText: String = cancellationReviewFallback,
+    companionText: String = cancellationCompanionMessage
 ) {
     let artifacts = events.compactMap { event -> (
         kind: ReviewLogEntry.Kind,
@@ -1070,10 +1117,10 @@ private func assertProductCancellationArtifacts(
         .agentMessage,
     ])
     #expect(artifacts.map(\.text) == [
-        cancellationReviewFallback,
-        cancellationReviewFallback,
-        cancellationCompanionMessage,
-        cancellationCompanionMessage,
+        reviewExitText,
+        reviewExitText,
+        companionText,
+        companionText,
     ])
     #expect(artifacts.allSatisfy { $0.audience == .product })
 }
@@ -1086,7 +1133,8 @@ private func assertDeveloperCancellationArtifacts(
         groupID: String?,
         audience: ReviewLogEntry.Audience
     )? in
-        guard case .logEntry(let kind, _, let groupID, _, _, let audience) = event,
+        guard case .logEntry(let kind, _, let groupID, _, let metadata, let audience) = event,
+              metadata?.sourceType != "suppressedFinalReviewCompanion",
               groupID == "review-exit" || groupID == "cancellation-companion"
         else {
             return nil

@@ -254,8 +254,9 @@ extension ReviewUITests {
         #expect(await backend.notificationRouterIsRunningForTesting() == false)
     }
 
-    @Test func sidebarCancellationUsesAppServerInterruptAndRendersTerminalState() async throws {
+    @Test func sidebarCancellationHidesCompletedUpstreamArtifactsAndRendersTerminalState() async throws {
         let transport = FakeJSONRPCTransport()
+        let interruptResponseGate = AsyncGate()
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await transport.enqueue(
             AppServerAPI.Thread.Start.Response(threadID: "thread-review", model: "gpt-5"),
@@ -269,6 +270,7 @@ extension ReviewUITests {
             for: "review/start"
         )
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        await transport.hold(method: "turn/interrupt", gate: interruptResponseGate)
         try await transport.enqueue(
             AppServerAPI.Thread.Unsubscribe.Response(status: .unsubscribed),
             for: "thread/unsubscribe"
@@ -294,6 +296,11 @@ extension ReviewUITests {
                 snapshot.job("job-1")?.activeRun?.turnID == "turn-review"
             } != nil)
             let job = try #require(store.job(id: "job-1"))
+            guard case .active(let activeAttempt) = store.reviewAttemptOwnerships[job.id] else {
+                Issue.record("Expected an active review attempt")
+                return
+            }
+            let admission = activeAttempt.admission
             let harness = makeWindowHarness(store: store)
             defer { harness.window.close() }
             let sidebar = harness.viewController.sidebarViewControllerForTesting
@@ -354,9 +361,20 @@ extension ReviewUITests {
             )
             #expect(interruptParams.threadID == "thread-review")
             #expect(interruptParams.turnID == "turn-review")
+            await interruptResponseGate.open()
+            try await withTestTimeout {
+                while true {
+                    if case .interrupting(_, _, .acknowledged) = await admission.currentPhase() {
+                        return
+                    }
+                    try Task.checkCancellation()
+                    await Task.yield()
+                }
+            }
 
-            let reviewExitArtifact = "Review mode exited after cancellation."
-            let companionArtifact = "Review was interrupted before completion."
+            let reviewExitArtifact = "Reviewer failed to output a response."
+            let companionArtifact =
+                "Review was interrupted. Please re-run /review and wait for it to complete."
             for method in ["item/started", "item/completed"] {
                 try await transport.emitServerNotification(
                     method: method,
@@ -393,7 +411,7 @@ extension ReviewUITests {
                         id: "turn-review",
                         items: [],
                         itemsView: "notLoaded",
-                        status: "interrupted"
+                        status: "completed"
                     )
                 )
             )
@@ -420,6 +438,8 @@ extension ReviewUITests {
                 $0.audience == .developer
             }
             #expect(defaultRead.logs.allSatisfy { $0.audience == .product })
+            #expect(defaultRead.logs.contains { $0.text == reviewExitArtifact } == false)
+            #expect(defaultRead.logs.contains { $0.text == companionArtifact } == false)
             #expect(developerDiagnostics.map(\.kind) == [.diagnostic, .diagnostic])
             #expect(developerDiagnostics.map(\.groupID) == [
                 "review-exit",
@@ -429,10 +449,10 @@ extension ReviewUITests {
                 reviewExitArtifact,
                 companionArtifact,
             ])
-            #expect(job.rawLogText == """
-            Review mode exited after cancellation.
-            Review was interrupted before completion.
-            """)
+            #expect(job.rawLogText == [
+                reviewExitArtifact,
+                companionArtifact,
+            ].joined(separator: "\n"))
             #expect(allRead.rawLogText == job.rawLogText)
             try await waitForCondition {
                 store.reviewWorkerTasks["job-1"] == nil
