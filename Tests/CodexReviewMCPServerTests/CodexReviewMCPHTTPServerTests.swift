@@ -957,17 +957,18 @@ struct CodexReviewMCPHTTPServerTests {
             expectedStatusCode: 202
         )
 
+        await server.holdNextSessionCloseCompletionForTesting()
         let stop = Task { try await server.stop() }
-        try #require(await waitUntil(timeout: .seconds(2)) {
-            store.sessionCloseReceipts[sessionID] != nil
-        })
-        let closeReceipt = try #require(store.sessionCloseReceipts[sessionID])
+        let closeReceipt = try #require(
+            await server.waitUntilSessionCloseCompletionIsHeldForTesting()
+        )
         await closeReceipt.waitUntilCancellationPublished()
         let pending = try #require(await server.networkResourceSnapshotForTesting()?
             .connections.flatMap(\.requests).first { $0.pendingDomainWorkCount == 1 })
         #expect(pending.responseEnd == .closed)
         #expect(await server.eventLoopGroupShutdownCountForTesting() == 0)
 
+        await server.releaseSessionCloseCompletionForTesting()
         await domainRelease.open()
         await backend.yield(.cancelled(
             "Cancellation requested because the MCP session closed."
@@ -2217,7 +2218,7 @@ struct CodexReviewMCPHTTPServerTests {
             let firstDelete = Task {
                 try await deleteSession(endpoint: endpoint, sessionID: sessionID)
             }
-            await server.waitUntilSessionCloseCompletionIsHeldForTesting()
+            _ = await server.waitUntilSessionCloseCompletionIsHeldForTesting()
             let receiptIdentity = await server.sessionCloseReceiptIdentityForTesting(sessionID: sessionID)
             let initialJoinCount = await server.sessionCloseJoinCountForTesting()
 
@@ -2318,7 +2319,7 @@ struct CodexReviewMCPHTTPServerTests {
             let cleanup = Task {
                 await server.runSessionCleanupForTesting(now: .distantFuture)
             }
-            await server.waitUntilSessionCloseCompletionIsHeldForTesting()
+            _ = await server.waitUntilSessionCloseCompletionIsHeldForTesting()
             let receiptIdentity = await server.sessionCloseReceiptIdentityForTesting(sessionID: sessionID)
             let initialJoinCount = await server.sessionCloseJoinCountForTesting()
             let stop = Task {
@@ -2356,7 +2357,7 @@ struct CodexReviewMCPHTTPServerTests {
         let deletion = Task {
             try await deleteSession(endpoint: endpoint, sessionID: sessionID)
         }
-        await server.waitUntilSessionCloseCompletionIsHeldForTesting()
+        _ = await server.waitUntilSessionCloseCompletionIsHeldForTesting()
         let receiptIdentity = await server.sessionCloseReceiptIdentityForTesting(sessionID: sessionID)
 
         deletion.cancel()

@@ -24,6 +24,40 @@ package protocol CodexReviewSettingsBackend: AnyObject {
 }
 
 @MainActor
+package final class CodexReviewSettingsSubmissionReceipt {
+    private var isCompleted = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    fileprivate init() {}
+
+    package func waitUntilCompleted() async {
+        if isCompleted {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            if isCompleted {
+                continuation.resume()
+            } else {
+                waiters.append(continuation)
+            }
+        }
+    }
+
+    fileprivate func complete() {
+        precondition(
+            isCompleted == false,
+            "CodexReviewSettingsService must complete each submission receipt exactly once."
+        )
+        isCompleted = true
+        let waiters = waiters
+        self.waiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+}
+
+@MainActor
 package final class CodexReviewSettingsService {
     package struct RuntimeCutoverToken: Equatable, Sendable {
         fileprivate let ownerID: UUID
@@ -64,6 +98,7 @@ package final class CodexReviewSettingsService {
         let epoch: UInt64
         let intent: SettingsIntent
         let requiresCatalogRevalidation: Bool
+        let receipt: CodexReviewSettingsSubmissionReceipt
     }
 
     private enum RuntimeCutoverPhase {
@@ -501,7 +536,8 @@ package final class CodexReviewSettingsService {
             return .init(
                 epoch: deferredEpoch,
                 intent: queuedIntent.intent,
-                requiresCatalogRevalidation: queuedIntent.requiresCatalogRevalidation
+                requiresCatalogRevalidation: queuedIntent.requiresCatalogRevalidation,
+                receipt: queuedIntent.receipt
             )
         }
         cutoverPhase = .awaitingRecovery(
@@ -521,10 +557,18 @@ package final class CodexReviewSettingsService {
     }
 
     package func refresh() async {
+        _ = await submitRefresh()
+    }
+
+    package func submitRefresh() async -> CodexReviewSettingsSubmissionReceipt {
         await submit(.refresh)
     }
 
     package func updateModel(_ model: String?) async {
+        _ = await submitModel(model)
+    }
+
+    package func submitModel(_ model: String?) async -> CodexReviewSettingsSubmissionReceipt {
         await submit(.model(model))
     }
 
@@ -533,30 +577,50 @@ package final class CodexReviewSettingsService {
     }
 
     package func updateReasoningEffort(_ reasoningEffort: CodexReviewSettings.ReasoningEffort?) async {
+        _ = await submitReasoningEffort(reasoningEffort)
+    }
+
+    package func submitReasoningEffort(
+        _ reasoningEffort: CodexReviewSettings.ReasoningEffort?
+    ) async -> CodexReviewSettingsSubmissionReceipt {
         await submit(.reasoningEffort(reasoningEffort))
     }
 
     package func updateServiceTier(_ serviceTier: CodexReviewSettings.ServiceTier?) async {
+        _ = await submitServiceTier(serviceTier)
+    }
+
+    package func submitServiceTier(
+        _ serviceTier: CodexReviewSettings.ServiceTier?
+    ) async -> CodexReviewSettingsSubmissionReceipt {
         await submit(.serviceTier(serviceTier))
     }
 
-    private func submit(_ intent: SettingsIntent) async {
+    private func submit(_ intent: SettingsIntent) async -> CodexReviewSettingsSubmissionReceipt {
+        let receipt = CodexReviewSettingsSubmissionReceipt()
         guard let settingsStore else {
-            return
+            receipt.complete()
+            return receipt
         }
 
         let epoch = cutoverPhase.admissionEpoch
         if intent.isRefresh == false {
             applySelectionIntent(intent, to: settingsStore)
         }
-        queuedIntents.append(.init(epoch: epoch, intent: intent, requiresCatalogRevalidation: cutoverPhase.status != .active))
+        queuedIntents.append(.init(
+            epoch: epoch,
+            intent: intent,
+            requiresCatalogRevalidation: cutoverPhase.status != .active,
+            receipt: receipt
+        ))
 
         guard cutoverPhase.permitsSubmittedIntentDrain(for: epoch),
               processingEpoch == nil
         else {
-            return
+            return receipt
         }
         await drainIntents(for: epoch)
+        return receipt
     }
 
     private func drainIntents(for epoch: UInt64) async {
@@ -584,19 +648,23 @@ package final class CodexReviewSettingsService {
             if refreshIntents.isEmpty == false {
                 if cutoverPhase.isDrainingSource(epoch) == false {
                     if let error = await performRefresh() {
-                        guard retainingFailedIntents else {
+                        if retainingFailedIntents {
+                            queuedIntents.insert(contentsOf: refreshIntents, at: 0)
+                            queuedIntents.insert(contentsOf: retainedSelectionIntents, at: 0)
+                            return error
+                        } else {
+                            completeSubmissions(refreshIntents)
                             continue
                         }
-                        queuedIntents.insert(contentsOf: refreshIntents, at: 0)
-                        queuedIntents.insert(contentsOf: retainedSelectionIntents, at: 0)
-                        return error
                     }
                 }
+                completeSubmissions(refreshIntents)
                 continue
             }
 
             let selectionIntents = takeQueuedSelectionIntents(for: epoch)
             guard selectionIntents.isEmpty == false else {
+                completeSubmissions(retainedSelectionIntents)
                 return nil
             }
             retainedSelectionIntents.append(contentsOf: selectionIntents)
@@ -605,10 +673,18 @@ package final class CodexReviewSettingsService {
                     queuedIntents.insert(contentsOf: retainedSelectionIntents, at: 0)
                     return error
                 }
+                completeSubmissions(retainedSelectionIntents)
                 retainedSelectionIntents.removeAll(keepingCapacity: true)
             }
         }
+        completeSubmissions(retainedSelectionIntents)
         return nil
+    }
+
+    private func completeSubmissions(_ intents: [QueuedIntent]) {
+        for intent in intents {
+            intent.receipt.complete()
+        }
     }
 
     private func performRefresh() async -> (any Error)? {
