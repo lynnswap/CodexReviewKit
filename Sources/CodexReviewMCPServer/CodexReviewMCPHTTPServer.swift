@@ -1592,6 +1592,7 @@ package actor CodexReviewMCPHTTPServer {
         identity: MCPSemanticSession.Identity
     ) async {
         let sessionID = identity.sessionID
+        let storeReceipt = await adapter.beginCloseSession(sessionID)
         let server: Server?
         switch session.phase {
         case .initializing(let starting):
@@ -1621,7 +1622,7 @@ package actor CodexReviewMCPHTTPServer {
             await server.waitUntilCompleted()
             await server.stop()
         }
-        if let storeReceipt = await adapter.beginCloseSession(sessionID) {
+        if let storeReceipt {
             await storeReceipt.waitUntilClosed()
         }
         guard session.identity == identity,

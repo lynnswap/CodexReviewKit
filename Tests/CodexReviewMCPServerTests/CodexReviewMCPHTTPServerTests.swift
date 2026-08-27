@@ -958,14 +958,20 @@ struct CodexReviewMCPHTTPServerTests {
         )
 
         let stop = Task { try await server.stop() }
-        #expect(await server.waitForNetworkCloseWaiterRegistrationForTesting() == .registered)
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            store.sessionCloseReceipts[sessionID] != nil
+        })
+        let closeReceipt = try #require(store.sessionCloseReceipts[sessionID])
+        await closeReceipt.waitUntilCancellationPublished()
         let pending = try #require(await server.networkResourceSnapshotForTesting()?
             .connections.flatMap(\.requests).first { $0.pendingDomainWorkCount == 1 })
         #expect(pending.responseEnd == .closed)
         #expect(await server.eventLoopGroupShutdownCountForTesting() == 0)
 
         await domainRelease.open()
-        try await finishAcceptedReviewCancellation(using: backend)
+        await backend.yield(.cancelled(
+            "Cancellation requested because the MCP session closed."
+        ))
         _ = try? await response.value
         try await stop.value
         #expect(await server.eventLoopGroupShutdownCountForTesting() == 1)
