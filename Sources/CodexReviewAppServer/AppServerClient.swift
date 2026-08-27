@@ -253,9 +253,17 @@ package actor AppServerClient {
 }
 
 package actor RequestSerializer {
+    private let waiterQueued: (@Sendable () -> Void)?
+    private let waiterGranted: (@Sendable () async -> Void)?
     private var lanes: [AppServerAPI.RequestScope: SerialLane] = [:]
 
-    package init() {}
+    package init(
+        waiterQueued: (@Sendable () -> Void)? = nil,
+        waiterGranted: (@Sendable () async -> Void)? = nil
+    ) {
+        self.waiterQueued = waiterQueued
+        self.waiterGranted = waiterGranted
+    }
 
     package func run<Output: Sendable>(
         scope: AppServerAPI.RequestScope?,
@@ -265,8 +273,11 @@ package actor RequestSerializer {
             return try await operation()
         }
         let lane = lane(for: scope)
-        await lane.enter()
+        let waitedForAdmission = try await lane.enter()
         do {
+            if waitedForAdmission {
+                try Task.checkCancellation()
+            }
             let output = try await operation()
             await lane.leave()
             return output
@@ -280,24 +291,66 @@ package actor RequestSerializer {
         if let lane = lanes[scope] {
             return lane
         }
-        let lane = SerialLane()
+        let lane = SerialLane(
+            waiterQueued: waiterQueued,
+            waiterGranted: waiterGranted
+        )
         lanes[scope] = lane
         return lane
     }
 }
 
 private actor SerialLane {
-    private var isOccupied = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private struct Waiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Void, any Error>
+    }
 
-    func enter() async {
+    private var isOccupied = false
+    private var waiters: [Waiter] = []
+    private let waiterQueued: (@Sendable () -> Void)?
+    private let waiterGranted: (@Sendable () async -> Void)?
+
+    init(
+        waiterQueued: (@Sendable () -> Void)?,
+        waiterGranted: (@Sendable () async -> Void)?
+    ) {
+        self.waiterQueued = waiterQueued
+        self.waiterGranted = waiterGranted
+    }
+
+    func enter() async throws -> Bool {
         if isOccupied == false {
             isOccupied = true
-            return
+            return false
         }
-        await withCheckedContinuation { continuation in
-            waiters.append(continuation)
+
+        let waiterID = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                if Task.isCancelled {
+                    continuation.resume(throwing: CancellationError())
+                } else if isOccupied {
+                    waiters.append(.init(id: waiterID, continuation: continuation))
+                    waiterQueued?()
+                } else {
+                    isOccupied = true
+                    continuation.resume()
+                }
+            }
+        } onCancel: {
+            Task {
+                await self.cancelWaiter(id: waiterID)
+            }
         }
+        await waiterGranted?()
+        do {
+            try Task.checkCancellation()
+        } catch {
+            leave()
+            throw error
+        }
+        return true
     }
 
     func leave() {
@@ -305,7 +358,15 @@ private actor SerialLane {
             isOccupied = false
         } else {
             let next = waiters.removeFirst()
-            next.resume()
+            next.continuation.resume()
         }
+    }
+
+    private func cancelWaiter(id: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        let waiter = waiters.remove(at: index)
+        waiter.continuation.resume(throwing: CancellationError())
     }
 }

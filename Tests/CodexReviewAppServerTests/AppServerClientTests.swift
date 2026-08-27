@@ -6835,6 +6835,92 @@ struct AppServerClientTests {
         #expect(deletedThreadIDs == ["review-thread-1", "thread-1"])
     }
 
+    @Test func cancelledQueuedSameScopeWaiterIsRemovedBeforeGrant() async throws {
+        let firstGate = AsyncGate()
+        let (waiterQueuedStream, waiterQueuedContinuation) = AsyncStream<Void>.makeStream()
+        let serializer = RequestSerializer(waiterQueued: {
+            waiterQueuedContinuation.yield()
+        })
+        let scope = AppServerAPI.RequestScope.thread("thread-1")
+        let firstStarted = AsyncGate()
+        let first = Task {
+            try await serializer.run(scope: scope) {
+                await firstStarted.open()
+                await firstGate.waitIgnoringCancellation()
+                return "first"
+            }
+        }
+        await firstStarted.wait()
+
+        let second = Task {
+            try await serializer.run(scope: scope) {
+                "second"
+            }
+        }
+        var waiterQueuedIterator = waiterQueuedStream.makeAsyncIterator()
+        _ = await waiterQueuedIterator.next()
+        second.cancel()
+        await #expect(throws: CancellationError.self) {
+            try await second.value
+        }
+
+        await firstGate.open()
+        #expect(try await first.value == "first")
+        #expect(try await serializer.run(scope: scope) { "next" } == "next")
+    }
+
+    @Test func cancelledGrantedWaiterReleasesLaneExactlyOnce() async throws {
+        let firstGate = AsyncGate()
+        let grantStarted = AsyncGate()
+        let grantGate = AsyncGate()
+        let grantCount = CallCounter()
+        let (waiterQueuedStream, waiterQueuedContinuation) = AsyncStream<Void>.makeStream()
+        let serializer = RequestSerializer(
+            waiterQueued: {
+                waiterQueuedContinuation.yield()
+            },
+            waiterGranted: {
+                guard await grantCount.record() == 1 else {
+                    return
+                }
+                await grantStarted.open()
+                await grantGate.waitIgnoringCancellation()
+            }
+        )
+        let scope = AppServerAPI.RequestScope.thread("thread-1")
+        let firstStarted = AsyncGate()
+        let first = Task {
+            try await serializer.run(scope: scope) {
+                await firstStarted.open()
+                await firstGate.waitIgnoringCancellation()
+                return "first"
+            }
+        }
+        await firstStarted.wait()
+
+        var waiterQueuedIterator = waiterQueuedStream.makeAsyncIterator()
+        let second = Task {
+            try await serializer.run(scope: scope) { "second" }
+        }
+        _ = await waiterQueuedIterator.next()
+        let third = Task {
+            try await serializer.run(scope: scope) { "third" }
+        }
+        _ = await waiterQueuedIterator.next()
+
+        await firstGate.open()
+        await grantStarted.wait()
+        second.cancel()
+        await grantGate.open()
+
+        await #expect(throws: CancellationError.self) {
+            try await second.value
+        }
+        #expect(try await first.value == "first")
+        #expect(try await third.value == "third")
+        #expect(try await serializer.run(scope: scope) { "next" } == "next")
+    }
+
     @Test @MainActor
     func storeRetainsCleanupFailureAsSecondaryDiagnosticWithoutMaskingPrimary() async throws {
         let backend = FakeCodexReviewBackend()
