@@ -45,6 +45,7 @@ extension ReviewUITests {
         try await withReviewUIAppServerCleanup(
             store: store,
             backend: backend,
+            transport: transport,
             reviewTask: review
         ) {
             try #require(await StoreSnapshotProbe(store: store).waitUntil { snapshot in
@@ -225,6 +226,7 @@ extension ReviewUITests {
             try await withReviewUIAppServerCleanup(
                 store: store,
                 backend: backend,
+                transport: transport,
                 reviewTask: review
             ) {
                 try #require(await StoreSnapshotProbe(store: store).waitUntil { snapshot in
@@ -254,8 +256,9 @@ extension ReviewUITests {
         #expect(await backend.notificationRouterIsRunningForTesting() == false)
     }
 
-    @Test func sidebarCancellationUsesAppServerInterruptAndRendersTerminalState() async throws {
+    @Test func sidebarCancellationHidesCompletedUpstreamArtifactsAndRendersTerminalState() async throws {
         let transport = FakeJSONRPCTransport()
+        let interruptResponseGate = AsyncGate()
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await transport.enqueue(
             AppServerAPI.Thread.Start.Response(threadID: "thread-review", model: "gpt-5"),
@@ -269,6 +272,7 @@ extension ReviewUITests {
             for: "review/start"
         )
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        await transport.hold(method: "turn/interrupt", gate: interruptResponseGate)
         try await transport.enqueue(
             AppServerAPI.Thread.Unsubscribe.Response(status: .unsubscribed),
             for: "thread/unsubscribe"
@@ -288,12 +292,18 @@ extension ReviewUITests {
         try await withReviewUIAppServerCleanup(
             store: store,
             backend: backend,
+            transport: transport,
             reviewTask: review
         ) {
             try #require(await StoreSnapshotProbe(store: store).waitUntil { snapshot in
                 snapshot.job("job-1")?.activeRun?.turnID == "turn-review"
             } != nil)
             let job = try #require(store.job(id: "job-1"))
+            guard case .active(let activeAttempt) = store.reviewAttemptOwnerships[job.id] else {
+                Issue.record("Expected an active review attempt")
+                return
+            }
+            let admission = activeAttempt.admission
             let harness = makeWindowHarness(store: store)
             defer { harness.window.close() }
             let sidebar = harness.viewController.sidebarViewControllerForTesting
@@ -354,9 +364,20 @@ extension ReviewUITests {
             )
             #expect(interruptParams.threadID == "thread-review")
             #expect(interruptParams.turnID == "turn-review")
+            await interruptResponseGate.open()
+            try await withTestTimeout {
+                while true {
+                    if case .interrupting(_, _, .acknowledged) = await admission.currentPhase() {
+                        return
+                    }
+                    try Task.checkCancellation()
+                    await Task.yield()
+                }
+            }
 
-            let reviewExitArtifact = "Review mode exited after cancellation."
-            let companionArtifact = "Review was interrupted before completion."
+            let reviewExitArtifact = "Reviewer failed to output a response."
+            let companionArtifact =
+                "Review was interrupted. Please re-run /review and wait for it to complete."
             for method in ["item/started", "item/completed"] {
                 try await transport.emitServerNotification(
                     method: method,
@@ -385,6 +406,14 @@ extension ReviewUITests {
                     )
                 )
             }
+            let interleavedStatus = "Review thread is no longer loaded."
+            try await transport.emitServerNotification(
+                method: "thread/status/changed",
+                params: ReviewUIV2ThreadStatusNotification(
+                    threadID: "thread-review",
+                    status: .init(type: "notLoaded")
+                )
+            )
             try await transport.emitServerNotification(
                 method: "turn/completed",
                 params: ReviewUIV2TurnNotification(
@@ -393,7 +422,7 @@ extension ReviewUITests {
                         id: "turn-review",
                         items: [],
                         itemsView: "notLoaded",
-                        status: "interrupted"
+                        status: "completed"
                     )
                 )
             )
@@ -411,6 +440,7 @@ extension ReviewUITests {
             #expect(job.core.lifecycle.errorMessage == expectedCancellation.message)
             #expect(job.logEntries.contains { $0.kind == .error } == false)
             #expect(rendered.log.contains("Partial review before cancellation."))
+            #expect(rendered.log.contains(interleavedStatus))
             #expect(rendered.log.contains(reviewExitArtifact) == false)
             #expect(rendered.log.contains(companionArtifact) == false)
 
@@ -420,6 +450,9 @@ extension ReviewUITests {
                 $0.audience == .developer
             }
             #expect(defaultRead.logs.allSatisfy { $0.audience == .product })
+            #expect(defaultRead.logs.contains { $0.text == reviewExitArtifact } == false)
+            #expect(defaultRead.logs.contains { $0.text == companionArtifact } == false)
+            #expect(defaultRead.logs.contains { $0.text == interleavedStatus })
             #expect(developerDiagnostics.map(\.kind) == [.diagnostic, .diagnostic])
             #expect(developerDiagnostics.map(\.groupID) == [
                 "review-exit",
@@ -429,10 +462,8 @@ extension ReviewUITests {
                 reviewExitArtifact,
                 companionArtifact,
             ])
-            #expect(job.rawLogText == """
-            Review mode exited after cancellation.
-            Review was interrupted before completion.
-            """)
+            #expect(job.rawLogText.contains(reviewExitArtifact))
+            #expect(job.rawLogText.contains(companionArtifact))
             #expect(allRead.rawLogText == job.rawLogText)
             try await waitForCondition {
                 store.reviewWorkerTasks["job-1"] == nil
@@ -468,6 +499,7 @@ private enum ReviewUIAppServerIntegrationError: Error {
 private func withReviewUIAppServerCleanup<Value>(
     store: CodexReviewStore,
     backend: AppServerCodexReviewBackend,
+    transport: FakeJSONRPCTransport,
     reviewTask: Task<CodexReviewAPI.Read.Result, any Error>,
     operation: () async throws -> Value
 ) async throws -> Value {
@@ -476,8 +508,15 @@ private func withReviewUIAppServerCleanup<Value>(
         value = try await operation()
     } catch {
         let operationError = error
-        reviewTask.cancel()
-        await store.cancelAndDrainReviewWorkersForTesting()
+        do {
+            try await finishReviewForCleanup(
+                store: store,
+                transport: transport,
+                reviewTask: reviewTask
+            )
+        } catch {
+            Issue.record("Review cleanup terminal also failed: \(error.localizedDescription)")
+        }
         _ = await reviewTask.result
         do {
             try await backend.runtimeOwnerLifecycleHandle.closeAndWait()
@@ -486,11 +525,48 @@ private func withReviewUIAppServerCleanup<Value>(
         }
         throw operationError
     }
-    reviewTask.cancel()
-    await store.cancelAndDrainReviewWorkersForTesting()
+    try await finishReviewForCleanup(
+        store: store,
+        transport: transport,
+        reviewTask: reviewTask
+    )
     _ = await reviewTask.result
     try await backend.runtimeOwnerLifecycleHandle.closeAndWait()
     return value
+}
+
+@MainActor
+private func finishReviewForCleanup(
+    store: CodexReviewStore,
+    transport: FakeJSONRPCTransport,
+    reviewTask: Task<CodexReviewAPI.Read.Result, any Error>
+) async throws {
+    reviewTask.cancel()
+    if let job = store.orderedJobs.first(where: { $0.isTerminal == false }),
+       let threadID = job.core.run.reviewThreadID,
+       let turnID = job.core.run.turnID {
+        try await withTestTimeout {
+            while await transport.recordedRequests().contains(where: {
+                $0.method == "turn/interrupt"
+            }) == false {
+                try Task.checkCancellation()
+                await Task.yield()
+            }
+        }
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: ReviewUIV2TurnNotification(
+                threadID: threadID,
+                turn: .init(
+                    id: turnID,
+                    items: [],
+                    itemsView: "notLoaded",
+                    status: "interrupted"
+                )
+            )
+        )
+    }
+    await store.cancelAndDrainReviewWorkersForTesting()
 }
 
 @MainActor
@@ -651,6 +727,20 @@ private struct ReviewUIV2TurnNotification: Encodable, Sendable {
     enum CodingKeys: String, CodingKey {
         case threadID = "threadId"
         case turn
+    }
+}
+
+private struct ReviewUIV2ThreadStatusNotification: Encodable, Sendable {
+    struct Status: Encodable, Sendable {
+        var type: String
+    }
+
+    var threadID: String
+    var status: Status
+
+    enum CodingKeys: String, CodingKey {
+        case threadID = "threadId"
+        case status
     }
 }
 

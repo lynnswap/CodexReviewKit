@@ -242,22 +242,10 @@ extension CodexReviewStore {
             applyReviewWorkerInputFailure(inputFailure.failure, to: job)
         } catch let error where error is CancellationError || Task.isCancelled {
             cleanupCancellationRequest = job.pendingCancellationRequest
-            if let terminal = await admission.activeTerminalResolution(),
-               case .stream(let failure) = terminal.terminal {
-                if let cancellation = recordedStreamCancellation(
-                    terminal,
-                    failure: failure,
-                    pendingRequest: job.pendingCancellationRequest
-                ) {
-                    try? completeCancellationLocally(
-                        jobID: job.id,
-                        sessionID: job.sessionID,
-                        cancellation: cancellation
-                    )
-                } else {
-                    applyReviewWorkerInputFailure(failure, to: job)
-                }
-            } else {
+            if reviewAttemptOwnsTerminalBarrier(
+                jobID: jobID,
+                workerAdmission: admission
+            ) == false {
                 let cancellation = await admission.cancellationRequest()
                 if job.isTerminal == false || cancellation != nil {
                     try? completeCancellationAfterRegisteredWorkSuspension(
@@ -475,7 +463,7 @@ extension CodexReviewStore {
         _ active: StoreReviewActiveAttempt,
         cancellation: ActiveAttemptCancellation,
         inputs: ReviewWorkerInputs?,
-        drainCancellation: Bool
+        job: CodexReviewJob
     ) async throws -> ReviewInterruptResolution {
         guard let inputs else { throw recoveryOwnershipFailure("drain active cancellation") }
         let interrupt = Task<Result<ReviewInterruptResolution, any Error>, Never> { @MainActor in
@@ -487,14 +475,28 @@ extension CodexReviewStore {
             }
         }
         if try await active.admission.hasRecordedActiveTerminal(for: active.run) == false {
-            try await recordNextTerminal(
-                for: active,
-                cancellationRequest: cancellation.requestReceipt,
-                inputs: inputs,
-                drainCancellation: drainCancellation
-            )
+            do {
+                try await recordNextTerminal(
+                    for: active,
+                    cancellationRequest: cancellation.requestReceipt,
+                    inputs: inputs,
+                    drainCancellation: false,
+                    job: job
+                )
+            } catch {
+                switch await interrupt.value {
+                case .failure(let interruptFailure):
+                    throw interruptFailure
+                case .success:
+                    throw error
+                }
+            }
         }
-        return try await interrupt.value.get()
+        let resolution = try await interrupt.value.get()
+        if job.isTerminal == false {
+            applyRecordedInterruptTerminal(resolution, to: job)
+        }
+        return resolution
     }
 
     private func cleanupFailure(
@@ -507,18 +509,18 @@ extension CodexReviewStore {
         for active: StoreReviewActiveAttempt,
         cancellationRequest: ReviewCancellationRequestReceipt?,
         inputs: ReviewWorkerInputs,
-        drainCancellation: Bool
+        drainCancellation: Bool,
+        job: CodexReviewJob? = nil
     ) async throws {
         while true {
             let input: ReviewWorkerInput?
             if drainCancellation || Task.isCancelled {
                 input = await inputs.nextBuffered()
                 if input == nil {
-                    try await active.admission.recordStreamTerminal(.ownerCancellation, for: active.run, cancellationRequest: cancellationRequest)
-                    return
+                    throw CancellationError()
                 }
             } else {
-                input = await inputs.nextIgnoringCancellation()
+                input = await inputs.next()
             }
             guard let input else {
                 throw ReviewWorkerInputQueueError(failure: .workerContract(.init(
@@ -528,7 +530,20 @@ extension CodexReviewStore {
             switch input {
             case .reviewEvent(let event) where active.matches(event.source):
                 guard let terminal = reviewTerminalRecord(for: event.event) else { continue }
-                try await active.admission.recordCanonicalTerminal(terminal, for: active.run, cancellationRequest: cancellationRequest)
+                let resolution = try await active.admission.recordCanonicalTerminal(
+                    terminal,
+                    for: active.run,
+                    cancellationRequest: cancellationRequest
+                )
+                if let job {
+                    _ = handleReviewEvent(
+                        event.event,
+                        job: job,
+                        sourceRun: active.run,
+                        currentRun: active.run,
+                        recordedTerminal: resolution
+                    )
+                }
                 return
             case .reviewStreamTerminal(let stream) where active.matches(stream.source):
                 let failure: ReviewAttemptStreamFailure = switch stream.kind {
@@ -537,7 +552,18 @@ extension CodexReviewStore {
                 ))
                 case .failed(let failure): failure
                 }
-                try await active.admission.recordStreamTerminal(failure, for: active.run, cancellationRequest: cancellationRequest)
+                let resolution = try await active.admission.recordStreamTerminal(
+                    failure,
+                    for: active.run,
+                    cancellationRequest: cancellationRequest
+                )
+                if let job {
+                    applyRecordedStreamTerminal(
+                        failure,
+                        resolution: resolution,
+                        to: job
+                    )
+                }
                 return
             case .cleanupInterruptFailed(let message):
                 throw ReviewWorkerInputQueueError(failure: .workerContract(.init(message: message)))
@@ -546,6 +572,64 @@ extension CodexReviewStore {
                  .recoveryDispositionCompleted:
                 continue
             }
+        }
+    }
+
+    private func reviewAttemptOwnsTerminalBarrier(
+        jobID: String,
+        workerAdmission: ReviewStartAdmission
+    ) -> Bool {
+        guard let ownership = reviewAttemptOwnerships[jobID],
+              ownership.workerAdmission === workerAdmission else {
+            return false
+        }
+        switch ownership {
+        case .active:
+            return true
+        case .starting, .recovering:
+            return false
+        }
+    }
+
+    private func applyRecordedInterruptTerminal(
+        _ resolution: ReviewInterruptResolution,
+        to job: CodexReviewJob
+    ) {
+        switch resolution.terminal {
+        case .canonical(let terminal):
+            applyRecoveryProductTerminal(terminal, to: job)
+        case .connection(let failure):
+            applyRecordedStreamTerminal(
+                .unexpectedConnection(failure),
+                resolution: resolution,
+                to: job
+            )
+        case .stream(let failure):
+            applyRecordedStreamTerminal(
+                failure,
+                resolution: resolution,
+                to: job
+            )
+        }
+    }
+
+    private func applyRecordedStreamTerminal(
+        _ failure: ReviewAttemptStreamFailure,
+        resolution: ReviewInterruptResolution,
+        to job: CodexReviewJob
+    ) {
+        if let cancellation = recordedStreamCancellation(
+            resolution,
+            failure: failure,
+            pendingRequest: job.pendingCancellationRequest
+        ) {
+            try? completeCancellationLocally(
+                jobID: job.id,
+                sessionID: job.sessionID,
+                cancellation: cancellation
+            )
+        } else {
+            applyReviewWorkerInputFailure(failure, to: job)
         }
     }
 
@@ -589,7 +673,7 @@ extension CodexReviewStore {
                         active,
                         cancellation: cancellation,
                         inputs: inputs,
-                        drainCancellation: workerWasCancelled
+                        job: job
                     )
                     failure = cleanupFailure(from: resolution.requestFailure)
                 } catch {
@@ -912,6 +996,10 @@ extension CodexReviewStore {
                 reviewWorkerTasks[jobID]?.cancel()
                 await reviewWorkerTasks[jobID]?.value
             } catch {
+                if let requestFailure = error as? ReviewInterruptRequestFailure,
+                   case .outcomeUnknown = requestFailure.outcome {
+                    throw requestFailure
+                }
                 guard job.isTerminal == false else {
                     return .init(
                         jobID: job.id,
