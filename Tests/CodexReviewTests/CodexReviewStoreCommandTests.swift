@@ -3764,6 +3764,8 @@ struct CodexReviewStoreCommandTests {
             #expect(await replayedCloseCompletion.isComplete() == false)
 
             await startRelease.open()
+            try await backend.waitForInterruptReview(timeout: .seconds(2))
+            await backend.yield(.cancelled(reason.message))
             await firstClose.value
             await replayedClose.value
             let result = try await review.value
