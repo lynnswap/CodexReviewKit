@@ -841,6 +841,7 @@ struct CodexReviewMCPHTTPServerTests {
         )) { server in
             let endpoint = await server.url
             let sessionID = try await initializeSession(endpoint: endpoint)
+            await server.waitUntilSessionRequestsDrainForTesting(sessionID: sessionID)
             await server.holdNextWriterCompletionForTesting()
             await server.holdNextSessionRequestRetirementForTesting()
             let response = Task {
