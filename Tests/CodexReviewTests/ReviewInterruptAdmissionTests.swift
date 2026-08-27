@@ -89,7 +89,7 @@ struct ReviewInterruptAdmissionTests {
         let cancellation = ReviewCancellation.mcpClient(message: "Same cancellation")
         let rejection = ReviewInterruptRequestFailure(outcome: .rejected(code: -32_000, message: "No active turn"))
         let receipts = (delayed: makeReceipt(1, cancellation), rejected: makeReceipt(2, cancellation), retry: makeReceipt(3, cancellation))
-        let crossJobReceipt = ReviewCancellationRequestReceipt(id: .init(jobID: "job-2", ordinal: 4), cancellation: cancellation, rejectionDisposition: .reportFailure)
+        let crossJobReceipt = ReviewCancellationRequestReceipt(id: .init(jobID: "job-2", ordinal: 4), cancellation: cancellation, rejectionDisposition: .reportFailure, registeredWorkAdmission: nil)
 
         await #expect(throws: rejection) {
             try await admission.interrupt(run, cancellationRequest: receipts.rejected) { _, _ in
@@ -374,7 +374,7 @@ private func makeReceipt(
     _ cancellation: ReviewCancellation,
     _ disposition: ReviewCancellationRequestReceipt.RejectionDisposition = .reportFailure
 ) -> ReviewCancellationRequestReceipt {
-    .init(id: .init(jobID: "job-1", ordinal: ordinal), cancellation: cancellation, rejectionDisposition: disposition)
+    .init(id: .init(jobID: "job-1", ordinal: ordinal), cancellation: cancellation, rejectionDisposition: disposition, registeredWorkAdmission: nil)
 }
 
 private func makeActiveInterruptAdmission() async throws -> (

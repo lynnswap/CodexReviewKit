@@ -12,4 +12,5 @@ package struct ReviewCancellationRequestReceipt: Equatable, Sendable {
     package let id: ID
     package let cancellation: ReviewCancellation
     package let rejectionDisposition: RejectionDisposition
+    package let registeredWorkAdmission: ReviewStoreWorkRegistry.Admission?
 }
