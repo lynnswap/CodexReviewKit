@@ -1082,9 +1082,6 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
     ) async {
         let appServerBackend = appServerBackend
         let loginCleanup = takeLoginRuntimeForCleanup()
-        guard appServerBackend != nil || loginCleanup.isEmpty == false else {
-            return
-        }
         logger.info("Stopping review runtime semantic work for \(intent.diagnosticContext, privacy: .public)")
         if let appServerBackend {
             await cancelActiveReviewsForRuntimeTeardown(
@@ -1093,6 +1090,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 reason: intent.reviewCancellation,
                 timeoutWarning: intent.cleanupTimeoutWarning
             )
+        } else {
+            await context.stopUsingDefaultPolicy(intent: intent)
         }
         await cleanupLoginRuntime(loginCleanup)
         logger.info("Review runtime semantic work stopped after \(intent.diagnosticContext, privacy: .public)")

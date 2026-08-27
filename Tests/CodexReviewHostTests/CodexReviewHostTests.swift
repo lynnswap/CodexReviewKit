@@ -415,6 +415,32 @@ struct CodexReviewHostTests {
         #expect(server.stopCallCount == 1)
     }
 
+    @Test func liveStopCompletesContextWithoutAppServerBackend() async throws {
+        let workerStarted = AsyncGate()
+        let workerGate = AsyncGate()
+        let workerCancelled = AsyncGate()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transport: FakeJSONRPCTransport()
+        )
+        store.reviewWorkerTasks["job-1"] = Task {
+            await withTaskCancellationHandler {
+                await workerStarted.open()
+                await workerGate.waitIgnoringCancellation()
+            } onCancel: {
+                Task { await workerCancelled.open() }
+            }
+        }
+        await workerStarted.wait()
+        let context = store.detachRuntimeSemanticStopContext(intent: .explicitStop)
+
+        await store.backend.stop(context: context, intent: .explicitStop)
+        await workerCancelled.wait()
+        await workerGate.open()
+        #expect(await context.drainWorkers(timeout: .seconds(2)))
+    }
+
     @Test func liveSameAccountRestartRetainsMCPListenerAndURL() async throws {
         let homeURL = try temporaryHome()
         let firstTransport = FakeJSONRPCTransport()
@@ -2508,9 +2534,7 @@ struct CodexReviewHostTests {
         let stopTask = Task { @MainActor in
             await store.stop()
         }
-        let interruptStarted = await waitUntil(timeout: .seconds(2)) {
-            await transport.recordedRequests().map(\.method).contains("turn/interrupt")
-        }
+        await transport.waitForActiveRequests(method: "turn/interrupt")
         let methodsBeforeInterruptCompletes = await transport.recordedRequests().map(\.method)
         let jobBeforeInterruptCompletes = try #require(store.jobs.first)
         #expect(jobBeforeInterruptCompletes.cancellationRequested)
@@ -2525,7 +2549,6 @@ struct CodexReviewHostTests {
         await stopTask.value
         let result = try await reviewRead
 
-        #expect(interruptStarted)
         #expect(methodsBeforeInterruptCompletes.contains("turn/interrupt"))
         #expect(methodsBeforeInterruptCompletes.contains("thread/backgroundTerminals/clean") == false)
         #expect(methodsBeforeInterruptCompletes.contains("thread/delete") == false)
