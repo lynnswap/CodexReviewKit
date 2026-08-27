@@ -83,20 +83,14 @@ package final class DirectoryCapability: Sendable {
         let identity: Identity
     }
 
-    private struct RemovalPath {
-        let parentComponents: [RemovalComponent]
-        let leaf: RemovalComponent
-
-        var components: [RemovalComponent] { parentComponents + [leaf] }
-
-        func appending(_ component: RemovalComponent) -> Self {
-            Self(parentComponents: components, leaf: component)
-        }
+    private struct RemovalNode {
+        let parentIndex: Int?
+        let component: RemovalComponent
     }
 
     private enum RemovalWork {
-        case enumerate(RemovalPath)
-        case remove(RemovalPath)
+        case enumerate(Int)
+        case remove(Int)
     }
 
     private struct State: Sendable {
@@ -623,15 +617,16 @@ package final class DirectoryCapability: Sendable {
             path: rootPath
         )
 
-        let rootPath = RemovalPath(parentComponents: [], leaf: root)
-        var work: [RemovalWork] = [.enumerate(rootPath)]
+        var arena = [RemovalNode(parentIndex: nil, component: root)]
+        var work: [RemovalWork] = [.enumerate(0)]
         while let next = work.popLast() {
             switch next {
-            case .enumerate(let path):
+            case .enumerate(let nodeIndex):
                 var children: [RemovalComponent] = []
                 try withRemovalDirectory(
                     rootDescriptor: rootDescriptor,
-                    components: path.components,
+                    nodeIndex: nodeIndex,
+                    arena: arena,
                     expectedDeviceID: expectedDeviceID,
                     directoryURL: directoryURL
                 ) { parent, directoryPath in
@@ -669,27 +664,31 @@ package final class DirectoryCapability: Sendable {
                         }
                     }
                 }
-                work.append(.remove(path))
+                work.append(.remove(nodeIndex))
                 for child in children.reversed() {
-                    work.append(.enumerate(path.appending(child)))
+                    let childIndex = arena.count
+                    arena.append(RemovalNode(parentIndex: nodeIndex, component: child))
+                    work.append(.enumerate(childIndex))
                 }
-            case .remove(let path):
+            case .remove(let nodeIndex):
+                let node = arena[nodeIndex]
                 try withRemovalDirectory(
                     rootDescriptor: rootDescriptor,
-                    components: path.parentComponents,
+                    nodeIndex: node.parentIndex,
+                    arena: arena,
                     expectedDeviceID: expectedDeviceID,
                     directoryURL: directoryURL
                 ) { parent, parentPath in
                     let entryPath = URL(fileURLWithPath: parentPath, isDirectory: true)
-                        .appendingPathComponent(path.leaf.name.value, isDirectory: true).path
+                        .appendingPathComponent(node.component.name.value, isDirectory: true).path
                     try revalidateRemovalEntry(
                         parent: parent,
-                        component: path.leaf,
+                        component: node.component,
                         expectedDeviceID: expectedDeviceID,
                         expectedType: mode_t(S_IFDIR),
                         path: entryPath
                     )
-                    let removed = path.leaf.name.value.withCString { pointer in
+                    let removed = node.component.name.value.withCString { pointer in
                         retryingEINTR { unlinkat(parent, pointer, AT_REMOVEDIR) }
                     }
                     guard removed == 0 else {
@@ -702,7 +701,8 @@ package final class DirectoryCapability: Sendable {
 
     private static func withRemovalDirectory<Result>(
         rootDescriptor: Int32,
-        components: [RemovalComponent],
+        nodeIndex: Int?,
+        arena: [RemovalNode],
         expectedDeviceID: UInt64,
         directoryURL: URL,
         body: (Int32, String) throws -> Result
@@ -717,8 +717,15 @@ package final class DirectoryCapability: Sendable {
         }
         var needsClose = true
         defer { if needsClose { _ = Darwin.close(descriptor) } }
+        var reversedComponents: [RemovalComponent] = []
+        var currentIndex = nodeIndex
+        while let index = currentIndex {
+            let node = arena[index]
+            reversedComponents.append(node.component)
+            currentIndex = node.parentIndex
+        }
         var componentURL = directoryURL
-        for component in components {
+        for component in reversedComponents.reversed() {
             componentURL.appendPathComponent(component.name.value, isDirectory: true)
             let path = componentURL.path
             guard let status = try fileStatus(

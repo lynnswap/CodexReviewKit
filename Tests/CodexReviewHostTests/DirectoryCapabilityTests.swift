@@ -602,8 +602,9 @@ struct DirectoryCapabilityTests {
         let victimURL = fixture.appendingPathComponent("victim", isDirectory: true)
         let limit = try reduceOpenFileLimit()
         defer { restoreOpenFileLimit(limit.original) }
+        let depth = max(Int(limit.reducedSoftLimit) + 16, 512)
         var current = victim
-        for _ in 0..<(Int(limit.reducedSoftLimit) + 16) {
+        for _ in 0..<depth {
             let child = try current.directory(
                 named: .init("d"),
                 acquisition: .new,
