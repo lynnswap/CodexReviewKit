@@ -221,6 +221,18 @@ struct ReviewTerminalContractTests {
         )
         await backend.waitForStartReview()
         let cancellation = ReviewCancellation.mcpClient(message: "Stop")
+        _ = try #require(await StoreSnapshotProbe(store: store).waitUntilRunAttempt(
+            "attempt-1",
+            jobID: running.jobID
+        ))
+        guard case .active(let active) = store.reviewAttemptOwnerships[running.jobID] else {
+            Issue.record("Review did not publish its exact active attempt.")
+            return
+        }
+        try await active.admission.recordCanonicalTerminal(
+            .interrupted(.requested(cancellation)),
+            for: active.run
+        )
 
         try store.completeCancellationLocally(
             jobID: running.jobID,

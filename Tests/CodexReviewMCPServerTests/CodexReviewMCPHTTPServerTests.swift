@@ -473,7 +473,12 @@ struct CodexReviewMCPHTTPServerTests {
             idGenerator: .init(next: { "job-1" })
         )
 
-        try await withHTTPServer(store: store) { server in
+        try await withHTTPServer(
+            store: store,
+            afterStopStarted: {
+                try await finishAcceptedReviewCancellation(using: backend)
+            }
+        ) { server in
             let endpoint = await server.url
             let sessionID = try await initializeSession(endpoint: endpoint)
             let connection = try await RawHTTPConnection.connect(to: endpoint)
@@ -960,6 +965,7 @@ struct CodexReviewMCPHTTPServerTests {
         #expect(await server.eventLoopGroupShutdownCountForTesting() == 0)
 
         await domainRelease.open()
+        try await finishAcceptedReviewCancellation(using: backend)
         _ = try? await response.value
         try await stop.value
         #expect(await server.eventLoopGroupShutdownCountForTesting() == 1)
@@ -2290,6 +2296,7 @@ struct CodexReviewMCPHTTPServerTests {
             host: "127.0.0.1",
             port: 0
         ),
+        afterStopStarted: (() async throws -> Void)? = nil,
         operation: (CodexReviewMCPHTTPServer) async throws -> T
     ) async throws -> T {
         let adapter = CodexReviewMCPServer(store: store)
@@ -2301,12 +2308,32 @@ struct CodexReviewMCPHTTPServerTests {
         try await server.start()
         do {
             let result = try await operation(server)
-            try await server.stop()
+            if let afterStopStarted {
+                let stop = Task { try await server.stop() }
+                do {
+                    try await afterStopStarted()
+                    try await stop.value
+                } catch {
+                    stop.cancel()
+                    _ = try? await stop.value
+                    throw error
+                }
+            } else {
+                try await server.stop()
+            }
             return result
         } catch {
             try? await server.stop()
             throw error
         }
+    }
+
+    private func finishAcceptedReviewCancellation(
+        using backend: FakeCodexReviewBackend,
+        message: String = "Cancellation requested."
+    ) async throws {
+        try await backend.waitForInterruptReview(timeout: .seconds(2))
+        await backend.yield(.cancelled(message))
     }
 
     private func initializeSession(
