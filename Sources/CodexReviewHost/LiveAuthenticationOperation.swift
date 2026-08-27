@@ -4,11 +4,6 @@ import CodexReviewAppServer
 
 @MainActor
 final class LiveAuthenticationOperation {
-    struct AdmissionTransition {
-        var scope: ResourceScope
-        var displacedResources: ResourceCleanup?
-    }
-
     struct ResourceCleanup {
         var challenge: CodexReviewBackendModel.Login.Challenge?
         var backend: AppServerCodexReviewBackend?
@@ -34,6 +29,8 @@ final class LiveAuthenticationOperation {
             resources?.authenticationSession = session
             resources?.monitorTask = monitorTask
         }
+
+        func install(session: any CodexReviewNativeAuthentication.WebSession) { resources?.authenticationSession = session }
 
         func install(notificationTask: Task<Void, Never>) { resources?.notificationTask = notificationTask }
 
@@ -78,23 +75,33 @@ final class LiveAuthenticationOperation {
         case waitingForAccountUpdate
     }
 
-    var activation = Activation.activateAuthenticatedAccount
+    let activation: Activation
     private(set) var resourceScope: ResourceScope?
+    private(set) var setupTask: Task<Void, Never>?
     var phase = Phase.waitingForCompletion
 
-    func replaceResources(
-        _ resources: ResourceCleanup,
-        activation: Activation
-    ) -> AdmissionTransition {
-        let displacedResources = resourceScope?.takeForCleanup()
+    init(activation: Activation) {
+        self.activation = activation
+    }
+
+    func install(setupTask: Task<Void, Never>) {
+        self.setupTask = setupTask
+    }
+
+    func cancelSetup() {
+        setupTask?.cancel()
+    }
+
+    func waitForSetup() async {
+        await setupTask?.value
+    }
+
+    func installResources(_ resources: ResourceCleanup) -> ResourceScope? {
+        guard resourceScope == nil else { return nil }
         let scope = ResourceScope(resources)
         resourceScope = scope
-        self.activation = activation
         phase = .waitingForCompletion
-        return .init(
-            scope: scope,
-            displacedResources: displacedResources
-        )
+        return scope
     }
 
     func isCurrent(_ scope: ResourceScope?) -> Bool { resourceScope === scope }
