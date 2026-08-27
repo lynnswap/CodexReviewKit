@@ -1284,11 +1284,11 @@ public final class CodexReviewStore {
     }
 
     public func signIn() async {
-        await backend.signIn(auth: auth)
+        _ = await backend.signIn(auth: auth)
     }
 
     public func addAccount() async {
-        await backend.addAccount(auth: auth)
+        _ = await backend.addAccount(auth: auth)
     }
 
     public func cancelAuthentication() async {

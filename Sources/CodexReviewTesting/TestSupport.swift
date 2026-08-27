@@ -1253,7 +1253,7 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         }
     }
 
-    package func signIn(auth: CodexReviewAuthModel) async {
+    package func signIn(auth: CodexReviewAuthModel) async -> CodexReviewAuthenticationSessionReceipt {
         do {
             let challenge = try await reviewBackend.startLogin(.init())
             auth.updatePhase(.signingIn(.init(
@@ -1262,12 +1262,14 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
                 browserURL: challenge.verificationURL?.absoluteString,
                 userCode: challenge.userCode
             )))
+            return .completed(.succeeded)
         } catch {
             auth.updatePhase(.failed(message: error.localizedDescription))
+            return .completed(.failed(error.localizedDescription))
         }
     }
 
-    package func addAccount(auth: CodexReviewAuthModel) async {
+    package func addAccount(auth: CodexReviewAuthModel) async -> CodexReviewAuthenticationSessionReceipt {
         await signIn(auth: auth)
     }
 

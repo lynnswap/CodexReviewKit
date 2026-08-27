@@ -182,8 +182,8 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
         }
     }
 
-    func signIn(auth: CodexReviewAuthModel) async {
-        guard active else { return }
+    func signIn(auth: CodexReviewAuthModel) async -> CodexReviewAuthenticationSessionReceipt {
+        guard active else { return .completed(.cancelled) }
         do {
             let challenge = try await backend.startLogin(.init())
             loginChallenge = challenge
@@ -193,14 +193,16 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
                 browserURL: challenge.verificationURL?.absoluteString,
                 userCode: challenge.userCode
             )))
+            return .completed(.succeeded)
         } catch {
             auth.updatePhase(.failed(message: error.localizedDescription))
+            return .completed(.failed(error.localizedDescription))
         }
     }
 
-    func addAccount(auth: CodexReviewAuthModel) async {
-        guard active else { return }
-        await signIn(auth: auth)
+    func addAccount(auth: CodexReviewAuthModel) async -> CodexReviewAuthenticationSessionReceipt {
+        guard active else { return .completed(.cancelled) }
+        return await signIn(auth: auth)
     }
 
     func cancelAuthentication(auth: CodexReviewAuthModel) async {

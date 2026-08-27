@@ -1567,6 +1567,126 @@ struct CodexReviewHostTests {
         ])
     }
 
+    @Test func liveRuntimeStopCancelsAndJoinsExactAuthenticationSessionBeforeRejectingLateCallback() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
+        try await transport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await transport.enqueue(
+            AppServerAPI.Account.Login.Response.chatgpt(
+                loginID: "login-1",
+                authURL: "https://example.com/auth",
+                nativeWebAuthentication: .init(callbackURLScheme: "lynnpd.CodexReviewMonitor.auth")
+            ),
+            for: "account/login/start"
+        )
+        try await transport.enqueue(AppServerAPI.Account.Login.Cancel.Response(), for: "account/login/cancel")
+        let sessions = FakeWebAuthenticationSessions()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            nativeAuthenticationConfiguration: .init(
+                callbackScheme: "lynnpd.CodexReviewMonitor.auth",
+                browserSessionPolicy: .ephemeral,
+                presentationAnchorProvider: { NSWindow() }
+            ),
+            webAuthenticationSessionFactory: sessions.makeSession,
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        await store.addAccount()
+        let session = await sessions.waitForSession()
+        await session.waitUntilWaitingForCallback()
+        let cancellationGate = AsyncGate()
+        session.holdCancellation(with: cancellationGate)
+        let stopFinished = CompletionFlag()
+        let stop = Task { @MainActor in
+            await store.stop()
+            await stopFinished.complete()
+        }
+
+        await session.waitUntilCancellationStarted()
+        #expect(await stopFinished.isCompleted() == false)
+        session.complete(with: URL(string: "lynnpd.CodexReviewMonitor.auth://callback?code=late")!)
+        await cancellationGate.open()
+
+        await stop.value
+        #expect(store.serverState == .stopped)
+        #expect(store.auth.isAuthenticating == false)
+        #expect(store.auth.selectedAccount == nil)
+        #expect(await transport.recordedRequests().map(\.method) == [
+            "initialize",
+            "account/read",
+            "config/read",
+            "model/list",
+            "account/login/start",
+            "account/login/cancel",
+        ])
+    }
+
+    @Test func liveCancelAuthenticationJoinsBrowserLoginAndIgnoresLateAppServerCompletion() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
+        try await transport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await transport.enqueue(
+            AppServerAPI.Account.Login.Response.chatgpt(
+                loginID: "login-browser",
+                authURL: "https://example.com/auth",
+                nativeWebAuthentication: nil
+            ),
+            for: "account/login/start"
+        )
+        try await transport.enqueue(AppServerAPI.Account.Login.Cancel.Response(), for: "account/login/cancel")
+        let cancelGate = AsyncGate()
+        await transport.hold(method: "account/login/cancel", gate: cancelGate)
+        let externalURLOpener = FakeExternalURLOpener()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            externalURLOpener: externalURLOpener.open,
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        await transport.waitForNotificationStreamCount(1)
+        await store.signIn()
+        #expect(externalURLOpener.openedURLs == [URL(string: "https://example.com/auth")!])
+        let cancelFinished = CompletionFlag()
+        let cancel = Task { @MainActor in
+            await store.cancelAuthentication()
+            await cancelFinished.complete()
+        }
+        await transport.waitForRequestCount(6)
+
+        #expect(await cancelFinished.isCompleted() == false)
+        try await transport.emitServerNotification(
+            method: "account/login/completed",
+            params: TestLoginCompletedNotification(loginID: "login-browser", success: true)
+        )
+        await cancelGate.open()
+
+        await cancel.value
+        #expect(store.auth.selectedAccount == nil)
+        let methods = await transport.recordedRequests().map(\.method)
+        #expect(methods == [
+            "initialize",
+            "account/read",
+            "config/read",
+            "model/list",
+            "account/login/start",
+            "account/login/cancel",
+        ])
+    }
+
     @Test func liveStoreCancelsLoginWhenAuthenticationSessionSetupFails() async throws {
         let transport = FakeJSONRPCTransport()
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
@@ -3342,6 +3462,9 @@ private final class FakeExternalURLOpener {
 private final class FakeWebAuthenticationSession: CodexReviewNativeAuthentication.WebSession {
     private var callbackContinuation: CheckedContinuation<URL, Error>?
     private var callbackWaiters: [CheckedContinuation<Void, Never>] = []
+    private var cancellationGate: AsyncGate?
+    private var cancellationStarted = false
+    private var cancellationWaiters: [CheckedContinuation<Void, Never>] = []
 
     func waitForCallbackURL() async throws -> URL {
         try await withCheckedThrowingContinuation { continuation in
@@ -3355,7 +3478,33 @@ private final class FakeWebAuthenticationSession: CodexReviewNativeAuthenticatio
     }
 
     func cancel() async {
+        cancellationStarted = true
+        let waiters = cancellationWaiters
+        cancellationWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
+        if let cancellationGate {
+            await cancellationGate.waitIgnoringCancellation()
+        }
         resume(throwing: CodexReviewNativeAuthenticationError.cancelled)
+    }
+
+    func holdCancellation(with gate: AsyncGate) {
+        cancellationGate = gate
+    }
+
+    func waitUntilCancellationStarted() async {
+        if cancellationStarted {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            if cancellationStarted {
+                continuation.resume()
+            } else {
+                cancellationWaiters.append(continuation)
+            }
+        }
     }
 
     func closeFromAuthenticationWindow() async {

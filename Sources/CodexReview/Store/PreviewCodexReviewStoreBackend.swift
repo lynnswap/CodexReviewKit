@@ -69,12 +69,14 @@ package class PreviewCodexReviewStoreBackend: CodexReviewStoreBackend {
         }
     }
 
-    package func signIn(auth: CodexReviewAuthModel) async {
+    package func signIn(auth: CodexReviewAuthModel) async -> CodexReviewAuthenticationSessionReceipt {
         auth.updatePhase(.failed(message: Self.previewAuthenticationFailureMessage))
+        return .completed(.failed(Self.previewAuthenticationFailureMessage))
     }
 
-    package func addAccount(auth: CodexReviewAuthModel) async {
+    package func addAccount(auth: CodexReviewAuthModel) async -> CodexReviewAuthenticationSessionReceipt {
         auth.updatePhase(.failed(message: Self.previewAuthenticationFailureMessage))
+        return .completed(.failed(Self.previewAuthenticationFailureMessage))
     }
 
     package func cancelAuthentication(auth: CodexReviewAuthModel) async {
