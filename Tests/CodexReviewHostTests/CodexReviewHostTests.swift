@@ -1628,6 +1628,66 @@ struct CodexReviewHostTests {
         ])
     }
 
+    @Test func liveConcurrentAuthenticationPublicationWaiterCancellationDoesNotCancelOwner() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
+        try await transport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await transport.enqueue(
+            AppServerAPI.Account.Login.Response.chatgpt(
+                loginID: "login-shared",
+                authURL: "https://example.com/auth",
+                nativeWebAuthentication: .init(callbackURLScheme: "lynnpd.CodexReviewMonitor.auth")
+            ),
+            for: "account/login/start"
+        )
+        try await transport.enqueue(AppServerAPI.Account.Login.Cancel.Response(), for: "account/login/cancel")
+        let sessions = FakeWebAuthenticationSessions()
+        let presentationGate = AsyncGate()
+        sessions.holdNextCreation(with: presentationGate)
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            nativeAuthenticationConfiguration: .init(
+                callbackScheme: "lynnpd.CodexReviewMonitor.auth",
+                browserSessionPolicy: .ephemeral,
+                presentationAnchorProvider: { NSWindow() }
+            ),
+            webAuthenticationSessionFactory: sessions.makeSession,
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        let ownerFinished = CompletionFlag()
+        let owner = Task { @MainActor in
+            await store.signIn()
+            await ownerFinished.complete()
+        }
+        await sessions.waitForCreationStarted()
+        let waiterFinished = CompletionFlag()
+        let waiter = Task { @MainActor in
+            await store.addAccount()
+            await waiterFinished.complete()
+        }
+        waiter.cancel()
+
+        #expect(await ownerFinished.isCompleted() == false)
+        #expect(await waiterFinished.isCompleted() == false)
+        await presentationGate.open()
+        await owner.value
+        await waiter.value
+
+        let session = await sessions.waitForSession()
+        await session.waitUntilWaitingForCallback()
+        #expect(store.auth.isAuthenticating)
+        #expect(sessions.createdSessionCount == 1)
+        await store.cancelAuthentication()
+        #expect(await transport.recordedRequests().filter { $0.method == "account/login/start" }.count == 1)
+    }
+
     @Test func liveCancelAuthenticationJoinsBrowserLoginAndIgnoresLateAppServerCompletion() async throws {
         let transport = FakeJSONRPCTransport()
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
@@ -3413,6 +3473,8 @@ private final class FakeWebAuthenticationSessions {
     private var session: FakeWebAuthenticationSession?
     private var sessionCount = 0
     private var waiters: [CheckedContinuation<FakeWebAuthenticationSession, Never>] = []
+    private var creationGate: AsyncGate?
+    private var creationStartedGate = AsyncGate()
 
     var createdSessionCount: Int {
         sessionCount
@@ -3424,6 +3486,11 @@ private final class FakeWebAuthenticationSessions {
         browserSessionPolicy _: CodexReviewNativeAuthentication.Configuration.BrowserSessionPolicy,
         presentationAnchorProvider _: @escaping @MainActor @Sendable () -> ASPresentationAnchor?
     ) async throws -> any CodexReviewNativeAuthentication.WebSession {
+        if let creationGate {
+            await creationStartedGate.open()
+            await creationGate.waitIgnoringCancellation()
+            self.creationGate = nil
+        }
         let session = FakeWebAuthenticationSession()
         sessionCount += 1
         self.session = session
@@ -3433,6 +3500,15 @@ private final class FakeWebAuthenticationSessions {
             waiter.resume(returning: session)
         }
         return session
+    }
+
+    func holdNextCreation(with gate: AsyncGate) {
+        creationGate = gate
+        creationStartedGate = AsyncGate()
+    }
+
+    func waitForCreationStarted() async {
+        await creationStartedGate.wait()
     }
 
     func waitForSession() async -> FakeWebAuthenticationSession {

@@ -1452,13 +1452,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         activation: LoginActivation
     ) async -> CodexReviewAuthenticationSessionReceipt {
         if let activeAuthenticationOperation {
-            let receipt = activeAuthenticationOperation.receipt
-            await withTaskCancellationHandler {
-                await activeAuthenticationOperation.publication.wait()
-            } onCancel: {
-                receipt.cancel()
-            }
-            return receipt
+            await activeAuthenticationOperation.publication.wait()
+            return activeAuthenticationOperation.receipt
         }
 
         let operationID = UUID()
