@@ -7,7 +7,6 @@ final class LiveAuthenticationOperation {
     struct AdmissionTransition {
         var scope: ResourceScope
         var displacedResources: ResourceCleanup?
-        var displacedNotificationTask: Task<Void, Never>?
     }
 
     struct ResourceCleanup {
@@ -17,8 +16,9 @@ final class LiveAuthenticationOperation {
         var codexHomeURL: URL?
         var authenticationSession: (any CodexReviewNativeAuthentication.WebSession)?
         var monitorTask: Task<Void, Never>?
+        var notificationTask: Task<Void, Never>?
 
-        var isEmpty: Bool { challenge == nil && backend == nil && client == nil && codexHomeURL == nil && authenticationSession == nil && monitorTask == nil }
+        var isEmpty: Bool { challenge == nil && backend == nil && client == nil && codexHomeURL == nil && authenticationSession == nil && monitorTask == nil && notificationTask == nil }
     }
 
     final class ResourceScope {
@@ -34,6 +34,8 @@ final class LiveAuthenticationOperation {
             resources?.authenticationSession = session
             resources?.monitorTask = monitorTask
         }
+
+        func install(notificationTask: Task<Void, Never>) { resources?.notificationTask = notificationTask }
 
         func takePresentation() -> (
             session: (any CodexReviewNativeAuthentication.WebSession)?,
@@ -79,23 +81,19 @@ final class LiveAuthenticationOperation {
     var activation = Activation.activateAuthenticatedAccount
     private(set) var resourceScope: ResourceScope?
     var phase = Phase.waitingForCompletion
-    var notificationTask: Task<Void, Never>?
 
     func replaceResources(
         _ resources: ResourceCleanup,
         activation: Activation
     ) -> AdmissionTransition {
         let displacedResources = resourceScope?.takeForCleanup()
-        let displacedNotificationTask = notificationTask
         let scope = ResourceScope(resources)
         resourceScope = scope
-        notificationTask = nil
         self.activation = activation
         phase = .waitingForCompletion
         return .init(
             scope: scope,
-            displacedResources: displacedResources,
-            displacedNotificationTask: displacedNotificationTask
+            displacedResources: displacedResources
         )
     }
 
