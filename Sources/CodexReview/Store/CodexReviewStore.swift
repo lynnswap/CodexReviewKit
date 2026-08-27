@@ -90,6 +90,7 @@ public final class CodexReviewStore {
     @ObservationIgnored package var reviewTerminalWaiters: [String: [ReviewTerminalWaiter]] = [:]
     @ObservationIgnored package var nextCancellationRequestOrdinal: UInt64 = 0
     @ObservationIgnored package var closedSessions: Set<String> = []
+    @ObservationIgnored var sessionCloseReceipts: [String: ReviewStoreSessionCloseReceipt] = [:]
     @ObservationIgnored package var accountRateLimitAutoRefreshDriver: CodexReviewStoreRateLimitAutoRefreshDriver?
     @ObservationIgnored package let storeWorkRegistry = ReviewStoreWorkRegistry()
     @ObservationIgnored package var runtimeState: ReviewStoreRuntimeState = .stopped(
