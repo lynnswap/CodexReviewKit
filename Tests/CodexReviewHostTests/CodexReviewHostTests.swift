@@ -3399,6 +3399,97 @@ struct CodexReviewHostTests {
         #expect(store.auth.authenticationFailureCount == failureCount)
     }
 
+    @Test func liveStoreCallbackSchemeMismatchCleansItsAdmittedScopeNotReplacement() async throws {
+        let homeURL = try temporaryHome()
+        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "active@example.com",
+            accounts: ["active@example.com"]
+        )
+        let mainTransport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(mainTransport, accountEmail: "active@example.com")
+        let displacedTransport = FakeJSONRPCTransport()
+        let staleTransport = FakeJSONRPCTransport()
+        let replacementTransport = FakeJSONRPCTransport()
+        let loginFixtures = [
+            (displacedTransport, "login-displaced", "lynnpd.CodexReviewMonitor.auth"),
+            (staleTransport, "login-stale", "mismatched.callback.scheme"),
+            (replacementTransport, "login-replacement", "lynnpd.CodexReviewMonitor.auth"),
+        ]
+        for (transport, loginID, callbackScheme) in loginFixtures {
+            try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+            try await transport.enqueue(
+                AppServerAPI.Account.Login.Response.chatgpt(
+                    loginID: loginID,
+                    authURL: "https://example.com/auth",
+                    nativeWebAuthentication: .init(callbackURLScheme: callbackScheme)
+                ),
+                for: "account/login/start"
+            )
+            try await transport.enqueue(
+                AppServerAPI.Account.Login.Cancel.Response(),
+                for: "account/login/cancel"
+            )
+        }
+        let displacedCleanupGate = AsyncGate()
+        await displacedTransport.hold(method: "account/login/cancel", gate: displacedCleanupGate)
+        var loginTransports = [displacedTransport, staleTransport, replacementTransport]
+        var isolatedHomeURLs: [URL] = []
+        var sessions: [FakeWebAuthenticationSession] = []
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            nativeAuthenticationConfiguration: .init(
+                callbackScheme: "lynnpd.CodexReviewMonitor.auth",
+                browserSessionPolicy: .ephemeral,
+                presentationAnchorProvider: { NSWindow() }
+            ),
+            webAuthenticationSessionFactory: { _, _, _, _ in
+                let session = FakeWebAuthenticationSession()
+                sessions.append(session)
+                return session
+            },
+            transportFactory: { codexHomeURL in
+                if codexHomeURL == mainCodexHomeURL {
+                    return mainTransport
+                }
+                isolatedHomeURLs.append(codexHomeURL)
+                try FileManager.default.createDirectory(at: codexHomeURL, withIntermediateDirectories: true)
+                return loginTransports.removeFirst()
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        await store.addAccount()
+        let displacedSession = sessions[0]
+        await displacedSession.waitUntilWaitingForCallback()
+
+        async let staleStart: Void = store.addAccount()
+        await displacedTransport.waitForActiveRequests(method: "account/login/cancel")
+        await store.addAccount()
+        let replacementSession = sessions[1]
+        await replacementSession.waitUntilWaitingForCallback()
+        #expect(displacedSession.isCancelled)
+        #expect(await staleTransport.isClosedForTesting())
+        #expect(await replacementTransport.isClosedForTesting() == false)
+        #expect(replacementSession.isCancelled == false)
+
+        await displacedCleanupGate.open()
+        await staleStart
+
+        #expect(isolatedHomeURLs.count == 3)
+        #expect(FileManager.default.fileExists(atPath: isolatedHomeURLs[0].path) == false)
+        #expect(FileManager.default.fileExists(atPath: isolatedHomeURLs[1].path) == false)
+        #expect(FileManager.default.fileExists(atPath: isolatedHomeURLs[2].path))
+        #expect(await replacementTransport.isClosedForTesting() == false)
+        #expect(await replacementTransport.recordedRequests().map(\.method).contains("account/login/cancel") == false)
+        #expect(replacementSession.isCancelled == false)
+
+        await store.cancelAuthentication()
+        #expect(await replacementTransport.isClosedForTesting())
+        #expect(FileManager.default.fileExists(atPath: isolatedHomeURLs[2].path) == false)
+    }
+
     @Test func liveStoreClosesIsolatedLoginRuntimeWhenLoginCompletionFails() async throws {
         let homeURL = try temporaryHome()
         let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)

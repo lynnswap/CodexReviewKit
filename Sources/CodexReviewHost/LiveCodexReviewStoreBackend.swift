@@ -1409,8 +1409,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             let authURL = try Self.authenticationURL(from: challenge)
             let callbackScheme = nativeCallbackScheme ?? nativeAuthenticationConfiguration.callbackScheme
             guard callbackScheme == nativeAuthenticationConfiguration.callbackScheme else {
-                let cleanup = takeLoginRuntimeForCleanup()
-                if let backend = cleanup.backend, let challenge = cleanup.challenge {
+                let cleanup = scope.takeForCleanup()
+                takeNotificationTask(ifCurrent: scope)?.cancel()
+                if let backend = cleanup?.backend, let challenge = cleanup?.challenge {
                     try? await backend.cancelLogin(challenge)
                 }
                 updateAuthenticationFailure(
@@ -1418,7 +1419,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                     auth: auth,
                     activation: activation
                 )
-                await closeIsolatedLoginRuntime(client: cleanup.client, codexHomeURL: cleanup.codexHomeURL)
+                await closeIsolatedLoginRuntime(client: cleanup?.client, codexHomeURL: cleanup?.codexHomeURL)
                 return
             }
             let session = try await webAuthenticationSessionFactory(
