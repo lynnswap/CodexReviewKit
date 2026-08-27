@@ -198,6 +198,11 @@ struct DirectoryCapabilityTests {
             let anchorURL = fixture.appendingPathComponent(name, isDirectory: true)
             try createDirectory(anchorURL, permissions: 0o700)
             let appearedURL = anchorURL.appendingPathComponent("appeared", isDirectory: true)
+            let existing = try DirectoryCapability.resolveLocation(
+                at: anchorURL,
+                requirements: requirements
+            )
+            defer { try? existing.close() }
             let pending = try DirectoryCapability.resolveLocation(
                 at: appearedURL,
                 requirements: requirements
@@ -210,8 +215,49 @@ struct DirectoryCapabilityTests {
             defer { try? descendant.close() }
             try createEntry(appearedURL)
 
+            #expect(try existing.relationship(to: pending) == .indeterminate)
+            #expect(try pending.relationship(to: existing) == .indeterminate)
             #expect(try pending.relationship(to: descendant) == .indeterminate)
             #expect(try descendant.relationship(to: pending) == .indeterminate)
+        }
+    }
+
+    @Test func differentAnchorRelationshipsRevalidatePendingLocationsIndependently() throws {
+        let fixture = try makePrivateTemporaryDirectory()
+        defer { removeFixture(fixture) }
+        let requirements = DirectoryCapability.Requirements.trustedAnchor(ownerUserID: geteuid())
+        let cases: [(String, (URL) throws -> Void)] = [
+            ("file", { try Data().write(to: $0) }),
+            ("directory", { try createDirectory($0, permissions: 0o700) }),
+            ("symlink", { url in
+                guard symlink("missing-target", url.path) == 0 else {
+                    throw POSIXError(.init(rawValue: errno) ?? .EIO)
+                }
+            }),
+        ]
+
+        for (name, createEntry) in cases {
+            let rootURL = fixture.appendingPathComponent(name, isDirectory: true)
+            let childURL = rootURL.appendingPathComponent("child", isDirectory: true)
+            let siblingURL = rootURL.appendingPathComponent("sibling", isDirectory: true)
+            try createDirectory(rootURL, permissions: 0o700)
+            try createDirectory(childURL, permissions: 0o700)
+            try createDirectory(siblingURL, permissions: 0o700)
+            let appearedURL = childURL.appendingPathComponent("appeared", isDirectory: true)
+            let root = try DirectoryCapability.resolveLocation(at: rootURL, requirements: requirements)
+            let pending = try DirectoryCapability.resolveLocation(at: appearedURL, requirements: requirements)
+            let sibling = try DirectoryCapability.resolveLocation(at: siblingURL, requirements: requirements)
+            defer { try? root.close(); try? pending.close(); try? sibling.close() }
+
+            #expect(try root.relationship(to: pending) == .ancestor)
+            #expect(try pending.relationship(to: root) == .descendant)
+            #expect(try sibling.relationship(to: pending) == .disjoint)
+            #expect(try pending.relationship(to: sibling) == .disjoint)
+            try createEntry(appearedURL)
+            #expect(try root.relationship(to: pending) == .indeterminate)
+            #expect(try pending.relationship(to: root) == .indeterminate)
+            #expect(try sibling.relationship(to: pending) == .indeterminate)
+            #expect(try pending.relationship(to: sibling) == .indeterminate)
         }
     }
 

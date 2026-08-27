@@ -80,65 +80,135 @@ package final class DirectoryCapability: Sendable {
 
     package final class ResolvedDirectoryLocation: Sendable {
         private let anchor: DirectoryCapability
-        private let remainingNames: [Name]
+        private let target: Target
+
+        private enum Target: Sendable {
+            case existing
+            case pending(first: Name, rest: [Name])
+        }
+
+        private enum Revalidation: Sendable {
+            case valid(Snapshot)
+            case invalidated
+
+            func relationship(to other: Self) -> Relationship {
+                switch (self, other) {
+                case (.valid(let lhs), .valid(let rhs)): lhs.relationship(to: rhs)
+                case (.invalidated, _), (_, .invalidated): .indeterminate
+                }
+            }
+        }
+
+        private struct Snapshot: Sendable {
+            let anchorIdentity: Identity
+            let ancestorIdentities: Set<Identity>
+            let target: SnapshotTarget
+
+            func relationship(to other: Self) -> Relationship {
+                let anchorRelationship: Relationship
+                if anchorIdentity == other.anchorIdentity { anchorRelationship = .same }
+                else if other.ancestorIdentities.contains(anchorIdentity) { anchorRelationship = .ancestor }
+                else if ancestorIdentities.contains(other.anchorIdentity) { anchorRelationship = .descendant }
+                else { anchorRelationship = .disjoint }
+
+                switch anchorRelationship {
+                case .same:
+                    return target.relationship(to: other.target)
+                case .ancestor:
+                    if case .existing = target { return .ancestor }
+                    return .indeterminate
+                case .descendant:
+                    if case .existing = other.target { return .descendant }
+                    return .indeterminate
+                case .disjoint:
+                    return .disjoint
+                case .indeterminate:
+                    return .indeterminate
+                }
+            }
+        }
+
+        private enum SnapshotTarget: Sendable {
+            case existing
+            case pending(first: Name, rest: [Name], semantics: EntryNameSemantics)
+
+            func relationship(to other: Self) -> Relationship {
+                switch (self, other) {
+                case (.existing, .existing):
+                    return .same
+                case (.existing, .pending):
+                    return .ancestor
+                case (.pending, .existing):
+                    return .descendant
+                case let (.pending(lhsFirst, lhsRest, lhsSemantics),
+                          .pending(rhsFirst, rhsRest, rhsSemantics)):
+                    let lhs = [lhsFirst] + lhsRest
+                    let rhs = [rhsFirst] + rhsRest
+                    for (lhsName, rhsName) in zip(lhs, rhs) {
+                        switch DirectoryCapability.entryNameRelationship(
+                            lhsName, rhsName,
+                            lhsSemantics: lhsSemantics,
+                            rhsSemantics: rhsSemantics
+                        ) {
+                        case .same: continue
+                        case .distinct: return .disjoint
+                        case .indeterminate: return .indeterminate
+                        }
+                    }
+                    if lhs.count == rhs.count { return .same }
+                    return lhs.count < rhs.count ? .ancestor : .descendant
+                }
+            }
+        }
 
         fileprivate init(anchor: DirectoryCapability, remainingNames: [Name]) {
             self.anchor = anchor
-            self.remainingNames = remainingNames
+            target = remainingNames.isEmpty
+                ? .existing
+                : .pending(first: remainingNames[0], rest: Array(remainingNames.dropFirst()))
         }
 
         package func relationship(to other: ResolvedDirectoryLocation) throws -> Relationship {
-            switch try anchor.relationship(to: other.anchor) {
-            case .same:
-                return try sameAnchorRelationship(to: other)
-            case .ancestor:
-                return remainingNames.isEmpty ? .ancestor : .indeterminate
-            case .descendant:
-                return other.remainingNames.isEmpty ? .descendant : .indeterminate
-            case .disjoint:
-                return .disjoint
-            case .indeterminate:
-                return .indeterminate
-            }
+            let lhs = try revalidateForRelationship()
+            let rhs = try other.revalidateForRelationship()
+            return lhs.relationship(to: rhs)
         }
 
         package func close() throws {
             try anchor.close()
         }
 
-        private func sameAnchorRelationship(
-            to other: ResolvedDirectoryLocation
-        ) throws -> Relationship {
+        private func revalidateForRelationship() throws -> Revalidation {
             try anchor.withBorrowedDescriptor { descriptor in
                 try DirectoryCapability.validateOwned(descriptor, capability: anchor)
-                if let lhs = remainingNames.first,
-                   let rhs = other.remainingNames.first,
-                   try DirectoryCapability.entryExists(
-                       lhs, parent: descriptor, path: anchor.url.path
-                   ) || DirectoryCapability.entryExists(
-                       rhs, parent: descriptor, path: anchor.url.path
-                   ) {
-                    return .indeterminate
-                }
-                for (lhs, rhs) in zip(remainingNames, other.remainingNames) {
-                    switch try DirectoryCapability.entryNameRelationship(
-                        lhs, rhs, parent: descriptor, path: anchor.url.path
-                    ) {
-                    case .same:
-                        continue
-                    case .distinct:
-                        return .disjoint
-                    case .indeterminate:
-                        return .indeterminate
+                let ancestors = try DirectoryCapability.ancestryIdentities(
+                    of: descriptor, path: anchor.url.path)
+                let snapshotTarget: SnapshotTarget
+                switch target {
+                case .existing:
+                    snapshotTarget = .existing
+                case .pending(let first, let rest):
+                    let semantics = try DirectoryCapability.entryNameSemantics(
+                        parent: descriptor, path: anchor.url.path)
+                    if try DirectoryCapability.entryExists(
+                        first, parent: descriptor, path: anchor.url.path) {
+                        return .invalidated
                     }
+                    snapshotTarget = .pending(first: first, rest: rest, semantics: semantics)
                 }
-                if remainingNames.count == other.remainingNames.count { return .same }
-                return remainingNames.count < other.remainingNames.count ? .ancestor : .descendant
+                return .valid(Snapshot(
+                    anchorIdentity: anchor.identity,
+                    ancestorIdentities: ancestors,
+                    target: snapshotTarget
+                ))
             }
         }
     }
 
     private enum EntryNameRelationship { case same, distinct, indeterminate }
+    private enum EntryNameSemantics: Equatable, Sendable {
+        case caseSensitive, caseInsensitive, unknown
+    }
 
     private struct AbsoluteResolution {
         let descriptor: Int32
@@ -1451,14 +1521,19 @@ package final class DirectoryCapability: Sendable {
     }
 
     private static func isAncestor(_ ancestor: Identity, of descriptor: Int32, path: String) throws -> Bool {
+        try ancestryIdentities(of: descriptor, path: path).contains(ancestor)
+    }
+
+    private static func ancestryIdentities(of descriptor: Int32, path: String) throws -> Set<Identity> {
         var current = retryingEINTR { fcntl(descriptor, F_DUPFD_CLOEXEC, 0) }
         guard current >= 0 else {
             throw posixError(operation: "duplicate directory for ancestry", code: errno, path: path)
         }
         defer { _ = Darwin.close(current) }
+        var identities: Set<Identity> = []
         while true {
             let currentIdentity = Identity(try directoryStatus(current, path: path))
-            if currentIdentity == ancestor { return true }
+            identities.insert(currentIdentity)
             let parent = retryingEINTR { openat(current, "..", directoryOpenFlags) }
             guard parent >= 0 else { throw openError(code: errno, path: path) }
             let parentStatus: stat
@@ -1471,7 +1546,7 @@ package final class DirectoryCapability: Sendable {
             let parentIdentity = Identity(parentStatus)
             if parentIdentity == currentIdentity {
                 _ = Darwin.close(parent)
-                return false
+                return identities
             }
             _ = Darwin.close(current)
             current = parent
@@ -1481,25 +1556,39 @@ package final class DirectoryCapability: Sendable {
     private static func entryNameRelationship(
         _ lhs: Name,
         _ rhs: Name,
+        lhsSemantics: EntryNameSemantics,
+        rhsSemantics: EntryNameSemantics
+    ) -> EntryNameRelationship {
+        if lhs.value.utf8.elementsEqual(rhs.value.utf8) { return .same }
+        guard lhsSemantics == rhsSemantics else { return .indeterminate }
+        switch lhsSemantics {
+        case .caseSensitive:
+            return .distinct
+        case .unknown:
+            return .indeterminate
+        case .caseInsensitive:
+            guard let lhsASCII = asciiCaseFolded(lhs.value),
+                  let rhsASCII = asciiCaseFolded(rhs.value) else {
+                return .indeterminate
+            }
+            return lhsASCII == rhsASCII ? .same : .distinct
+        }
+    }
+
+    private static func entryNameSemantics(
         parent: Int32,
         path: String
-    ) throws -> EntryNameRelationship {
-        if lhs.value.utf8.elementsEqual(rhs.value.utf8) { return .same }
-
+    ) throws -> EntryNameSemantics {
         errno = 0
         let caseSensitive = fpathconf(parent, _PC_CASE_SENSITIVE)
         let code = errno
         if caseSensitive == -1 {
-            if code == 0 { return .indeterminate }
+            if code == 0 { return .unknown }
             throw posixError(operation: "read directory case sensitivity", code: code, path: path)
         }
-        if caseSensitive == 1 { return .distinct }
-        guard let lhsASCII = asciiCaseFolded(lhs.value),
-              let rhsASCII = asciiCaseFolded(rhs.value) else {
-            return .indeterminate
-        }
-        guard caseSensitive == 0 else { return .indeterminate }
-        return lhsASCII == rhsASCII ? .same : .distinct
+        if caseSensitive == 1 { return .caseSensitive }
+        if caseSensitive == 0 { return .caseInsensitive }
+        return .unknown
     }
 
     private static func entryExists(
