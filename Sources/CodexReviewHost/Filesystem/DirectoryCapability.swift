@@ -448,9 +448,11 @@ package final class DirectoryCapability: Sendable {
             }
             var needsClose = true
             defer { if needsClose { _ = Darwin.close(descriptor) } }
-            let status = try fileStatus(descriptor, path: path)
-            let identity = Identity(status)
+            var inspectedIdentity: Identity?
             do {
+                let status = try fileStatus(descriptor, path: path)
+                let identity = Identity(status)
+                inspectedIdentity = identity
                 try validateRegularFile(status, path: path)
                 let changedMode = retryingEINTR { fchmod(descriptor, mode_t(0o600)) }
                 guard changedMode == 0 else {
@@ -463,14 +465,23 @@ package final class DirectoryCapability: Sendable {
                         "The temporary file changed identity or permissions at \(path)."
                     )
                 }
+                needsClose = false
+                return TemporaryFile(name: name, identity: identity, descriptor: descriptor)
             } catch {
                 _ = Darwin.close(descriptor)
                 needsClose = false
-                try rollbackTemporaryFile(parent: parent, name: name, identity: identity, path: path)
+                if let inspectedIdentity {
+                    try rollbackTemporaryFile(
+                        parent: parent,
+                        name: name,
+                        identity: inspectedIdentity,
+                        path: path
+                    )
+                } else {
+                    try rollbackUninspectedTemporaryFile(parent: parent, name: name, path: path)
+                }
                 throw error
             }
-            needsClose = false
-            return TemporaryFile(name: name, identity: identity, descriptor: descriptor)
         }
         throw DirectoryCapabilityError.retryable(
             DirectoryPOSIXFailure(
@@ -544,6 +555,21 @@ package final class DirectoryCapability: Sendable {
         }
         guard removed == 0 else {
             throw posixError(operation: "remove temporary file", code: errno, path: path)
+        }
+    }
+
+    private static func rollbackUninspectedTemporaryFile(
+        parent: Int32,
+        name: Name,
+        path: String
+    ) throws {
+        // openat(O_EXCL) created this exact name under the validated parent. The RecoveryV1
+        // threat boundary excludes a malicious same-UID replacement before this cleanup.
+        let removed = name.value.withCString { pointer in
+            retryingEINTR { unlinkat(parent, pointer, 0) }
+        }
+        guard removed == 0 else {
+            throw posixError(operation: "remove uninspected temporary file", code: errno, path: path)
         }
     }
 
