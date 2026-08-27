@@ -134,6 +134,41 @@ package final class DirectoryCapability: Sendable {
         }
     }
 
+    package func readFile(named name: Name, maximumByteCount: Int) throws -> Data? {
+        guard maximumByteCount >= 0 else {
+            throw DirectoryCapabilityError.invalidRequest(
+                "A file read maximum byte count cannot be negative."
+            )
+        }
+        return try withBorrowedDescriptor { parent in
+            try Self.validateOwned(parent, capability: self)
+            let path = url.appendingPathComponent(name.value, isDirectory: false).path
+            let descriptor = name.value.withCString { pointer in
+                Self.retryingEINTR { openat(parent, pointer, Self.regularFileReadFlags) }
+            }
+            if descriptor < 0 {
+                if errno == ENOENT { return nil }
+                throw Self.openFileError(code: errno, path: path)
+            }
+            var needsClose = true
+            defer { if needsClose { _ = Darwin.close(descriptor) } }
+
+            let openedStatus = try Self.fileStatus(descriptor, path: path)
+            try Self.validateRegularFile(openedStatus, path: path)
+            let contents = try Self.readContents(
+                descriptor,
+                maximumByteCount: maximumByteCount,
+                path: path
+            )
+            let closeResult = Darwin.close(descriptor)
+            needsClose = false
+            guard closeResult == 0 else {
+                throw Self.posixError(operation: "close regular file", code: errno, path: path)
+            }
+            return contents
+        }
+    }
+
     package func relationship(to other: DirectoryCapability) throws -> Relationship {
         try withBorrowedDescriptor { lhs in
             try other.withBorrowedDescriptor { rhs in
@@ -201,6 +236,62 @@ package final class DirectoryCapability: Sendable {
         }
         return value
     }
+
+    private static func validateRegularFile(_ status: stat, path: String) throws {
+        guard status.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) else {
+            throw DirectoryCapabilityError.policyViolation(
+                "Expected a regular file without symbolic links at \(path)."
+            )
+        }
+    }
+
+    private static func fileStatus(_ descriptor: Int32, path: String) throws -> stat {
+        var status = stat()
+        let inspected = retryingEINTR { fstat(descriptor, &status) }
+        guard inspected == 0 else {
+            throw posixError(operation: "inspect regular file", code: errno, path: path)
+        }
+        return status
+    }
+
+    private static func readContents(
+        _ descriptor: Int32,
+        maximumByteCount: Int,
+        path: String
+    ) throws -> Data {
+        var contents = Data()
+        var buffer = [UInt8](
+            repeating: 0,
+            count: max(1, min(64 * 1024, maximumByteCount))
+        )
+        while contents.count < maximumByteCount {
+            let requestedCount = min(buffer.count, maximumByteCount - contents.count)
+            let readCount = buffer.withUnsafeMutableBytes { bytes in
+                retryingEINTRCount {
+                    Darwin.read(descriptor, bytes.baseAddress, requestedCount)
+                }
+            }
+            guard readCount >= 0 else {
+                throw posixError(operation: "read regular file", code: errno, path: path)
+            }
+            if readCount == 0 { return contents }
+            contents.append(contentsOf: buffer.prefix(readCount))
+        }
+        var extraByte: UInt8 = 0
+        let extraCount = withUnsafeMutableBytes(of: &extraByte) { bytes in
+            retryingEINTRCount { Darwin.read(descriptor, bytes.baseAddress, 1) }
+        }
+        guard extraCount >= 0 else {
+            throw posixError(operation: "read regular file", code: errno, path: path)
+        }
+        guard extraCount == 0 else {
+            throw DirectoryCapabilityError.policyViolation(
+                "The regular file exceeds the maximum byte count at \(path)."
+            )
+        }
+        return contents
+    }
+
     private static func acquireChild(
         parent: Int32,
         name: Name,
@@ -499,6 +590,10 @@ package final class DirectoryCapability: Sendable {
         }
         return posixError(operation: "open directory", code: code, path: path)
     }
+    private static func openFileError(code: Int32, path: String) -> DirectoryCapabilityError {
+        if code == ELOOP { return .policyViolation("Symbolic links are not allowed at \(path).") }
+        return posixError(operation: "open regular file", code: code, path: path)
+    }
     private static func posixError(
         operation: String,
         code: Int32,
@@ -516,5 +611,11 @@ package final class DirectoryCapability: Sendable {
         repeat { result = operation() } while result == -1 && errno == EINTR
         return result
     }
+    private static func retryingEINTRCount(_ operation: () -> Int) -> Int {
+        var result: Int
+        repeat { result = operation() } while result == -1 && errno == EINTR
+        return result
+    }
     private static let directoryOpenFlags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+    private static let regularFileReadFlags = O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC
 }
