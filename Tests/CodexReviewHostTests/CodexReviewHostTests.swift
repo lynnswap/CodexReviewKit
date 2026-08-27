@@ -1613,6 +1613,97 @@ struct CodexReviewHostTests {
         ])
     }
 
+    @Test func livePrimaryLoginCompletionRequiresExactNonNullChallenge() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
+        try await transport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await transport.enqueue(
+            AppServerAPI.Account.Login.Response.chatgpt(
+                loginID: "login-current",
+                authURL: "https://example.com/auth",
+                nativeWebAuthentication: .init(callbackURLScheme: "lynnpd.CodexReviewMonitor.auth")
+            ),
+            for: "account/login/start"
+        )
+        try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
+        try await transport.enqueue(
+            AppServerAPI.Account.Read.Response(
+                account: .init(email: "new@example.com", planType: "plus")
+            ),
+            for: "account/read"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
+                limitID: "codex",
+                primary: .init(usedPercent: 20, windowDurationMins: 300)
+            )),
+            for: "account/rateLimits/read"
+        )
+        let sessions = FakeWebAuthenticationSessions()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            nativeAuthenticationConfiguration: .init(
+                callbackScheme: "lynnpd.CodexReviewMonitor.auth",
+                browserSessionPolicy: .ephemeral,
+                presentationAnchorProvider: { NSWindow() }
+            ),
+            webAuthenticationSessionFactory: sessions.makeSession,
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        await store.addAccount()
+        let session = await sessions.waitForSession()
+        await session.waitUntilWaitingForCallback()
+
+        try await transport.emitServerNotification(
+            method: "account/login/completed",
+            params: TestLoginCompletedNotification(loginID: nil, success: false, error: "missing identity")
+        )
+        try await transport.emitServerNotification(
+            method: "account/login/completed",
+            params: TestLoginCompletedNotification(loginID: "login-stale", success: false, error: "stale identity")
+        )
+        try await transport.emitServerNotification(
+            method: "account/updated",
+            params: EmptyResponse()
+        )
+        await transport.waitForRequestCount(6)
+
+        #expect(session.isCancelled == false)
+        #expect(store.auth.selectedAccount == nil)
+
+        try await transport.emitServerNotification(
+            method: "account/login/completed",
+            params: TestLoginCompletedNotification(loginID: "login-current", success: true)
+        )
+        try await transport.emitServerNotification(
+            method: "account/updated",
+            params: EmptyResponse()
+        )
+        await waitUntil {
+            store.auth.selectedAccount?.accountKey == "new@example.com"
+                && store.auth.selectedAccount?.rateLimits.first?.usedPercent == 20
+        }
+
+        #expect(session.isCancelled)
+        #expect(await transport.recordedRequests().map(\.method) == [
+            "initialize",
+            "account/read",
+            "config/read",
+            "model/list",
+            "account/login/start",
+            "account/read",
+            "account/read",
+            "account/rateLimits/read",
+        ])
+    }
+
     @Test func liveStoreAddsAccountWithoutSwitchingExistingActiveAccount() async throws {
         let homeURL = try temporaryHome()
         let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
@@ -3342,6 +3433,7 @@ private final class FakeExternalURLOpener {
 private final class FakeWebAuthenticationSession: CodexReviewNativeAuthentication.WebSession {
     private var callbackContinuation: CheckedContinuation<URL, Error>?
     private var callbackWaiters: [CheckedContinuation<Void, Never>] = []
+    private(set) var isCancelled = false
 
     func waitForCallbackURL() async throws -> URL {
         try await withCheckedThrowingContinuation { continuation in
@@ -3355,6 +3447,7 @@ private final class FakeWebAuthenticationSession: CodexReviewNativeAuthenticatio
     }
 
     func cancel() async {
+        isCancelled = true
         resume(throwing: CodexReviewNativeAuthenticationError.cancelled)
     }
 
