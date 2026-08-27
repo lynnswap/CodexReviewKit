@@ -154,6 +154,14 @@ package final class DirectoryCapability: Sendable {
         return try withBorrowedDescriptor { parent in
             try Self.validateOwned(parent, capability: self)
             let path = url.appendingPathComponent(name.value, isDirectory: false).path
+            guard let inspectedStatus = try Self.fileStatus(
+                atParent: parent,
+                named: name,
+                path: path
+            ) else {
+                return nil
+            }
+            try Self.validateRegularFile(inspectedStatus, path: path)
             let descriptor = name.value.withCString { pointer in
                 Self.retryingEINTR { openat(parent, pointer, Self.regularFileReadFlags) }
             }
@@ -166,6 +174,11 @@ package final class DirectoryCapability: Sendable {
 
             let openedStatus = try Self.fileStatus(descriptor, path: path)
             try Self.validateRegularFile(openedStatus, path: path)
+            guard Identity(openedStatus) == Identity(inspectedStatus) else {
+                throw DirectoryCapabilityError.policyViolation(
+                    "The regular file changed identity before opening at \(path)."
+                )
+            }
             let contents = try Self.readContents(
                 descriptor,
                 maximumByteCount: maximumByteCount,
@@ -337,6 +350,20 @@ package final class DirectoryCapability: Sendable {
             throw posixError(operation: "inspect regular file", code: errno, path: path)
         }
         return status
+    }
+
+    private static func fileStatus(
+        atParent parent: Int32,
+        named name: Name,
+        path: String
+    ) throws -> stat? {
+        var status = stat()
+        let inspected = name.value.withCString { pointer in
+            retryingEINTR { fstatat(parent, pointer, &status, AT_SYMLINK_NOFOLLOW) }
+        }
+        if inspected == 0 { return status }
+        if errno == ENOENT { return nil }
+        throw posixError(operation: "inspect regular file entry", code: errno, path: path)
     }
 
     private static func readContents(
