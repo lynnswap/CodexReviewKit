@@ -3374,20 +3374,20 @@ struct CodexReviewHostTests {
         let replacementSession = sessions[1]
         await replacementSession.waitUntilWaitingForCallback()
         let failureCount = store.auth.authenticationFailureCount
+        #expect(await firstLoginTransport.isClosedForTesting())
+        #expect(await firstLoginTransport.recordedRequests().map(\.method).count { $0 == "account/login/cancel" } == 1)
+        #expect(isolatedHomeURLs.count == 2)
+        #expect(FileManager.default.fileExists(atPath: isolatedHomeURLs[0].path) == false)
 
         await firstFactoryGate.open()
         await firstStart
 
         #expect(sessions[0].isCancelled)
         #expect(replacementSession.isCancelled == false)
-        #expect(await firstLoginTransport.isClosedForTesting())
         #expect(await secondLoginTransport.isClosedForTesting() == false)
-        #expect(await firstLoginTransport.recordedRequests().map(\.method).count { $0 == "account/login/cancel" } == 1)
         #expect(await secondLoginTransport.recordedRequests().map(\.method).contains("account/login/cancel") == false)
         #expect(store.auth.isAuthenticating)
         #expect(store.auth.authenticationFailureCount == failureCount)
-        #expect(isolatedHomeURLs.count == 2)
-        #expect(FileManager.default.fileExists(atPath: isolatedHomeURLs[0].path) == false)
         #expect(FileManager.default.fileExists(atPath: isolatedHomeURLs[1].path))
 
         await store.cancelAuthentication()

@@ -4,6 +4,12 @@ import CodexReviewAppServer
 
 @MainActor
 final class LiveAuthenticationOperation {
+    struct AdmissionTransition {
+        var scope: ResourceScope
+        var displacedResources: ResourceCleanup?
+        var displacedNotificationTask: Task<Void, Never>?
+    }
+
     struct ResourceCleanup {
         var challenge: CodexReviewBackendModel.Login.Challenge?
         var backend: AppServerCodexReviewBackend?
@@ -12,9 +18,7 @@ final class LiveAuthenticationOperation {
         var authenticationSession: (any CodexReviewNativeAuthentication.WebSession)?
         var monitorTask: Task<Void, Never>?
 
-        var isEmpty: Bool {
-            challenge == nil && backend == nil && client == nil && codexHomeURL == nil && authenticationSession == nil && monitorTask == nil
-        }
+        var isEmpty: Bool { challenge == nil && backend == nil && client == nil && codexHomeURL == nil && authenticationSession == nil && monitorTask == nil }
     }
 
     final class ResourceScope {
@@ -26,10 +30,7 @@ final class LiveAuthenticationOperation {
 
         init(_ resources: ResourceCleanup) { self.resources = resources }
 
-        func install(
-            session: any CodexReviewNativeAuthentication.WebSession,
-            monitorTask: Task<Void, Never>
-        ) {
+        func install(session: any CodexReviewNativeAuthentication.WebSession, monitorTask: Task<Void, Never>) {
             resources?.authenticationSession = session
             resources?.monitorTask = monitorTask
         }
@@ -46,10 +47,7 @@ final class LiveAuthenticationOperation {
             return (resources?.authenticationSession, resources?.monitorTask)
         }
 
-        func takeForCleanup() -> ResourceCleanup? {
-            defer { resources = nil }
-            return resources
-        }
+        func takeForCleanup() -> ResourceCleanup? { defer { resources = nil }; return resources }
     }
 
     enum Activation: Equatable, Sendable {
@@ -83,10 +81,22 @@ final class LiveAuthenticationOperation {
     var phase = Phase.waitingForCompletion
     var notificationTask: Task<Void, Never>?
 
-    func install(_ scope: ResourceScope, activation: Activation) {
+    func replaceResources(
+        _ resources: ResourceCleanup,
+        activation: Activation
+    ) -> AdmissionTransition {
+        let displacedResources = resourceScope?.takeForCleanup()
+        let displacedNotificationTask = notificationTask
+        let scope = ResourceScope(resources)
         resourceScope = scope
+        notificationTask = nil
         self.activation = activation
         phase = .waitingForCompletion
+        return .init(
+            scope: scope,
+            displacedResources: displacedResources,
+            displacedNotificationTask: displacedNotificationTask
+        )
     }
 
     func isCurrent(_ scope: ResourceScope?) -> Bool { resourceScope === scope }

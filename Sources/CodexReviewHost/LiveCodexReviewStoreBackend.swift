@@ -96,18 +96,16 @@ private struct PendingAuthenticationResources {
     mutating func consume(
         into operation: LiveAuthenticationOperation,
         activation: LoginActivation
-    ) -> LiveAuthenticationOperation.ResourceScope? {
+    ) -> LiveAuthenticationOperation.AdmissionTransition? {
         guard let resources = takeForCleanup() else {
             return nil
         }
-        let scope = LiveAuthenticationOperation.ResourceScope(.init(
+        return operation.replaceResources(.init(
             challenge: resources.challenge,
             backend: resources.backend,
             client: resources.client,
             codexHomeURL: resources.codexHomeURL
-        ))
-        operation.install(scope, activation: activation)
-        return scope
+        ), activation: activation)
     }
 }
 
@@ -1383,13 +1381,16 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 await cleanupPendingAuthenticationResources(pendingResources.takeForCleanup())
                 return
             }
-            guard let scope = pendingResources.consume(into: authenticationOperation, activation: activation) else {
+            guard let admission = pendingResources.consume(into: authenticationOperation, activation: activation) else {
                 return
             }
+            let scope = admission.scope
             admittedScope = scope
+            admission.displacedNotificationTask?.cancel()
             if let loginClient {
                 observeLoginNotifications(client: loginClient, backend: appServerBackend, auth: auth)
             }
+            await cleanupDisplacedAuthenticationResources(admission.displacedResources)
             logger.info("Received ChatGPT login challenge")
             let nativeCallbackScheme = challenge.nativeWebAuthenticationCallbackScheme
             let usesNativeAuthentication = nativeAuthenticationConfiguration != nil && challenge.verificationURL != nil
@@ -1438,12 +1439,13 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 await closeIsolatedLoginRuntime(client: cleanup?.client, codexHomeURL: cleanup?.codexHomeURL)
                 return
             }
+            let scopeProvider: @MainActor () -> LiveAuthenticationOperation.ResourceScope? = { [weak scope] in scope }
             let monitorTask = Task { @MainActor [weak self, weak auth] in
                 guard let self, let auth else {
                     return
                 }
                 await self.monitorAuthenticationSession(
-                    scope: scope,
+                    scopeProvider: scopeProvider,
                     challenge: challenge,
                     session: session,
                     completesLoginThroughCallback: nativeCallbackScheme != nil,
@@ -1494,7 +1496,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
     }
 
     private func monitorAuthenticationSession(
-        scope: LiveAuthenticationOperation.ResourceScope,
+        scopeProvider: @escaping @MainActor () -> LiveAuthenticationOperation.ResourceScope?,
         challenge: CodexReviewBackendModel.Login.Challenge,
         session: any CodexReviewNativeAuthentication.WebSession,
         completesLoginThroughCallback: Bool,
@@ -1502,6 +1504,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
     ) async {
         do {
             let callbackURL = try await session.waitForCallbackURL()
+            guard let scope = scopeProvider() else { return }
             guard authenticationOperation.resourceScope === scope, scope.isOpen else {
                 let cleanup = scope.takeForCleanup()
                 if let backend = cleanup?.backend, let challenge = cleanup?.challenge { try? await backend.cancelLogin(challenge) }
@@ -1542,11 +1545,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             }
             await closeIsolatedLoginRuntime(client: cleanup?.client, codexHomeURL: loginCodexHomeURL)
         } catch is CancellationError {
-            await handleAuthenticationSessionCancelled(scope: scope, auth: auth)
+            if let scope = scopeProvider() { await handleAuthenticationSessionCancelled(scope: scope, auth: auth) }
         } catch CodexReviewNativeAuthenticationError.cancelled {
-            await handleAuthenticationSessionCancelled(scope: scope, auth: auth)
+            if let scope = scopeProvider() { await handleAuthenticationSessionCancelled(scope: scope, auth: auth) }
         } catch {
-            guard scope.isOpen else {
+            guard let scope = scopeProvider(), scope.isOpen else {
                 return
             }
             logger.error("ChatGPT login failed to complete: \(error.localizedDescription, privacy: .public)")
@@ -1604,7 +1607,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         scope: LiveAuthenticationOperation.ResourceScope,
         auth: CodexReviewAuthModel
     ) async {
-        guard let cleanup = scope.takeForCleanup() else {
+        guard scope.challenge != nil, let cleanup = scope.takeForCleanup() else {
             return
         }
         logger.info("ChatGPT login session was cancelled")
@@ -2187,12 +2190,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             let presentation = scope.takePresentation()
             presentation.monitorTask?.cancel()
             await presentation.session?.cancel()
-            if let expectedRuntimeHandle {
-                guard activeRuntimeHandle === expectedRuntimeHandle,
-                      acceptsRuntimeRequests
-                else {
-                    return
-                }
+            if let expectedRuntimeHandle,
+               (activeRuntimeHandle !== expectedRuntimeHandle || acceptsRuntimeRequests == false)
+            {
+                await cleanupAuthenticationScope(scope)
+                return
             }
             guard payload.success else {
                 let cleanup = scope.takeForCleanup()
@@ -2256,12 +2258,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             presentation.monitorTask?.cancel()
             await presentation.session?.cancel()
             let snapshot = try await backend.readAuth()
-            if let expectedRuntimeHandle {
-                guard activeRuntimeHandle === expectedRuntimeHandle,
-                      acceptsRuntimeRequests
-                else {
-                    return
-                }
+            if let expectedRuntimeHandle,
+               (activeRuntimeHandle !== expectedRuntimeHandle || acceptsRuntimeRequests == false)
+            {
+                await cleanupAuthenticationScope(scope)
+                return
             }
             let account = applyAuthSnapshot(
                 snapshot,
@@ -2601,12 +2602,28 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         return cleanup
     }
 
-    private func takeNotificationTask(
-        ifCurrent scope: LiveAuthenticationOperation.ResourceScope
-    ) -> Task<Void, Never>? {
+    private func takeNotificationTask(ifCurrent scope: LiveAuthenticationOperation.ResourceScope) -> Task<Void, Never>? {
         guard authenticationOperation.resourceScope === scope else { return nil }
         defer { authenticationOperation.notificationTask = nil }
         return authenticationOperation.notificationTask
+    }
+
+    private func cleanupAuthenticationScope(_ scope: LiveAuthenticationOperation.ResourceScope) async {
+        let cleanup = scope.takeForCleanup()
+        takeNotificationTask(ifCurrent: scope)?.cancel()
+        await closeIsolatedLoginRuntime(client: cleanup?.client, codexHomeURL: cleanup?.codexHomeURL)
+    }
+
+    private func cleanupDisplacedAuthenticationResources(
+        _ cleanup: LiveAuthenticationOperation.ResourceCleanup?
+    ) async {
+        guard let cleanup else { return }
+        cleanup.monitorTask?.cancel()
+        await cleanup.authenticationSession?.cancel()
+        if let backend = cleanup.backend, let challenge = cleanup.challenge {
+            try? await backend.cancelLogin(challenge)
+        }
+        await closeIsolatedLoginRuntime(client: cleanup.client, codexHomeURL: cleanup.codexHomeURL)
     }
 
     private func cleanupLoginRuntime(_ cleanup: LiveAuthenticationOperation.ResourceCleanup) async {
