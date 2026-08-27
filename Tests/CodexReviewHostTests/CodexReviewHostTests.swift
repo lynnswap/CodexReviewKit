@@ -3220,6 +3220,77 @@ struct CodexReviewHostTests {
         #expect(FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path) == false)
     }
 
+    @Test func liveStoreRuntimeStopJoinsHeldAuthenticationFactory() async throws {
+        let homeURL = try temporaryHome()
+        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try writeRegistry(homeURL: homeURL, activeAccountKey: "active@example.com", accounts: ["active@example.com"])
+        let firstMainTransport = FakeJSONRPCTransport()
+        let secondMainTransport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(firstMainTransport, accountEmail: "active@example.com")
+        try await enqueueRuntimeStartResponses(secondMainTransport, accountEmail: "active@example.com")
+        let firstLoginTransport = FakeJSONRPCTransport()
+        let secondLoginTransport = FakeJSONRPCTransport()
+        try await secondLoginTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await secondLoginTransport.enqueue(
+            AppServerAPI.Account.Login.Response.chatgpt(
+                loginID: "login-after-stop",
+                authURL: "https://example.com/auth",
+                nativeWebAuthentication: .init(callbackURLScheme: "lynnpd.CodexReviewMonitor.auth")
+            ),
+            for: "account/login/start"
+        )
+        try await secondLoginTransport.enqueue(AppServerAPI.Account.Login.Cancel.Response(), for: "account/login/cancel")
+        var mainTransports = [firstMainTransport, secondMainTransport]
+        var loginTransports = [firstLoginTransport, secondLoginTransport]
+        var isolatedHomeURLs: [URL] = []
+        let factoryEntered = AsyncGate()
+        let factoryGate = AsyncGate()
+        let sessions = FakeWebAuthenticationSessions()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            nativeAuthenticationConfiguration: .init(
+                callbackScheme: "lynnpd.CodexReviewMonitor.auth",
+                browserSessionPolicy: .ephemeral,
+                presentationAnchorProvider: { NSWindow() }
+            ),
+            webAuthenticationSessionFactory: sessions.makeSession,
+            transportFactory: { codexHomeURL in
+                if codexHomeURL == mainCodexHomeURL { return mainTransports.removeFirst() }
+                isolatedHomeURLs.append(codexHomeURL)
+                try FileManager.default.createDirectory(at: codexHomeURL, withIntermediateDirectories: true)
+                let transport = loginTransports.removeFirst()
+                if isolatedHomeURLs.count == 1 {
+                    await factoryEntered.open()
+                    await factoryGate.waitIgnoringCancellation()
+                }
+                return transport
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        async let firstStart: Void = store.addAccount()
+        await factoryEntered.wait()
+        async let joinedStart: Void = store.addAccount()
+        let stop = Task { @MainActor in await store.stop() }
+        await factoryGate.open()
+        await firstStart
+        await joinedStart
+        await stop.value
+
+        #expect(await firstLoginTransport.isClosedForTesting())
+        #expect(await firstLoginTransport.recordedRequests().isEmpty)
+        #expect(FileManager.default.fileExists(atPath: isolatedHomeURLs[0].path) == false)
+        #expect(isolatedHomeURLs.count == 1)
+
+        await store.start(forceRestartIfNeeded: true)
+        await store.addAccount()
+        let session = await sessions.waitForSession()
+        await session.waitUntilWaitingForCallback()
+        #expect(isolatedHomeURLs.count == 2)
+        #expect(store.auth.isAuthenticating)
+        await store.cancelAuthentication()
+    }
+
     @Test func liveStoreLoginStartFailureCleansItsPendingResourcesNotReplacement() async throws {
         let homeURL = try temporaryHome()
         let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
@@ -3237,7 +3308,7 @@ struct CodexReviewHostTests {
             for: "account/login/start"
         )
         let firstStartGate = AsyncGate()
-        await firstLoginTransport.hold(method: "account/login/start", gate: firstStartGate)
+        await firstLoginTransport.holdNextIgnoringCancellation(method: "account/login/start", gate: firstStartGate)
         let secondLoginTransport = FakeJSONRPCTransport()
         try await secondLoginTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await secondLoginTransport.enqueue(
@@ -3282,29 +3353,30 @@ struct CodexReviewHostTests {
         await store.start(forceRestartIfNeeded: true)
         async let firstStart: Void = store.addAccount()
         await firstLoginTransport.waitForActiveRequests(method: "account/login/start")
-        await store.addAccount()
-        let secondSession = await sessions.waitForSession()
-        await secondSession.waitUntilWaitingForCallback()
+        async let joinedStart: Void = store.addAccount()
         let failureCountBeforeFirstResult = store.auth.authenticationFailureCount
-        #expect(store.auth.isAuthenticating)
+        let cancellation = Task { @MainActor in await store.cancelAuthentication() }
 
         await firstStartGate.open()
         await firstStart
+        await joinedStart
+        await cancellation.value
 
         #expect(await firstLoginTransport.isClosedForTesting())
+        #expect(await secondLoginTransport.isClosedForTesting() == false)
+        #expect(store.auth.authenticationFailureCount == failureCountBeforeFirstResult)
+        #expect(store.auth.isAuthenticating == false)
+        #expect(isolatedHomeURLs.count == 1)
+        #expect(FileManager.default.fileExists(atPath: isolatedHomeURLs[0].path) == false)
+
+        await store.addAccount()
+        let secondSession = await sessions.waitForSession()
+        await secondSession.waitUntilWaitingForCallback()
         #expect(await secondLoginTransport.isClosedForTesting() == false)
         #expect(secondSession.isCancelled == false)
         #expect(store.auth.isAuthenticating)
         #expect(store.auth.authenticationFailureCount == failureCountBeforeFirstResult)
-        #expect(isolatedHomeURLs.count == 2)
-        #expect(FileManager.default.fileExists(atPath: isolatedHomeURLs[0].path) == false)
         #expect(FileManager.default.fileExists(atPath: isolatedHomeURLs[1].path))
-
-        await store.addAccount()
-        #expect(await laterFailingTransport.isClosedForTesting())
-        #expect(store.auth.isAuthenticating)
-        #expect(store.auth.authenticationFailureCount == failureCountBeforeFirstResult)
-        #expect(FileManager.default.fileExists(atPath: isolatedHomeURLs[2].path) == false)
 
         await store.cancelAuthentication()
     }
@@ -3370,19 +3442,26 @@ struct CodexReviewHostTests {
         await store.start(forceRestartIfNeeded: true)
         async let firstStart: Void = store.addAccount()
         await firstFactoryStarted.wait()
-        await store.addAccount()
-        let replacementSession = sessions[1]
-        await replacementSession.waitUntilWaitingForCallback()
+        async let joinedStart: Void = store.addAccount()
         let failureCount = store.auth.authenticationFailureCount
-        #expect(await firstLoginTransport.isClosedForTesting())
-        #expect(await firstLoginTransport.recordedRequests().map(\.method).count { $0 == "account/login/cancel" } == 1)
-        #expect(isolatedHomeURLs.count == 2)
-        #expect(FileManager.default.fileExists(atPath: isolatedHomeURLs[0].path) == false)
+        let cancellation = Task { @MainActor in await store.cancelAuthentication() }
 
         await firstFactoryGate.open()
         await firstStart
+        await joinedStart
+        await cancellation.value
 
         #expect(sessions[0].isCancelled)
+        #expect(await firstLoginTransport.isClosedForTesting())
+        #expect(await firstLoginTransport.recordedRequests().map(\.method).count { $0 == "account/login/cancel" } == 1)
+        #expect(isolatedHomeURLs.count == 1)
+        #expect(FileManager.default.fileExists(atPath: isolatedHomeURLs[0].path) == false)
+        #expect(store.auth.isAuthenticating == false)
+        #expect(store.auth.authenticationFailureCount == failureCount)
+
+        await store.addAccount()
+        let replacementSession = sessions[1]
+        await replacementSession.waitUntilWaitingForCallback()
         #expect(replacementSession.isCancelled == false)
         #expect(await secondLoginTransport.isClosedForTesting() == false)
         #expect(await secondLoginTransport.recordedRequests().map(\.method).contains("account/login/cancel") == false)
@@ -3489,23 +3568,30 @@ struct CodexReviewHostTests {
         let displacedSession = sessions[0]
         await displacedSession.waitUntilWaitingForCallback()
 
-        async let staleStart: Void = store.addAccount()
+        let displacedCancellation = Task { @MainActor in await store.cancelAuthentication() }
         await displacedTransport.waitForActiveRequests(method: "account/login/cancel")
+        async let joinedStart: Void = store.addAccount()
+        await displacedCleanupGate.open()
+        await displacedCancellation.value
+        await joinedStart
+        #expect(displacedSession.isCancelled)
+        #expect(await displacedTransport.isClosedForTesting())
+        #expect(isolatedHomeURLs.count == 1)
+        #expect(FileManager.default.fileExists(atPath: isolatedHomeURLs[0].path) == false)
+
+        let failureCountBeforeMismatch = store.auth.authenticationFailureCount
+        await store.addAccount()
+        #expect(await staleTransport.isClosedForTesting())
+        #expect(store.auth.authenticationFailureCount == failureCountBeforeMismatch + 1)
+
         await store.addAccount()
         let replacementSession = sessions[1]
         await replacementSession.waitUntilWaitingForCallback()
-        #expect(displacedSession.isCancelled)
-        #expect(await staleTransport.isClosedForTesting())
         #expect(await replacementTransport.isClosedForTesting() == false)
         #expect(replacementSession.isCancelled == false)
         let failureCount = store.auth.authenticationFailureCount
         #expect(store.auth.isAuthenticating)
-
-        await displacedCleanupGate.open()
-        await staleStart
-
         #expect(isolatedHomeURLs.count == 3)
-        #expect(FileManager.default.fileExists(atPath: isolatedHomeURLs[0].path) == false)
         #expect(FileManager.default.fileExists(atPath: isolatedHomeURLs[1].path) == false)
         #expect(FileManager.default.fileExists(atPath: isolatedHomeURLs[2].path))
         #expect(await replacementTransport.isClosedForTesting() == false)
@@ -3522,6 +3608,7 @@ struct CodexReviewHostTests {
         )
         try await replacementTransport.emitServerNotification(method: "account/updated", params: EmptyResponse())
         await replacementTransport.waitForActiveRequests(method: "account/read")
+        await store.cancelAuthentication()
         await store.addAccount()
         let rateLimitSession = sessions[2]
         await rateLimitSession.waitUntilWaitingForCallback()
@@ -3536,6 +3623,7 @@ struct CodexReviewHostTests {
         )
         try await rateLimitTransport.emitServerNotification(method: "account/updated", params: EmptyResponse())
         await rateLimitTransport.waitForActiveRequests(method: "account/rateLimits/read")
+        await store.cancelAuthentication()
         await store.addAccount()
         let finalSession = sessions[3]
         await finalSession.waitUntilWaitingForCallback()
@@ -3606,8 +3694,9 @@ struct CodexReviewHostTests {
         await staleSession.waitUntilWaitingForCallback()
         staleSession.complete(with: URL(string: "lynnpd.CodexReviewMonitor.auth://callback?code=stale")!)
         await staleTransport.waitForActiveRequests(method: "account/login/complete")
-        async let replacementStart: Void = store.addAccount()
+        let cancellation = Task { @MainActor in await store.cancelAuthentication() }
         await staleTransport.waitForActiveRequests(method: "account/login/cancel")
+        async let joinedStart: Void = store.addAccount()
         await completeGate.open()
         await staleTransport.waitForActiveRequests(method: "account/read")
         await readGate.open()
@@ -3615,7 +3704,9 @@ struct CodexReviewHostTests {
             store.auth.persistedAccounts.contains { $0.accountKey == "stale-native@example.com" }
         } == false)
         await cancelGate.open()
-        await replacementStart
+        await cancellation.value
+        await joinedStart
+        await store.addAccount()
         let replacementSession = await sessions.waitForSession()
         await replacementSession.waitUntilWaitingForCallback()
 
