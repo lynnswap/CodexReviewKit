@@ -58,6 +58,85 @@ struct CodexReviewStoreCommandTests {
         #expect(job.core.lifecycle.cancellation == request.cancellation)
     }
 
+    @Test func defaultSemanticStopBoundsMissingInterruptTerminal() async throws {
+        let reviewBackend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: reviewBackend)
+        )
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-1",
+            targetSummary: "Review",
+            status: .running,
+            summary: "Running"
+        )
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [.init(cwd: job.cwd)],
+            jobs: [job]
+        )
+        let admission = ReviewStartAdmission()
+        let preparedRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-1",
+            threadID: "thread-1",
+            reviewThreadID: "thread-1"
+        )
+        var activeRun = preparedRun
+        activeRun.turnID = "turn-1"
+        try await admission.admitThreadStartDispatch()
+        try await admission.recordPreparedThread(preparedRun)
+        try await admission.admitReviewStartDispatch(for: preparedRun)
+        try await admission.recordActiveRun(activeRun)
+        store.reviewAttemptOwnerships[job.id] = .active(.init(
+            attempt: .init(run: activeRun),
+            admission: admission
+        ))
+        let context = store.detachRuntimeSemanticStopContext(intent: .explicitStop)
+
+        let stop = Task { @MainActor in
+            await context.stopUsingDefaultPolicy(
+                intent: .explicitStop,
+                cancellationTimeout: .milliseconds(20)
+            )
+        }
+        try await reviewBackend.waitForInterruptReview(timeout: .seconds(2))
+        await stop.value
+
+        #expect(job.core.lifecycle.status == .cancelled)
+        try await admission.recordCanonicalTerminal(
+            .interrupted(.requested(.system(message: "Review runtime stopped."))),
+            for: activeRun
+        )
+    }
+
+    @Test func lateReviewWaiterUsesDetachedContextTimeout() async throws {
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        )
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-1",
+            targetSummary: "Review",
+            status: .running,
+            summary: "Running"
+        )
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [.init(cwd: job.cwd)],
+            jobs: [job]
+        )
+        store.storeWorkRegistry.closeReviewAdmission()
+        let context = store.detachRuntimeSemanticStopContext(intent: .explicitStop)
+
+        let result = try await store.awaitReview(
+            sessionID: job.sessionID,
+            jobID: job.id,
+            timeout: .zero
+        )
+
+        #expect(result.core.lifecycle.status == .running)
+        #expect(store.reviewTerminalWaiters[job.id] == nil)
+        _ = context.completeCancellationsLocally(reason: .system())
+    }
+
     @Test func runtimeTeardownClosesReviewAdmissionBeforeContextTransfer() async throws {
         let backend = FakeCodexReviewBackend()
         let startGate = AsyncGate()

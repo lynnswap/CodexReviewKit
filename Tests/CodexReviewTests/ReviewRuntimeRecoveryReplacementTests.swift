@@ -38,7 +38,7 @@ struct ReviewRuntimeRecoveryReplacementTests {
 
         let takenRuntime = try #require(replacement.takeRetiringRuntime())
 
-        #expect(takenRuntime.handle === runtime.handle)
+        #expect(takenRuntime.0.handle === runtime.handle)
         #expect(replacement.takeRetiringRuntime() == nil)
     }
 

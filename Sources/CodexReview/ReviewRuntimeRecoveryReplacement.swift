@@ -3,6 +3,11 @@ import Synchronization
 
 @MainActor
 package final class ReviewRuntimeRecoveryReplacement {
+    package struct SemanticStop {
+        package let context: ReviewRuntimeSemanticStopContext
+        package let intent: ReviewRuntimeTeardownIntent
+    }
+
     package struct SourceCloseJoin: Sendable {
         fileprivate let waiter: ReviewRuntimeRecoveryJoinWaiter<SourceCloseResult>
 
@@ -33,6 +38,7 @@ package final class ReviewRuntimeRecoveryReplacement {
     package let retainedMCP: RetainedMCPServer
 
     private var retiringRuntime: PreparedRuntime?
+    private var retiringSemanticStop: SemanticStop?
     private var publishedRuntimeOwnership: PublishedRuntimeOwnership = .awaitingInstallation
     private var sourceCloseFailureWasConsumed = false
     private let outcomeOwner = ReviewRuntimeRecoveryReplayOwner<Outcome>()
@@ -49,9 +55,24 @@ package final class ReviewRuntimeRecoveryReplacement {
         self.retainedMCP = retainedMCP
     }
 
-    package func takeRetiringRuntime() -> PreparedRuntime? {
-        defer { retiringRuntime = nil }
-        return retiringRuntime
+    package func installRetiringSemanticStop(
+        context: ReviewRuntimeSemanticStopContext,
+        intent: ReviewRuntimeTeardownIntent
+    ) {
+        precondition(
+            retiringSemanticStop == nil,
+            "ReviewRuntimeRecoveryReplacement owns at most one transferred retiring semantic stop."
+        )
+        retiringSemanticStop = .init(context: context, intent: intent)
+    }
+
+    package func takeRetiringRuntime() -> (PreparedRuntime, SemanticStop?)? {
+        guard let retiringRuntime else { return nil }
+        defer {
+            self.retiringRuntime = nil
+            retiringSemanticStop = nil
+        }
+        return (retiringRuntime, retiringSemanticStop)
     }
 
     package func installPublishedRuntime(_ runtime: PreparedRuntime) {

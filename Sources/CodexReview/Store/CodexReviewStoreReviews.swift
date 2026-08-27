@@ -1945,6 +1945,11 @@ extension CodexReviewStore {
         guard isReviewResultFinalized(jobID: jobID) == false else {
             return
         }
+        if let context = reviewTerminalWaiterContexts[jobID]?.context {
+            await context.waitForTerminal(jobID: jobID, timeout: timeout)
+            return
+        }
+        reviewTerminalWaiterContexts.removeValue(forKey: jobID)
         let waiterID = UUID()
         let timeoutTask = timeout.flatMap { duration in
             startRegisteredStoreWork(

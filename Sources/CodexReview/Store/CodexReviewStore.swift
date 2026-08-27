@@ -118,6 +118,7 @@ public final class CodexReviewStore {
     @ObservationIgnored package var reviewAttemptOwnerships: [String: StoreReviewAttemptOwnership] = [:]
     @ObservationIgnored package var reviewWorkerTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored package var reviewTerminalWaiters: [String: [ReviewTerminalWaiter]] = [:]
+    @ObservationIgnored package var reviewTerminalWaiterContexts: [String: ReviewRuntimeSemanticStopContextReference] = [:]
     @ObservationIgnored package var nextCancellationRequestOrdinal: UInt64 = 0
     @ObservationIgnored package var closedSessions: Set<String> = []
     @ObservationIgnored var sessionCloseReceipts: [String: ReviewStoreSessionCloseReceipt] = [:]
@@ -554,9 +555,9 @@ public final class CodexReviewStore {
             }
 
         case .replacing(let replacement, let task):
-            task.cancel()
             var retiringSemanticStopContext = semanticStopContext
             if let publishedRuntime = replacement.takePublishedRuntime() {
+                task.cancel()
                 await stopPublishedRuntimeSemantics(
                     intent: intent,
                     context: retiringSemanticStopContext
@@ -568,11 +569,21 @@ public final class CodexReviewStore {
                     purpose: runtimeTransitionPurpose(for: intent),
                     admissionAlreadyClosed: true
                 )
+            } else {
+                if let context = retiringSemanticStopContext {
+                    replacement.installRetiringSemanticStop(
+                        context: context,
+                        intent: intent
+                    )
+                    retiringSemanticStopContext = nil
+                }
+                task.cancel()
             }
             await task.value
             await closeRetiringRuntime(
                 for: replacement,
-                semanticStopContext: retiringSemanticStopContext
+                semanticStopContext: retiringSemanticStopContext,
+                semanticStopIntent: intent
             )
             await stopMCPServer()
 
@@ -1158,10 +1169,11 @@ public final class CodexReviewStore {
 
     private func closePublishedRuntimeForReplacement(
         _ runtime: PreparedRuntime,
-        semanticStopContext: ReviewRuntimeSemanticStopContext? = nil
+        semanticStopContext: ReviewRuntimeSemanticStopContext? = nil,
+        semanticStopIntent: ReviewRuntimeTeardownIntent = .explicitStop
     ) async -> ReviewRuntimeCloseFailure? {
         await stopPublishedRuntimeSemantics(
-            intent: .explicitStop,
+            intent: semanticStopIntent,
             context: semanticStopContext
                 ?? detachRuntimeSemanticStopContext(intent: .explicitStop)
         )
@@ -1174,15 +1186,19 @@ public final class CodexReviewStore {
 
     private func closeRetiringRuntime(
         for replacement: ReviewRuntimeRecoveryReplacement,
-        semanticStopContext: ReviewRuntimeSemanticStopContext? = nil
+        semanticStopContext: ReviewRuntimeSemanticStopContext? = nil,
+        semanticStopIntent: ReviewRuntimeTeardownIntent = .explicitStop
     ) async {
-        guard let retiringRuntime = replacement.takeRetiringRuntime() else {
+        guard let (retiringRuntime, transferredSemanticStop) = replacement.takeRetiringRuntime() else {
             replacement.finishSourceClose(.closed)
             return
         }
         let failure = await closePublishedRuntimeForReplacement(
             retiringRuntime,
-            semanticStopContext: semanticStopContext
+            semanticStopContext: transferredSemanticStop?.context
+                ?? semanticStopContext,
+            semanticStopIntent: transferredSemanticStop?.intent
+                ?? semanticStopIntent
         )
         if let failure {
             replacement.finishSourceClose(.failed(failure))

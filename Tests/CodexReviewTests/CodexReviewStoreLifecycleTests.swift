@@ -409,11 +409,23 @@ struct CodexReviewStoreLifecycleTests {
         )
         let store = CodexReviewStore.makeTestingStore(backend: backend)
         await store.start()
-
+        let job = CodexReviewJob(
+            id: "job-1",
+            sessionID: "session-1",
+            cwd: "/tmp/project",
+            targetSummary: "Review",
+            core: .init(
+                lifecycle: .init(status: .running),
+                output: .init(summary: "Running")
+            ),
+            logEntries: []
+        )
         let preparationGate = AsyncGate()
         backend.holdRuntimePreparation(with: preparationGate)
         let restart = Task { @MainActor in await store.restart() }
         await backend.waitForRuntimePreparation()
+        store.workspaces.insert(.init(cwd: job.cwd))
+        store.jobs.insert(job)
         guard case .replacing(let replacement, _) = store.runtimeState else {
             Issue.record("Expected an admitted runtime replacement.")
             return
@@ -433,6 +445,8 @@ struct CodexReviewStoreLifecycleTests {
         #expect(store.serverState == .failed(
             "Review runtime stopped unexpectedly: Injected failure."
         ))
+        #expect(job.core.lifecycle.cancellation?.message ==
+            "Review runtime stopped unexpectedly: Injected failure.")
         await store.stop()
     }
 

@@ -27,6 +27,34 @@ private actor RuntimeStopDetachedReviewWorkerDrainRace {
     }
 }
 
+private enum RuntimeStopDefaultCancellationOutcome: Sendable {
+    case completed(ReviewRuntimeCancellationRequestOutcome)
+    case timedOut
+}
+
+private actor RuntimeStopDefaultCancellationRace {
+    private var result: RuntimeStopDefaultCancellationOutcome?
+    private var continuation: CheckedContinuation<RuntimeStopDefaultCancellationOutcome, Never>?
+
+    func finish(_ value: RuntimeStopDefaultCancellationOutcome) {
+        guard result == nil else { return }
+        result = value
+        continuation?.resume(returning: value)
+        continuation = nil
+    }
+
+    func wait() async -> RuntimeStopDefaultCancellationOutcome {
+        if let result { return result }
+        return await withCheckedContinuation { continuation in
+            if let result {
+                continuation.resume(returning: result)
+            } else {
+                self.continuation = continuation
+            }
+        }
+    }
+}
+
 package struct ReviewRuntimeCancellationRequestOutcome: Sendable {
     package let jobIDs: [String]
     package let firstFailure: ReviewRuntimeCloseFailure?
@@ -100,8 +128,28 @@ package final class ReviewRuntimeSemanticStopContext {
         }
         return .init(jobIDs: jobIDs, firstFailure: firstFailure)
     }
-    package func stopUsingDefaultPolicy(intent: ReviewRuntimeTeardownIntent) async {
-        let requested = await requestCancellations().jobIDs
+    package func stopUsingDefaultPolicy(
+        intent: ReviewRuntimeTeardownIntent,
+        cancellationTimeout: Duration = .seconds(2)
+    ) async {
+        let race = RuntimeStopDefaultCancellationRace()
+        let cancellationTask = Task { @MainActor in
+            let outcome = await requestCancellations()
+            await race.finish(.completed(outcome))
+        }
+        let timeoutTask = Task {
+            do { try await Task.sleep(for: cancellationTimeout) } catch { return }
+            await race.finish(.timedOut)
+        }
+        let requested: [String]
+        switch await race.wait() {
+        case .completed(let outcome):
+            timeoutTask.cancel()
+            requested = outcome.jobIDs
+        case .timedOut:
+            cancellationTask.cancel()
+            requested = []
+        }
         let projected = completeCancellationsLocally(reason: intent.reviewCancellation)
         await cancelWorkers(jobIDs: Array(Set(requested + projected + workerJobIDs)), reason: intent.reviewCancellation)
     }
@@ -171,6 +219,37 @@ package final class ReviewRuntimeSemanticStopContext {
     }
     package func waitForWorkers() async {
         for task in entries.values.compactMap(\.workerTask) { await task.value }
+    }
+    package func waitForTerminal(jobID: String, timeout: Duration?) async {
+        guard let entry = entries[jobID], entry.job?.isTerminal == false else { return }
+        let waiterID = UUID()
+        let timeoutTask = timeout.map { duration in
+            Task { @MainActor [weak self] in
+                do { try await Task.sleep(for: duration) } catch { return }
+                self?.resumeWaiter(jobID: jobID, waiterID: waiterID)
+            }
+        }
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard var entry = entries[jobID], entry.job?.isTerminal == false else {
+                    timeoutTask?.cancel()
+                    continuation.resume()
+                    return
+                }
+                entry.waiters.append(.init(
+                    id: waiterID,
+                    continuation: continuation,
+                    timeoutTask: timeoutTask
+                ))
+                entries[jobID] = entry
+            }
+        } onCancel: {
+            timeoutTask?.cancel()
+            Task { @MainActor [weak self] in
+                self?.resumeWaiter(jobID: jobID, waiterID: waiterID)
+            }
+        }
+        timeoutTask?.cancel()
     }
     package func cancelTransferredWorkers() { entries.forEach { $0.value.workerTask?.cancel(); resumeWaiters(for: $0.key) } }
     private func completeLocally(
@@ -270,6 +349,20 @@ package final class ReviewRuntimeSemanticStopContext {
         entries[jobID] = entry
         for waiter in waiters { waiter.timeoutTask?.cancel(); waiter.continuation.resume() }
     }
+    private func resumeWaiter(jobID: String, waiterID: UUID) {
+        guard var entry = entries[jobID],
+              let index = entry.waiters.firstIndex(where: { $0.id == waiterID }) else { return }
+        let waiter = entry.waiters.remove(at: index)
+        entries[jobID] = entry
+        waiter.timeoutTask?.cancel()
+        waiter.continuation.resume()
+    }
+}
+
+@MainActor
+package final class ReviewRuntimeSemanticStopContextReference {
+    package weak var context: ReviewRuntimeSemanticStopContext?
+    package init(_ context: ReviewRuntimeSemanticStopContext) { self.context = context }
 }
 extension CodexReviewStore {
     @discardableResult
@@ -451,7 +544,7 @@ extension CodexReviewStore {
         }
         let backend = backend
         let clock = clock
-        return ReviewRuntimeSemanticStopContext(
+        let context = ReviewRuntimeSemanticStopContext(
             entries: entries,
             interruptReview: { admission, reason in
                 try await backend.interruptReview(admission, reason: reason)
@@ -466,6 +559,10 @@ extension CodexReviewStore {
             now: { clock.now() },
             writeDiagnostics: { [weak self] in self?.writeDiagnosticsIfNeeded() }
         )
+        for jobID in jobIDs {
+            reviewTerminalWaiterContexts[jobID] = .init(context)
+        }
+        return context
     }
 
     package func terminateAllRunningJobsLocally(
