@@ -31,7 +31,153 @@ package struct ReviewRuntimeCancellationRequestOutcome: Sendable {
     package let jobIDs: [String]
     package let firstFailure: ReviewRuntimeCloseFailure?
 }
-
+@MainActor
+package final class ReviewRuntimeSemanticStopContext {
+    package typealias Interrupt = @MainActor @Sendable (ReviewInterruptRequestAdmission, CodexReviewBackendModel.CancellationReason) async throws -> Void
+    package typealias CleanupRecovery = @MainActor @Sendable (StoreReviewRecoveryReceipt.DiscardTarget) async throws -> Void
+    package struct Entry {
+        let job: CodexReviewJob?
+        let ownership: StoreReviewAttemptOwnership?
+        let cancellationRequest: ReviewCancellationRequestReceipt?
+        let workerTask: Task<Void, Never>?
+        var waiters: [CodexReviewStore.ReviewTerminalWaiter]
+    }
+    private var entries: [String: Entry]
+    private let interruptReview: Interrupt
+    private let cleanupRecovery: CleanupRecovery
+    private let now: @MainActor @Sendable () -> Date
+    private let writeDiagnostics: @MainActor @Sendable () -> Void
+    package init(
+        entries: [String: Entry],
+        interruptReview: @escaping Interrupt,
+        cleanupRecovery: @escaping CleanupRecovery,
+        now: @escaping @MainActor @Sendable () -> Date,
+        writeDiagnostics: @escaping @MainActor @Sendable () -> Void
+    ) {
+        self.entries = entries
+        self.interruptReview = interruptReview
+        self.cleanupRecovery = cleanupRecovery
+        self.now = now
+        self.writeDiagnostics = writeDiagnostics
+    }
+    isolated deinit { cancelTransferredWorkers() }
+    package var workerJobIDs: [String] { entries.compactMap { $0.value.workerTask == nil ? nil : $0.key }.sorted() }
+    package func requestCancellations() async -> ReviewRuntimeCancellationRequestOutcome {
+        var firstFailure: ReviewRuntimeCloseFailure?
+        let jobIDs = entries.compactMap { id, entry in
+            entry.cancellationRequest == nil ? nil : id
+        }.sorted()
+        for jobID in jobIDs {
+            guard let entry = entries[jobID],
+                  let ownership = entry.ownership,
+                  let request = entry.cancellationRequest else {
+                firstFailure = firstFailure ?? .cleanup("Runtime semantic stop lost the exact review cancellation owner.")
+                continue
+            }
+            do {
+                switch ownership {
+                case .starting(let admission):
+                    await admission.registerCancellationRequest(request)
+                    completeLocally(entry.job, cancellation: request.cancellation)
+                    entry.workerTask?.cancel()
+                case .active(let active):
+                    _ = try await active.admission.interrupt(
+                        active.run,
+                        cancellationRequest: request,
+                        request: interruptReview
+                    )
+                    entry.workerTask?.cancel()
+                    await entry.workerTask?.value
+                case .recovering(let receipt):
+                    await receipt.cancelOwnedOperation(cancellationRequest: request)
+                    entry.workerTask?.cancel()
+                    await entry.workerTask?.value
+                }
+            } catch {
+                firstFailure = firstFailure ?? (error as? ReviewRuntimeCloseFailure) ?? .cleanup(error.localizedDescription)
+            }
+        }
+        return .init(jobIDs: jobIDs, firstFailure: firstFailure)
+    }
+    package func stopUsingDefaultPolicy(intent: ReviewRuntimeTeardownIntent) async {
+        let requested = await requestCancellations().jobIDs
+        let projected = completeCancellationsLocally(reason: intent.reviewCancellation)
+        await cancelWorkers(jobIDs: Array(Set(requested + projected + workerJobIDs)), reason: intent.reviewCancellation)
+    }
+    package func completeCancellationsLocally(reason: ReviewCancellation) -> [String] {
+        let jobIDs: [String] = entries.compactMap { id, entry -> String? in
+            guard entry.job?.isTerminal == false else { return nil }
+            completeLocally(entry.job, cancellation: reason)
+            return id
+        }.sorted()
+        writeDiagnostics()
+        return jobIDs
+    }
+    package func cancelWorkers(jobIDs: [String], reason: ReviewCancellation) async {
+        for jobID in Set(jobIDs) {
+            guard let entry = entries[jobID] else { continue }
+            switch entry.ownership {
+            case .starting(let admission):
+                if let request = entry.cancellationRequest {
+                    await admission.registerCancellationRequest(request)
+                }
+            case .recovering(let receipt):
+                await receipt.cancelOwnedOperation(reason)
+                if let join = try? receipt.joinOwnedOperationIfPresent() { _ = try? await join.value }
+                if let target = try? receipt.suppress() {
+                    switch target {
+                    case .source where entry.workerTask != nil: break
+                    default: try? await cleanupRecovery(target)
+                    }
+                }
+            case .active, nil: break
+            }
+            entry.workerTask?.cancel()
+            resumeWaiters(for: jobID)
+        }
+    }
+    package func drainWorkers(timeout: Duration) async -> Bool {
+        let tasks = entries.values.compactMap(\.workerTask)
+        guard tasks.isEmpty == false else { return true }
+        let race = RuntimeStopDetachedReviewWorkerDrainRace()
+        let drainTask = Task {
+            for task in tasks { await task.value }
+            await race.finish(true)
+        }
+        let timeoutTask = Task {
+            do { try await Task.sleep(for: timeout) } catch { return }
+            await race.finish(false)
+        }
+        let didDrain = await race.wait()
+        if didDrain { timeoutTask.cancel() } else { drainTask.cancel() }
+        return didDrain
+    }
+    package func cancelTransferredWorkers() { entries.forEach { $0.value.workerTask?.cancel(); resumeWaiters(for: $0.key) } }
+    private func completeLocally(
+        _ job: CodexReviewJob?,
+        cancellation: ReviewCancellation
+    ) {
+        guard let job, job.isTerminal == false else { return }
+        let endedAt = now()
+        job.closeActiveCommandLogEntries(status: "canceled", completedAt: endedAt)
+        job.pendingCancellationRequest = nil
+        job.core.lifecycle.cancellation = cancellation
+        job.core.lifecycle.status = .cancelled
+        job.core.output.summary = cancellation.message
+        job.core.output.hasFinalReview = false
+        job.core.lifecycle.errorMessage = cancellation.message.nilIfEmpty
+            ?? job.core.lifecycle.errorMessage
+        job.core.lifecycle.endedAt = endedAt
+        job.applyReviewLogLimit()
+    }
+    private func resumeWaiters(for jobID: String) {
+        guard var entry = entries[jobID] else { return }
+        let waiters = entry.waiters
+        entry.waiters.removeAll(keepingCapacity: false)
+        entries[jobID] = entry
+        for waiter in waiters { waiter.timeoutTask?.cancel(); waiter.continuation.resume() }
+    }
+}
 extension CodexReviewStore {
     @discardableResult
     package func recordCancellationRequest(
@@ -186,114 +332,47 @@ extension CodexReviewStore {
         }
     }
 
-    package func requestActiveReviewCancellationsForRuntimeStop(
-        reason: ReviewCancellation = .system(message: "Review runtime stopped.")
-    ) async -> ReviewRuntimeCancellationRequestOutcome {
-        let activeJobIDs = orderedJobs
-            .filter { $0.isTerminal == false }
-            .map(\.id)
-        var firstFailure: ReviewRuntimeCloseFailure?
-        for jobID in activeJobIDs {
-            do {
-                _ = try await performCancelReview(
-                    jobID: jobID,
-                    cancellation: reason,
-                    rejectionDisposition: .preserveRuntimeStopIntent
-                )
-            } catch {
-                if firstFailure == nil {
-                    firstFailure = (error as? ReviewRuntimeCloseFailure)
-                        ?? .cleanup(error.localizedDescription)
-                }
-            }
-        }
-        return .init(jobIDs: activeJobIDs, firstFailure: firstFailure)
-    }
-
-    package var reviewWorkerJobIDsForRuntimeStop: [String] {
-        reviewWorkerTasks.keys.sorted()
-    }
-
-    @discardableResult
-    package func cancelActiveReviewsLocallyForRuntimeStop(
-        reason: ReviewCancellation = .system(message: "Review runtime stopped.")
-    ) -> [String] {
-        let activeJobIDs = orderedJobs
-            .filter { $0.isTerminal == false }
-            .map(\.id)
-        guard activeJobIDs.isEmpty == false else {
-            return []
-        }
-
-        for jobID in activeJobIDs {
-            if let job = job(id: jobID), job.isTerminal == false {
-                try? completeCancellationLocally(
-                    jobID: job.id,
-                    sessionID: job.sessionID,
-                    cancellation: reason
-                )
-            }
-        }
-        return activeJobIDs
-    }
-
-    package func cancelAndDetachReviewWorkersForRuntimeStop(
-        jobIDs: [String],
-        reason: ReviewCancellation
-    ) async {
+    package func detachRuntimeSemanticStopContext(
+        intent: ReviewRuntimeTeardownIntent
+    ) -> ReviewRuntimeSemanticStopContext {
+        let activeJobs = orderedJobs.filter { $0.isTerminal == false }
+        let jobIDs = Set(activeJobs.map(\.id))
+            .union(reviewWorkerTasks.keys)
+        var entries: [String: ReviewRuntimeSemanticStopContext.Entry] = [:]
         for jobID in jobIDs {
-            if case .recovering(let receipt) = reviewAttemptOwnerships[jobID] {
-                await receipt.cancelOwnedOperation(reason)
+            let job = job(id: jobID)
+            let request = job.flatMap {
+                recordCancellationRequest(
+                    intent.reviewCancellation,
+                    rejectionDisposition: .preserveRuntimeStopIntent,
+                    for: $0
+                )
             }
-            if let task = reviewWorkerTasks.removeValue(forKey: jobID) {
-                task.cancel()
-                runtimeStopDetachedReviewWorkerTasks[jobID] = task
-            }
-            resumeReviewWaiters(for: jobID)
+            entries[jobID] = .init(
+                job: job,
+                ownership: reviewAttemptOwnerships.removeValue(forKey: jobID),
+                cancellationRequest: request,
+                workerTask: reviewWorkerTasks.removeValue(forKey: jobID),
+                waiters: reviewTerminalWaiters.removeValue(forKey: jobID) ?? []
+            )
         }
-    }
-
-    package func drainRuntimeStopDetachedReviewWorkers(timeout: Duration) async -> Bool {
-        let tasks = Array(runtimeStopDetachedReviewWorkerTasks.values)
-        return await drainReviewWorkerTasksForRuntimeStop(tasks, timeout: timeout)
-    }
-
-    package func drainReviewWorkersForRuntimeStop(timeout: Duration) async -> Bool {
-        let tasks = Array(reviewWorkerTasks.values) + Array(runtimeStopDetachedReviewWorkerTasks.values)
-        return await drainReviewWorkerTasksForRuntimeStop(tasks, timeout: timeout)
-    }
-
-    private func drainReviewWorkerTasksForRuntimeStop(
-        _ tasks: [Task<Void, Never>],
-        timeout: Duration
-    ) async -> Bool {
-        guard tasks.isEmpty == false else {
-            return true
-        }
-
-        let race = RuntimeStopDetachedReviewWorkerDrainRace()
-        let drainTask = Task {
-            for task in tasks {
-                await task.value
-            }
-            await race.finish(true)
-        }
-        let timeoutTask = Task {
-            do {
-                try await Task.sleep(for: timeout)
-            } catch {
-                return
-            }
-            await race.finish(false)
-        }
-
-        let didDrain = await race.wait()
-        if didDrain {
-            timeoutTask.cancel()
-        } else {
-            drainTask.cancel()
-        }
-        return didDrain
+        let backend = backend
+        let clock = clock
+        return ReviewRuntimeSemanticStopContext(
+            entries: entries,
+            interruptReview: { admission, reason in
+                try await backend.interruptReview(admission, reason: reason)
+            },
+            cleanupRecovery: { target in
+                switch target {
+                case .source(let active): try await backend.cleanupReview(active.run)
+                case .prepared(let prepared): try await backend.discardReviewRecovery(prepared)
+                case .staged(let staged): try await backend.discardReviewRecovery(staged)
+                }
+            },
+            now: { clock.now() },
+            writeDiagnostics: { [weak self] in self?.writeDiagnosticsIfNeeded() }
+        )
     }
 
     package func terminateAllRunningJobsLocally(

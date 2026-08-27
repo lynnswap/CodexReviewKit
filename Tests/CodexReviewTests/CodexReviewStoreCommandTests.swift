@@ -2181,11 +2181,12 @@ struct CodexReviewStoreCommandTests {
             networkMonitor.yield(.satisfied())
             await settleStarted.wait()
             let reason = ReviewCancellation.system(message: "Review runtime stopped.")
-            let jobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(reason: reason)
-            await store.cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: jobIDs, reason: reason)
+            let context = store.detachRuntimeSemanticStopContext(intent: .explicitStop)
+            let jobIDs = context.completeCancellationsLocally(reason: reason)
+            await context.cancelWorkers(jobIDs: jobIDs, reason: reason)
             await settleGate.open()
 
-            #expect(await store.drainReviewWorkersForRuntimeStop(timeout: .seconds(2)))
+            #expect(await context.drainWorkers(timeout: .seconds(2)))
             #expect(storeBackend.reviewRecoveryCommands.contains {
                 if case .stage = $0 { true } else { false }
             } == false)
@@ -2213,26 +2214,19 @@ struct CodexReviewStoreCommandTests {
             )
             _ = try await running
 
-            let locallyCancelledJobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
-                reason: .system(message: "Review runtime stopped.")
-            )
-            let cancelled = try store.readReview(jobID: "job-1")
-
-            #expect(locallyCancelledJobIDs == ["job-1"])
-            #expect(cancelled.core.lifecycle.status == .cancelled)
-            #expect(store.reviewWorkerTasks["job-1"] != nil)
-            #expect(store.reviewAttemptOwnerships["job-1"]?.run == run)
-
-            await store.cancelAndDetachReviewWorkersForRuntimeStop(
-                jobIDs: locallyCancelledJobIDs,
-                reason: .system(message: "Review runtime stopped.")
-            )
-
+            let context = store.detachRuntimeSemanticStopContext(intent: .explicitStop)
             #expect(store.reviewWorkerTasks["job-1"] == nil)
+            #expect(store.reviewAttemptOwnerships["job-1"] == nil)
+
+            let stop = Task { @MainActor in
+                await context.stopUsingDefaultPolicy(intent: .explicitStop)
+            }
             try await backend.waitForInterruptReview(timeout: .seconds(2))
             await backend.yield(.cancelled("Review runtime stopped."), for: run)
-            #expect(await store.drainRuntimeStopDetachedReviewWorkers(timeout: .seconds(2)))
+            await stop.value
+            #expect(await context.drainWorkers(timeout: .seconds(2)))
             #expect(store.reviewAttemptOwnerships["job-1"] == nil)
+            #expect(try store.readReview(jobID: "job-1").core.lifecycle.status == .cancelled)
         }
     }
 
@@ -2477,19 +2471,14 @@ struct CodexReviewStoreCommandTests {
             try await resolveTypedRecoveryDisposition(backend: backend, store: store)
             _ = try await running
 
-            let locallyCancelledJobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
-                reason: .system(message: "Review runtime stopped.")
-            )
-            await store.cancelAndDetachReviewWorkersForRuntimeStop(
-                jobIDs: locallyCancelledJobIDs,
-                reason: .system(message: "Review runtime stopped.")
-            )
+            let reason = ReviewCancellation.system(message: "Review runtime stopped.")
+            let context = store.detachRuntimeSemanticStopContext(intent: .explicitStop)
+            let locallyCancelledJobIDs = context.completeCancellationsLocally(reason: reason)
+            await context.cancelWorkers(jobIDs: locallyCancelledJobIDs, reason: reason)
 
             #expect(store.reviewWorkerTasks["job-1"] == nil)
-            guard case .recovering = store.reviewAttemptOwnerships["job-1"] else {
-                Issue.record("Runtime stop removed recovery ownership before worker cleanup."); return
-            }
-            #expect(await store.drainRuntimeStopDetachedReviewWorkers(timeout: .seconds(2)))
+            #expect(store.reviewAttemptOwnerships["job-1"] == nil)
+            #expect(await context.drainWorkers(timeout: .seconds(2)))
             #expect(store.reviewAttemptOwnerships["job-1"] == nil)
         }
     }
@@ -2514,18 +2503,15 @@ struct CodexReviewStoreCommandTests {
             )
             _ = try await running
 
-            let locallyCancelledJobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
-                reason: .system(message: "Review runtime stopped.")
-            )
-            await store.cancelAndDetachReviewWorkersForRuntimeStop(
-                jobIDs: locallyCancelledJobIDs,
-                reason: .system(message: "Review runtime stopped.")
-            )
+            let context = store.detachRuntimeSemanticStopContext(intent: .explicitStop)
+            let stop = Task { @MainActor in
+                await context.stopUsingDefaultPolicy(intent: .explicitStop)
+            }
 
             try await backend.waitForInterruptReview(timeout: .seconds(2))
             await backend.yield(.cancelled("Review runtime stopped."), for: run)
-            #expect(await store.drainRuntimeStopDetachedReviewWorkers(timeout: .seconds(2)))
-            #expect(store.runtimeStopDetachedReviewWorkerTasks["job-1"] == nil)
+            await stop.value
+            #expect(await context.drainWorkers(timeout: .seconds(2)))
             let commands = await backend.recordedCommands()
             let interruptIndex = try #require(commands.firstIndex { command in
                 if case .interruptReviewAdmission(_, let reason) = command {
@@ -2555,21 +2541,18 @@ struct CodexReviewStoreCommandTests {
             try await backend.waitForStartReview(timeout: .seconds(2))
             let admission = try #require(startingAdmission(in: store, jobID: "job-1"))
 
-            let locallyCancelledJobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
-                reason: .system(message: "Review runtime stopped.")
-            )
-            await store.cancelAndDetachReviewWorkersForRuntimeStop(
-                jobIDs: locallyCancelledJobIDs,
-                reason: .system(message: "Review runtime stopped.")
-            )
-            let didDrain = await store.drainReviewWorkersForRuntimeStop(
+            let reason = ReviewCancellation.system(message: "Review runtime stopped.")
+            let context = store.detachRuntimeSemanticStopContext(intent: .explicitStop)
+            let locallyCancelledJobIDs = context.completeCancellationsLocally(reason: reason)
+            await context.cancelWorkers(jobIDs: locallyCancelledJobIDs, reason: reason)
+            let didDrain = await context.drainWorkers(
                 timeout: .milliseconds(20)
             )
             let resultBeforeStartReviewUnblocked = try await waitForTaskValue(
                 running,
                 timeout: .seconds(1)
             )
-            #expect(startingAdmission(in: store, jobID: "job-1") === admission)
+            #expect(startingAdmission(in: store, jobID: "job-1") == nil)
             guard case .startingReview(_, .outcomeUnknown) = await admission.currentPhase() else {
                 Issue.record("Detached worker did not retain its exact in-flight admission.")
                 return
@@ -2577,7 +2560,7 @@ struct CodexReviewStoreCommandTests {
             await startReviewGate.open()
             try await backend.waitForInterruptReview(timeout: .seconds(2))
             await backend.yield(.cancelled("Review runtime stopped."))
-            await store.cancelAndDrainReviewWorkersForTesting()
+            #expect(await context.drainWorkers(timeout: .seconds(2)))
             let result = try #require(resultBeforeStartReviewUnblocked)
 
             #expect(locallyCancelledJobIDs == ["job-1"])
@@ -3316,80 +3299,6 @@ struct CodexReviewStoreCommandTests {
 
             await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
             _ = try await result
-        }
-    }
-
-    @Test func staleSameValueRejectionCannotClearRuntimeStopReceipt() async throws {
-        let run = CodexReviewBackendModel.Review.Run(
-            threadID: "thread-1",
-            turnID: "turn-1",
-            reviewThreadID: "review-thread-1"
-        )
-        let backend = FakeCodexReviewBackend(nextRun: run)
-        let interruptGate = AsyncGate()
-        await backend.holdInterruptReview(with: interruptGate)
-        await backend.rejectInterrupts(message: "Interrupt failed")
-        let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
-            idGenerator: .init(next: { "job-1" })
-        )
-        try await withStoreCommandTestCleanup(backend: backend, store: store) {
-            let review = Task { @MainActor in
-                try await store.startReview(
-                    sessionID: "session-1",
-                    request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
-                )
-            }
-            try #require(await StoreSnapshotProbe(store: store).waitUntilRunAttempt(
-                run.attemptID,
-                jobID: "job-1"
-            ) != nil)
-            guard case .active(let active) = store.reviewAttemptOwnerships["job-1"] else {
-                Issue.record("Review did not publish its exact active attempt.")
-                return
-            }
-            let cancellation = ReviewCancellation.system(message: "Same cancellation")
-            let first = Task { @MainActor in
-                try await store.cancelReview(jobID: "job-1", cancellation: cancellation)
-            }
-            try await backend.waitForInterruptReview(timeout: .seconds(2))
-            let firstReceipt = try #require(store.job(id: "job-1")?.pendingCancellationRequest)
-
-            let runtime = Task { @MainActor in
-                await store.requestActiveReviewCancellationsForRuntimeStop(reason: cancellation)
-            }
-            try #require(await waitUntil {
-                store.job(id: "job-1")?.pendingCancellationRequest?.id != firstReceipt.id
-            })
-            let runtimeReceipt = try #require(store.job(id: "job-1")?.pendingCancellationRequest)
-            #expect(runtimeReceipt.cancellation == firstReceipt.cancellation)
-            #expect(runtimeReceipt.rejectionDisposition == .preserveRuntimeStopIntent)
-            await active.admission.waitForCancellationRequestReceipt(runtimeReceipt.id)
-
-            await interruptGate.open()
-            await #expect(throws: ReviewInterruptRequestFailure.self) {
-                try await first.value
-            }
-            let runtimeOutcome = await runtime.value
-
-            #expect(runtimeOutcome.firstFailure == .cleanup("Interrupt failed"))
-            #expect(store.job(id: "job-1")?.pendingCancellationRequest?.id == runtimeReceipt.id)
-            await #expect(throws: ReviewInterruptRequestFailure.self) {
-                try await store.cancelReview(jobID: "job-1", cancellation: cancellation)
-            }
-            #expect(await backend.recordedCommands().filter {
-                if case .interruptReviewAdmission = $0 { true } else { false }
-            }.count == 1)
-            await backend.finishEvents(
-                throwing: ReviewAttemptStreamFailure.ownerForcedConnectionClose(
-                    .connection("Runtime closed")
-                ),
-                for: run
-            )
-            let final = try await review.value
-            #expect(final.core.lifecycle.status == .cancelled)
-            #expect(final.core.lifecycle.cancellation == cancellation)
-            #expect(await active.admission.activeTerminalResolution()?.cancellationRequestReceipt?.id == runtimeReceipt.id)
         }
     }
 

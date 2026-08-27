@@ -117,7 +117,6 @@ public final class CodexReviewStore {
     @ObservationIgnored package let idGenerator: CodexReviewIDGenerator
     @ObservationIgnored package var reviewAttemptOwnerships: [String: StoreReviewAttemptOwnership] = [:]
     @ObservationIgnored package var reviewWorkerTasks: [String: Task<Void, Never>] = [:]
-    @ObservationIgnored package var runtimeStopDetachedReviewWorkerTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored package var reviewTerminalWaiters: [String: [ReviewTerminalWaiter]] = [:]
     @ObservationIgnored package var nextCancellationRequestOrdinal: UInt64 = 0
     @ObservationIgnored package var closedSessions: Set<String> = []
@@ -178,9 +177,6 @@ public final class CodexReviewStore {
             break
         }
         for task in reviewWorkerTasks.values {
-            task.cancel()
-        }
-        for task in runtimeStopDetachedReviewWorkerTasks.values {
             task.cancel()
         }
         for waiters in reviewTerminalWaiters.values {
@@ -515,6 +511,7 @@ public final class CodexReviewStore {
         if case .failed(let message) = intent.finalState {
             transitionToFailed(message)
         }
+        let semanticStopContext = detachRuntimeSemanticStopContext(intent: intent)
         let task = Task<Void, Never> { @MainActor [weak self] in
             guard let self else {
                 return
@@ -522,7 +519,8 @@ public final class CodexReviewStore {
             await self.performRuntimeTeardown(
                 previousState: previousState,
                 generation: generation,
-                intent: intent
+                intent: intent,
+                semanticStopContext: semanticStopContext
             )
             self.finishRuntimeTeardown(generation: generation)
         }
@@ -539,7 +537,8 @@ public final class CodexReviewStore {
     private func performRuntimeTeardown(
         previousState: ReviewStoreRuntimeState,
         generation: ReviewRuntimeGeneration,
-        intent: ReviewRuntimeTeardownIntent
+        intent: ReviewRuntimeTeardownIntent,
+        semanticStopContext: ReviewRuntimeSemanticStopContext? = nil
     ) async {
         switch previousState {
         case .acquiring(_, let context, let task):
@@ -549,14 +548,18 @@ public final class CodexReviewStore {
                 await performRuntimeTeardown(
                     previousState: recyclingState,
                     generation: generation,
-                    intent: intent
+                    intent: intent,
+                    semanticStopContext: semanticStopContext
                 )
             }
 
         case .replacing(let replacement, let task):
             task.cancel()
             if let publishedRuntime = replacement.takePublishedRuntime() {
-                await stopPublishedRuntimeSemantics(intent: intent)
+                await stopPublishedRuntimeSemantics(
+                    intent: intent,
+                    context: semanticStopContext ?? detachRuntimeSemanticStopContext(intent: intent)
+                )
                 await closeRuntime(
                     publishedRuntime,
                     purpose: runtimeTransitionPurpose(for: intent),
@@ -568,7 +571,10 @@ public final class CodexReviewStore {
             await stopMCPServer()
 
         case .running(_, let runtime, _):
-            await stopPublishedRuntimeSemantics(intent: intent)
+            await stopPublishedRuntimeSemantics(
+                intent: intent,
+                context: semanticStopContext ?? detachRuntimeSemanticStopContext(intent: intent)
+            )
             await stopMCPServer()
             await closeRuntime(
                 runtime,
@@ -1147,7 +1153,10 @@ public final class CodexReviewStore {
     private func closePublishedRuntimeForReplacement(
         _ runtime: PreparedRuntime
     ) async -> ReviewRuntimeCloseFailure? {
-        await stopPublishedRuntimeSemantics(intent: .explicitStop)
+        await stopPublishedRuntimeSemantics(
+            intent: .explicitStop,
+            context: detachRuntimeSemanticStopContext(intent: .explicitStop)
+        )
         return await closeRuntime(
             runtime,
             purpose: .restartSameAccount,
@@ -1171,30 +1180,10 @@ public final class CodexReviewStore {
     }
 
     private func stopPublishedRuntimeSemantics(
-        intent: ReviewRuntimeTeardownIntent
+        intent: ReviewRuntimeTeardownIntent,
+        context: ReviewRuntimeSemanticStopContext
     ) async {
-        let locallyCancelledJobIDs: [String]
-        if backend.handlesActiveReviewStopCleanup {
-            locallyCancelledJobIDs = []
-        } else {
-            let cancellationOutcome = await requestActiveReviewCancellationsForRuntimeStop(
-                reason: intent.reviewCancellation
-            )
-            locallyCancelledJobIDs = cancellationOutcome.jobIDs
-            if let failure = cancellationOutcome.firstFailure {
-                runtimeLifecycleLogger.error(
-                    "Review cancellation request failed before runtime stop: \(failure.localizedDescription, privacy: .public)"
-                )
-            }
-        }
-        await backend.stop(store: self, intent: intent)
-        let remainingLocallyCancelledJobIDs = cancelActiveReviewsLocallyForRuntimeStop(
-            reason: intent.reviewCancellation
-        )
-        await cancelAndDetachReviewWorkersForRuntimeStop(
-            jobIDs: Array(Set(locallyCancelledJobIDs + remainingLocallyCancelledJobIDs)),
-            reason: intent.reviewCancellation
-        )
+        await backend.stop(context: context, intent: intent)
     }
 
     @discardableResult

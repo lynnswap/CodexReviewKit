@@ -1030,6 +1030,9 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     private var runtimePublicationHandle: TestingRuntimeLifecycleHandle?
     private var runtimePublicationEntryWaiters: [CheckedContinuation<Void, Never>] = []
     private var runtimePublicationReleaseWaiters: [CheckedContinuation<Void, Never>] = []
+    private var semanticStopGate: AsyncGate?
+    private var semanticStopStartedGate = AsyncGate()
+    private var semanticStopCancellationGate = AsyncGate()
     private var scriptedReviewRecoveryRoute: ScriptedReviewRecoveryRoute?
     private var reviewRecoveryStageGate: AsyncGate?
     private var reviewRecoveryStageStartedGate = AsyncGate()
@@ -1123,6 +1126,17 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         )
         runtimePublicationIsHeld = true
         runtimePublicationHandle = nil
+    }
+
+    package func holdSemanticStop(with gate: AsyncGate) {
+        semanticStopGate = gate
+        semanticStopStartedGate = AsyncGate()
+        semanticStopCancellationGate = AsyncGate()
+    }
+
+    package func waitForSemanticStop() async { await semanticStopStartedGate.wait() }
+    package func waitForSemanticStopCancellation() async {
+        await semanticStopCancellationGate.wait()
     }
 
     package func waitForRuntimePublicationEntry() async {
@@ -1226,7 +1240,24 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         }
     }
 
-    package func stop(store _: CodexReviewStore) async {
+    package func stop(
+        context: ReviewRuntimeSemanticStopContext,
+        intent: ReviewRuntimeTeardownIntent
+    ) async {
+        await semanticStopStartedGate.open()
+        if let semanticStopGate {
+            let cancellationGate = semanticStopCancellationGate
+            await withTaskCancellationHandler {
+                await semanticStopGate.waitIgnoringCancellation()
+            } onCancel: {
+                Task { @MainActor in
+                    context.cancelTransferredWorkers()
+                    await cancellationGate.open()
+                }
+            }
+            self.semanticStopGate = nil
+        }
+        await context.stopUsingDefaultPolicy(intent: intent)
         isActive = false
     }
 

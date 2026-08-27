@@ -804,7 +804,6 @@ struct CodexReviewHostTests {
         #expect(cancellation.cancelled)
         #expect(result.core.lifecycle.status == .cancelled)
         #expect(store.reviewWorkerTasks[jobID] == nil)
-        #expect(store.runtimeStopDetachedReviewWorkerTasks[jobID] == nil)
         #expect(factoryCallCount == 2)
         #expect(store.serverState != .running)
 
@@ -2691,29 +2690,22 @@ struct CodexReviewHostTests {
             await store.stop()
         }
         try #require(await waitUntil(timeout: .seconds(2)) {
-            store.runtimeStopDetachedReviewWorkerTasks[job.id] != nil
+            store.reviewWorkerTasks[job.id] == nil
+                && store.reviewAttemptOwnerships[job.id] == nil
         })
-        let detachedWorker = try #require(
-            store.runtimeStopDetachedReviewWorkerTasks[job.id]
-        )
-        let ownershipRemainedStarting: Bool
-        if case .starting = store.reviewAttemptOwnerships[job.id] {
-            ownershipRemainedStarting = true
-        } else {
-            ownershipRemainedStarting = false
-        }
 
         #expect(store.reviewWorkerTasks[job.id] == nil)
-        #expect(ownershipRemainedStarting)
+        #expect(store.reviewAttemptOwnerships[job.id] == nil)
 
         await stop.value
         let result = try #require(try await waitForTaskValue(review, timeout: .seconds(1)))
         await reviewStartGate.open()
-        await detachedWorker.value
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            store.storeWorkRegistry.activeOrdinals.isEmpty
+        })
 
         #expect(result.core.lifecycle.status == .cancelled)
         #expect(store.reviewAttemptOwnerships[job.id] == nil)
-        #expect(store.runtimeStopDetachedReviewWorkerTasks[job.id] == nil)
         #expect(await transport.isClosedForTesting())
     }
 

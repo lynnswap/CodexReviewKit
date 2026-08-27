@@ -666,10 +666,6 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         self
     }
 
-    var handlesActiveReviewStopCleanup: Bool {
-        true
-    }
-
     var initialSettingsSnapshot: CodexReviewSettings.Snapshot {
         settingsSnapshot
     }
@@ -1019,16 +1015,16 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
     }
 
     private func cancelActiveReviewsForRuntimeTeardown(
-        store: CodexReviewStore,
+        context: ReviewRuntimeSemanticStopContext,
         appServerBackend: AppServerCodexReviewBackend,
         reason: ReviewCancellation,
         timeoutWarning: String
     ) async {
-        let workerJobIDs = store.reviewWorkerJobIDsForRuntimeStop
+        let workerJobIDs = context.workerJobIDs
         let cancellationCleanup = await runRuntimeShutdownCleanup(
             timeout: shutdownCleanupTimeout
         ) {
-            await store.requestActiveReviewCancellationsForRuntimeStop(reason: reason)
+            await context.requestCancellations()
         }
         let cancellationJobIDs: [String]
         let didRequestCancellation: Bool
@@ -1059,11 +1055,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 )
             }
         }
-        let locallyCancelledJobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
+        let locallyCancelledJobIDs = context.completeCancellationsLocally(
             reason: reason
         )
-        let currentWorkerJobIDs = store.reviewWorkerJobIDsForRuntimeStop
-        await store.cancelAndDetachReviewWorkersForRuntimeStop(
+        let currentWorkerJobIDs = context.workerJobIDs
+        await context.cancelWorkers(
             jobIDs: Array(Set(
                 workerJobIDs
                     + cancellationJobIDs
@@ -1072,7 +1068,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             )),
             reason: reason
         )
-        let didDrainReviewWorkers = await store.drainReviewWorkersForRuntimeStop(
+        let didDrainReviewWorkers = await context.drainWorkers(
             timeout: shutdownCleanupTimeout
         )
         if cancellationTimedOut || didDrainReviewWorkers == false {
@@ -1080,12 +1076,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         }
     }
 
-    func stop(store: CodexReviewStore) async {
-        await stop(store: store, intent: .explicitStop)
-    }
-
     func stop(
-        store: CodexReviewStore,
+        context: ReviewRuntimeSemanticStopContext,
         intent: ReviewRuntimeTeardownIntent
     ) async {
         let appServerBackend = appServerBackend
@@ -1096,7 +1088,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         logger.info("Stopping review runtime semantic work for \(intent.diagnosticContext, privacy: .public)")
         if let appServerBackend {
             await cancelActiveReviewsForRuntimeTeardown(
-                store: store,
+                context: context,
                 appServerBackend: appServerBackend,
                 reason: intent.reviewCancellation,
                 timeoutWarning: intent.cleanupTimeoutWarning
