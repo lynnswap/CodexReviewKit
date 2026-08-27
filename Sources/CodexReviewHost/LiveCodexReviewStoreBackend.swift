@@ -2065,14 +2065,36 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         }
         switch notification.method {
         case "account/login/completed":
-            await handleLoginCompletedNotification(
-                notification,
-                backend: backend,
-                expectedRuntimeHandle: expectedRuntimeHandle,
-                auth: auth
-            )
+            do {
+                let payload = try JSONDecoder().decode(
+                    AppServerAccountLoginCompletedNotification.self,
+                    from: notification.params
+                )
+                guard let loginID = payload.loginID,
+                      loginID == authenticationOperation.challenge?.id,
+                      authenticationOperation.backend === backend else {
+                    return
+                }
+                await handleLoginCompletedNotification(
+                    notification,
+                    backend: backend,
+                    expectedRuntimeHandle: expectedRuntimeHandle,
+                    auth: auth
+                )
+            } catch {
+                logger.error("Failed to decode account login completion: \(error.localizedDescription, privacy: .public)")
+            }
         case "account/updated":
-            await handleAccountUpdatedNotification(
+            guard authenticationOperation.backend === backend,
+                  authenticationOperation.phase == .waitingForAccountUpdate else {
+                await refreshAuthAfterAccountNotification(
+                    backend: backend,
+                    expectedRuntimeHandle: expectedRuntimeHandle,
+                    auth: auth
+                )
+                return
+            }
+            await finishCompletedLoginAfterAccountUpdate(
                 backend: backend,
                 expectedRuntimeHandle: expectedRuntimeHandle,
                 auth: auth
