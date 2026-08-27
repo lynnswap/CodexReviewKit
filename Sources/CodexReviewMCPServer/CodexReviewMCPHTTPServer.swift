@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 import MCP
 import OSLog
+import CodexReview
 @preconcurrency import NIOCore
 @preconcurrency import NIOHTTP1
 @preconcurrency import NIOPosix
@@ -213,6 +214,30 @@ private actor MCPHTTPLifecycleCompletionGate {
     private func reset() {
         shouldHoldNextCompletion = false
         releaseWasRequested = false
+    }
+}
+
+private actor MCPHTTPSessionCloseCompletionGate {
+    private let completionGate = MCPHTTPLifecycleCompletionGate()
+    private var storeReceipt: ReviewStoreSessionCloseReceipt?
+
+    func holdNextCompletion() async {
+        await completionGate.holdNextCompletion()
+    }
+
+    func waitIfNeeded(_ storeReceipt: ReviewStoreSessionCloseReceipt?) async {
+        self.storeReceipt = storeReceipt
+        await completionGate.waitIfNeeded()
+        self.storeReceipt = nil
+    }
+
+    func waitUntilHolding() async -> ReviewStoreSessionCloseReceipt? {
+        await completionGate.waitUntilHolding()
+        return storeReceipt
+    }
+
+    func release() async {
+        await completionGate.release()
     }
 }
 
@@ -483,7 +508,7 @@ package actor CodexReviewMCPHTTPServer {
     private let responseEndAcknowledgementGate = MCPHTTPLifecycleCompletionGate()
     private let responseEndWriteGate = MCPHTTPLifecycleCompletionGate()
     private let sessionStartCompletionGate = MCPHTTPLifecycleCompletionGate()
-    private let sessionCloseCompletionGate = MCPHTTPLifecycleCompletionGate()
+    private let sessionCloseCompletionGate = MCPHTTPSessionCloseCompletionGate()
     private let sessionRequestHandoffGate = MCPHTTPSessionRequestHandoffGate()
     private let sessionRequestRetirementGate = MCPHTTPLifecycleCompletionGate()
     private let responseBackpressureProbe = MCPHTTPResponseBackpressureProbe()
@@ -985,7 +1010,7 @@ package actor CodexReviewMCPHTTPServer {
         await sessionCloseCompletionGate.holdNextCompletion()
     }
 
-    package func waitUntilSessionCloseCompletionIsHeldForTesting() async {
+    package func waitUntilSessionCloseCompletionIsHeldForTesting() async -> ReviewStoreSessionCloseReceipt? {
         await sessionCloseCompletionGate.waitUntilHolding()
     }
 
@@ -1580,7 +1605,6 @@ package actor CodexReviewMCPHTTPServer {
         let receipt = MCPSemanticSession.CloseReceipt(
             identity: session.identity
         ) { [self, session] identity in
-            await sessionCloseCompletionGate.waitIfNeeded()
             await performSessionClose(session, identity: identity)
         }
         session.closeReceipt = receipt
@@ -1593,6 +1617,7 @@ package actor CodexReviewMCPHTTPServer {
     ) async {
         let sessionID = identity.sessionID
         let storeReceipt = await adapter.beginCloseSession(sessionID)
+        await sessionCloseCompletionGate.waitIfNeeded(storeReceipt)
         let server: Server?
         switch session.phase {
         case .initializing(let starting):
