@@ -33,11 +33,7 @@ package final class CodexReviewAuthenticationSessionReceipt: Sendable {
         task.cancel()
     }
     package func waitUntilTerminal() async -> CodexReviewAuthenticationSessionTerminal {
-        await withTaskCancellationHandler {
-            await task.value
-        } onCancel: {
-            task.cancel()
-        }
+        await task.value
     }
 
     package func cancelAndWait() async -> CodexReviewAuthenticationSessionTerminal {
