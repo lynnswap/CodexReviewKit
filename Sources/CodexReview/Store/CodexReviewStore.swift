@@ -12,6 +12,37 @@ private struct ReviewRuntimeCancellationRegistration: Sendable {
     let receipt: ReviewCancellationRequestReceipt
 }
 
+@MainActor
+private final class ReviewSettingsSubmissionPublication {
+    private var isPublished = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func publish() {
+        guard isPublished == false else {
+            return
+        }
+        isPublished = true
+        let waiters = waiters
+        self.waiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+
+    func waitUntilPublished() async {
+        if isPublished {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            if isPublished {
+                continuation.resume()
+            } else {
+                waiters.append(continuation)
+            }
+        }
+    }
+}
+
 package enum StoreReviewAttemptOwnership {
     case starting(ReviewStartAdmission)
     case active(StoreReviewActiveAttempt)
@@ -751,17 +782,27 @@ public final class CodexReviewStore {
         }
     }
 
-    private func performStoreOwnedRegisteredWork(
+    private func performRegisteredSettingsSubmission(
         kind: ReviewStoreWorkKind,
-        operation: @escaping @MainActor @Sendable (CodexReviewStore) async -> Void
+        submission: @escaping @MainActor @Sendable (
+            CodexReviewStore
+        ) async -> CodexReviewSettingsSubmissionReceipt
     ) async {
-        guard let task = startRegisteredStoreWork(
+        let publication = ReviewSettingsSubmissionPublication()
+        guard startRegisteredStoreWork(
             kind: kind,
-            operation: operation
-        ) else {
+            cancelledBeforeEntry: .runFinalizer { _ in
+                publication.publish()
+            },
+            operation: { @MainActor store in
+                let receipt = await submission(store)
+                publication.publish()
+                await receipt.waitUntilCompleted()
+            }
+        ) != nil else {
             return
         }
-        await task.value
+        await publication.waitUntilPublished()
     }
 
     package func performThrowingRegisteredStoreWork<Value: Sendable>(
@@ -1293,48 +1334,24 @@ public final class CodexReviewStore {
     }
 
     public func refreshAuthentication() async {
-        await performRegisteredStoreWork(
-            kind: .authenticationMutation("refresh")
-        ) { @MainActor store in
-            await store.backend.refreshAuth(auth: store.auth)
-        }
+        await backend.refreshAuth(auth: auth)
     }
 
     public func signIn() async {
-        await performRegisteredStoreWork(
-            kind: .authenticationMutation("sign-in")
-        ) { @MainActor store in
-            await store.backend.signIn(auth: store.auth)
-        }
+        await backend.signIn(auth: auth)
     }
 
     public func addAccount() async {
-        await performRegisteredStoreWork(
-            kind: .authenticationMutation("add-account")
-        ) { @MainActor store in
-            await store.backend.addAccount(auth: store.auth)
-        }
+        await backend.addAccount(auth: auth)
     }
 
     public func cancelAuthentication() async {
-        await performRegisteredStoreWork(
-            kind: .authenticationMutation("cancel")
-        ) { @MainActor store in
-            await store.backend.cancelAuthentication(auth: store.auth)
-        }
+        await backend.cancelAuthentication(auth: auth)
     }
 
     package func performPrimaryAuthenticationAction() async {
-        await performRegisteredStoreWork(
-            kind: .authenticationMutation("primary-action")
-        ) { @MainActor store in
-            await store.performPrimaryAuthenticationActionWithinRegisteredWork()
-        }
-    }
-
-    private func performPrimaryAuthenticationActionWithinRegisteredWork() async {
         if auth.isAuthenticating {
-            await backend.cancelAuthentication(auth: auth)
+            await cancelAuthentication()
             return
         }
         guard canPerformPrimaryAuthenticationAction else {
@@ -1348,24 +1365,16 @@ public final class CodexReviewStore {
         else {
             return
         }
-        await backend.signIn(auth: auth)
+        await signIn()
     }
 
     public func logout() async {
-        await performRegisteredStoreWork(
-            kind: .authenticationMutation("logout")
-        ) { @MainActor store in
-            await store.performLogoutWithinRegisteredWork()
-        }
-    }
-
-    private func performLogoutWithinRegisteredWork() async {
         if auth.isAuthenticating, auth.selectedAccount == nil {
-            await backend.cancelAuthentication(auth: auth)
+            await cancelAuthentication()
             return
         }
         do {
-            try await performSignOutActiveAccount()
+            try await signOutActiveAccount()
         } catch {
             if auth.errorMessage == nil, auth.isAuthenticated {
                 auth.updatePhase(.failed(message: error.localizedDescription))
@@ -1374,26 +1383,10 @@ public final class CodexReviewStore {
     }
 
     public func signOutActiveAccount() async throws {
-        try await performThrowingRegisteredStoreWork(
-            kind: .authenticationMutation("sign-out")
-        ) { @MainActor store in
-            try await store.performSignOutActiveAccount()
-        }
-    }
-
-    private func performSignOutActiveAccount() async throws {
         try await backend.signOutActiveAccount(auth: auth)
     }
 
     package func switchAccount(_ account: CodexAccount) async throws {
-        try await performThrowingRegisteredStoreWork(
-            kind: .authenticationMutation("switch-account")
-        ) { @MainActor store in
-            try await store.performSwitchAccount(account)
-        }
-    }
-
-    private func performSwitchAccount(_ account: CodexAccount) async throws {
         guard canSwitchAccount(account) else {
             return
         }
@@ -1492,38 +1485,15 @@ public final class CodexReviewStore {
     }
 
     package func removeAccount(accountKey: String) async throws {
-        try await performThrowingRegisteredStoreWork(
-            kind: .authenticationMutation("remove-account")
-        ) { @MainActor store in
-            try await store.performRemoveAccount(accountKey: accountKey)
-        }
-    }
-
-    private func performRemoveAccount(accountKey: String) async throws {
         try await backend.removeAccount(auth: auth, accountKey: accountKey)
     }
 
     package func reorderPersistedAccount(accountKey: String, toIndex: Int) async throws {
-        try await performThrowingRegisteredStoreWork(
-            kind: .authenticationMutation("reorder-account")
-        ) { @MainActor store in
-            try await store.backend.reorderPersistedAccount(
-                auth: store.auth,
-                accountKey: accountKey,
-                toIndex: toIndex
-            )
-        }
+        try await backend.reorderPersistedAccount(auth: auth, accountKey: accountKey, toIndex: toIndex)
     }
 
     package func refreshAccountRateLimits(accountKey: String) async {
-        await performRegisteredStoreWork(
-            kind: .authenticationMutation("refresh-rate-limits")
-        ) { @MainActor store in
-            await store.backend.refreshAccountRateLimits(
-                auth: store.auth,
-                accountKey: accountKey
-            )
-        }
+        await backend.refreshAccountRateLimits(auth: auth, accountKey: accountKey)
     }
 
     package func startStartupAuthRefresh() {
@@ -1548,50 +1518,50 @@ public final class CodexReviewStore {
     }
 
     package func refreshSettings() async {
-        await performStoreOwnedRegisteredWork(
+        await performRegisteredSettingsSubmission(
             kind: .settingsMutation("refresh")
         ) { @MainActor store in
-            await store.settingsService.refresh()
+            await store.settingsService.submitRefresh()
         }
     }
 
     package func updateSettingsModel(_ model: String) async {
-        await performStoreOwnedRegisteredWork(
+        await performRegisteredSettingsSubmission(
             kind: .settingsMutation("update-model")
         ) { @MainActor store in
-            await store.settingsService.updateModel(model)
+            await store.settingsService.submitModel(model)
         }
     }
 
     package func clearSettingsModelOverride() async {
-        await performStoreOwnedRegisteredWork(
+        await performRegisteredSettingsSubmission(
             kind: .settingsMutation("clear-model")
         ) { @MainActor store in
-            await store.settingsService.clearModelOverride()
+            await store.settingsService.submitModel(nil)
         }
     }
 
     package func updateSettingsReasoningEffort(_ reasoningEffort: CodexReviewSettings.ReasoningEffort?) async {
-        await performStoreOwnedRegisteredWork(
+        await performRegisteredSettingsSubmission(
             kind: .settingsMutation("update-reasoning-effort")
         ) { @MainActor store in
-            await store.settingsService.updateReasoningEffort(reasoningEffort)
+            await store.settingsService.submitReasoningEffort(reasoningEffort)
         }
     }
 
     package func clearSettingsReasoningEffort() async {
-        await performStoreOwnedRegisteredWork(
+        await performRegisteredSettingsSubmission(
             kind: .settingsMutation("clear-reasoning-effort")
         ) { @MainActor store in
-            await store.settingsService.updateReasoningEffort(nil)
+            await store.settingsService.submitReasoningEffort(nil)
         }
     }
 
     package func updateSettingsServiceTier(_ serviceTier: CodexReviewSettings.ServiceTier?) async {
-        await performStoreOwnedRegisteredWork(
+        await performRegisteredSettingsSubmission(
             kind: .settingsMutation("update-service-tier")
         ) { @MainActor store in
-            await store.settingsService.updateServiceTier(serviceTier)
+            await store.settingsService.submitServiceTier(serviceTier)
         }
     }
 
@@ -1688,11 +1658,11 @@ public final class CodexReviewStore {
             guard let account = auth.persistedAccounts.first(where: { $0.accountKey == accountKey }) else {
                 return
             }
-            try await performSwitchAccount(account)
+            try await switchAccount(account)
         case .signOutActiveAccount:
-            try await performSignOutActiveAccount()
+            try await signOutActiveAccount()
         case .removeAccount(let accountKey):
-            try await performRemoveAccount(accountKey: accountKey)
+            try await removeAccount(accountKey: accountKey)
         }
     }
 

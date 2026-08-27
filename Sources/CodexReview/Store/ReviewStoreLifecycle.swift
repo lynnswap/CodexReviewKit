@@ -7,7 +7,6 @@ package enum ReviewStoreWorkKind: Hashable, Sendable {
     case rateLimitWakeUp
     case rateLimitRefresh(accountKey: String)
     case settingsMutation(String)
-    case authenticationMutation(String)
     case accountAction
     case testing(String)
 
@@ -25,8 +24,6 @@ package enum ReviewStoreWorkKind: Hashable, Sendable {
             "Rate-limit refresh \(accountKey)"
         case .settingsMutation(let operation):
             "Settings mutation \(operation)"
-        case .authenticationMutation(let operation):
-            "Authentication mutation \(operation)"
         case .accountAction:
             "Account action"
         case .testing(let label):
