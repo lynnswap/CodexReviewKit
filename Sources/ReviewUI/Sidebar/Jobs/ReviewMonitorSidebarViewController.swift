@@ -234,22 +234,22 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             scrollView.topAnchor.constraint(equalTo: view.topAnchor),
             scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
 
             emptyStateViewController.view.topAnchor.constraint(equalTo: view.topAnchor),
             emptyStateViewController.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             emptyStateViewController.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            emptyStateViewController.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            emptyStateViewController.view.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
 
             accountsViewController.view.topAnchor.constraint(equalTo: view.topAnchor),
             accountsViewController.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             accountsViewController.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            accountsViewController.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            accountsViewController.view.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
 
             unavailableView.topAnchor.constraint(equalTo: view.topAnchor),
             unavailableView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             unavailableView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            unavailableView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            unavailableView.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
         ])
     }
 
@@ -2110,6 +2110,36 @@ extension ReviewMonitorSidebarViewController {
         return outlineView.rect(ofRow: outlineView.numberOfRows - 1)
     }
 
+    var sidebarLastRowFrameForTesting: NSRect {
+        guard outlineView.numberOfRows > 0 else {
+            return .zero
+        }
+        return outlineView.convert(
+            outlineView.rect(ofRow: outlineView.numberOfRows - 1),
+            to: view
+        )
+    }
+
+    var sidebarLastJobForTesting: CodexReviewJob? {
+        guard outlineView.numberOfRows > 0 else {
+            return nil
+        }
+        return job(atRow: outlineView.numberOfRows - 1)
+    }
+
+    func jobRowAccessibilityIdentifierForTesting(_ job: CodexReviewJob) -> String? {
+        guard let row = row(forJobID: job.id),
+              let cellView = outlineView.view(
+                atColumn: 0,
+                row: row,
+                makeIfNecessary: true
+              ) as? ReviewMonitorJobCellView
+        else {
+            return nil
+        }
+        return cellView.hostingAccessibilityIdentifierForTesting
+    }
+
     @discardableResult
     func performWorkspaceDropForTesting(
         _ workspace: CodexReviewWorkspace,
@@ -2551,6 +2581,10 @@ private final class ReviewMonitorJobCellView: NSTableCellView {
 
     var hostingViewIdentityForTesting: ObjectIdentifier? {
         hostingView.map(ObjectIdentifier.init)
+    }
+
+    var hostingAccessibilityIdentifierForTesting: String? {
+        hostingView?.accessibilityIdentifier()
     }
 
     func contentMinXForTesting(relativeTo view: NSView) -> CGFloat? {
