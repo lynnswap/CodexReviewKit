@@ -27,7 +27,6 @@ package struct CodexReviewStoreSeed {
 package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend, Sendable {
     var seed: CodexReviewStoreSeed { get }
     var isActive: Bool { get }
-    var handlesActiveReviewStopCleanup: Bool { get }
     var mcpServerLifecycle: any MCPServerLifecycleOwner { get }
 
     func attachStore(_ store: CodexReviewStore)
@@ -43,9 +42,8 @@ package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend, Sendable {
     func waitForRuntimePublication(
         handle: any RuntimeLifecycleHandle
     ) async
-    func stop(store: CodexReviewStore) async
     func stop(
-        store: CodexReviewStore,
+        context: ReviewRuntimeSemanticStopContext,
         intent: ReviewRuntimeTeardownIntent
     ) async
     func waitUntilStopped() async
@@ -85,17 +83,6 @@ package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend, Sendable {
 }
 
 extension CodexReviewStoreBackend {
-    package var handlesActiveReviewStopCleanup: Bool {
-        false
-    }
-
-    package func stop(
-        store: CodexReviewStore,
-        intent _: ReviewRuntimeTeardownIntent
-    ) async {
-        await stop(store: store)
-    }
-
     package func commitRuntimePublication(
         _ snapshot: RuntimePublicationSnapshot,
         handle _: any RuntimeLifecycleHandle,

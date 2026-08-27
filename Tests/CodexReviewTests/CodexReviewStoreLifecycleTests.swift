@@ -6,6 +6,41 @@ import CodexReviewTesting
 @Suite("store runtime lifecycle", .serialized)
 @MainActor
 struct CodexReviewStoreLifecycleTests {
+    @Test func backendSemanticStopBoundaryDoesNotRetainStoreAndForwardsCancellation() async throws {
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        let semanticStopGate = AsyncGate()
+        let workerGate = AsyncGate()
+        let workerCancellation = AsyncGate()
+        backend.holdSemanticStop(with: semanticStopGate)
+        var store: CodexReviewStore? = CodexReviewStore.makeTestingStore(backend: backend)
+        weak let weakStore = store
+        store?.reviewAttemptOwnerships["job-1"] = .starting(ReviewStartAdmission())
+        store?.reviewWorkerTasks["job-1"] = Task {
+            await withTaskCancellationHandler {
+                await workerGate.waitIgnoringCancellation()
+            } onCancel: {
+                Task { await workerCancellation.open() }
+            }
+        }
+        let context = try #require(store?.detachRuntimeSemanticStopContext(intent: .explicitStop))
+        #expect(store?.reviewAttemptOwnerships.isEmpty == true)
+        #expect(store?.reviewWorkerTasks.isEmpty == true)
+
+        let stop = Task { @MainActor in
+            await backend.stop(context: context, intent: .explicitStop)
+        }
+        await backend.waitForSemanticStop()
+        store = nil
+        #expect(weakStore == nil)
+
+        stop.cancel()
+        await backend.waitForSemanticStopCancellation()
+        await workerCancellation.wait()
+        await semanticStopGate.open()
+        await workerGate.open()
+        await stop.value
+    }
+
     @Test func stopInvalidatesHeldRuntimePreparationAndClosesStaleHandleOnce() async throws {
         let preparationGate = AsyncGate()
         let mcpOwner = TestingMCPServerLifecycleOwner()

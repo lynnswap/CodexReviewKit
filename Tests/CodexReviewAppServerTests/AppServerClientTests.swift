@@ -7344,23 +7344,18 @@ struct AppServerClientTests {
         }
         #expect(waiterRegistered)
 
-        let jobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
-            reason: .system(message: "Review runtime stopped.")
-        )
-        #expect(store.reviewTerminalWaiters["job-1"]?.count == 1)
-        await store.cancelAndDetachReviewWorkersForRuntimeStop(
-            jobIDs: jobIDs,
-            reason: .system(message: "Review runtime stopped.")
-        )
+        let reason = ReviewCancellation.system(message: "Review runtime stopped.")
+        let context = store.detachRuntimeSemanticStopContext(intent: .explicitStop)
+        let jobIDs = context.completeCancellationsLocally(reason: reason)
+        await context.cancelWorkers(jobIDs: jobIDs, reason: reason)
 
         #expect(store.reviewTerminalWaiters["job-1"] == nil)
-        #expect(store.runtimeStopDetachedReviewWorkerTasks["job-1"] != nil)
         #expect(try await result.value.core.lifecycle.status == .cancelled)
 
         await startGate.open()
         try await backend.waitForInterruptReview(timeout: .seconds(2))
         await backend.yield(.cancelled("Review runtime stopped."))
-        #expect(await store.drainRuntimeStopDetachedReviewWorkers(timeout: .seconds(2)))
+        #expect(await context.drainWorkers(timeout: .seconds(2)))
         await backend.finishEventMailboxes()
         await store.cancelAndDrainReviewWorkersForTesting()
     }

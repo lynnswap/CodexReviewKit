@@ -188,7 +188,6 @@ extension CodexReviewStore {
         guard let job = job(id: jobID) else {
             removeStartingReviewOwnership(for: jobID, ifOwnedBy: admission)
             reviewWorkerTasks.removeValue(forKey: jobID)
-            runtimeStopDetachedReviewWorkerTasks.removeValue(forKey: jobID)
             resumeReviewWaiters(for: jobID)
             return
         }
@@ -285,7 +284,6 @@ extension CodexReviewStore {
         await inputs?.cancelAndWait()
         removeStartingReviewOwnership(for: jobID, ifOwnedBy: admission)
         reviewWorkerTasks.removeValue(forKey: jobID)
-        runtimeStopDetachedReviewWorkerTasks.removeValue(forKey: jobID)
         if job.isTerminal {
             resumeReviewWaiters(for: jobID)
         }
@@ -644,7 +642,23 @@ extension CodexReviewStore {
     ) async -> ReviewRuntimeCloseFailure? {
         let cancellationRequest = latestCleanupCancellationRequest(capturedCancellationRequest, job.pendingCancellationRequest)
         if let unpublishedAttempt {
-            let failure = await cleanupReviewFailure(unpublishedAttempt.run)
+            var failure: ReviewRuntimeCloseFailure?
+            if let request = await workerAdmission.cancellationRequestReceipt(), let inputs {
+                do {
+                    let resolution = try await interruptActiveAttemptAndRecordTerminal(
+                        unpublishedAttempt,
+                        cancellation: .receipt(request),
+                        inputs: inputs,
+                        job: job
+                    )
+                    failure = cleanupFailure(from: resolution.requestFailure)
+                } catch {
+                    failure = .cleanup(error.localizedDescription)
+                }
+            }
+            if failure == nil {
+                failure = await cleanupReviewFailure(unpublishedAttempt.run)
+            }
             let starting = StoreReviewAttemptOwnership.starting(workerAdmission)
             if reviewAttemptOwnerships[jobID]?.matches(starting) == true {
                 reviewAttemptOwnerships.removeValue(forKey: jobID)

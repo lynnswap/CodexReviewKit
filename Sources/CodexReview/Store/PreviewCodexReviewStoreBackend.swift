@@ -25,7 +25,11 @@ package class PreviewCodexReviewStoreBackend: CodexReviewStoreBackend {
         throw CodexReviewAPI.Error.io(Self.previewUnavailableMessage)
     }
 
-    package func stop(store _: CodexReviewStore) async {
+    package func stop(
+        context: ReviewRuntimeSemanticStopContext,
+        intent: ReviewRuntimeTeardownIntent
+    ) async {
+        await context.stopUsingDefaultPolicy(intent: intent)
         isActive = false
     }
 

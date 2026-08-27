@@ -897,6 +897,10 @@ package actor ReviewStartAdmission {
         }
     }
 
+    package func cancellationRequestReceipt() -> ReviewCancellationRequestReceipt? {
+        effectiveCancellationRequestReceipt
+    }
+
     package func waitForCancellationRequestReceipt(_ id: ReviewCancellationRequestReceipt.ID) async {
         if effectiveCancellationRequestReceipt?.id == id { return }
         await withCheckedContinuation { cancellationRequestReceiptWaiters[id, default: []].append($0) }

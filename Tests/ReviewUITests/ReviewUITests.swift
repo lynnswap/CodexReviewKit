@@ -6865,7 +6865,11 @@ final class CountingStartBackend: PreviewCodexReviewStoreBackend {
         )
     }
 
-    override func stop(store _: CodexReviewStore) async {
+    override func stop(
+        context: ReviewRuntimeSemanticStopContext,
+        intent: ReviewRuntimeTeardownIntent
+    ) async {
+        await context.stopUsingDefaultPolicy(intent: intent)
         isActive = false
     }
 
@@ -6894,7 +6898,11 @@ final class AuthActionBackend: PreviewCodexReviewStoreBackend {
         )
     }
 
-    override func stop(store _: CodexReviewStore) async {
+    override func stop(
+        context: ReviewRuntimeSemanticStopContext,
+        intent: ReviewRuntimeTeardownIntent
+    ) async {
+        await context.stopUsingDefaultPolicy(intent: intent)
         isActive = false
     }
 
@@ -6952,7 +6960,11 @@ final class BlockingSettingsBackend: PreviewCodexReviewStoreBackend {
         )
     }
 
-    override func stop(store _: CodexReviewStore) async {
+    override func stop(
+        context: ReviewRuntimeSemanticStopContext,
+        intent: ReviewRuntimeTeardownIntent
+    ) async {
+        await context.stopUsingDefaultPolicy(intent: intent)
     }
 
     override func waitUntilStopped() async {}

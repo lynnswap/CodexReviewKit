@@ -114,7 +114,11 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
         )
     }
 
-    func stop(store _: CodexReviewStore) async {
+    func stop(
+        context: ReviewRuntimeSemanticStopContext,
+        intent: ReviewRuntimeTeardownIntent
+    ) async {
+        await context.stopUsingDefaultPolicy(intent: intent)
         active = false
     }
 
