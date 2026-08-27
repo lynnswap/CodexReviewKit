@@ -38,12 +38,9 @@ enum ReviewMonitorAddAccountAction {
         operation: @escaping @MainActor @Sendable () async -> Void
     ) async {
         let auth = store.auth
-        let previousFailureCount = auth.authenticationFailureCount
         let previousWarningMessage = auth.warningMessage
         await operation()
-        if auth.authenticationFailureCount != previousFailureCount,
-           let message = auth.errorMessage
-        {
+        if let message = auth.errorMessage {
             await presentFailureAlert(
                 title: "Failed to Add Account",
                 message: message

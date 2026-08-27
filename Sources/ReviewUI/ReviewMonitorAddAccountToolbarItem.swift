@@ -103,6 +103,7 @@ final class ReviewMonitorAddAccountToolbarItem: NSToolbarItem {
 
     private func makeProviderMenu() -> NSMenu {
         let menu = NSMenu()
+        menu.autoenablesItems = false
         let chatGPT = NSMenuItem(
             title: "ChatGPT",
             action: #selector(handleAddChatGPT(_:)),
