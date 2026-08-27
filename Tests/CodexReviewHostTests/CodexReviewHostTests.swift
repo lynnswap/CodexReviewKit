@@ -3412,10 +3412,14 @@ struct CodexReviewHostTests {
         let displacedTransport = FakeJSONRPCTransport()
         let staleTransport = FakeJSONRPCTransport()
         let replacementTransport = FakeJSONRPCTransport()
+        let rateLimitTransport = FakeJSONRPCTransport()
+        let finalTransport = FakeJSONRPCTransport()
         let loginFixtures = [
             (displacedTransport, "login-displaced", "lynnpd.CodexReviewMonitor.auth"),
             (staleTransport, "login-stale", "mismatched.callback.scheme"),
             (replacementTransport, "login-replacement", "lynnpd.CodexReviewMonitor.auth"),
+            (rateLimitTransport, "login-rate-limit", "lynnpd.CodexReviewMonitor.auth"),
+            (finalTransport, "login-final", "lynnpd.CodexReviewMonitor.auth"),
         ]
         for (transport, loginID, callbackScheme) in loginFixtures {
             try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
@@ -3432,9 +3436,30 @@ struct CodexReviewHostTests {
                 for: "account/login/cancel"
             )
         }
+        try await replacementTransport.enqueue(
+            AppServerAPI.Account.Read.Response(account: .init(email: "stale-read@example.com", planType: "plus")),
+            for: "account/read"
+        )
+        try await rateLimitTransport.enqueue(
+            AppServerAPI.Account.Read.Response(account: .init(email: "stale-rate@example.com", planType: "plus")),
+            for: "account/read"
+        )
+        try await rateLimitTransport.enqueue(
+            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
+                limitID: "codex",
+                primary: .init(usedPercent: 88, windowDurationMins: 300)
+            )),
+            for: "account/rateLimits/read"
+        )
         let displacedCleanupGate = AsyncGate()
         await displacedTransport.hold(method: "account/login/cancel", gate: displacedCleanupGate)
-        var loginTransports = [displacedTransport, staleTransport, replacementTransport]
+        var loginTransports = [
+            displacedTransport,
+            staleTransport,
+            replacementTransport,
+            rateLimitTransport,
+            finalTransport,
+        ]
         var isolatedHomeURLs: [URL] = []
         var sessions: [FakeWebAuthenticationSession] = []
         let store = CodexReviewStore.makeLiveStoreForTesting(
@@ -3489,9 +3514,115 @@ struct CodexReviewHostTests {
         #expect(store.auth.isAuthenticating)
         #expect(store.auth.authenticationFailureCount == failureCount)
 
+        let staleReadGate = AsyncGate()
+        await replacementTransport.holdNext(method: "account/read", gate: staleReadGate)
+        try await replacementTransport.emitServerNotification(
+            method: "account/login/completed",
+            params: TestLoginCompletedNotification(loginID: "login-replacement", success: true)
+        )
+        try await replacementTransport.emitServerNotification(method: "account/updated", params: EmptyResponse())
+        await replacementTransport.waitForActiveRequests(method: "account/read")
+        await store.addAccount()
+        let rateLimitSession = sessions[2]
+        await rateLimitSession.waitUntilWaitingForCallback()
+        #expect(store.auth.persistedAccounts.contains { $0.accountKey == "stale-read@example.com" } == false)
+        #expect(store.auth.authenticationFailureCount == failureCount)
+
+        let staleRateLimitGate = AsyncGate()
+        await rateLimitTransport.holdNext(method: "account/rateLimits/read", gate: staleRateLimitGate)
+        try await rateLimitTransport.emitServerNotification(
+            method: "account/login/completed",
+            params: TestLoginCompletedNotification(loginID: "login-rate-limit", success: true)
+        )
+        try await rateLimitTransport.emitServerNotification(method: "account/updated", params: EmptyResponse())
+        await rateLimitTransport.waitForActiveRequests(method: "account/rateLimits/read")
+        await store.addAccount()
+        let finalSession = sessions[3]
+        await finalSession.waitUntilWaitingForCallback()
+        let staleRateAccount = try #require(
+            store.auth.persistedAccounts.first { $0.accountKey == "stale-rate@example.com" }
+        )
+        #expect(staleRateAccount.rateLimits.isEmpty)
+        #expect(staleRateAccount.lastRateLimitError == nil)
+        #expect(store.auth.authenticationFailureCount == failureCount)
+        #expect(store.auth.isAuthenticating)
+
         await store.cancelAuthentication()
-        #expect(await replacementTransport.isClosedForTesting())
-        #expect(FileManager.default.fileExists(atPath: isolatedHomeURLs[2].path) == false)
+        #expect(await finalTransport.isClosedForTesting())
+        #expect(FileManager.default.fileExists(atPath: isolatedHomeURLs[4].path) == false)
+    }
+
+    @Test func liveStoreStaleNativeCompletionCannotCommitAfterReplacement() async throws {
+        let homeURL = try temporaryHome()
+        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try writeRegistry(homeURL: homeURL, activeAccountKey: "active@example.com", accounts: ["active@example.com"])
+        let mainTransport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(mainTransport, accountEmail: "active@example.com")
+        let staleTransport = FakeJSONRPCTransport()
+        let replacementTransport = FakeJSONRPCTransport()
+        for (transport, loginID) in [(staleTransport, "login-stale-native"), (replacementTransport, "login-current")] {
+            try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+            try await transport.enqueue(
+                AppServerAPI.Account.Login.Response.chatgpt(
+                    loginID: loginID,
+                    authURL: "https://example.com/auth",
+                    nativeWebAuthentication: .init(callbackURLScheme: "lynnpd.CodexReviewMonitor.auth")
+                ),
+                for: "account/login/start"
+            )
+            try await transport.enqueue(AppServerAPI.Account.Login.Cancel.Response(), for: "account/login/cancel")
+        }
+        try await staleTransport.enqueue(AppServerAPI.Account.Login.Complete.Response(), for: "account/login/complete")
+        try await staleTransport.enqueue(
+            AppServerAPI.Account.Read.Response(account: .init(email: "stale-native@example.com", planType: "plus")),
+            for: "account/read"
+        )
+        let completeGate = AsyncGate()
+        let readGate = AsyncGate()
+        let cancelGate = AsyncGate()
+        await staleTransport.holdNextIgnoringCancellation(method: "account/login/complete", gate: completeGate)
+        await staleTransport.holdNextIgnoringCancellation(method: "account/read", gate: readGate)
+        await staleTransport.holdNext(method: "account/login/cancel", gate: cancelGate)
+        var loginTransports = [staleTransport, replacementTransport]
+        let sessions = FakeWebAuthenticationSessions()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            nativeAuthenticationConfiguration: .init(
+                callbackScheme: "lynnpd.CodexReviewMonitor.auth",
+                browserSessionPolicy: .ephemeral,
+                presentationAnchorProvider: { NSWindow() }
+            ),
+            webAuthenticationSessionFactory: sessions.makeSession,
+            transportFactory: { codexHomeURL in
+                if codexHomeURL == mainCodexHomeURL { return mainTransport }
+                try FileManager.default.createDirectory(at: codexHomeURL, withIntermediateDirectories: true)
+                return loginTransports.removeFirst()
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        await store.addAccount()
+        let staleSession = await sessions.waitForSession()
+        await staleSession.waitUntilWaitingForCallback()
+        staleSession.complete(with: URL(string: "lynnpd.CodexReviewMonitor.auth://callback?code=stale")!)
+        await staleTransport.waitForActiveRequests(method: "account/login/complete")
+        async let replacementStart: Void = store.addAccount()
+        await staleTransport.waitForActiveRequests(method: "account/login/cancel")
+        await completeGate.open()
+        await staleTransport.waitForActiveRequests(method: "account/read")
+        await readGate.open()
+        #expect(await waitUntil(timeout: .milliseconds(100)) {
+            store.auth.persistedAccounts.contains { $0.accountKey == "stale-native@example.com" }
+        } == false)
+        await cancelGate.open()
+        await replacementStart
+        let replacementSession = await sessions.waitForSession()
+        await replacementSession.waitUntilWaitingForCallback()
+
+        #expect(store.auth.persistedAccounts.contains { $0.accountKey == "stale-native@example.com" } == false)
+        #expect(store.auth.isAuthenticating)
+        #expect(replacementSession.isCancelled == false)
+        await store.cancelAuthentication()
     }
 
     @Test func liveStoreClosesIsolatedLoginRuntimeWhenLoginCompletionFails() async throws {
