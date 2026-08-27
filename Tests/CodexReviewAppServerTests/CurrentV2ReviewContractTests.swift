@@ -190,10 +190,12 @@ struct CurrentV2ReviewDecoderReducerTests {
 
         #expect(try reducer.ingest(marker) == .accepted(nil))
         let result = try reducer.ingest(terminal)
-        guard case .accepted(.completed(let final)) = result else {
+        let resolution = try #require(result.terminalResolution)
+        guard case .completed(let final) = resolution.terminal else {
             Issue.record("Expected a completed terminal")
             return
         }
+        #expect(resolution.ingestionError == nil)
         #expect(final.text == "No findings.")
         #expect(final.source == .exitedReviewMode(itemID: "review-result"))
         #expect(final.suppressedAgentMessageItemIDs == ["assistant-final"])
@@ -204,10 +206,12 @@ struct CurrentV2ReviewDecoderReducerTests {
         let terminal = try reviewEnvelope(CurrentV2FixturePin.sparseTurnCompleted)
 
         let result = try reducer.ingest(terminal)
-        guard case .accepted(.completed(let final)) = result else {
+        let resolution = try #require(result.terminalResolution)
+        guard case .completed(let final) = resolution.terminal else {
             Issue.record("Expected a completed terminal")
             return
         }
+        #expect(resolution.ingestionError == nil)
         #expect(final.text == "No findings.")
         #expect(final.source == .turnSummary(itemID: "assistant-final"))
         #expect(final.suppressedAgentMessageItemIDs.isEmpty)
@@ -226,11 +230,13 @@ struct CurrentV2ReviewDecoderReducerTests {
         var reducer = makeReducer()
         let terminal = try reviewEnvelope(try turnCompletedData(turnFragment: turnFragment))
 
-        guard case .accepted(.failed(let message)) = try reducer.ingest(terminal) else {
+        let resolution = try #require(try reducer.ingest(terminal).terminalResolution)
+        guard case .failed(let message) = resolution.terminal else {
             Issue.record("Expected missing-final-review failure")
             return
         }
         #expect(message?.contains("canonical final review") == true)
+        #expect(resolution.ingestionError == .missingFinalReview)
     }
 
     @Test func emptyFullMarkerDoesNotFallBackToTheSummaryCompanion() throws {
@@ -242,11 +248,13 @@ struct CurrentV2ReviewDecoderReducerTests {
         let terminal = try reviewEnvelope(CurrentV2FixturePin.sparseTurnCompleted)
 
         #expect(try reducer.ingest(marker) == .accepted(nil))
-        guard case .accepted(.failed(let message)) = try reducer.ingest(terminal) else {
+        let resolution = try #require(try reducer.ingest(terminal).terminalResolution)
+        guard case .failed(let message) = resolution.terminal else {
             Issue.record("Expected empty marker failure")
             return
         }
         #expect(message?.contains("canonical final review") == true)
+        #expect(resolution.ingestionError == .missingFinalReview)
     }
 
     @Test(
@@ -263,19 +271,24 @@ struct CurrentV2ReviewDecoderReducerTests {
         var reducer = makeReducer()
         let data = try terminalData(status: status, errorMessage: message)
 
-        #expect(try reducer.ingest(reviewEnvelope(data)) == .accepted(expected))
+        #expect(try reducer.ingest(reviewEnvelope(data)) == .accepted(.init(
+            terminal: expected
+        )))
     }
 
     @Test func nonterminalTerminalStatusFailsVisibly() throws {
         var reducer = makeReducer()
 
-        guard case .accepted(.failed(let message)) = try reducer.ingest(
+        let ingestion = try reducer.ingest(
             reviewEnvelope(try terminalData(status: "inProgress", errorMessage: nil))
-        ) else {
+        )
+        let resolution = try #require(ingestion.terminalResolution)
+        guard case .failed(let message) = resolution.terminal else {
             Issue.record("Expected invalid-terminal-status failure")
             return
         }
         #expect(message?.contains("invalid terminal status inProgress") == true)
+        #expect(resolution.ingestionError == .invalidTerminalStatus("inProgress"))
     }
 
     @Test func unknownTurnStatusIsMalformedAtTheSchemaBoundary() throws {
@@ -301,14 +314,17 @@ struct CurrentV2ReviewDecoderReducerTests {
         ))
 
         #expect(try reducer.ingest(foreignMarker) == .foreignIdentity)
-        guard case .accepted(.failed) = try reducer.ingest(
+        let ingestion = try reducer.ingest(
             reviewEnvelope(try turnCompletedData(
                 turnFragment: #"{"items":[],"itemsView":"notLoaded"}"#
             ))
-        ) else {
+        )
+        let resolution = try #require(ingestion.terminalResolution)
+        guard case .failed = resolution.terminal else {
             Issue.record("Expected the canonical turn to fail without output")
             return
         }
+        #expect(resolution.ingestionError == .missingFinalReview)
     }
 
     @Test func stableLifecycleDuplicateIsNoOpAndConflictFails() throws {
@@ -348,10 +364,12 @@ struct CurrentV2ReviewDecoderReducerTests {
         ))
 
         #expect(try reducer.ingest(marker) == .accepted(nil))
-        guard case .accepted(.completed(let final)) = try reducer.ingest(terminal) else {
+        let resolution = try #require(try reducer.ingest(terminal).terminalResolution)
+        guard case .completed(let final) = resolution.terminal else {
             Issue.record("Expected a completed terminal")
             return
         }
+        #expect(resolution.ingestionError == nil)
         #expect(final.source == .exitedReviewMode(itemID: "review-result"))
         #expect(final.suppressedAgentMessageItemIDs.isEmpty)
     }
@@ -380,10 +398,12 @@ struct CurrentV2ReviewDecoderReducerTests {
         ))
 
         #expect(try reducer.ingest(marker) == .accepted(nil))
-        guard case .accepted(.completed(let final)) = try reducer.ingest(terminal) else {
+        let resolution = try #require(try reducer.ingest(terminal).terminalResolution)
+        guard case .completed(let final) = resolution.terminal else {
             Issue.record("Expected a completed terminal")
             return
         }
+        #expect(resolution.ingestionError == nil)
         #expect(final.suppressedAgentMessageItemIDs.isEmpty)
     }
 
@@ -782,11 +802,13 @@ struct CurrentV2ReviewDecoderReducerTests {
             itemsView: "summary"
         ))
 
-        guard case .accepted(.completed(let result)) = try reducer.ingest(terminal) else {
+        let resolution = try #require(try reducer.ingest(terminal).terminalResolution)
+        guard case .completed(let result) = resolution.terminal else {
             Issue.record("Expected completed result")
             return
         }
         #expect(result.text == "invalid: \u{FFFD}")
+        #expect(resolution.ingestionError == nil)
     }
 
     @Test func overLimitFinalOutputFailsInsteadOfTruncating() throws {
@@ -803,12 +825,17 @@ struct CurrentV2ReviewDecoderReducerTests {
             itemsView: "summary"
         ))
 
-        guard case .accepted(.failed(let message)) = try reducer.ingest(terminal) else {
+        let resolution = try #require(try reducer.ingest(terminal).terminalResolution)
+        guard case .failed(let message) = resolution.terminal else {
             Issue.record("Expected output-too-large failure")
             return
         }
         #expect(message?.contains("UTF-8 bytes") == true)
         #expect(message?.contains("262144") == true)
+        #expect(resolution.ingestionError == .outputTooLarge(
+            actualBytes: ReviewFinalResult.maximumUTF8Bytes + 1,
+            limit: ReviewFinalResult.maximumUTF8Bytes
+        ))
     }
 
     private func makeReducer() -> CurrentV2ReviewTerminalReducer {
@@ -1272,7 +1299,11 @@ struct CurrentV2ReviewRoutingIntegrationTests {
 
     @Test func malformedKnownEventFailsOnlyItsSelectedAttempt() async throws {
         let transport = FakeJSONRPCTransport()
-        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let diagnostics = ReviewIngestionDiagnosticCapture()
+        let backend = AppServerCodexReviewBackend(
+            client: .init(transport: transport),
+            ingestionDiagnosticRecorder: diagnostics
+        )
         let failedAttempt = await backend.reviewAttemptForTesting(.init(
             attemptID: "attempt-1",
             threadID: "thread-1",
@@ -1286,13 +1317,14 @@ struct CurrentV2ReviewRoutingIntegrationTests {
             reviewThreadID: "thread-2"
         ))
 
+        let malformedParams = V2ItemNotification(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            item: .init(type: "sleep", id: "sleep-1")
+        )
         try await transport.emitServerNotification(
             method: "item/completed",
-            params: MalformedV2ItemNotification(
-                threadID: "thread-1",
-                turnID: "turn-1",
-                item: .init(type: "exitedReviewMode", review: "missing item id")
-            )
+            params: malformedParams
         )
         try await transport.emitServerNotification(
             method: "item/completed",
@@ -1311,7 +1343,7 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         )
 
         #expect(try await failedAttempt.events.next() == .failed(
-            "Malformed app-server notification item/completed: id must be a nonempty string"
+            "Malformed app-server notification item/completed: durationMs must be an integer"
         ))
         #expect(try await collectEvents(from: healthyAttempt.events).last == .completed(
             summary: "Succeeded.",
@@ -1319,6 +1351,22 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         ))
         #expect(await backend.notificationRouterMetricsForTesting().attemptFailures == 1)
         #expect(await transport.isClosedForTesting() == false)
+        let captured = diagnostics.snapshot()
+        #expect(captured.count == 1)
+        let diagnostic = try #require(captured.first)
+        #expect(diagnostic.method == "item/completed")
+        #expect(diagnostic.threadID == "thread-1")
+        #expect(diagnostic.turnID == "turn-1")
+        #expect(diagnostic.itemType == "sleep")
+        #expect(diagnostic.stage == .schemaValidation)
+        #expect(diagnostic.error == .malformedKnownEvent(
+            method: "item/completed",
+            message: "durationMs must be an integer"
+        ))
+        #expect(diagnostic.disposition == .attemptFailed)
+        #expect(try canonicalJSON(diagnostic.rawParams) == canonicalJSON(
+            JSONEncoder().encode(malformedParams)
+        ))
     }
 
     @Test func exitedReviewModeStartedWithoutReviewFailsItsSelectedAttempt() async throws {
@@ -1544,29 +1592,270 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         #expect(try canonicalJSON(diagnostic.rawParams) == canonicalJSON(JSONEncoder().encode(fixture.params)))
     }
 
-    @Test func selectedMalformedAndTerminalFailuresRemainOutsideBoundaryCapture() async throws {
-        let fixtures: [(String, BoundaryDiagnosticFixture.Params, String)] = [
-            ("item/agentMessage/delta", .reviewPayload(.init(threadID: "thread-selected", turnID: "turn-selected", itemID: "item-1", delta: "delta", plan: "invalid")), "Malformed app-server notification item/agentMessage/delta: The data couldn’t be read because it isn’t in the correct format."),
-            ("turn/completed", .turn(.init(threadID: "thread-selected", turn: .init(id: "turn-selected", items: [], itemsView: "notLoaded", status: "completed"))), ReviewIngestionError.missingFinalReview.localizedDescription),
-        ]
-        for (index, fixture) in fixtures.enumerated() {
-            let transport = FakeJSONRPCTransport()
-            let diagnostics = ReviewIngestionDiagnosticCapture()
-            let backend = AppServerCodexReviewBackend(
-                client: .init(transport: transport),
-                ingestionDiagnosticRecorder: diagnostics
+    @Test func selectedPayloadDecodeFailureRecordsAttemptFailure() async throws {
+        let transport = FakeJSONRPCTransport()
+        let diagnostics = ReviewIngestionDiagnosticCapture()
+        let backend = AppServerCodexReviewBackend(
+            client: .init(transport: transport),
+            ingestionDiagnosticRecorder: diagnostics
+        )
+        let attempt = await backend.reviewAttemptForTesting(.init(
+            attemptID: "attempt-1",
+            threadID: "thread-selected",
+            turnID: "turn-selected",
+            reviewThreadID: "thread-selected"
+        ))
+        let params = V2MalformedReviewPayloadNotification(
+            threadID: "thread-selected",
+            turnID: "turn-selected",
+            itemID: "item-1",
+            delta: "delta",
+            plan: "invalid"
+        )
+
+        try await transport.emitServerNotification(
+            method: "item/agentMessage/delta",
+            params: params
+        )
+
+        #expect(try await attempt.events.next() == .failed(
+            "Malformed app-server notification item/agentMessage/delta: The data couldn’t be read because it isn’t in the correct format."
+        ))
+        await backend.waitForReviewNotificationCompletionForTesting(1)
+        let captured = diagnostics.snapshot()
+        #expect(captured.count == 1)
+        let diagnostic = try #require(captured.first)
+        #expect(diagnostic.method == "item/agentMessage/delta")
+        #expect(diagnostic.threadID == "thread-selected")
+        #expect(diagnostic.turnID == "turn-selected")
+        #expect(diagnostic.itemType == nil)
+        #expect(diagnostic.stage == .payloadDecoding)
+        #expect(diagnostic.error == .malformedKnownEvent(
+            method: "item/agentMessage/delta",
+            message: "The data couldn’t be read because it isn’t in the correct format."
+        ))
+        #expect(diagnostic.disposition == .attemptFailed)
+        #expect(try canonicalJSON(diagnostic.rawParams) == canonicalJSON(
+            JSONEncoder().encode(params)
+        ))
+        let metrics = await backend.notificationRouterMetricsForTesting()
+        #expect(metrics.attemptFailures == 1)
+        #expect(metrics.ignored == 0)
+        #expect(metrics.connectionFailures == 0)
+    }
+
+    @Test func terminalReductionFailureRecordsAttemptFailure() async throws {
+        let transport = FakeJSONRPCTransport()
+        let diagnostics = ReviewIngestionDiagnosticCapture()
+        let backend = AppServerCodexReviewBackend(
+            client: .init(transport: transport),
+            ingestionDiagnosticRecorder: diagnostics
+        )
+        let attempt = await backend.reviewAttemptForTesting(.init(
+            attemptID: "attempt-1",
+            threadID: "thread-selected",
+            turnID: "turn-selected",
+            reviewThreadID: "thread-selected"
+        ))
+        let params = V2TurnNotification(
+            threadID: "thread-selected",
+            turn: .init(
+                id: "turn-selected",
+                items: [
+                    .init(type: "futureItem", id: "future-1"),
+                ],
+                itemsView: "notLoaded",
+                status: "completed"
             )
-            let attempt = await backend.reviewAttemptForTesting(.init(
-                attemptID: "attempt-\(index)",
-                threadID: "thread-selected",
-                turnID: "turn-selected",
-                reviewThreadID: "thread-selected"
-            ))
-            try await transport.emitServerNotification(method: fixture.0, params: fixture.1)
-            #expect(try await attempt.events.next() == .failed(fixture.2))
-            await backend.waitForReviewNotificationCompletionForTesting(1)
-            #expect(diagnostics.snapshot().isEmpty)
+        )
+
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: params
+        )
+
+        #expect(try await collectEvents(from: attempt.events) == [
+            .failed(ReviewIngestionError.missingFinalReview.localizedDescription),
+        ])
+        await backend.waitForReviewNotificationCompletionForTesting(1)
+        let captured = diagnostics.snapshot()
+        #expect(captured.count == 2)
+        let unsupportedDiagnostic = try #require(captured.first)
+        #expect(unsupportedDiagnostic.stage == .schemaValidation)
+        #expect(unsupportedDiagnostic.error == .unsupportedItemType(
+            method: "turn/completed",
+            type: "futureItem"
+        ))
+        #expect(unsupportedDiagnostic.disposition == .ignored)
+        let diagnostic = try #require(captured.last)
+        #expect(diagnostic.method == "turn/completed")
+        #expect(diagnostic.threadID == "thread-selected")
+        #expect(diagnostic.turnID == "turn-selected")
+        #expect(diagnostic.stage == .terminalReduction)
+        #expect(diagnostic.error == .missingFinalReview)
+        #expect(diagnostic.disposition == .attemptFailed)
+        let expectedRawParams = try canonicalJSON(JSONEncoder().encode(params))
+        for capturedDiagnostic in captured {
+            #expect(try canonicalJSON(capturedDiagnostic.rawParams) == expectedRawParams)
         }
+        let metrics = await backend.notificationRouterMetricsForTesting()
+        #expect(metrics.attemptFailures == 1)
+        #expect(metrics.ignored == 1)
+        #expect(metrics.connectionFailures == 0)
+    }
+
+    @Test func reducerFailureRecordsAttemptFailure() async throws {
+        let transport = FakeJSONRPCTransport()
+        let diagnostics = ReviewIngestionDiagnosticCapture()
+        let backend = AppServerCodexReviewBackend(
+            client: .init(transport: transport),
+            ingestionDiagnosticRecorder: diagnostics
+        )
+        let attempt = await backend.reviewAttemptForTesting(.init(
+            attemptID: "attempt-1",
+            threadID: "thread-selected",
+            turnID: "turn-selected",
+            reviewThreadID: "thread-selected"
+        ))
+
+        for review in ["First review", "Conflicting review"] {
+            try await transport.emitServerNotification(
+                method: "item/completed",
+                params: V2ItemNotification(
+                    threadID: "thread-selected",
+                    turnID: "turn-selected",
+                    item: .init(
+                        type: "exitedReviewMode",
+                        id: "review-result",
+                        review: review
+                    )
+                )
+            )
+        }
+
+        let events = try await collectEvents(from: attempt.events)
+        #expect(events.last == .failed(
+            ReviewIngestionError.conflictingStableEvent(
+                key: "item/completed:thread-selected:turn-selected:review-result"
+            ).localizedDescription
+        ))
+        await backend.waitForReviewNotificationCompletionForTesting(2)
+        let diagnostic = try #require(diagnostics.snapshot().last)
+        #expect(diagnostic.stage == .terminalReduction)
+        #expect(diagnostic.disposition == .attemptFailed)
+        let metrics = await backend.notificationRouterMetricsForTesting()
+        #expect(metrics.attemptFailures == 1)
+        #expect(metrics.connectionFailures == 0)
+    }
+
+    @Test func malformedInputAfterFinishedTerminalRecordsIgnoredOutcome() async throws {
+        let transport = FakeJSONRPCTransport()
+        let diagnostics = ReviewIngestionDiagnosticCapture()
+        let backend = AppServerCodexReviewBackend(
+            client: .init(transport: transport),
+            ingestionDiagnosticRecorder: diagnostics
+        )
+        let attempt = await backend.reviewAttemptForTesting(.init(
+            attemptID: "attempt-1",
+            threadID: "thread-review",
+            turnID: "turn-review",
+            reviewThreadID: "thread-review"
+        ))
+        try await emitCompletedReview(transport: transport, review: "No findings.")
+        #expect(try await collectEvents(from: attempt.events).last == .completed(
+            summary: "Succeeded.",
+            result: "No findings."
+        ))
+        let params = MalformedV2ItemNotification(
+            threadID: "thread-review",
+            turnID: "turn-review",
+            item: .init(type: "exitedReviewMode", review: "late malformed input")
+        )
+
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: params
+        )
+
+        await backend.waitForReviewNotificationCompletionForTesting(3)
+        let captured = diagnostics.snapshot()
+        #expect(captured.count == 1)
+        let diagnostic = try #require(captured.first)
+        #expect(diagnostic.error == .malformedKnownEvent(
+            method: "item/completed",
+            message: "id must be a nonempty string"
+        ))
+        #expect(diagnostic.disposition == .ignored)
+        #expect(try canonicalJSON(diagnostic.rawParams) == canonicalJSON(
+            JSONEncoder().encode(params)
+        ))
+        let metrics = await backend.notificationRouterMetricsForTesting()
+        #expect(metrics.attemptFailures == 0)
+        #expect(metrics.ignored == 1)
+        #expect(await transport.isClosedForTesting() == false)
+    }
+
+    @Test func finalizingTerminalRecordsReentrantMalformedInputAsIgnored() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(
+            AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"),
+            for: "initialize"
+        )
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let diagnostics = ReviewIngestionDiagnosticCapture()
+        let backend = AppServerCodexReviewBackend(
+            client: .init(transport: transport),
+            ingestionDiagnosticRecorder: diagnostics
+        )
+        let run = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-1",
+            threadID: "thread-review",
+            turnID: "turn-review",
+            reviewThreadID: "thread-review"
+        )
+        let attempt = await backend.reviewAttemptForTesting(run)
+        let commitEntered = AsyncGate()
+        let releaseCommit = AsyncGate()
+        await backend.holdNextReviewEventSessionTerminalCommitForTesting(run) {
+            await commitEntered.open()
+            await releaseCommit.wait()
+        }
+        let interrupt = Task {
+            try await backend.interruptReview(run, reason: .init(message: "Stop"))
+        }
+        await commitEntered.wait()
+        let params = MalformedV2ItemNotification(
+            threadID: "thread-review",
+            turnID: "turn-review",
+            item: .init(type: "exitedReviewMode", review: "reentrant malformed input")
+        )
+
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: params
+        )
+        await backend.waitForReviewNotificationCompletionForTesting(1)
+
+        let captured = diagnostics.snapshot()
+        #expect(captured.count == 1)
+        let diagnostic = try #require(captured.first)
+        #expect(diagnostic.error == .malformedKnownEvent(
+            method: "item/completed",
+            message: "id must be a nonempty string"
+        ))
+        #expect(diagnostic.disposition == .ignored)
+        #expect(try canonicalJSON(diagnostic.rawParams) == canonicalJSON(
+            JSONEncoder().encode(params)
+        ))
+        #expect(await attempt.events.isFinished() == false)
+        let metrics = await backend.notificationRouterMetricsForTesting()
+        #expect(metrics.attemptFailures == 0)
+        #expect(metrics.ignored == 1)
+
+        await releaseCommit.open()
+        try await interrupt.value
+        #expect(try await collectEvents(from: attempt.events) == [.cancelled("Stop")])
+        await transport.close()
     }
 
     @Test func unscopedOptionalThreadWarningLogsAndConnectionContinues() async throws {
