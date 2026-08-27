@@ -141,7 +141,7 @@ package final class ReviewRuntimeSemanticStopContext {
         guard tasks.isEmpty == false else { return true }
         let race = RuntimeStopDetachedReviewWorkerDrainRace()
         let drainTask = Task {
-            for task in tasks { await task.value }
+            await waitForWorkers()
             await race.finish(true)
         }
         let timeoutTask = Task {
@@ -151,6 +151,9 @@ package final class ReviewRuntimeSemanticStopContext {
         let didDrain = await race.wait()
         if didDrain { timeoutTask.cancel() } else { drainTask.cancel() }
         return didDrain
+    }
+    package func waitForWorkers() async {
+        for task in entries.values.compactMap(\.workerTask) { await task.value }
     }
     package func cancelTransferredWorkers() { entries.forEach { $0.value.workerTask?.cancel(); resumeWaiters(for: $0.key) } }
     private func completeLocally(

@@ -45,33 +45,6 @@ private actor RuntimeShutdownCleanupRace<Value: Sendable> {
     }
 }
 
-private func runRuntimeShutdownCleanup<Value: Sendable>(
-    timeout: Duration,
-    operation: @escaping @Sendable () async -> Value
-) async -> RuntimeShutdownCleanupOutcome<Value> {
-    let race = RuntimeShutdownCleanupRace<Value>()
-    let operationTask = Task {
-        let value = await operation()
-        await race.finish(.completed(value))
-    }
-    let timeoutTask = Task {
-        do {
-            try await Task.sleep(for: timeout)
-        } catch {
-            return
-        }
-        await race.finish(.timedOut)
-    }
-    let result = await race.wait()
-    switch result {
-    case .completed:
-        timeoutTask.cancel()
-    case .timedOut:
-        operationTask.cancel()
-    }
-    return result
-}
-
 private struct PendingLoginRuntimeCleanup {
     var client: AppServerClient?
     var codexHomeURL: URL?
@@ -327,6 +300,10 @@ public extension CodexReviewStore {
     package var liveReviewRecoveryRouteCountForTesting: Int? {
         (backend as? LiveCodexReviewStoreBackend)?.reviewRecoveryRouteCountForTesting
     }
+
+    package var liveRuntimeShutdownCleanupTasksForTesting: [Task<Void, Never>]? {
+        (backend as? LiveCodexReviewStoreBackend)?.runtimeShutdownCleanupTasksForTesting
+    }
 }
 
 @MainActor
@@ -560,11 +537,15 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
     private var appServerBackend: AppServerCodexReviewBackend?
     private var activeRuntimeHandle: LiveRuntimeLifecycleHandle?
     private var reviewAttemptRuntimeRoutes = ReviewAttemptRuntimeRouteRegistry()
+    private var runtimeShutdownCleanupTasks: [UUID: Task<Void, Never>] = [:]
     fileprivate var reviewAttemptRuntimeRouteCountForTesting: Int {
         reviewAttemptRuntimeRoutes.count
     }
     fileprivate var reviewRecoveryRouteCountForTesting: Int {
         reviewAttemptRuntimeRoutes.recoveryCount
+    }
+    fileprivate var runtimeShutdownCleanupTasksForTesting: [Task<Void, Never>] {
+        Array(runtimeShutdownCleanupTasks.values)
     }
     private var acceptsRuntimeRequests = false
     private var mcpHTTPServer: (any CodexReviewMCPHTTPServing)?
@@ -1059,21 +1040,51 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             reason: reason
         )
         let currentWorkerJobIDs = context.workerJobIDs
-        await context.cancelWorkers(
-            jobIDs: Array(Set(
-                workerJobIDs
-                    + cancellationJobIDs
-                    + locallyCancelledJobIDs
-                    + currentWorkerJobIDs
-            )),
-            reason: reason
-        )
-        let didDrainReviewWorkers = await context.drainWorkers(
+        let workerCleanup = await runRuntimeShutdownCleanup(
             timeout: shutdownCleanupTimeout
-        )
-        if cancellationTimedOut || didDrainReviewWorkers == false {
+        ) {
+            await context.cancelWorkers(
+                jobIDs: Array(Set(
+                    workerJobIDs
+                        + cancellationJobIDs
+                        + locallyCancelledJobIDs
+                        + currentWorkerJobIDs
+                )),
+                reason: reason
+            )
+            await context.waitForWorkers()
+        }
+        let workerCleanupTimedOut: Bool = switch workerCleanup {
+        case .completed: false
+        case .timedOut: true
+        }
+        if cancellationTimedOut || workerCleanupTimedOut {
             logger.warning("\(timeoutWarning, privacy: .public)")
         }
+    }
+
+    private func runRuntimeShutdownCleanup<Value: Sendable>(
+        timeout: Duration,
+        operation: @escaping @MainActor @Sendable () async -> Value
+    ) async -> RuntimeShutdownCleanupOutcome<Value> {
+        let id = UUID()
+        let race = RuntimeShutdownCleanupRace<Value>()
+        let operationTask = Task { @MainActor [weak self] in
+            let value = await operation()
+            await race.finish(.completed(value))
+            self?.runtimeShutdownCleanupTasks.removeValue(forKey: id)
+        }
+        runtimeShutdownCleanupTasks[id] = operationTask
+        let timeoutTask = Task {
+            do { try await Task.sleep(for: timeout) } catch { return }
+            await race.finish(.timedOut)
+        }
+        let result = await race.wait()
+        switch result {
+        case .completed: timeoutTask.cancel()
+        case .timedOut: operationTask.cancel()
+        }
+        return result
     }
 
     func stop(

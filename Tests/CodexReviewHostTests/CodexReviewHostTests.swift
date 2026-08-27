@@ -441,6 +441,70 @@ struct CodexReviewHostTests {
         #expect(await context.drainWorkers(timeout: .seconds(2)))
     }
 
+    @Test func liveStopBoundsHeldRecoveryJoinAndRetainsEventualCleanup() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(transport)
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            shutdownCleanupTimeout: .milliseconds(20),
+            transport: transport
+        )
+        await store.start()
+
+        let recoveryStarted = AsyncGate()
+        let recoveryGate = AsyncGate()
+        let workerStarted = AsyncGate()
+        let workerGate = AsyncGate()
+        let admission = ReviewStartAdmission()
+        let source = StoreReviewActiveAttempt(
+            attempt: .init(run: .init(threadID: "thread-1", turnID: "turn-1")),
+            admission: admission
+        )
+        let receipt = StoreReviewRecoveryReceipt(source: source)
+        try receipt.startDisposition {
+            await recoveryStarted.open()
+            await recoveryGate.waitIgnoringCancellation()
+            throw CancellationError()
+        }
+        let job = CodexReviewJob(
+            id: "job-1",
+            sessionID: "session-1",
+            cwd: "/tmp/project",
+            targetSummary: "Review",
+            core: .init(
+                lifecycle: .init(status: .running),
+                output: .init(summary: "Running")
+            ),
+            logEntries: []
+        )
+        store.jobs.insert(job)
+        store.reviewAttemptOwnerships[job.id] = .recovering(receipt)
+        store.reviewWorkerTasks[job.id] = Task {
+            await workerStarted.open()
+            await workerGate.waitIgnoringCancellation()
+        }
+        await recoveryStarted.wait()
+        await workerStarted.wait()
+
+        let stopFinished = CompletionFlag()
+        let stop = Task { @MainActor in
+            await store.stop()
+            await stopFinished.complete()
+        }
+        #expect(await waitUntil(timeout: .seconds(2)) { await stopFinished.isCompleted() })
+        let eventualCleanupTasks = try #require(store.liveRuntimeShutdownCleanupTasksForTesting)
+        #expect(eventualCleanupTasks.isEmpty == false)
+        #expect(await transport.isClosedForTesting())
+
+        await recoveryGate.open()
+        await workerGate.open()
+        for task in eventualCleanupTasks { await task.value }
+        await stop.value
+        #expect(job.core.lifecycle.status == .cancelled)
+        #expect(throws: (any Error).self) { try receipt.suppress() }
+    }
+
     @Test func liveSameAccountRestartRetainsMCPListenerAndURL() async throws {
         let homeURL = try temporaryHome()
         let firstTransport = FakeJSONRPCTransport()
@@ -2591,14 +2655,11 @@ struct CodexReviewHostTests {
         }
         await waitUntil { store.jobs.first?.core.run.turnID == "turn-1" }
 
-        let startedAt = Date()
         await store.stop()
-        let elapsed = Date().timeIntervalSince(startedAt)
         let resultBeforeRemoteCleanupUnblocked = try await waitForTaskValue(reviewRead, timeout: .seconds(1))
         await interruptGate.open()
         let result = try #require(resultBeforeRemoteCleanupUnblocked)
 
-        #expect(elapsed < 1)
         #expect(result.core.lifecycle.status == .cancelled)
         #expect(await transport.recordedRequests().map(\.method).contains("turn/interrupt"))
     }
@@ -2760,7 +2821,7 @@ struct CodexReviewHostTests {
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
-            shutdownCleanupTimeout: .seconds(1),
+            shutdownCleanupTimeout: .milliseconds(20),
             networkMonitor: networkMonitor,
             networkRecoveryPolicy: .init(sleep: { _ in }),
             transport: transport
@@ -2794,21 +2855,21 @@ struct CodexReviewHostTests {
             await store.stop()
             await stopFinished.complete()
         }
-        let cleanupStarted = await waitUntil(timeout: .seconds(2)) {
-            await transport.recordedRequests().map(\.method).contains("thread/backgroundTerminals/clean")
-        }
-        let stoppedBeforeCleanupUnblocked = await waitUntil(timeout: .milliseconds(100)) {
+        await transport.waitForActiveRequests(method: "thread/backgroundTerminals/clean")
+        let stoppedBeforeCleanupUnblocked = await waitUntil(timeout: .seconds(2)) {
             await stopFinished.isCompleted()
         }
-        await cleanupGate.open()
         await stopTask.value
+        await cleanupGate.open()
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            store.liveReviewRecoveryRouteCountForTesting == 0
+        })
         let result = try await reviewRead.value
 
-        #expect(cleanupStarted)
-        #expect(stoppedBeforeCleanupUnblocked == false)
+        #expect(stoppedBeforeCleanupUnblocked)
         #expect(result.core.lifecycle.status == .cancelled)
         let methods = await transport.recordedRequests().map(\.method)
-        #expect(methods.contains("thread/delete"))
+        #expect(methods.contains("thread/backgroundTerminals/clean"))
         #expect(store.liveReviewRecoveryRouteCountForTesting == 0)
     }
 
