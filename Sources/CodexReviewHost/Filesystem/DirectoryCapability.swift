@@ -26,7 +26,6 @@ package enum DirectoryCapabilityError: Error, Equatable, LocalizedError, Sendabl
         }
     }
 }
-
 package final class DirectoryCapability: Sendable {
     package struct Name: Hashable, Sendable {
         fileprivate let value: String
@@ -80,7 +79,6 @@ package final class DirectoryCapability: Sendable {
         state = Mutex(.init(descriptor: descriptor, closeFailure: nil))
     }
     deinit { try? close() }
-
     package static func openExisting(
         at absoluteURL: URL,
         requirements: Requirements
@@ -136,7 +134,6 @@ package final class DirectoryCapability: Sendable {
             }
         }
     }
-
     package func withRevalidatedPath<Result>(_ body: (URL) throws -> Result) throws -> Result {
         try withBorrowedDescriptor { borrowed in
             try Self.validateOwned(borrowed, capability: self)
@@ -149,6 +146,8 @@ package final class DirectoryCapability: Sendable {
                 )
             }
             try Self.validate(reopened, status: status, requirements: requirements, path: url.path)
+            // Path-only Process/GRDB APIs cannot consume this descriptor. The documented threat
+            // model excludes a malicious same-UID rename after this synchronous boundary.
             return try body(url)
         }
     }
@@ -231,9 +230,10 @@ package final class DirectoryCapability: Sendable {
         }
         var transfersDescriptor = false
         defer { if transfersDescriptor == false { _ = Darwin.close(descriptor) } }
-        var status = try directoryStatus(descriptor, path: path)
-        let identity = Identity(status)
+        let identity: Identity
         do {
+            var status = try directoryStatus(descriptor, path: path)
+            identity = Identity(status)
             guard createdIdentity == nil || createdIdentity == identity else {
                 throw DirectoryCapabilityError.policyViolation(
                     "The created directory changed identity before reopening at \(path).")
