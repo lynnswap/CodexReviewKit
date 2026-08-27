@@ -216,6 +216,63 @@ private actor MCPHTTPLifecycleCompletionGate {
     }
 }
 
+private actor MCPHTTPSessionRequestHandoffGate {
+    private var isArmed = false
+    private var releaseWasRequested = false
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var holdWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func holdNextHandoff() {
+        precondition(
+            isArmed == false && continuation == nil,
+            "MCPHTTPSessionRequestHandoffGate owns at most one held handoff."
+        )
+        isArmed = true
+        releaseWasRequested = false
+    }
+
+    func waitIfArmed() async {
+        guard isArmed else {
+            return
+        }
+        isArmed = false
+        let waiters = holdWaiters
+        holdWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
+        if releaseWasRequested {
+            releaseWasRequested = false
+            return
+        }
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func waitUntilHolding() async {
+        if continuation != nil {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            if self.continuation != nil {
+                continuation.resume()
+            } else {
+                holdWaiters.append(continuation)
+            }
+        }
+    }
+
+    func release() {
+        if let continuation {
+            self.continuation = nil
+            continuation.resume()
+        } else if isArmed {
+            releaseWasRequested = true
+        }
+    }
+}
+
 package actor CodexReviewMCPHTTPServer {
     private struct StartingGenerationFailure: Swift.Error, @unchecked Sendable {
         let primary: any Swift.Error
@@ -378,6 +435,10 @@ package actor CodexReviewMCPHTTPServer {
             lastAccessedAt = now
             return true
         }
+
+        func owns(_ lease: RequestLease) -> Bool {
+            requestLeases[lease.operation.id] === lease
+        }
     }
 
     private struct FixedSessionIDGenerator: SessionIDGenerator {
@@ -402,6 +463,7 @@ package actor CodexReviewMCPHTTPServer {
     private let responseEndAcknowledgementGate = MCPHTTPLifecycleCompletionGate()
     private let responseEndWriteGate = MCPHTTPLifecycleCompletionGate()
     private let sessionStartCompletionGate = MCPHTTPLifecycleCompletionGate()
+    private let sessionRequestHandoffGate = MCPHTTPSessionRequestHandoffGate()
     private let sessionRequestRetirementGate = MCPHTTPLifecycleCompletionGate()
     private let responseBackpressureProbe = MCPHTTPResponseBackpressureProbe()
     private var eventLoopGroupShutdownCount = 0
@@ -897,6 +959,18 @@ package actor CodexReviewMCPHTTPServer {
         await sessionStartCompletionGate.release()
     }
 
+    package func holdNextSessionRequestHandoffForTesting() async {
+        await sessionRequestHandoffGate.holdNextHandoff()
+    }
+
+    package func waitUntilSessionRequestHandoffIsHeldForTesting() async {
+        await sessionRequestHandoffGate.waitUntilHolding()
+    }
+
+    package func releaseSessionRequestHandoffForTesting() async {
+        await sessionRequestHandoffGate.release()
+    }
+
     package func holdNextSessionRequestRetirementForTesting() async {
         await sessionRequestRetirementGate.holdNextCompletion()
     }
@@ -1222,6 +1296,14 @@ package actor CodexReviewMCPHTTPServer {
                 ))
             }
             observeSessionRequest(lease, in: session)
+            await sessionRequestHandoffGate.waitIfArmed()
+            guard authorizeSDKHandoff(for: lease, in: session) else {
+                return .init(response: .error(
+                    statusCode: 503,
+                    .internalError("MCP request was cancelled before SDK admission."),
+                    sessionID: sessionID
+                ))
+            }
             let response = await session.transport.handleRequest(request)
             let (trackedResponse, didFinishRequest) = trackResponse(
                 response,
@@ -1347,6 +1429,16 @@ package actor CodexReviewMCPHTTPServer {
                     .internalError("MCP session initialization was cancelled.")
                 ))
             }
+            guard authorizeSDKHandoff(
+                for: session.initialRequestLease,
+                in: session
+            ) else {
+                await closeSession(session)
+                return .init(response: .error(
+                    statusCode: 503,
+                    .internalError("MCP session initialization was cancelled.")
+                ))
+            }
             let response = await transport.handleRequest(request)
             let (trackedResponse, didFinishRequest) = trackResponse(
                 response,
@@ -1384,11 +1476,26 @@ package actor CodexReviewMCPHTTPServer {
               generation.networkResources.generationID == session.identity.generationID else {
             return false
         }
-        return operation.publishSessionIfActive(
+        return operation.withActiveSessionRequest(
             for: session.identity.sessionID
         ) {
             session.phase = .active(.init(server: server, transport: session.transport))
         }
+    }
+
+    private func authorizeSDKHandoff(
+        for lease: MCPSemanticSession.RequestLease,
+        in session: MCPSemanticSession
+    ) -> Bool {
+        var didAuthorize = false
+        let hadNetworkAuthority = lease.operation.withActiveSessionRequest(
+            for: session.identity.sessionID
+        ) {
+            didAuthorize = sessions[session.identity.sessionID] === session
+                && session.owns(lease)
+                && Task.isCancelled == false
+        }
+        return hadNetworkAuthority && didAuthorize
     }
 
     package static func ownedRequest(

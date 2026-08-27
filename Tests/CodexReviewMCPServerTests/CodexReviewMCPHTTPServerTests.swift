@@ -565,6 +565,49 @@ struct CodexReviewMCPHTTPServerTests {
         }
     }
 
+    @Test func deletedSessionCannotHandOffHeldToolCallToSDK() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        let server = CodexReviewMCPHTTPServer(
+            adapter: CodexReviewMCPServer(store: store),
+            configuration: .init(host: "127.0.0.1", port: 0)
+        )
+        try await server.start()
+        do {
+            let endpoint = await server.url
+            let sessionID = try await initializeSession(endpoint: endpoint)
+            await server.holdNextSessionRequestHandoffForTesting()
+            let toolCall = Task {
+                try await postJSONRPCData(
+                    endpoint: endpoint,
+                    sessionID: sessionID,
+                    bodyData: makeReviewStartBody(id: 44),
+                    expectedStatusCode: 503
+                )
+            }
+
+            await server.waitUntilSessionRequestHandoffIsHeldForTesting()
+            #expect(try await deleteSession(
+                endpoint: endpoint,
+                sessionID: sessionID
+            ).statusCode == 200)
+            await server.releaseSessionRequestHandoffForTesting()
+            _ = try await toolCall.value
+
+            #expect(await backend.recordedCommands().contains {
+                if case .startReview = $0 { true } else { false }
+            } == false)
+            try await server.stop()
+        } catch {
+            await server.releaseSessionRequestHandoffForTesting()
+            try? await server.stop()
+            throw error
+        }
+    }
+
     @Test func nonKeepAliveRequestRejectsPipelinedMutationBeforeDomainAdmission() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
