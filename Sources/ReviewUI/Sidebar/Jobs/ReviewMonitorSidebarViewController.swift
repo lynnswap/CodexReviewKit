@@ -230,6 +230,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         unavailableView.isHidden = true
         view.addSubview(unavailableView)
 
+        // The bottom accessory intentionally overlays every sidebar state. Keep these views pinned
+        // to the full bounds; using the safe-area bottom would change the layered footer design.
         NSLayoutConstraint.activate([
             scrollView.topAnchor.constraint(equalTo: view.topAnchor),
             scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
