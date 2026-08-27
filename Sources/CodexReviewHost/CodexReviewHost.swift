@@ -70,6 +70,7 @@ package final class CodexReviewHost {
 @MainActor
 private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
     let seed = CodexReviewStoreSeed()
+    let semanticStopExecutionOwner = ReviewRuntimeSemanticStopExecutionOwner()
     let mcpServerLifecycle: any MCPServerLifecycleOwner
     private let backend: any CodexReviewBackend
     private let mcpLifecycleOwner: NoMCPServerLifecycleOwner
@@ -118,7 +119,11 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
         context: ReviewRuntimeSemanticStopContext,
         intent: ReviewRuntimeTeardownIntent
     ) async {
-        await context.stopUsingDefaultPolicy(intent: intent)
+        await semanticStopExecutionOwner.stop(
+            context: context,
+            intent: intent,
+            policy: .defaultPolicy
+        )
         active = false
     }
 

@@ -27,6 +27,7 @@ package struct CodexReviewStoreSeed {
 package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend, Sendable {
     var seed: CodexReviewStoreSeed { get }
     var isActive: Bool { get }
+    var semanticStopExecutionOwner: ReviewRuntimeSemanticStopExecutionOwner { get }
     var mcpServerLifecycle: any MCPServerLifecycleOwner { get }
 
     func attachStore(_ store: CodexReviewStore)

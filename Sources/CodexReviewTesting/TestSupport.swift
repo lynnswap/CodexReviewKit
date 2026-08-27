@@ -1018,6 +1018,7 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     package private(set) var isActive = false
     package private(set) var startRequests: [Bool] = []
     package private(set) var reviewRecoveryCommands: [ReviewRecoveryCommand] = []
+    package let semanticStopExecutionOwner = ReviewRuntimeSemanticStopExecutionOwner()
     package let mcpServerLifecycle: any MCPServerLifecycleOwner
     package private(set) var lastPreparedRuntimeHandle: TestingRuntimeLifecycleHandle?
     private var runtimePreparationGate: AsyncGate?
@@ -1257,7 +1258,11 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
             }
             self.semanticStopGate = nil
         }
-        await context.stopUsingDefaultPolicy(intent: intent)
+        await semanticStopExecutionOwner.stop(
+            context: context,
+            intent: intent,
+            policy: .defaultPolicy
+        )
         isActive = false
     }
 

@@ -6869,7 +6869,11 @@ final class CountingStartBackend: PreviewCodexReviewStoreBackend {
         context: ReviewRuntimeSemanticStopContext,
         intent: ReviewRuntimeTeardownIntent
     ) async {
-        await context.stopUsingDefaultPolicy(intent: intent)
+        await semanticStopExecutionOwner.stop(
+            context: context,
+            intent: intent,
+            policy: .defaultPolicy
+        )
         isActive = false
     }
 
@@ -6902,7 +6906,11 @@ final class AuthActionBackend: PreviewCodexReviewStoreBackend {
         context: ReviewRuntimeSemanticStopContext,
         intent: ReviewRuntimeTeardownIntent
     ) async {
-        await context.stopUsingDefaultPolicy(intent: intent)
+        await semanticStopExecutionOwner.stop(
+            context: context,
+            intent: intent,
+            policy: .defaultPolicy
+        )
         isActive = false
     }
 
@@ -6964,7 +6972,11 @@ final class BlockingSettingsBackend: PreviewCodexReviewStoreBackend {
         context: ReviewRuntimeSemanticStopContext,
         intent: ReviewRuntimeTeardownIntent
     ) async {
-        await context.stopUsingDefaultPolicy(intent: intent)
+        await semanticStopExecutionOwner.stop(
+            context: context,
+            intent: intent,
+            policy: .defaultPolicy
+        )
     }
 
     override func waitUntilStopped() async {}

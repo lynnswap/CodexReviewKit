@@ -90,22 +90,46 @@ struct CodexReviewStoreCommandTests {
             attempt: .init(run: activeRun),
             admission: admission
         ))
+        let workerGate = AsyncGate()
+        let workerCancelled = AsyncGate()
+        store.reviewWorkerTasks[job.id] = Task {
+            await withTaskCancellationHandler {
+                await workerGate.waitIgnoringCancellation()
+            } onCancel: {
+                Task { await workerCancelled.open() }
+            }
+        }
         let context = store.detachRuntimeSemanticStopContext(intent: .explicitStop)
 
         let stop = Task { @MainActor in
-            await context.stopUsingDefaultPolicy(
+            await store.backend.semanticStopExecutionOwner.stop(
+                context: context,
                 intent: .explicitStop,
-                cancellationTimeout: .milliseconds(20)
+                policy: .init(
+                    cancellationTimeout: .milliseconds(20),
+                    workerDrainTimeout: .milliseconds(20),
+                    forceCloseAfterCancellationFailure: {},
+                    reportCancellationFailure: { _ in },
+                    reportTimeout: {}
+                )
             )
         }
         try await reviewBackend.waitForInterruptReview(timeout: .seconds(2))
         await stop.value
 
         #expect(job.core.lifecycle.status == .cancelled)
+        await workerCancelled.wait()
+        let eventualTasks = store.backend.semanticStopExecutionOwner
+            .eventualCleanupTasksForTesting
+        #expect(eventualTasks.isEmpty == false)
         try await admission.recordCanonicalTerminal(
             .interrupted(.requested(.system(message: "Review runtime stopped."))),
             for: activeRun
         )
+        await workerGate.open()
+        for task in eventualTasks { await task.value }
+        #expect(store.backend.semanticStopExecutionOwner
+            .eventualCleanupTasksForTesting.isEmpty)
     }
 
     @Test func lateReviewWaiterUsesDetachedContextTimeout() async throws {
@@ -164,7 +188,11 @@ struct CodexReviewStoreCommandTests {
         #expect(context.workerJobIDs == [priorJobID])
         store.storeWorkRegistry.openReviewAdmission()
         prior.cancel()
-        await context.stopUsingDefaultPolicy(intent: .explicitStop)
+        await store.backend.semanticStopExecutionOwner.stop(
+            context: context,
+            intent: .explicitStop,
+            policy: .defaultPolicy
+        )
 
         await startGate.open()
         try await backend.waitForInterruptReview(timeout: .seconds(2))
@@ -2387,7 +2415,11 @@ struct CodexReviewStoreCommandTests {
             #expect(store.reviewAttemptOwnerships["job-1"] == nil)
 
             let stop = Task { @MainActor in
-                await context.stopUsingDefaultPolicy(intent: .explicitStop)
+                await store.backend.semanticStopExecutionOwner.stop(
+                    context: context,
+                    intent: .explicitStop,
+                    policy: .defaultPolicy
+                )
             }
             try await backend.waitForInterruptReview(timeout: .seconds(2))
             await backend.yield(.cancelled("Review runtime stopped."), for: run)
@@ -2673,7 +2705,11 @@ struct CodexReviewStoreCommandTests {
 
             let context = store.detachRuntimeSemanticStopContext(intent: .explicitStop)
             let stop = Task { @MainActor in
-                await context.stopUsingDefaultPolicy(intent: .explicitStop)
+                await store.backend.semanticStopExecutionOwner.stop(
+                    context: context,
+                    intent: .explicitStop,
+                    policy: .defaultPolicy
+                )
             }
 
             try await backend.waitForInterruptReview(timeout: .seconds(2))
@@ -2762,7 +2798,11 @@ struct CodexReviewStoreCommandTests {
         try await backend.waitForStartReview(timeout: .seconds(2))
         let context = store.detachRuntimeSemanticStopContext(intent: .explicitStop)
         let stop = Task { @MainActor in
-            await context.stopUsingDefaultPolicy(intent: .explicitStop)
+            await store.backend.semanticStopExecutionOwner.stop(
+                context: context,
+                intent: .explicitStop,
+                policy: .defaultPolicy
+            )
         }
 
         await startGate.open()

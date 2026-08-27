@@ -5,6 +5,7 @@ package class PreviewCodexReviewStoreBackend: CodexReviewStoreBackend {
     package let seed: CodexReviewStoreSeed
     package var isActive = false
     package var currentSettingsSnapshot: CodexReviewSettings.Snapshot
+    package let semanticStopExecutionOwner = ReviewRuntimeSemanticStopExecutionOwner()
     package let mcpServerLifecycle: any MCPServerLifecycleOwner = NoMCPServerLifecycleOwner()
 
     package init(seed: CodexReviewStoreSeed = .init()) {
@@ -29,7 +30,11 @@ package class PreviewCodexReviewStoreBackend: CodexReviewStoreBackend {
         context: ReviewRuntimeSemanticStopContext,
         intent: ReviewRuntimeTeardownIntent
     ) async {
-        await context.stopUsingDefaultPolicy(intent: intent)
+        await semanticStopExecutionOwner.stop(
+            context: context,
+            intent: intent,
+            policy: .defaultPolicy
+        )
         isActive = false
     }
 

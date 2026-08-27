@@ -13,38 +13,6 @@ private let defaultExternalURLOpener: ExternalURLOpener = { url in
     _ = NSWorkspace.shared.open(url)
 }
 
-private enum RuntimeShutdownCleanupOutcome<Value: Sendable>: Sendable {
-    case completed(Value)
-    case timedOut
-}
-
-private actor RuntimeShutdownCleanupRace<Value: Sendable> {
-    private var result: RuntimeShutdownCleanupOutcome<Value>?
-    private var continuation: CheckedContinuation<RuntimeShutdownCleanupOutcome<Value>, Never>?
-
-    func finish(_ value: RuntimeShutdownCleanupOutcome<Value>) {
-        guard result == nil else {
-            return
-        }
-        result = value
-        continuation?.resume(returning: value)
-        continuation = nil
-    }
-
-    func wait() async -> RuntimeShutdownCleanupOutcome<Value> {
-        if let result {
-            return result
-        }
-        return await withCheckedContinuation { continuation in
-            if let result {
-                continuation.resume(returning: result)
-            } else {
-                self.continuation = continuation
-            }
-        }
-    }
-}
-
 private struct PendingLoginRuntimeCleanup {
     var client: AppServerClient?
     var codexHomeURL: URL?
@@ -302,7 +270,8 @@ public extension CodexReviewStore {
     }
 
     package var liveRuntimeShutdownCleanupTasksForTesting: [Task<Void, Never>]? {
-        (backend as? LiveCodexReviewStoreBackend)?.runtimeShutdownCleanupTasksForTesting
+        (backend as? LiveCodexReviewStoreBackend)?
+            .semanticStopExecutionOwner.eventualCleanupTasksForTesting
     }
 }
 
@@ -532,20 +501,17 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
     ) -> any CodexReviewMCPHTTPServing
 
     let seed: CodexReviewStoreSeed
+    let semanticStopExecutionOwner = ReviewRuntimeSemanticStopExecutionOwner()
 
     private var client: AppServerClient?
     private var appServerBackend: AppServerCodexReviewBackend?
     private var activeRuntimeHandle: LiveRuntimeLifecycleHandle?
     private var reviewAttemptRuntimeRoutes = ReviewAttemptRuntimeRouteRegistry()
-    private var runtimeShutdownCleanupTasks: [UUID: Task<Void, Never>] = [:]
     fileprivate var reviewAttemptRuntimeRouteCountForTesting: Int {
         reviewAttemptRuntimeRoutes.count
     }
     fileprivate var reviewRecoveryRouteCountForTesting: Int {
         reviewAttemptRuntimeRoutes.recoveryCount
-    }
-    fileprivate var runtimeShutdownCleanupTasksForTesting: [Task<Void, Never>] {
-        Array(runtimeShutdownCleanupTasks.values)
     }
     private var acceptsRuntimeRequests = false
     private var mcpHTTPServer: (any CodexReviewMCPHTTPServing)?
@@ -995,98 +961,6 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         return message
     }
 
-    private func cancelActiveReviewsForRuntimeTeardown(
-        context: ReviewRuntimeSemanticStopContext,
-        appServerBackend: AppServerCodexReviewBackend,
-        reason: ReviewCancellation,
-        timeoutWarning: String
-    ) async {
-        let workerJobIDs = context.workerJobIDs
-        let cancellationCleanup = await runRuntimeShutdownCleanup(
-            timeout: shutdownCleanupTimeout
-        ) {
-            await context.requestCancellations()
-        }
-        let cancellationJobIDs: [String]
-        let didRequestCancellation: Bool
-        let cancellationTimedOut: Bool
-        switch cancellationCleanup {
-        case .completed(let outcome):
-            cancellationJobIDs = outcome.jobIDs
-            didRequestCancellation = outcome.firstFailure == nil
-            cancellationTimedOut = false
-            if let failure = outcome.firstFailure {
-                logger.error(
-                    "Failed to request active review cancellation before runtime teardown: \(failure.localizedDescription, privacy: .public)"
-                )
-            }
-        case .timedOut:
-            cancellationJobIDs = []
-            didRequestCancellation = false
-            cancellationTimedOut = true
-        }
-        if didRequestCancellation == false {
-            let lifecycle = appServerBackend.runtimeOwnerLifecycleHandle
-            await lifecycle.closeAdmission()
-            do {
-                try await lifecycle.closeAndWait()
-            } catch {
-                logger.error(
-                    "Failed to force-close app-server during review cancellation fallback: \(error.localizedDescription, privacy: .public)"
-                )
-            }
-        }
-        let locallyCancelledJobIDs = context.completeCancellationsLocally(
-            reason: reason
-        )
-        let currentWorkerJobIDs = context.workerJobIDs
-        let workerCleanup = await runRuntimeShutdownCleanup(
-            timeout: shutdownCleanupTimeout
-        ) {
-            await context.cancelWorkers(
-                jobIDs: Array(Set(
-                    workerJobIDs
-                        + cancellationJobIDs
-                        + locallyCancelledJobIDs
-                        + currentWorkerJobIDs
-                )),
-                reason: reason
-            )
-            await context.waitForWorkers()
-        }
-        let workerCleanupTimedOut: Bool = switch workerCleanup {
-        case .completed: false
-        case .timedOut: true
-        }
-        if cancellationTimedOut || workerCleanupTimedOut {
-            logger.warning("\(timeoutWarning, privacy: .public)")
-        }
-    }
-
-    private func runRuntimeShutdownCleanup<Value: Sendable>(
-        timeout: Duration,
-        operation: @escaping @MainActor @Sendable () async -> Value
-    ) async -> RuntimeShutdownCleanupOutcome<Value> {
-        let id = UUID()
-        let race = RuntimeShutdownCleanupRace<Value>()
-        let operationTask = Task { @MainActor [weak self] in
-            let value = await operation()
-            await race.finish(.completed(value))
-            self?.runtimeShutdownCleanupTasks.removeValue(forKey: id)
-        }
-        runtimeShutdownCleanupTasks[id] = operationTask
-        let timeoutTask = Task {
-            do { try await Task.sleep(for: timeout) } catch { return }
-            await race.finish(.timedOut)
-        }
-        let result = await race.wait()
-        switch result {
-        case .completed: timeoutTask.cancel()
-        case .timedOut: operationTask.cancel()
-        }
-        return result
-    }
-
     func stop(
         context: ReviewRuntimeSemanticStopContext,
         intent: ReviewRuntimeTeardownIntent
@@ -1094,16 +968,35 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         let appServerBackend = appServerBackend
         let loginCleanup = takeLoginRuntimeForCleanup()
         logger.info("Stopping review runtime semantic work for \(intent.diagnosticContext, privacy: .public)")
-        if let appServerBackend {
-            await cancelActiveReviewsForRuntimeTeardown(
-                context: context,
-                appServerBackend: appServerBackend,
-                reason: intent.reviewCancellation,
-                timeoutWarning: intent.cleanupTimeoutWarning
-            )
-        } else {
-            await context.stopUsingDefaultPolicy(intent: intent)
-        }
+        let policy = ReviewRuntimeSemanticStopExecutionOwner.Policy(
+            cancellationTimeout: shutdownCleanupTimeout,
+            workerDrainTimeout: shutdownCleanupTimeout,
+            forceCloseAfterCancellationFailure: {
+                guard let appServerBackend else { return }
+                let lifecycle = appServerBackend.runtimeOwnerLifecycleHandle
+                await lifecycle.closeAdmission()
+                do {
+                    try await lifecycle.closeAndWait()
+                } catch {
+                    logger.error(
+                        "Failed to force-close app-server during review cancellation fallback: \(error.localizedDescription, privacy: .public)"
+                    )
+                }
+            },
+            reportCancellationFailure: { failure in
+                logger.error(
+                    "Failed to request active review cancellation before runtime teardown: \(failure.localizedDescription, privacy: .public)"
+                )
+            },
+            reportTimeout: {
+                logger.warning("\(intent.cleanupTimeoutWarning, privacy: .public)")
+            }
+        )
+        await semanticStopExecutionOwner.stop(
+            context: context,
+            intent: intent,
+            policy: policy
+        )
         await cleanupLoginRuntime(loginCleanup)
         logger.info("Review runtime semantic work stopped after \(intent.diagnosticContext, privacy: .public)")
     }

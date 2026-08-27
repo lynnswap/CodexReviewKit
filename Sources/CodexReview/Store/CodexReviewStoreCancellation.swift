@@ -27,34 +27,6 @@ private actor RuntimeStopDetachedReviewWorkerDrainRace {
     }
 }
 
-private enum RuntimeStopDefaultCancellationOutcome: Sendable {
-    case completed(ReviewRuntimeCancellationRequestOutcome)
-    case timedOut
-}
-
-private actor RuntimeStopDefaultCancellationRace {
-    private var result: RuntimeStopDefaultCancellationOutcome?
-    private var continuation: CheckedContinuation<RuntimeStopDefaultCancellationOutcome, Never>?
-
-    func finish(_ value: RuntimeStopDefaultCancellationOutcome) {
-        guard result == nil else { return }
-        result = value
-        continuation?.resume(returning: value)
-        continuation = nil
-    }
-
-    func wait() async -> RuntimeStopDefaultCancellationOutcome {
-        if let result { return result }
-        return await withCheckedContinuation { continuation in
-            if let result {
-                continuation.resume(returning: result)
-            } else {
-                self.continuation = continuation
-            }
-        }
-    }
-}
-
 package struct ReviewRuntimeCancellationRequestOutcome: Sendable {
     package let jobIDs: [String]
     package let firstFailure: ReviewRuntimeCloseFailure?
@@ -127,31 +99,6 @@ package final class ReviewRuntimeSemanticStopContext {
             }
         }
         return .init(jobIDs: jobIDs, firstFailure: firstFailure)
-    }
-    package func stopUsingDefaultPolicy(
-        intent: ReviewRuntimeTeardownIntent,
-        cancellationTimeout: Duration = .seconds(2)
-    ) async {
-        let race = RuntimeStopDefaultCancellationRace()
-        let cancellationTask = Task { @MainActor in
-            let outcome = await requestCancellations()
-            await race.finish(.completed(outcome))
-        }
-        let timeoutTask = Task {
-            do { try await Task.sleep(for: cancellationTimeout) } catch { return }
-            await race.finish(.timedOut)
-        }
-        let requested: [String]
-        switch await race.wait() {
-        case .completed(let outcome):
-            timeoutTask.cancel()
-            requested = outcome.jobIDs
-        case .timedOut:
-            cancellationTask.cancel()
-            requested = []
-        }
-        let projected = completeCancellationsLocally(reason: intent.reviewCancellation)
-        await cancelWorkers(jobIDs: Array(Set(requested + projected + workerJobIDs)), reason: intent.reviewCancellation)
     }
     package func completeCancellationsLocally(reason: ReviewCancellation) -> [String] {
         let jobIDs: [String] = entries.compactMap { id, entry -> String? in
