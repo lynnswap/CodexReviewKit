@@ -410,6 +410,225 @@ struct DirectoryCapabilityTests {
         #expect(try replacementTemporaryNames(in: fixture).isEmpty)
     }
 
+    @Test func recursiveRemovalDeletesNestedTreesWithoutFollowingSymbolicLinks() throws {
+        let fixture = try makePrivateTemporaryDirectory()
+        defer { removeFixture(fixture) }
+        let root = try openFixtureRoot(fixture)
+        defer { try? root.close() }
+        let victim = try root.directory(
+            named: try .init("victim"),
+            acquisition: .new,
+            requirements: managedRequirements(root)
+        )
+        let victimIdentity = victim.identity
+        try victim.close()
+        let victimURL = fixture.appendingPathComponent("victim", isDirectory: true)
+        let nestedURL = victimURL.appendingPathComponent("nested", isDirectory: true)
+        try createDirectory(nestedURL, permissions: 0o700)
+        try Data("payload".utf8).write(to: nestedURL.appendingPathComponent("file"))
+        let externalURL = fixture.appendingPathComponent("external")
+        let externalContents = Data("preserved".utf8)
+        try externalContents.write(to: externalURL)
+        #expect(symlink(externalURL.path, nestedURL.appendingPathComponent("link").path) == 0)
+
+        try root.removeDirectoryRecursively(
+            named: .init("victim"),
+            expectedIdentity: victimIdentity
+        )
+
+        #expect(FileManager.default.fileExists(atPath: victimURL.path) == false)
+        #expect(try Data(contentsOf: externalURL) == externalContents)
+    }
+
+    @Test func recursiveRemovalNoOpsOnlyForAnAbsentRootAndRejectsConflicts() throws {
+        let fixture = try makePrivateTemporaryDirectory()
+        defer { removeFixture(fixture) }
+        let root = try openFixtureRoot(fixture)
+        defer { try? root.close() }
+        try root.removeDirectoryRecursively(
+            named: .init("absent"),
+            expectedIdentity: root.identity
+        )
+        let victim = try root.directory(
+            named: try .init("victim"),
+            acquisition: .new,
+            requirements: managedRequirements(root)
+        )
+        let victimIdentity = victim.identity
+        try victim.close()
+
+        expectDirectoryError(.policyViolation) {
+            try root.removeDirectoryRecursively(
+                named: .init("victim"),
+                expectedIdentity: root.identity
+            )
+        }
+        let victimURL = fixture.appendingPathComponent("victim", isDirectory: true)
+        try FileManager.default.removeItem(at: victimURL)
+        let externalURL = fixture.appendingPathComponent("external")
+        try Data("preserved".utf8).write(to: externalURL)
+        #expect(symlink(externalURL.path, victimURL.path) == 0)
+        expectDirectoryError(.policyViolation) {
+            try root.removeDirectoryRecursively(
+                named: .init("victim"),
+                expectedIdentity: victimIdentity
+            )
+        }
+        #expect(try Data(contentsOf: externalURL) == Data("preserved".utf8))
+    }
+
+    @Test func recursiveRemovalRejectsUnsupportedDescendantEntries() throws {
+        let fixture = try makePrivateTemporaryDirectory()
+        defer { removeFixture(fixture) }
+        let root = try openFixtureRoot(fixture)
+        defer { try? root.close() }
+        let victim = try root.directory(
+            named: try .init("victim"),
+            acquisition: .new,
+            requirements: managedRequirements(root)
+        )
+        let victimIdentity = victim.identity
+        try victim.close()
+        let victimURL = fixture.appendingPathComponent("victim", isDirectory: true)
+        let fifoURL = victimURL.appendingPathComponent("fifo")
+        #expect(mkfifo(fifoURL.path, 0o600) == 0)
+
+        let error = captureDirectoryError {
+            try root.removeDirectoryRecursively(
+                named: .init("victim"),
+                expectedIdentity: victimIdentity
+            )
+        }
+
+        guard case .policyViolation(let message) = error else {
+            Issue.record("Expected an unsupported-entry policy violation.")
+            return
+        }
+        #expect(message.contains(fifoURL.path))
+        #expect(FileManager.default.fileExists(atPath: fifoURL.path))
+    }
+
+    @Test func recursiveRemovalReportsPartialFailureAfterCompletedDescendantMutation() throws {
+        let fixture = try makePrivateTemporaryDirectory()
+        defer { removeFixture(fixture) }
+        let root = try openFixtureRoot(fixture)
+        defer { try? root.close() }
+        let victim = try root.directory(
+            named: try .init("victim"),
+            acquisition: .new,
+            requirements: managedRequirements(root)
+        )
+        let victimIdentity = victim.identity
+        try victim.close()
+        let victimURL = fixture.appendingPathComponent("victim", isDirectory: true)
+        let childURL = victimURL.appendingPathComponent("child", isDirectory: true)
+        try createDirectory(childURL, permissions: 0o700)
+        let removedBeforeFailureURL = childURL.appendingPathComponent("removed-before-failure")
+        try Data().write(to: removedBeforeFailureURL)
+        try addDenyDeleteChildACL(to: victimURL)
+        defer { try? removeFirstACL(from: victimURL) }
+
+        let error = captureDirectoryError {
+            try root.removeDirectoryRecursively(
+                named: .init("victim"),
+                expectedIdentity: victimIdentity
+            )
+        }
+
+        guard case .userActionRequired(let failure) = error else {
+            Issue.record("Expected a recursive-removal POSIX failure.")
+            return
+        }
+        #expect(failure.path == childURL.path)
+        #expect(FileManager.default.fileExists(atPath: victimURL.path))
+        #expect(FileManager.default.fileExists(atPath: childURL.path))
+        #expect(FileManager.default.fileExists(atPath: removedBeforeFailureURL.path) == false)
+    }
+
+    @Test func recursiveRemovalDetectsAnObservableConcurrentRootIdentitySwap() async throws {
+        let fixture = try makePrivateTemporaryDirectory()
+        defer { removeFixture(fixture) }
+        let root = try openFixtureRoot(fixture)
+        defer { try? root.close() }
+        let victim = try root.directory(
+            named: try .init("victim"),
+            acquisition: .new,
+            requirements: managedRequirements(root)
+        )
+        let victimIdentity = victim.identity
+        try victim.close()
+        let victimURL = fixture.appendingPathComponent("victim", isDirectory: true)
+        let bulkURL = victimURL.appendingPathComponent("bulk", isDirectory: true)
+        try createDirectory(bulkURL, permissions: 0o700)
+        let markerURL = bulkURL.appendingPathComponent("marker")
+        try Data().write(to: markerURL)
+        try createEmptyFiles(count: 2_048, in: bulkURL)
+        let operation = Task.detached {
+            do {
+                try root.removeDirectoryRecursively(
+                    named: try .init("victim"),
+                    expectedIdentity: victimIdentity
+                )
+                return RaceResult.success
+            } catch let error as DirectoryCapabilityError {
+                if case .policyViolation = error { return .policyViolation }
+                return .unexpected(error.localizedDescription)
+            } catch {
+                return .unexpected(error.localizedDescription)
+            }
+        }
+        try waitUntilMissing(markerURL)
+        let movedURL = fixture.appendingPathComponent("moved", isDirectory: true)
+        guard rename(victimURL.path, movedURL.path) == 0 else {
+            throw POSIXError(.init(rawValue: errno) ?? .EIO)
+        }
+        try createDirectory(victimURL, permissions: 0o700)
+        let replacementIdentity = try fileIdentity(at: victimURL)
+
+        #expect(await operation.value == .policyViolation)
+        #expect(try fileIdentity(at: victimURL) == replacementIdentity)
+        #expect(replacementIdentity.inode != victimIdentity.inode)
+    }
+
+    @Test func recursiveRemovalBorrowSurvivesCapabilityClose() async throws {
+        let fixture = try makePrivateTemporaryDirectory()
+        defer { removeFixture(fixture) }
+        let root = try openFixtureRoot(fixture)
+        let victim = try root.directory(
+            named: try .init("victim"),
+            acquisition: .new,
+            requirements: managedRequirements(root)
+        )
+        let victimIdentity = victim.identity
+        try victim.close()
+        let victimURL = fixture.appendingPathComponent("victim", isDirectory: true)
+        let markerURL = victimURL.appendingPathComponent("marker")
+        try Data().write(to: markerURL)
+        try createEmptyFiles(count: 2_048, in: victimURL)
+        let operation = Task.detached {
+            do {
+                try root.removeDirectoryRecursively(
+                    named: try .init("victim"),
+                    expectedIdentity: victimIdentity
+                )
+                return RaceResult.success
+            } catch {
+                return .unexpected(error.localizedDescription)
+            }
+        }
+        try waitUntilMissing(markerURL)
+        try root.close()
+
+        #expect(await operation.value == .success)
+        #expect(FileManager.default.fileExists(atPath: victimURL.path) == false)
+        expectDirectoryError(.closed) {
+            try root.removeDirectoryRecursively(
+                named: .init("victim"),
+                expectedIdentity: victimIdentity
+            )
+        }
+    }
+
     @Test func closeIsIdempotentAndRejectsLaterOperations() throws {
         let fixture = try makePrivateTemporaryDirectory()
         defer { removeFixture(fixture) }
@@ -424,6 +643,12 @@ struct DirectoryCapabilityTests {
         }
         expectDirectoryError(.closed) {
             try root.replaceFile(named: .init("file"), with: Data(), maximumByteCount: 0)
+        }
+        expectDirectoryError(.closed) {
+            try root.removeDirectoryRecursively(
+                named: .init("directory"),
+                expectedIdentity: root.identity
+            )
         }
     }
 
@@ -464,7 +689,7 @@ struct DirectoryCapabilityTests {
 
 private enum ExpectedError { case invalidRequest, policyViolation, userActionRequired, closed }
 
-private enum RaceResult: Equatable, Sendable { case success, unexpected(String) }
+private enum RaceResult: Equatable, Sendable { case success, policyViolation, unexpected(String) }
 
 private enum FixtureError: Error { case unableToCreateTemporaryDirectory, commandFailed }
 
@@ -497,6 +722,21 @@ private func expectDirectoryError(
     }
 }
 
+private func captureDirectoryError(
+    operation: () throws -> Void
+) -> DirectoryCapabilityError? {
+    do {
+        try operation()
+        Issue.record("Expected DirectoryCapabilityError.")
+        return nil
+    } catch let error as DirectoryCapabilityError {
+        return error
+    } catch {
+        Issue.record("Unexpected error type: \(error)")
+        return nil
+    }
+}
+
 private func makePrivateTemporaryDirectory() throws -> URL {
     var template = Array("/private/tmp/codex-directory-capability.XXXXXX".utf8CString)
     let path = template.withUnsafeMutableBufferPointer { buffer -> String? in
@@ -525,6 +765,31 @@ private func createDirectory(_ url: URL, permissions: mode_t) throws {
     guard chmod(url.path, permissions) == 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
 }
 
+private func createEmptyFiles(count: Int, in directory: URL) throws {
+    for index in 0..<count {
+        let url = directory.appendingPathComponent("entry-\(index)")
+        let descriptor = open(url.path, O_WRONLY | O_CREAT | O_EXCL, mode_t(0o600))
+        guard descriptor >= 0 else {
+            throw POSIXError(.init(rawValue: errno) ?? .EIO)
+        }
+        guard Darwin.close(descriptor) == 0 else {
+            throw POSIXError(.init(rawValue: errno) ?? .EIO)
+        }
+    }
+}
+
+private func waitUntilMissing(_ url: URL) throws {
+    while true {
+        var status = stat()
+        if lstat(url.path, &status) == 0 {
+            sched_yield()
+            continue
+        }
+        guard errno == ENOENT else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
+        return
+    }
+}
+
 private func permissions(at url: URL) throws -> mode_t {
     var status = stat()
     guard stat(url.path, &status) == 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
@@ -550,6 +815,24 @@ private func addAllowACL(to url: URL) throws {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/bin/chmod")
     process.arguments = ["+a", "everyone allow read", url.path]
+    try process.run()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else { throw FixtureError.commandFailed }
+}
+
+private func addDenyDeleteChildACL(to url: URL) throws {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/chmod")
+    process.arguments = ["+a", "everyone deny delete_child", url.path]
+    try process.run()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else { throw FixtureError.commandFailed }
+}
+
+private func removeFirstACL(from url: URL) throws {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/chmod")
+    process.arguments = ["-a#", "0", url.path]
     try process.run()
     process.waitUntilExit()
     guard process.terminationStatus == 0 else { throw FixtureError.commandFailed }
