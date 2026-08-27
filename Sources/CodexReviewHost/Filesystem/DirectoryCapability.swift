@@ -7,6 +7,7 @@ package struct DirectoryPOSIXFailure: Equatable, Sendable {
     package let code: Int32
     package let path: String
 }
+
 package enum DirectoryCapabilityError: Error, Equatable, LocalizedError, Sendable {
     case invalidRequest(String)
     case policyViolation(String)
@@ -14,6 +15,7 @@ package enum DirectoryCapabilityError: Error, Equatable, LocalizedError, Sendabl
     case retryable(DirectoryPOSIXFailure)
     case ioFailure(DirectoryPOSIXFailure)
     case closed
+
     package var errorDescription: String? {
         switch self {
         case .invalidRequest(let message), .policyViolation(let message):
@@ -25,9 +27,11 @@ package enum DirectoryCapabilityError: Error, Equatable, LocalizedError, Sendabl
         }
     }
 }
+
 package final class DirectoryCapability: Sendable {
     package struct Name: Hashable, Sendable {
         fileprivate let value: String
+
         package init(_ value: String) throws {
             guard value.isEmpty == false, value != ".", value != "..",
                   value.contains("/") == false, value.utf8.contains(0) == false else {
@@ -38,44 +42,55 @@ package final class DirectoryCapability: Sendable {
             self.value = value
         }
     }
+
     package struct Identity: Hashable, Sendable {
         package let deviceID: UInt64
         package let inode: UInt64
+
         fileprivate init(_ status: stat) {
             deviceID = UInt64(bitPattern: Int64(status.st_dev))
             inode = UInt64(status.st_ino)
         }
     }
+
     package struct Requirements: Equatable, Sendable {
         fileprivate enum Policy: Equatable, Sendable { case trustedAnchor, managed }
         fileprivate let policy: Policy
         fileprivate let ownerUserID: uid_t
         fileprivate let deviceID: UInt64?
+
         package static func trustedAnchor(ownerUserID: uid_t) -> Self {
             Self(policy: .trustedAnchor, ownerUserID: ownerUserID, deviceID: nil)
         }
+
         package static func managed(ownerUserID: uid_t, deviceID: UInt64) -> Self {
             Self(policy: .managed, ownerUserID: ownerUserID, deviceID: deviceID)
         }
         fileprivate var creationMode: mode_t? { policy == .managed ? 0o700 : nil }
     }
+
     package enum Acquisition: Equatable, Sendable { case existing, existingOrCreate, new }
     package enum Relationship: Equatable, Sendable { case same, ancestor, descendant, disjoint }
+
     private struct State: Sendable {
         var descriptor: Int32?
         var closeFailure: DirectoryPOSIXFailure?
     }
+
     package let identity: Identity
     private let requirements: Requirements
     private let url: URL
     private let state: Mutex<State>
+
     private init(descriptor: Int32, identity: Identity, requirements: Requirements, url: URL) {
         self.identity = identity
         self.requirements = requirements
         self.url = url
         state = Mutex(.init(descriptor: descriptor, closeFailure: nil))
     }
+
     deinit { try? close() }
+
     package static func openExisting(
         at absoluteURL: URL,
         requirements: Requirements
@@ -94,6 +109,7 @@ package final class DirectoryCapability: Sendable {
             url: absoluteURL
         )
     }
+
     package func directory(
         named name: Name,
         acquisition: Acquisition,
@@ -117,6 +133,7 @@ package final class DirectoryCapability: Sendable {
             )
         }
     }
+
     package func relationship(to other: DirectoryCapability) throws -> Relationship {
         try withBorrowedDescriptor { lhs in
             try other.withBorrowedDescriptor { rhs in
@@ -129,6 +146,7 @@ package final class DirectoryCapability: Sendable {
             }
         }
     }
+
     package func withRevalidatedPath<Result>(_ body: (URL) throws -> Result) throws -> Result {
         try withBorrowedDescriptor { borrowed in
             try Self.validateOwned(borrowed, capability: self)
@@ -146,6 +164,7 @@ package final class DirectoryCapability: Sendable {
             return try body(url)
         }
     }
+
     package func close() throws {
         let path = url.path
         let failure = state.withLock { state -> DirectoryPOSIXFailure? in
@@ -161,6 +180,7 @@ package final class DirectoryCapability: Sendable {
         }
         if let failure { throw DirectoryCapabilityError.ioFailure(failure) }
     }
+
     private func withBorrowedDescriptor<Result>(_ body: (Int32) throws -> Result) throws -> Result {
         let path = url.path
         let descriptor = try state.withLock { state -> Int32 in
