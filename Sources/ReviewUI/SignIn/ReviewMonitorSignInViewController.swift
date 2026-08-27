@@ -98,6 +98,9 @@ final class ReviewMonitorSignInViewController: NSHostingController<SignInView> {
                 self?.apiKeyPromptWindow = nil
                 self?.apiKeySignInTask = nil
             }
+            guard Task.isCancelled == false else {
+                return
+            }
             guard let apiKey = await ReviewMonitorAPIKeyPrompt.request(
                 window: window,
                 submitTitle: "Sign In",
@@ -112,7 +115,6 @@ final class ReviewMonitorSignInViewController: NSHostingController<SignInView> {
     private func cancelAPIKeySignIn() {
         apiKeySignInTask?.cancel()
         guard let apiKeyAlert else {
-            apiKeySignInTask = nil
             return
         }
         if let apiKeyPromptWindow {

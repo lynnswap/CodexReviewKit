@@ -47,6 +47,21 @@ struct ReviewMonitorAPIKeyPromptTests {
         #expect(viewController.hasAPIKeySignInTaskForTesting == false)
     }
 
+    @Test func signInControllerDoesNotPresentAfterImmediateCancellation() async {
+        let store = CodexReviewStore.makePreviewStore()
+        let viewController = ReviewMonitorSignInViewController(store: store)
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.makeKeyAndOrderFront(nil)
+
+        viewController.startAPIKeySignInForTesting()
+        viewController.cancelAPIKeySignInForTesting()
+        await waitUntil { viewController.hasAPIKeySignInTaskForTesting == false }
+
+        #expect(viewController.hasAPIKeySignInTaskForTesting == false)
+        #expect(window.attachedSheet == nil)
+    }
+
     @Test func signInControllerCancelsPromptQueuedBehindExistingSheet() async {
         let store = CodexReviewStore.makePreviewStore()
         let viewController = ReviewMonitorSignInViewController(store: store)
