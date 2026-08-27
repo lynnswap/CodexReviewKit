@@ -2766,8 +2766,8 @@ private actor AppServerReviewEventSession {
             return []
         }
 
-        requestedCancellationArtifacts = nil
-        return artifacts.originalEvents + events
+        // Nonmembers are delivered normally without relinquishing exact artifact ownership.
+        return events
     }
 
     private static func lastLogMetadata(
