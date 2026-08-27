@@ -507,6 +507,7 @@ public final class CodexReviewStore {
             ?? failureIncident(in: previousState)
             ?? makeFailureIncident(for: previousState)
         closePublishedRuntimeAdmission(in: previousState)
+        storeWorkRegistry.closeReviewAdmission()
         let generation = previousState.generation.successor()
         if case .replacing(let replacement, _) = previousState {
             replacement.finish(.superseded(runtimeTransitionPurpose(for: intent)))
@@ -656,6 +657,7 @@ public final class CodexReviewStore {
             return nil
         }
 
+        storeWorkRegistry.closeReviewAdmission()
         _ = context.failureIncident?.admitSuccessor(generation: generation)
 
         serverState = .starting
@@ -750,7 +752,7 @@ public final class CodexReviewStore {
             guard let self else {
                 return
             }
-            if Task.isCancelled || storeWorkRegistry.acceptsNewWork == false {
+            if Task.isCancelled || storeWorkRegistry.accepts(admission) == false {
                 switch cancelledBeforeEntry {
                 case .skip:
                     return
@@ -807,7 +809,10 @@ public final class CodexReviewStore {
 
     package func performThrowingRegisteredStoreWork<Value: Sendable>(
         kind: ReviewStoreWorkKind,
-        operation: @escaping @MainActor @Sendable (CodexReviewStore) async throws -> Value
+        operation: @escaping @MainActor @Sendable (
+            CodexReviewStore,
+            ReviewStoreWorkRegistry.Admission
+        ) async throws -> Value
     ) async throws -> Value {
         guard let admission = storeWorkRegistry.register(kind) else {
             throw CodexReviewAPI.Error.io("Review Store work admission is closed.")
@@ -817,10 +822,10 @@ public final class CodexReviewStore {
                 throw CancellationError()
             }
             try Task.checkCancellation()
-            if self.storeWorkRegistry.acceptsNewWork == false {
+            if self.storeWorkRegistry.accepts(admission) == false {
                 throw CancellationError()
             }
-            return try await operation(self)
+            return try await operation(self, admission)
         }
         storeWorkRegistry.install(task, for: admission)
         defer {
@@ -1011,6 +1016,7 @@ public final class CodexReviewStore {
         retiringRuntime: PreparedRuntime?,
         retainedMCP: RetainedMCPServer
     ) -> RuntimeStartOperation {
+        storeWorkRegistry.closeReviewAdmission()
         let replacement = ReviewRuntimeRecoveryReplacement(
             sourceGeneration: sourceGeneration,
             retiringRuntime: retiringRuntime,
@@ -1329,6 +1335,7 @@ public final class CodexReviewStore {
     }
 
     private func publishRuntime(serverURL: URL?) {
+        storeWorkRegistry.openReviewAdmission()
         transitionToRunning(serverURL: serverURL)
         startAccountRateLimitAutoRefresh()
     }

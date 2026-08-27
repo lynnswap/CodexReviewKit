@@ -6,6 +6,25 @@ import CodexReviewTesting
 @Suite("store runtime lifecycle", .serialized)
 @MainActor
 struct CodexReviewStoreLifecycleTests {
+    @Test func reviewAdmissionGenerationDoesNotReopenPriorWork() throws {
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        )
+        let registry = store.storeWorkRegistry
+        let priorReview = try #require(registry.register(.reviewMutation("prior")))
+        let settings = try #require(registry.register(.settingsMutation("settings")))
+
+        registry.closeReviewAdmission()
+        #expect(registry.register(.reviewMutation("late")) == nil)
+        #expect(registry.accepts(priorReview) == false)
+        #expect(registry.accepts(settings))
+
+        registry.openReviewAdmission()
+        let nextReview = try #require(registry.register(.reviewMutation("next")))
+        #expect(registry.accepts(priorReview) == false)
+        #expect(registry.accepts(nextReview))
+    }
+
     @Test func stopInvalidatesHeldRuntimePreparationAndClosesStaleHandleOnce() async throws {
         let preparationGate = AsyncGate()
         let mcpOwner = TestingMCPServerLifecycleOwner()
@@ -921,7 +940,7 @@ struct CodexReviewStoreLifecycleTests {
         let first = Task { @MainActor in
             try? await store.performThrowingRegisteredStoreWork(
                 kind: .testing("first work")
-            ) { _ in
+            ) { _, _ in
                 await firstEntered.open()
                 await firstRelease.waitIgnoringCancellation()
                 throw StoreWorkTestFailure.first
@@ -931,7 +950,7 @@ struct CodexReviewStoreLifecycleTests {
         let second = Task { @MainActor in
             try? await store.performThrowingRegisteredStoreWork(
                 kind: .testing("second work")
-            ) { _ in
+            ) { _, _ in
                 await secondEntered.open()
                 await secondRelease.waitIgnoringCancellation()
                 throw StoreWorkTestFailure.second
@@ -1136,7 +1155,7 @@ struct CodexReviewStoreLifecycleTests {
         let throwingTask = Task { @MainActor in
             try await store.performThrowingRegisteredStoreWork(
                 kind: .testing("individually cancelled throwing work")
-            ) { _ in
+            ) { _, _ in
                 throwingOperationRan = true
             }
         }

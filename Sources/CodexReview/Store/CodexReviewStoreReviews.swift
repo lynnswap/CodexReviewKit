@@ -23,11 +23,12 @@ extension CodexReviewStore {
     ) async throws -> CodexReviewAPI.Read.Result {
         try await performThrowingRegisteredStoreWork(
             kind: .reviewMutation("start")
-        ) { @MainActor store in
+        ) { @MainActor store, workAdmission in
             try await store.performStartReview(
                 sessionID: sessionID,
                 request: request,
-                waitTimeout: nil
+                waitTimeout: nil,
+                workAdmission: workAdmission
             )
         }
     }
@@ -40,11 +41,12 @@ extension CodexReviewStore {
     ) async throws -> CodexReviewAPI.Read.Result {
         try await performThrowingRegisteredStoreWork(
             kind: .reviewMutation("start")
-        ) { @MainActor store in
+        ) { @MainActor store, workAdmission in
             try await store.performStartReview(
                 sessionID: sessionID,
                 request: request,
-                waitTimeout: waitTimeout
+                waitTimeout: waitTimeout,
+                workAdmission: workAdmission
             )
         }
     }
@@ -52,12 +54,13 @@ extension CodexReviewStore {
     private func performStartReview(
         sessionID: String,
         request: CodexReviewAPI.Start.Request,
-        waitTimeout: Duration?
+        waitTimeout: Duration?,
+        workAdmission: ReviewStoreWorkRegistry.Admission
     ) async throws -> CodexReviewAPI.Read.Result {
         let jobID = try beginReview(sessionID: sessionID, request: request)
         guard let waitTimeout else {
             _ = try await awaitReview(sessionID: sessionID, jobID: jobID)
-            if Task.isCancelled, storeWorkRegistry.acceptsNewWork {
+            if Task.isCancelled, storeWorkRegistry.accepts(workAdmission) {
                 _ = try await performCancelReview(
                     jobID: jobID,
                     cancellation: .system()
@@ -896,7 +899,7 @@ extension CodexReviewStore {
     ) async throws -> CodexReviewAPI.Cancel.Outcome {
         try await performThrowingRegisteredStoreWork(
             kind: .reviewMutation("cancel")
-        ) { @MainActor store in
+        ) { @MainActor store, _ in
             guard let job = store.job(id: jobID), job.sessionID == sessionID else {
                 throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
             }
@@ -914,7 +917,7 @@ extension CodexReviewStore {
     ) async throws -> CodexReviewAPI.Cancel.Outcome {
         try await performThrowingRegisteredStoreWork(
             kind: .reviewMutation("cancel")
-        ) { @MainActor store in
+        ) { @MainActor store, _ in
             try await store.performCancelReview(
                 jobID: jobID,
                 cancellation: cancellation

@@ -152,7 +152,7 @@ extension CodexReviewStore {
         )
         try await performThrowingRegisteredStoreWork(
             kind: .reviewMutation("cancel-all")
-        ) { @MainActor store in
+        ) { @MainActor store, _ in
             try await store.performCancelAllRunningJobs(cancellation: cancellation)
         }
     }

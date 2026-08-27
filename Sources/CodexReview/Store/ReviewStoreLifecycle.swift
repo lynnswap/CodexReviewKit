@@ -30,6 +30,13 @@ package enum ReviewStoreWorkKind: Hashable, Sendable {
             label
         }
     }
+
+    package var isReviewWork: Bool {
+        switch self {
+        case .reviewMutation, .reviewWorker, .reviewWaiter: true
+        case .rateLimitWakeUp, .rateLimitRefresh, .settingsMutation, .accountAction, .testing: false
+        }
+    }
 }
 
 package enum ReviewStoreWorkCancelledBeforeEntryPolicy: Sendable {
@@ -92,6 +99,7 @@ package final class ReviewStoreWorkRegistry {
     package struct Admission: Hashable, Sendable {
         package let ordinal: UInt64
         package let kind: ReviewStoreWorkKind
+        package let reviewGeneration: UInt64?
     }
 
     package struct CloseOperation {
@@ -158,6 +166,8 @@ package final class ReviewStoreWorkRegistry {
 
     private var state: State = .open
     private var admissionIsOpen = true
+    private var reviewAdmissionIsOpen = true
+    private var reviewAdmissionGeneration: UInt64 = 0
     private var nextWorkOrdinal: UInt64 = 0
     private var nextCloseID: UInt64 = 0
     private var registeredTasks: [UInt64: RegisteredTask] = [:]
@@ -184,14 +194,18 @@ package final class ReviewStoreWorkRegistry {
     }
 
     package func register(_ kind: ReviewStoreWorkKind) -> Admission? {
-        guard admissionIsOpen else {
+        guard admissionIsOpen, reviewAdmissionIsOpen || kind.isReviewWork == false else {
             return nil
         }
         guard nextWorkOrdinal < UInt64.max else {
             preconditionFailure("ReviewStoreWorkRegistry work ordinal exhausted.")
         }
         nextWorkOrdinal += 1
-        return .init(ordinal: nextWorkOrdinal, kind: kind)
+        return .init(
+            ordinal: nextWorkOrdinal,
+            kind: kind,
+            reviewGeneration: kind.isReviewWork ? reviewAdmissionGeneration : nil
+        )
     }
 
     package func install<Success: Sendable, Failure: Error>(
@@ -210,6 +224,25 @@ package final class ReviewStoreWorkRegistry {
 
     package func finish(_ admission: Admission) {
         registeredTasks.removeValue(forKey: admission.ordinal)
+    }
+
+    package func accepts(_ admission: Admission) -> Bool {
+        guard admissionIsOpen else { return false }
+        guard let generation = admission.reviewGeneration else { return true }
+        return reviewAdmissionIsOpen && generation == reviewAdmissionGeneration
+    }
+
+    package func closeReviewAdmission() {
+        guard reviewAdmissionIsOpen else { return }
+        guard reviewAdmissionGeneration < UInt64.max else {
+            preconditionFailure("ReviewStoreWorkRegistry review generation exhausted.")
+        }
+        reviewAdmissionGeneration += 1
+        reviewAdmissionIsOpen = false
+    }
+
+    package func openReviewAdmission() {
+        if admissionIsOpen { reviewAdmissionIsOpen = true }
     }
 
     package func beginClosing(
@@ -280,6 +313,7 @@ package final class ReviewStoreWorkRegistry {
 
     package func cancelWithoutWaiting() {
         admissionIsOpen = false
+        reviewAdmissionIsOpen = false
         for task in registeredTasks.values {
             task.cancel()
         }
