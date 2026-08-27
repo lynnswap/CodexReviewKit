@@ -3220,6 +3220,79 @@ struct CodexReviewHostTests {
         #expect(FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path) == false)
     }
 
+    @Test func liveStoreLoginStartFailureCleansItsPendingResourcesNotReplacement() async throws {
+        let homeURL = try temporaryHome()
+        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "active@example.com",
+            accounts: ["active@example.com"]
+        )
+        let mainTransport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(mainTransport, accountEmail: "active@example.com")
+        let firstLoginTransport = FakeJSONRPCTransport()
+        try await firstLoginTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        await firstLoginTransport.enqueueFailure(
+            .responseError(code: -32603, message: "first login unavailable"),
+            for: "account/login/start"
+        )
+        let firstStartGate = AsyncGate()
+        await firstLoginTransport.hold(method: "account/login/start", gate: firstStartGate)
+        let secondLoginTransport = FakeJSONRPCTransport()
+        try await secondLoginTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await secondLoginTransport.enqueue(
+            AppServerAPI.Account.Login.Response.chatgpt(
+                loginID: "login-b",
+                authURL: "https://example.com/auth",
+                nativeWebAuthentication: .init(callbackURLScheme: "lynnpd.CodexReviewMonitor.auth")
+            ),
+            for: "account/login/start"
+        )
+        try await secondLoginTransport.enqueue(
+            AppServerAPI.Account.Login.Cancel.Response(),
+            for: "account/login/cancel"
+        )
+        var loginTransports = [firstLoginTransport, secondLoginTransport]
+        var isolatedHomeURLs: [URL] = []
+        let sessions = FakeWebAuthenticationSessions()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            nativeAuthenticationConfiguration: .init(
+                callbackScheme: "lynnpd.CodexReviewMonitor.auth",
+                browserSessionPolicy: .ephemeral,
+                presentationAnchorProvider: { NSWindow() }
+            ),
+            webAuthenticationSessionFactory: sessions.makeSession,
+            transportFactory: { codexHomeURL in
+                if codexHomeURL == mainCodexHomeURL {
+                    return mainTransport
+                }
+                isolatedHomeURLs.append(codexHomeURL)
+                try FileManager.default.createDirectory(at: codexHomeURL, withIntermediateDirectories: true)
+                return loginTransports.removeFirst()
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        async let firstStart: Void = store.addAccount()
+        await firstLoginTransport.waitForActiveRequests(method: "account/login/start")
+        await store.addAccount()
+        let secondSession = await sessions.waitForSession()
+        await secondSession.waitUntilWaitingForCallback()
+
+        await firstStartGate.open()
+        await firstStart
+
+        #expect(await firstLoginTransport.isClosedForTesting())
+        #expect(await secondLoginTransport.isClosedForTesting() == false)
+        #expect(secondSession.isCancelled == false)
+        #expect(isolatedHomeURLs.count == 2)
+        #expect(FileManager.default.fileExists(atPath: isolatedHomeURLs[0].path) == false)
+        #expect(FileManager.default.fileExists(atPath: isolatedHomeURLs[1].path))
+
+        await store.cancelAuthentication()
+    }
+
     @Test func liveStoreClosesIsolatedLoginRuntimeWhenLoginCompletionFails() async throws {
         let homeURL = try temporaryHome()
         let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)

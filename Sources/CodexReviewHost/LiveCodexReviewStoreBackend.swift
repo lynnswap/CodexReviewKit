@@ -82,6 +82,44 @@ private struct PendingLoginRuntimeCleanup {
     }
 }
 
+private struct PendingAuthenticationResources {
+    private(set) var isOwned = true
+    var backend: AppServerCodexReviewBackend?
+    var challenge: CodexReviewBackendModel.Login.Challenge?
+    var client: AppServerClient?
+    var codexHomeURL: URL?
+
+    mutating func takeForCleanup() -> Self? {
+        guard isOwned else {
+            return nil
+        }
+        let resources = self
+        isOwned = false
+        backend = nil
+        challenge = nil
+        client = nil
+        codexHomeURL = nil
+        return resources
+    }
+
+    @MainActor
+    mutating func consume(
+        into operation: LiveAuthenticationOperation,
+        activation: LoginActivation
+    ) -> Bool {
+        guard let resources = takeForCleanup() else {
+            return false
+        }
+        operation.backend = resources.backend
+        operation.challenge = resources.challenge
+        operation.client = resources.client
+        operation.codexHomeURL = resources.codexHomeURL
+        operation.activation = activation
+        operation.phase = .waitingForCompletion
+        return true
+    }
+}
+
 private enum CodexExecutableDependency: Sendable {
     case resolvedForTesting(URL)
     case resolver(CodexExecutableResolver)
@@ -1331,18 +1369,18 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
     }
 
     private func startLogin(auth: CodexReviewAuthModel, activation: LoginActivation) async {
+        var pendingResources = PendingAuthenticationResources()
         let expectedRuntimeHandle = activeRuntimeHandle
-        var isolatedLoginClient: AppServerClient?
-        var isolatedLoginCodexHomeURL: URL?
         do {
             let runtime = try await loginRuntime(for: activation)
             let appServerBackend = runtime.backend
             let loginCodexHomeURL = runtime.codexHomeURL
             let loginClient = runtime.usesPrimaryRuntime ? nil : runtime.client
-            isolatedLoginClient = loginClient
-            isolatedLoginCodexHomeURL = loginCodexHomeURL
+            pendingResources.backend = appServerBackend
+            pendingResources.client = loginClient
+            pendingResources.codexHomeURL = loginCodexHomeURL
             guard isCurrentRuntime(expectedRuntimeHandle) else {
-                await closeIsolatedLoginRuntime(client: loginClient, codexHomeURL: loginCodexHomeURL)
+                await cleanupPendingAuthenticationResources(pendingResources.takeForCleanup())
                 return
             }
             guard runtime.usesPrimaryRuntime || self.appServerBackend != nil else {
@@ -1352,27 +1390,24 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                     auth: auth,
                     activation: activation
                 )
-                await closeIsolatedLoginRuntime(client: loginClient, codexHomeURL: loginCodexHomeURL)
+                await cleanupPendingAuthenticationResources(pendingResources.takeForCleanup())
                 return
             }
             logger.info("Starting ChatGPT login")
             let challenge = try await appServerBackend.startLogin(.init(
                 nativeWebAuthenticationCallbackScheme: nativeAuthenticationConfiguration?.callbackScheme
             ))
+            pendingResources.challenge = challenge
             guard let expectedRuntimeHandle,
                   activeRuntimeHandle === expectedRuntimeHandle,
                   acceptsRuntimeRequests
             else {
-                try? await appServerBackend.cancelLogin(challenge)
-                await closeIsolatedLoginRuntime(client: loginClient, codexHomeURL: loginCodexHomeURL)
+                await cleanupPendingAuthenticationResources(pendingResources.takeForCleanup())
                 return
             }
-            authenticationOperation.challenge = challenge
-            authenticationOperation.backend = appServerBackend
-            authenticationOperation.client = loginClient
-            authenticationOperation.codexHomeURL = loginCodexHomeURL
-            authenticationOperation.activation = activation
-            authenticationOperation.phase = .waitingForCompletion
+            guard pendingResources.consume(into: authenticationOperation, activation: activation) else {
+                return
+            }
             if let loginClient {
                 observeLoginNotifications(client: loginClient, backend: appServerBackend, auth: auth)
             }
@@ -1436,14 +1471,23 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             }
         } catch {
             logger.error("ChatGPT login failed to start: \(error.localizedDescription, privacy: .public)")
+            if let pendingCleanup = pendingResources.takeForCleanup() {
+                await cleanupPendingAuthenticationResources(pendingCleanup)
+                updateAuthenticationFailure(
+                    error.localizedDescription,
+                    auth: auth,
+                    activation: activation
+                )
+                return
+            }
             let pendingLoginBackend = authenticationOperation.backend
             let pendingLoginChallenge = authenticationOperation.challenge
             authenticationOperation.challenge = nil
             authenticationOperation.backend = nil
             authenticationOperation.phase = .waitingForCompletion
-            let loginClient = authenticationOperation.client ?? isolatedLoginClient
+            let loginClient = authenticationOperation.client
             authenticationOperation.client = nil
-            let loginCodexHomeURL = authenticationOperation.codexHomeURL ?? isolatedLoginCodexHomeURL
+            let loginCodexHomeURL = authenticationOperation.codexHomeURL
             authenticationOperation.codexHomeURL = nil
             authenticationOperation.authenticationSession = nil
             authenticationOperation.monitorTask?.cancel()
@@ -2546,6 +2590,18 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         }
         await closeClientRecordingFailure(client, context: "isolated login runtime cleanup")
         try? FileManager.default.removeItem(at: codexHomeURL)
+    }
+
+    private func cleanupPendingAuthenticationResources(
+        _ resources: PendingAuthenticationResources?
+    ) async {
+        guard let resources else {
+            return
+        }
+        if let backend = resources.backend, let challenge = resources.challenge {
+            try? await backend.cancelLogin(challenge)
+        }
+        await closeIsolatedLoginRuntime(client: resources.client, codexHomeURL: resources.codexHomeURL)
     }
 
     private func closeAppServerRuntime(
