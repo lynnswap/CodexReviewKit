@@ -144,17 +144,18 @@ struct DirectoryCapabilityTests {
         defer { removeFixture(fixture) }
         let root = try openFixtureRoot(fixture)
         defer { try? root.close() }
-        let existingURL = fixture.appendingPathComponent("existing", isDirectory: true)
-        try createDirectory(existingURL, permissions: 0o750)
-
-        expectDirectoryError(.policyViolation) {
-            _ = try root.directory(
-                named: .init("existing"),
-                acquisition: .existing,
-                requirements: managedRequirements(root)
-            )
+        for (name, mode): (String, mode_t) in [("shared", 0o750), ("special", 0o1700)] {
+            let existingURL = fixture.appendingPathComponent(name, isDirectory: true)
+            try createDirectory(existingURL, permissions: mode)
+            expectDirectoryError(.policyViolation) {
+                _ = try root.directory(
+                    named: .init(name),
+                    acquisition: .existing,
+                    requirements: managedRequirements(root)
+                )
+            }
+            #expect(try permissions(at: existingURL) == mode)
         }
-        #expect(try permissions(at: existingURL) == 0o750)
     }
 
     @Test func ownerDeviceAndACLPoliciesFailClosed() throws {
@@ -356,7 +357,7 @@ private func createDirectory(_ url: URL, permissions: mode_t) throws {
 private func permissions(at url: URL) throws -> mode_t {
     var status = stat()
     guard stat(url.path, &status) == 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
-    return status.st_mode & 0o777
+    return status.st_mode & 0o7777
 }
 
 private func addAllowACL(to url: URL) throws {

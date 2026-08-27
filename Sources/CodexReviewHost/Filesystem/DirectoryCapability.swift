@@ -373,7 +373,7 @@ package final class DirectoryCapability: Sendable {
         guard status.st_uid == requirements.ownerUserID else {
             throw DirectoryCapabilityError.policyViolation("Directory owner mismatch at \(path).")
         }
-        let permissions = status.st_mode & 0o777
+        let permissions = status.st_mode & 0o7777
         switch requirements.policy {
         case .trustedAnchor:
             guard permissions & 0o022 == 0 else {
