@@ -83,6 +83,8 @@ struct CodexReviewStoreCommandTests {
         }
         let context = store.detachRuntimeSemanticStopContext(intent: .explicitStop)
         #expect(context.workerJobIDs == [priorJobID])
+        store.storeWorkRegistry.openReviewAdmission()
+        prior.cancel()
         await context.stopUsingDefaultPolicy(intent: .explicitStop)
 
         await startGate.open()
