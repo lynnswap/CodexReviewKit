@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import OSLog
+import Synchronization
 import CodexReview
 import CodexReviewAppServer
 import CodexReviewMCPServer
@@ -81,37 +82,60 @@ private struct PendingLoginRuntimeCleanup {
     }
 }
 
-@MainActor
-private final class AuthenticationSessionCompletion {
-    private let stream: AsyncStream<CodexReviewAuthenticationSessionTerminal>
-    private let continuation: AsyncStream<CodexReviewAuthenticationSessionTerminal>.Continuation
-    private var terminal: CodexReviewAuthenticationSessionTerminal?
-
-    init() {
-        (stream, continuation) = AsyncStream.makeStream(
-            bufferingPolicy: .bufferingNewest(1)
-        )
+private final class AuthenticationSessionCompletion: Sendable {
+    enum Outcome: Sendable {
+        case terminal(CodexReviewAuthenticationSessionTerminal)
+        case cancellationRequested
     }
+
+    private struct State {
+        var outcome: Outcome?
+        var waiters: [CheckedContinuation<Outcome, Never>] = []
+    }
+
+    private let state = Mutex(State())
 
     @discardableResult
     func resolve(_ terminal: CodexReviewAuthenticationSessionTerminal) -> Bool {
-        guard self.terminal == nil else {
-            return false
-        }
-        self.terminal = terminal
-        continuation.yield(terminal)
-        continuation.finish()
-        return true
+        finish(with: .terminal(terminal))
     }
 
-    func wait() async -> CodexReviewAuthenticationSessionTerminal? {
-        if let terminal {
-            return terminal
+    func requestCancellation() {
+        _ = finish(with: .cancellationRequested)
+    }
+
+    func wait() async -> Outcome {
+        await withCheckedContinuation { continuation in
+            let outcome = state.withLock { state -> Outcome? in
+                guard let outcome = state.outcome else {
+                    state.waiters.append(continuation)
+                    return nil
+                }
+                return outcome
+            }
+            if let outcome {
+                continuation.resume(returning: outcome)
+            }
         }
-        for await terminal in stream {
-            return terminal
+    }
+
+    private func finish(with outcome: Outcome) -> Bool {
+        let waiters = state.withLock { state -> [CheckedContinuation<Outcome, Never>]? in
+            guard state.outcome == nil else {
+                return nil
+            }
+            state.outcome = outcome
+            let waiters = state.waiters
+            state.waiters.removeAll(keepingCapacity: false)
+            return waiters
         }
-        return terminal
+        guard let waiters else {
+            return false
+        }
+        for waiter in waiters {
+            waiter.resume(returning: outcome)
+        }
+        return true
     }
 }
 
@@ -1459,7 +1483,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         let operationID = UUID()
         let completion = AuthenticationSessionCompletion()
         let publication = AuthenticationSessionPublication()
-        let task = Task { @MainActor [weak self, weak auth] in
+        let operationTask = Task { @MainActor [weak self, weak auth] in
             guard let self, let auth else {
                 publication.publish()
                 return CodexReviewAuthenticationSessionTerminal.cancelled
@@ -1472,9 +1496,16 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 publication: publication
             )
         }
+        let receiptTask = Task {
+            await withTaskCancellationHandler {
+                await operationTask.value
+            } onCancel: {
+                completion.requestCancellation()
+            }
+        }
         let receipt = CodexReviewAuthenticationSessionReceipt(
             operationID: operationID,
-            task: task
+            task: receiptTask
         )
         activeAuthenticationOperation = .init(
             id: operationID,
@@ -1485,7 +1516,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         await withTaskCancellationHandler {
             await publication.wait()
         } onCancel: {
-            task.cancel()
+            receiptTask.cancel()
         }
         return receipt
     }
@@ -1504,10 +1535,12 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         }
         await startLogin(auth: auth, activation: activation, operationID: id)
         publication.publish()
-        if let terminal = await completion.wait() {
+        switch await completion.wait() {
+        case .terminal(let terminal):
             return terminal
+        case .cancellationRequested:
+            return await cancelAuthenticationOperation(id: id, auth: auth)
         }
-        return await cancelAuthenticationOperation(id: id, auth: auth)
     }
 
     private func authenticationOperationAcceptsCallbacks(id: UUID) -> Bool {

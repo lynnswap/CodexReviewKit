@@ -1596,6 +1596,7 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
 
     private var responses: [String: [QueuedResponse]]
     private var requests: [JSONRPC.Request] = []
+    private var requestTaskCancellationStates: [Bool] = []
     private var notifications: [JSONRPC.Notification] = []
     private var serverNotificationContinuations: [AsyncThrowingStream<JSONRPC.Notification, Error>.Continuation] = []
     private var activeByMethod: [String: Int] = [:]
@@ -1667,6 +1668,7 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
             throw JSONRPC.Error.closed
         }
         requests.append(request)
+        requestTaskCancellationStates.append(Task.isCancelled)
         resumeRequestCountWaiters()
         activeByMethod[request.method, default: 0] += 1
         resumeActiveRequestWaiters(for: request.method)
@@ -1771,6 +1773,12 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
 
     package func recordedRequests() -> [JSONRPC.Request] {
         requests
+    }
+
+    package func taskCancellationStates(for method: String) -> [Bool] {
+        zip(requests, requestTaskCancellationStates).compactMap { request, isCancelled in
+            request.method == method ? isCancelled : nil
+        }
     }
 
     package func waitForRequestCount(_ count: Int) async {

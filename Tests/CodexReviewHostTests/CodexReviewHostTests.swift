@@ -1585,6 +1585,8 @@ struct CodexReviewHostTests {
             for: "account/login/start"
         )
         try await transport.enqueue(AppServerAPI.Account.Login.Cancel.Response(), for: "account/login/cancel")
+        let cancelLoginGate = AsyncGate()
+        await transport.hold(method: "account/login/cancel", gate: cancelLoginGate)
         let sessions = FakeWebAuthenticationSessions()
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": try temporaryHome().path],
@@ -1614,8 +1616,14 @@ struct CodexReviewHostTests {
         session.complete(with: URL(string: "lynnpd.CodexReviewMonitor.auth://callback?code=late")!)
         await cancellationGate.open()
 
+        await transport.waitForRequestCount(6)
+        #expect(await stopFinished.isCompleted() == false)
+        #expect(await transport.taskCancellationStates(for: "account/login/cancel") == [false])
+        await cancelLoginGate.open()
+
         await stop.value
         #expect(store.serverState == .stopped)
+        #expect(store.auth.phase == .signedOut)
         #expect(store.auth.isAuthenticating == false)
         #expect(store.auth.selectedAccount == nil)
         #expect(await transport.recordedRequests().map(\.method) == [
@@ -1728,6 +1736,7 @@ struct CodexReviewHostTests {
         await transport.waitForRequestCount(6)
 
         #expect(await cancelFinished.isCompleted() == false)
+        #expect(await transport.taskCancellationStates(for: "account/login/cancel") == [false])
         try await transport.emitServerNotification(
             method: "account/login/completed",
             params: TestLoginCompletedNotification(loginID: "login-browser", success: true)
@@ -1735,6 +1744,7 @@ struct CodexReviewHostTests {
         await cancelGate.open()
 
         await cancel.value
+        #expect(store.auth.phase == .signedOut)
         #expect(store.auth.selectedAccount == nil)
         let methods = await transport.recordedRequests().map(\.method)
         #expect(methods == [
