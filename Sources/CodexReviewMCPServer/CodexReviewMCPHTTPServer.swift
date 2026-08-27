@@ -365,6 +365,21 @@ package actor CodexReviewMCPHTTPServer {
             let transport: StatefulHTTPServerTransport
         }
 
+        final class CloseReceipt: Sendable {
+            let identity: Identity
+            let task: Task<Void, Never>
+
+            init(
+                identity: Identity,
+                operation: @escaping @Sendable (Identity) async -> Void
+            ) {
+                self.identity = identity
+                self.task = Task {
+                    await operation(identity)
+                }
+            }
+        }
+
         enum Phase {
             case initializing(StartingSession)
             case active(Runtime)
@@ -373,6 +388,7 @@ package actor CodexReviewMCPHTTPServer {
         enum RequestRole: Sendable {
             case initialize
             case regular
+            case close
         }
 
         final class RequestLease: @unchecked Sendable {
@@ -395,6 +411,7 @@ package actor CodexReviewMCPHTTPServer {
         var lastAccessedAt: Date
         let initialRequestLease: RequestLease
         private(set) var requestLeases: [UUID: RequestLease] = [:]
+        var closeReceipt: CloseReceipt?
 
         init(
             identity: Identity,
@@ -419,6 +436,9 @@ package actor CodexReviewMCPHTTPServer {
             now: Date
         ) -> RequestLease? {
             guard case .active = phase else {
+                return nil
+            }
+            if case .regular = role, closeReceipt != nil {
                 return nil
             }
             let lease = RequestLease(operation: operation, role: role)
@@ -463,6 +483,7 @@ package actor CodexReviewMCPHTTPServer {
     private let responseEndAcknowledgementGate = MCPHTTPLifecycleCompletionGate()
     private let responseEndWriteGate = MCPHTTPLifecycleCompletionGate()
     private let sessionStartCompletionGate = MCPHTTPLifecycleCompletionGate()
+    private let sessionCloseCompletionGate = MCPHTTPLifecycleCompletionGate()
     private let sessionRequestHandoffGate = MCPHTTPSessionRequestHandoffGate()
     private let sessionRequestRetirementGate = MCPHTTPLifecycleCompletionGate()
     private let responseBackpressureProbe = MCPHTTPResponseBackpressureProbe()
@@ -479,6 +500,7 @@ package actor CodexReviewMCPHTTPServer {
     private var startStartingJoinWaiters: [CheckedContinuation<Void, Never>] = []
     private var didBeginClosingInitializingSession = false
     private var initializingSessionCloseWaiters: [CheckedContinuation<Void, Never>] = []
+    private var sessionCloseJoinCount = 0
 
     package init(
         adapter: CodexReviewMCPServer,
@@ -959,6 +981,18 @@ package actor CodexReviewMCPHTTPServer {
         await sessionStartCompletionGate.release()
     }
 
+    package func holdNextSessionCloseCompletionForTesting() async {
+        await sessionCloseCompletionGate.holdNextCompletion()
+    }
+
+    package func waitUntilSessionCloseCompletionIsHeldForTesting() async {
+        await sessionCloseCompletionGate.waitUntilHolding()
+    }
+
+    package func releaseSessionCloseCompletionForTesting() async {
+        await sessionCloseCompletionGate.release()
+    }
+
     package func holdNextSessionRequestHandoffForTesting() async {
         await sessionRequestHandoffGate.holdNextHandoff()
     }
@@ -998,6 +1032,14 @@ package actor CodexReviewMCPHTTPServer {
 
     package func sessionCountForTesting() -> Int {
         sessions.count
+    }
+
+    package func sessionCloseReceiptIdentityForTesting(sessionID: String) -> ObjectIdentifier? {
+        sessions[sessionID]?.closeReceipt.map(ObjectIdentifier.init)
+    }
+
+    package func sessionCloseJoinCountForTesting() -> Int {
+        sessionCloseJoinCount
     }
 
     package func waitUntilStartingGenerationAdmissionIsClosedForTesting() async {
@@ -1285,9 +1327,10 @@ package actor CodexReviewMCPHTTPServer {
                     .internalError("MCP request ownership conflict.")
                 ))
             }
+            let isCloseRequest = request.method.uppercased() == "DELETE"
             guard let lease = session.admitRequest(
                 operation: operation,
-                role: .regular,
+                role: isCloseRequest ? .close : .regular,
                 now: Date()
             ) else {
                 return .init(response: .error(
@@ -1296,6 +1339,16 @@ package actor CodexReviewMCPHTTPServer {
                 ))
             }
             observeSessionRequest(lease, in: session)
+            if isCloseRequest {
+                if let validationFailure = makeValidationPipeline().validate(
+                    request,
+                    context: .init(httpMethod: request.method, sessionID: sessionID)
+                ) {
+                    return .init(response: validationFailure)
+                }
+                await closeSession(session)
+                return .init(response: .ok(headers: [HTTPHeaderName.sessionID: sessionID]))
+            }
             await sessionRequestHandoffGate.waitIfArmed()
             guard authorizeSDKHandoff(for: lease, in: session) else {
                 return .init(response: .error(
@@ -1305,13 +1358,10 @@ package actor CodexReviewMCPHTTPServer {
                 ))
             }
             let response = await session.transport.handleRequest(request)
-            let (trackedResponse, didFinishRequest) = trackResponse(
+            let trackedResponse = trackResponse(
                 response,
                 responseSourceKind: Self.responseSourceKind(for: request)
-            )
-            if didFinishRequest, request.method.uppercased() == "DELETE", trackedResponse.response.statusCode == 200 {
-                await closeSession(session)
-            }
+            ).response
             return trackedResponse
         }
 
@@ -1468,6 +1518,7 @@ package actor CodexReviewMCPHTTPServer {
         operation: MCPHTTPNetworkResourceOwner.RequestOperation
     ) -> Bool {
         guard sessions[session.identity.sessionID] === session,
+              session.closeReceipt == nil,
               case .initializing(let currentStart) = session.phase,
               currentStart === starting,
               case .running(let currentGeneration) = lifecycleState,
@@ -1493,6 +1544,7 @@ package actor CodexReviewMCPHTTPServer {
         ) {
             didAuthorize = sessions[session.identity.sessionID] === session
                 && session.owns(lease)
+                && session.closeReceipt == nil
                 && Task.isCancelled == false
         }
         return hadNetworkAuthority && didAuthorize
@@ -1520,7 +1572,27 @@ package actor CodexReviewMCPHTTPServer {
         guard sessions[sessionID] === session else {
             return
         }
-        sessions.removeValue(forKey: sessionID)
+        if let receipt = session.closeReceipt {
+            sessionCloseJoinCount += 1
+            await receipt.task.value
+            return
+        }
+        let receipt = MCPSemanticSession.CloseReceipt(
+            identity: session.identity
+        ) { [self, session] identity in
+            await sessionCloseCompletionGate.waitIfNeeded()
+            await performSessionClose(session, identity: identity)
+        }
+        session.closeReceipt = receipt
+        await receipt.task.value
+    }
+
+    private func performSessionClose(
+        _ session: MCPSemanticSession,
+        identity: MCPSemanticSession.Identity
+    ) async {
+        let sessionID = identity.sessionID
+        let storeReceipt = await adapter.beginCloseSession(sessionID)
         let server: Server?
         switch session.phase {
         case .initializing(let starting):
@@ -1550,7 +1622,14 @@ package actor CodexReviewMCPHTTPServer {
             await server.waitUntilCompleted()
             await server.stop()
         }
-        await adapter.closeSession(sessionID)
+        if let storeReceipt {
+            await storeReceipt.waitUntilClosed()
+        }
+        guard session.identity == identity,
+              sessions[sessionID] === session else {
+            return
+        }
+        sessions.removeValue(forKey: sessionID)
         logger.info("Closed MCP HTTP session \(sessionID, privacy: .public)")
     }
 

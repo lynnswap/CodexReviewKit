@@ -110,8 +110,8 @@ package final class CodexReviewMCPServer {
         }
     }
 
-    package func closeSession(_ sessionID: String) async {
-        await store.closeSession(sessionID)
+    package func beginCloseSession(_ sessionID: String) async -> ReviewStoreSessionCloseReceipt? {
+        await store.beginCloseSession(sessionID)
     }
 
     package func hasActiveReviews(in sessionID: String) -> Bool {
