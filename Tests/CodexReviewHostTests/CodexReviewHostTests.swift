@@ -1514,7 +1514,7 @@ struct CodexReviewHostTests {
         ])
     }
 
-    @Test func liveStoreCancelsLoginWhenAuthenticationSessionIsClosed() async throws {
+    @Test func liveStoreAddAccountReturnsAfterPresentationAndCancelsWhenAuthenticationSessionCloses() async throws {
         let transport = FakeJSONRPCTransport()
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")

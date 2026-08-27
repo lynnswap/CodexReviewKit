@@ -1337,10 +1337,12 @@ public final class CodexReviewStore {
         await backend.refreshAuth(auth: auth)
     }
 
+    /// Presents sign-in and returns after the authentication challenge is published.
     public func signIn() async {
         _ = await backend.signIn(auth: auth)
     }
 
+    /// Presents account sign-in and returns after the authentication challenge is published.
     public func addAccount() async {
         _ = await backend.addAccount(auth: auth)
     }
