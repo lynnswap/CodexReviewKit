@@ -489,6 +489,9 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             run: provisionalRun,
             control: control,
             ingestionDiagnosticRecorder: ingestionDiagnosticRecorder,
+            attemptFailureRecorder: { [weak self] in
+                await self?.recordTerminalReductionAttemptFailure()
+            },
             isRunFinalized: false
         )
         registerReviewEventSession(session, for: provisionalRun)
@@ -1018,6 +1021,9 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             run: provisionalRun,
             control: control,
             ingestionDiagnosticRecorder: ingestionDiagnosticRecorder,
+            attemptFailureRecorder: { [weak self] in
+                await self?.recordTerminalReductionAttemptFailure()
+            },
             isRunFinalized: false
         )
         registerReviewEventSession(session, for: provisionalRun)
@@ -1481,7 +1487,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         let session = AppServerReviewEventSession(
             run: run,
             control: control,
-            ingestionDiagnosticRecorder: ingestionDiagnosticRecorder
+            ingestionDiagnosticRecorder: ingestionDiagnosticRecorder,
+            attemptFailureRecorder: { [weak self] in
+                await self?.recordTerminalReductionAttemptFailure()
+            }
         )
         registerReviewEventSession(session, for: run)
         return session
@@ -1945,6 +1954,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         return .ignored
     }
 
+    private func recordTerminalReductionAttemptFailure() {
+        notificationRouterMetrics.attemptFailures += 1
+    }
+
     private func recordIngestionDiagnostic(
         _ failure: CurrentV2ReviewNotificationDecodeFailure,
         stage: ReviewIngestionDiagnosticRecord.Stage? = nil,
@@ -2269,6 +2282,7 @@ private actor AppServerReviewEventSession {
     private let control: AppServerReviewControl
     private let mailbox: BackendReviewEventMailbox
     private let ingestionDiagnosticRecorder: any ReviewIngestionDiagnosticRecording
+    private let attemptFailureRecorder: @Sendable () async -> Void
     private var terminalReducer: CurrentV2ReviewTerminalReducer?
     private var emittedCanonicalStart = false
     private var reviewThreadIDsForCleanup: [String] = []
@@ -2291,12 +2305,14 @@ private actor AppServerReviewEventSession {
         control: AppServerReviewControl,
         mailbox: BackendReviewEventMailbox = .init(),
         ingestionDiagnosticRecorder: any ReviewIngestionDiagnosticRecording,
+        attemptFailureRecorder: @escaping @Sendable () async -> Void,
         isRunFinalized: Bool = true
     ) {
         self.run = run
         self.control = control
         self.mailbox = mailbox
         self.ingestionDiagnosticRecorder = ingestionDiagnosticRecorder
+        self.attemptFailureRecorder = attemptFailureRecorder
         self.isRunFinalized = isRunFinalized
         self.terminalReducer = Self.makeTerminalReducer(for: run)
         if let reviewThreadID = run.reviewThreadID?.nilIfEmpty,
@@ -2645,6 +2661,7 @@ private actor AppServerReviewEventSession {
             terminalCommitState = .finalizing
         }
         if let error = resolution.ingestionError {
+            await attemptFailureRecorder()
             recordIngestionDiagnostic(
                 notification,
                 error: error,
@@ -2887,6 +2904,9 @@ private actor AppServerReviewEventSession {
         diagnosticFor notification: AppServerRoutedReviewNotification
     ) async {
         let didFailAttempt = await failAttempt(error)
+        if didFailAttempt {
+            await attemptFailureRecorder()
+        }
         recordIngestionDiagnostic(
             notification,
             error: error,

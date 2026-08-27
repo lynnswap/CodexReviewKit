@@ -1698,6 +1698,54 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         for capturedDiagnostic in captured {
             #expect(try canonicalJSON(capturedDiagnostic.rawParams) == expectedRawParams)
         }
+        let metrics = await backend.notificationRouterMetricsForTesting()
+        #expect(metrics.attemptFailures == 1)
+        #expect(metrics.ignored == 1)
+        #expect(metrics.connectionFailures == 0)
+    }
+
+    @Test func reducerFailureRecordsAttemptFailure() async throws {
+        let transport = FakeJSONRPCTransport()
+        let diagnostics = ReviewIngestionDiagnosticCapture()
+        let backend = AppServerCodexReviewBackend(
+            client: .init(transport: transport),
+            ingestionDiagnosticRecorder: diagnostics
+        )
+        let attempt = await backend.reviewAttemptForTesting(.init(
+            attemptID: "attempt-1",
+            threadID: "thread-selected",
+            turnID: "turn-selected",
+            reviewThreadID: "thread-selected"
+        ))
+
+        for review in ["First review", "Conflicting review"] {
+            try await transport.emitServerNotification(
+                method: "item/completed",
+                params: V2ItemNotification(
+                    threadID: "thread-selected",
+                    turnID: "turn-selected",
+                    item: .init(
+                        type: "exitedReviewMode",
+                        id: "review-result",
+                        review: review
+                    )
+                )
+            )
+        }
+
+        let events = try await collectEvents(from: attempt.events)
+        #expect(events.last == .failed(
+            ReviewIngestionError.conflictingStableEvent(
+                key: "item/completed:thread-selected:turn-selected:review-result"
+            ).localizedDescription
+        ))
+        await backend.waitForReviewNotificationCompletionForTesting(2)
+        let diagnostic = try #require(diagnostics.snapshot().last)
+        #expect(diagnostic.stage == .terminalReduction)
+        #expect(diagnostic.disposition == .attemptFailed)
+        let metrics = await backend.notificationRouterMetricsForTesting()
+        #expect(metrics.attemptFailures == 1)
+        #expect(metrics.connectionFailures == 0)
     }
 
     @Test func malformedInputAfterFinishedTerminalRecordsIgnoredOutcome() async throws {
