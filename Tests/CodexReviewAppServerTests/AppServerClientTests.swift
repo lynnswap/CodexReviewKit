@@ -6835,6 +6835,436 @@ struct AppServerClientTests {
         #expect(deletedThreadIDs == ["review-thread-1", "thread-1"])
     }
 
+    @Test func backendCleanupTimesOutHeldRequestAndCancelsItsSend() async throws {
+        let transport = FakeJSONRPCTransport()
+        let cleanupGate = AsyncGate()
+        let timeoutGate = AsyncGate()
+        await transport.holdNextIgnoringCancellation(
+            method: "thread/backgroundTerminals/clean",
+            gate: cleanupGate
+        )
+        let backend = AppServerCodexReviewBackend(
+            client: .init(transport: transport),
+            cleanupRequestTimeout: .seconds(2),
+            cleanupRequestSleep: { _ in
+                await timeoutGate.wait()
+            }
+        )
+        let run = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "thread-1"
+        )
+        let cleanup = Task {
+            try await backend.cleanupReview(run)
+        }
+
+        await transport.waitForRequestCount(1)
+        await timeoutGate.open()
+
+        await #expect(throws: ReviewRuntimeCloseFailure.connection(
+            "thread/backgroundTerminals/clean for thread-1: "
+                + "thread/backgroundTerminals/clean cleanup request timed out after 2.0 seconds."
+        )) {
+            try await cleanup.value
+        }
+        #expect(await transport.recordedRequests().map(\.method) == [
+            "thread/backgroundTerminals/clean",
+        ])
+        #expect(await transport.isClosedForTesting())
+    }
+
+    @Test func backendCleanupTimeoutRemovesQueuedSerializerRequest() async throws {
+        let transport = FakeJSONRPCTransport()
+        let activeRequestGate = AsyncGate()
+        let timeoutGate = AsyncGate()
+        let (waiterQueuedStream, waiterQueuedContinuation) = AsyncStream<Void>.makeStream()
+        let serializer = RequestSerializer(waiterQueued: {
+            waiterQueuedContinuation.yield()
+        })
+        await transport.holdNextIgnoringCancellation(
+            method: "thread/unsubscribe",
+            gate: activeRequestGate
+        )
+        try await transport.enqueue(
+            AppServerAPI.Thread.Unsubscribe.Response(status: .unsubscribed),
+            for: "thread/unsubscribe"
+        )
+        let client = AppServerClient(
+            transport: transport,
+            serializer: serializer
+        )
+        let activeRequest = Task {
+            try await client.send(AppServerAPI.Thread.Unsubscribe.Request(
+                params: .init(threadID: "thread-1")
+            ))
+        }
+        await transport.waitForActiveRequests(method: "thread/unsubscribe")
+        let backend = AppServerCodexReviewBackend(
+            client: client,
+            cleanupRequestTimeout: .seconds(2),
+            cleanupRequestSleep: { _ in
+                await timeoutGate.wait()
+            }
+        )
+        let run = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "thread-1"
+        )
+        let cleanup = Task {
+            try await backend.cleanupReview(run)
+        }
+
+        var waiterQueuedIterator = waiterQueuedStream.makeAsyncIterator()
+        _ = await waiterQueuedIterator.next()
+        await timeoutGate.open()
+
+        await #expect(throws: ReviewRuntimeCloseFailure.connection(
+            "thread/backgroundTerminals/clean for thread-1: "
+                + "thread/backgroundTerminals/clean cleanup request timed out after 2.0 seconds."
+        )) {
+            try await cleanup.value
+        }
+        await #expect(throws: JSONRPC.Error.closed) {
+            try await activeRequest.value
+        }
+        #expect(await transport.recordedRequests().map(\.method) == [
+            "thread/unsubscribe",
+        ])
+        #expect(await transport.isClosedForTesting())
+        #expect(try await serializer.run(scope: .thread("thread-1")) { "next" } == "next")
+    }
+
+    @Test func backendCleanupPreservesJSONRPCConnectionFailureClassification() async throws {
+        let transport = FakeJSONRPCTransport()
+        await transport.enqueueFailure(
+            .closed,
+            for: "thread/backgroundTerminals/clean"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Thread.Unsubscribe.Response(status: .unsubscribed),
+            for: "thread/unsubscribe"
+        )
+        try await transport.enqueue(EmptyResponse(), for: "thread/delete")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let run = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "thread-1"
+        )
+
+        await #expect(throws: ReviewRuntimeCloseFailure.connection(
+            "thread/backgroundTerminals/clean for thread-1: JSON-RPC transport is closed."
+        )) {
+            try await backend.cleanupReview(run)
+        }
+    }
+
+    @Test func cancelledQueuedSameScopeWaiterIsRemovedBeforeGrant() async throws {
+        let firstGate = AsyncGate()
+        let (waiterQueuedStream, waiterQueuedContinuation) = AsyncStream<Void>.makeStream()
+        let serializer = RequestSerializer(waiterQueued: {
+            waiterQueuedContinuation.yield()
+        })
+        let scope = AppServerAPI.RequestScope.thread("thread-1")
+        let firstStarted = AsyncGate()
+        let first = Task {
+            try await serializer.run(scope: scope) {
+                await firstStarted.open()
+                await firstGate.waitIgnoringCancellation()
+                return "first"
+            }
+        }
+        await firstStarted.wait()
+
+        let second = Task {
+            try await serializer.run(scope: scope) {
+                "second"
+            }
+        }
+        var waiterQueuedIterator = waiterQueuedStream.makeAsyncIterator()
+        _ = await waiterQueuedIterator.next()
+        second.cancel()
+        await #expect(throws: CancellationError.self) {
+            try await second.value
+        }
+
+        await firstGate.open()
+        #expect(try await first.value == "first")
+        #expect(try await serializer.run(scope: scope) { "next" } == "next")
+    }
+
+    @Test func cancelledGrantedWaiterReleasesLaneExactlyOnce() async throws {
+        let firstGate = AsyncGate()
+        let grantStarted = AsyncGate()
+        let grantGate = AsyncGate()
+        let grantCount = CallCounter()
+        let (waiterQueuedStream, waiterQueuedContinuation) = AsyncStream<Void>.makeStream()
+        let serializer = RequestSerializer(
+            waiterQueued: {
+                waiterQueuedContinuation.yield()
+            },
+            waiterGranted: {
+                guard await grantCount.record() == 1 else {
+                    return
+                }
+                await grantStarted.open()
+                await grantGate.waitIgnoringCancellation()
+            }
+        )
+        let scope = AppServerAPI.RequestScope.thread("thread-1")
+        let firstStarted = AsyncGate()
+        let first = Task {
+            try await serializer.run(scope: scope) {
+                await firstStarted.open()
+                await firstGate.waitIgnoringCancellation()
+                return "first"
+            }
+        }
+        await firstStarted.wait()
+
+        var waiterQueuedIterator = waiterQueuedStream.makeAsyncIterator()
+        let second = Task {
+            try await serializer.run(scope: scope) { "second" }
+        }
+        _ = await waiterQueuedIterator.next()
+        let third = Task {
+            try await serializer.run(scope: scope) { "third" }
+        }
+        _ = await waiterQueuedIterator.next()
+
+        await firstGate.open()
+        await grantStarted.wait()
+        second.cancel()
+        await grantGate.open()
+
+        await #expect(throws: CancellationError.self) {
+            try await second.value
+        }
+        #expect(try await first.value == "first")
+        #expect(try await third.value == "third")
+        #expect(try await serializer.run(scope: scope) { "next" } == "next")
+    }
+
+    @Test func timeoutCleanupPreservesCallerCancellationAcrossTransportContainment() async throws {
+        let transport = FakeJSONRPCTransport()
+        let cleanupGate = AsyncGate()
+        let timeoutGate = AsyncGate()
+        let closeStarted = AsyncGate()
+        let closeGate = AsyncGate()
+        await transport.holdNextIgnoringCancellation(
+            method: "thread/backgroundTerminals/clean",
+            gate: cleanupGate
+        )
+        let client = AppServerClient(transport: transport)
+        let backend = AppServerCodexReviewBackend(
+            client: client,
+            cleanupRequestTimeout: .seconds(2),
+            cleanupRequestSleep: { _ in
+                await timeoutGate.wait()
+            },
+            cleanupTransportClose: {
+                await closeStarted.open()
+                await closeGate.waitIgnoringCancellation()
+                try await client.close()
+            }
+        )
+        let run = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "thread-1"
+        )
+        let cleanup = Task {
+            try await backend.cleanupReview(run)
+        }
+
+        await transport.waitForRequestCount(1)
+        await timeoutGate.open()
+        await closeStarted.wait()
+        cleanup.cancel()
+        await closeGate.open()
+
+        do {
+            try await cleanup.value
+            Issue.record("Timeout cleanup unexpectedly succeeded.")
+        } catch let invalidation as AppServerCleanupTransportInvalidation {
+            #expect(invalidation.failure == .connection(
+                "thread/backgroundTerminals/clean cleanup request timed out after 2.0 seconds."
+            ))
+            #expect(invalidation.callerWasCancelled)
+        } catch {
+            Issue.record("Timeout cleanup returned an untyped error.")
+        }
+    }
+
+    @Test func cancelledCleanupClosesTransportAndReturnsCancellation() async throws {
+        let transport = FakeJSONRPCTransport()
+        let cleanupGate = AsyncGate()
+        await transport.holdNextIgnoringCancellation(
+            method: "thread/backgroundTerminals/clean",
+            gate: cleanupGate
+        )
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let run = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "thread-1"
+        )
+        let cleanup = Task {
+            try await backend.cleanupReview(run)
+        }
+
+        await transport.waitForRequestCount(1)
+        cleanup.cancel()
+
+        do {
+            try await cleanup.value
+            Issue.record("Cancelled cleanup unexpectedly succeeded.")
+        } catch let invalidation as AppServerCleanupTransportInvalidation {
+            #expect(invalidation.failure == .connection(
+                "thread/backgroundTerminals/clean cleanup request was cancelled."
+            ))
+            #expect(invalidation.callerWasCancelled)
+        } catch {
+            Issue.record("Cancelled cleanup returned an untyped error.")
+        }
+        #expect(await transport.isClosedForTesting())
+        #expect(await transport.recordedRequests().map(\.method) == [
+            "thread/backgroundTerminals/clean",
+        ])
+    }
+
+    @Test func cleanupAlreadyCancelledAtAdmissionStillRunsBoundedRequests() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(
+            EmptyResponse(),
+            for: "thread/backgroundTerminals/clean"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Thread.Unsubscribe.Response(status: .unsubscribed),
+            for: "thread/unsubscribe"
+        )
+        try await transport.enqueue(
+            EmptyResponse(),
+            for: "thread/delete"
+        )
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let run = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "thread-1"
+        )
+        let admissionGate = AsyncGate()
+        let cleanup = Task {
+            await admissionGate.waitIgnoringCancellation()
+            try await backend.cleanupReview(run)
+        }
+
+        cleanup.cancel()
+        await admissionGate.open()
+        try await cleanup.value
+
+        #expect(await transport.recordedRequests().map(\.method) == [
+            "thread/backgroundTerminals/clean",
+            "thread/unsubscribe",
+            "thread/delete",
+        ])
+        #expect(await transport.isClosedForTesting() == false)
+    }
+
+    @Test func cleanupClassifiesTransportFatalErrorsAsRuntimeInvalidation() async throws {
+        let transportErrors: [JSONRPC.Error] = [
+            .invalidMessage("Malformed response."),
+            .transportTerminated(.processExit("App-server exited.")),
+        ]
+        for transportError in transportErrors {
+            let transport = FakeJSONRPCTransport()
+            await transport.enqueueFailure(
+                transportError,
+                for: "thread/backgroundTerminals/clean"
+            )
+            let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+            let run = CodexReviewBackendModel.Review.Run(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                reviewThreadID: "thread-1"
+            )
+
+            do {
+                try await backend.cleanupReview(run)
+                Issue.record("Transport-fatal cleanup unexpectedly succeeded.")
+            } catch let failure as ReviewRuntimeCloseFailure {
+                #expect(failure == .connection(
+                    "thread/backgroundTerminals/clean for thread-1: "
+                        + transportError.localizedDescription
+                ))
+            } catch {
+                Issue.record("Transport-fatal cleanup returned an untyped error.")
+            }
+            #expect(await transport.isClosedForTesting())
+            #expect(await transport.recordedRequests().map(\.method) == [
+                "thread/backgroundTerminals/clean",
+            ])
+        }
+    }
+
+    @Test func cleanupSeparatesRawTransportAndResponseDecodingFailures() async throws {
+        let transportFailure = FakeJSONRPCTransport()
+        await transportFailure.enqueueTransportFailure(
+            message: "raw cleanup I/O failed",
+            for: "thread/backgroundTerminals/clean"
+        )
+        let transportBackend = AppServerCodexReviewBackend(
+            client: .init(transport: transportFailure)
+        )
+        let run = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-transport",
+            turnID: "turn-1",
+            reviewThreadID: "thread-transport"
+        )
+
+        do {
+            try await transportBackend.cleanupReview(run)
+            Issue.record("Raw transport cleanup unexpectedly succeeded.")
+        } catch let failure as ReviewRuntimeCloseFailure {
+            guard case .connection(let message) = failure else {
+                Issue.record("Raw transport cleanup did not invalidate the runtime.")
+                return
+            }
+            #expect(message.contains("transport"))
+            #expect(message.contains("raw cleanup I/O failed"))
+        }
+        #expect(await transportFailure.isClosedForTesting())
+
+        let decodingFailure = FakeJSONRPCTransport()
+        await decodingFailure.enqueueRawResponse(
+            Data("not-json".utf8),
+            for: "thread/backgroundTerminals/clean"
+        )
+        let decodingBackend = AppServerCodexReviewBackend(
+            client: .init(transport: decodingFailure)
+        )
+        let decodingRun = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-decoding",
+            turnID: "turn-1",
+            reviewThreadID: "thread-decoding"
+        )
+
+        do {
+            try await decodingBackend.cleanupReview(decodingRun)
+            Issue.record("Response decoding cleanup unexpectedly succeeded.")
+        } catch let failure as ReviewRuntimeCloseFailure {
+            guard case .cleanup(let message) = failure else {
+                Issue.record("Response decoding failure incorrectly invalidated the runtime.")
+                return
+            }
+            #expect(message.contains("responseDecoding"))
+            #expect(message.contains("thread/backgroundTerminals/clean"))
+        }
+        #expect(await decodingFailure.isClosedForTesting() == false)
+    }
+
     @Test @MainActor
     func storeRetainsCleanupFailureAsSecondaryDiagnosticWithoutMaskingPrimary() async throws {
         let backend = FakeCodexReviewBackend()

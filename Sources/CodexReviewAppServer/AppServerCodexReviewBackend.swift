@@ -15,6 +15,83 @@ private func makeAppServerReviewAttemptID() -> String {
     UUID().uuidString
 }
 
+private struct AppServerCleanupRequestTimeout: LocalizedError, Sendable {
+    let method: String
+    let timeout: Duration
+    let transportCloseFailure: String?
+
+    var errorDescription: String? {
+        var message = "\(method) cleanup request timed out after \(timeout)."
+        if let transportCloseFailure {
+            message += " Transport close failed: \(transportCloseFailure)"
+        }
+        return message
+    }
+}
+
+private struct AppServerCleanupRequestRaceFailure: LocalizedError, Sendable {
+    let message: String
+
+    var errorDescription: String? {
+        message
+    }
+}
+
+package struct AppServerCleanupTransportInvalidation: LocalizedError, Sendable {
+    package let failure: ReviewRuntimeCloseFailure
+    package let callerWasCancelled: Bool
+    package let message: String
+
+    package init(
+        failure: ReviewRuntimeCloseFailure,
+        callerWasCancelled: Bool,
+        message: String
+    ) {
+        self.failure = failure
+        self.callerWasCancelled = callerWasCancelled
+        self.message = message
+    }
+
+    package var errorDescription: String? {
+        failure.localizedDescription
+    }
+}
+
+private enum AppServerCleanupRequestOutcome<Response: Sendable>: Sendable {
+    case success(Response)
+    case failure(String)
+    case transportInvalidated(String)
+    case cancelled
+    case timedOut(AppServerCleanupRequestTimeout)
+}
+
+private actor AppServerCleanupRequestRace<Response: Sendable> {
+    private var outcome: AppServerCleanupRequestOutcome<Response>?
+    private var continuation: CheckedContinuation<AppServerCleanupRequestOutcome<Response>, Never>?
+
+    func resolve(_ outcome: AppServerCleanupRequestOutcome<Response>) {
+        guard self.outcome == nil else {
+            return
+        }
+        self.outcome = outcome
+        continuation?.resume(returning: outcome)
+        continuation = nil
+    }
+
+    func wait() async -> AppServerCleanupRequestOutcome<Response> {
+        if let outcome {
+            return outcome
+        }
+        return await withCheckedContinuation { continuation in
+            if let outcome {
+                continuation.resume(returning: outcome)
+            } else {
+                self.continuation = continuation
+            }
+        }
+    }
+}
+
 package struct AppServerRuntimeOwnerLifecycleHandle: Sendable {
     private let closeAdmissionOperation: @Sendable () async -> Void
     private let closeAndWaitOperation: @Sendable () async throws -> Void
@@ -189,6 +266,9 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     private let client: AppServerClient
     private let threadStartPermissionStrategy: AppServerAPI.Thread.Start.PermissionStrategy
     private let ingestionDiagnosticRecorder: any ReviewIngestionDiagnosticRecording
+    private let cleanupRequestTimeout: Duration
+    private let cleanupRequestSleep: @Sendable (Duration) async throws -> Void
+    private let cleanupTransportClose: @Sendable () async throws -> Void
     private var controlsByThreadID: [String: AppServerReviewControl] = [:]
     private var reviewEventSessionsByAttemptID: [String: AppServerReviewEventSession] = [:]
     private var reviewEventSessionRegistrationOrdinalByAttemptID: [String: Int] = [:]
@@ -217,11 +297,17 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     package init(
         client: AppServerClient,
         threadStartPermissionStrategy: AppServerAPI.Thread.Start.PermissionStrategy = .modernPermissions,
-        ingestionDiagnosticRecorder: any ReviewIngestionDiagnosticRecording = OSLogReviewIngestionDiagnosticRecorder()
+        ingestionDiagnosticRecorder: any ReviewIngestionDiagnosticRecording = OSLogReviewIngestionDiagnosticRecorder(),
+        cleanupRequestTimeout: Duration = .seconds(2),
+        cleanupRequestSleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+        cleanupTransportClose: (@Sendable () async throws -> Void)? = nil
     ) {
         self.client = client
         self.threadStartPermissionStrategy = threadStartPermissionStrategy
         self.ingestionDiagnosticRecorder = ingestionDiagnosticRecorder
+        self.cleanupRequestTimeout = cleanupRequestTimeout
+        self.cleanupRequestSleep = cleanupRequestSleep
+        self.cleanupTransportClose = cleanupTransportClose ?? { try await client.close() }
     }
 
     package nonisolated var runtimeOwnerLifecycleHandle: AppServerRuntimeOwnerLifecycleHandle {
@@ -1024,11 +1110,136 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         try await performCleanupReview(run)
     }
 
+    private func sendCleanupRequest<Request: AppServerAPI.Request>(
+        _ request: Request
+    ) async throws -> Request.Response {
+        let race = AppServerCleanupRequestRace<Request.Response>()
+        let sendTask = Task { [client] in
+            do {
+                await race.resolve(.success(try await client.sendCleanupRequest(request)))
+            } catch is CancellationError {
+                await race.resolve(.cancelled)
+            } catch let failure as AppServerCleanupRequestFailure {
+                switch failure.stage {
+                case .transport:
+                    await race.resolve(.transportInvalidated(failure.localizedDescription))
+                case .responseDecoding:
+                    await race.resolve(.failure(failure.localizedDescription))
+                }
+            } catch let error as JSONRPC.Error {
+                switch error {
+                case .closed, .invalidMessage, .transportTerminated:
+                    await race.resolve(.transportInvalidated(error.localizedDescription))
+                case .responseError:
+                    await race.resolve(.failure(error.localizedDescription))
+                }
+            } catch {
+                await race.resolve(.failure(error.localizedDescription))
+            }
+        }
+        let timeoutTask = Task { [cleanupRequestSleep, cleanupRequestTimeout] in
+            do {
+                try await cleanupRequestSleep(cleanupRequestTimeout)
+                await race.resolve(.timedOut(.init(
+                    method: Request.method,
+                    timeout: cleanupRequestTimeout,
+                    transportCloseFailure: nil
+                )))
+            } catch {
+                await race.resolve(.cancelled)
+            }
+        }
+
+        let observesNewCallerCancellation = Task.isCancelled == false
+        let outcome = await withTaskCancellationHandler {
+            await race.wait()
+        } onCancel: {
+            guard observesNewCallerCancellation else {
+                return
+            }
+            Task {
+                await race.resolve(.cancelled)
+            }
+        }
+        switch outcome {
+        case .success(let response):
+            timeoutTask.cancel()
+            await timeoutTask.value
+            await sendTask.value
+            return response
+        case .failure(let message):
+            timeoutTask.cancel()
+            await timeoutTask.value
+            await sendTask.value
+            throw AppServerCleanupRequestRaceFailure(message: message)
+        case .transportInvalidated(let message):
+            timeoutTask.cancel()
+            await timeoutTask.value
+            sendTask.cancel()
+            let transportCloseFailure = await closeClientForCleanupTermination()
+            await sendTask.value
+            var invalidationMessage = message
+            if let transportCloseFailure {
+                invalidationMessage += " Transport close failed: \(transportCloseFailure)"
+            }
+            throw AppServerCleanupTransportInvalidation(
+                failure: .connection(invalidationMessage),
+                callerWasCancelled: Task.isCancelled,
+                message: invalidationMessage
+            )
+        case .cancelled:
+            timeoutTask.cancel()
+            await timeoutTask.value
+            sendTask.cancel()
+            let transportCloseFailure = await closeClientForCleanupTermination()
+            await sendTask.value
+            var cancellationMessage = "\(Request.method) cleanup request was cancelled."
+            if let transportCloseFailure {
+                cancellationMessage += " Transport close failed: \(transportCloseFailure)"
+            }
+            throw AppServerCleanupTransportInvalidation(
+                failure: .connection(cancellationMessage),
+                callerWasCancelled: Task.isCancelled,
+                message: cancellationMessage
+            )
+        case .timedOut(let timeout):
+            timeoutTask.cancel()
+            await timeoutTask.value
+            sendTask.cancel()
+            let transportCloseFailure = await closeClientForCleanupTermination()
+            await sendTask.value
+            var timeoutMessage = "\(timeout.method) cleanup request timed out after \(timeout.timeout)."
+            if let transportCloseFailure {
+                timeoutMessage += " Transport close failed: \(transportCloseFailure)"
+            }
+            throw AppServerCleanupTransportInvalidation(
+                failure: .connection(timeoutMessage),
+                callerWasCancelled: Task.isCancelled,
+                message: timeoutMessage
+            )
+        }
+    }
+
+    private func closeClientForCleanupTermination() async -> String? {
+        do {
+            try await cleanupTransportClose()
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
     private func performCleanupReview(
         _ run: CodexReviewBackendModel.Review.Run
     ) async throws {
         controlsByThreadID.removeValue(forKey: run.threadID)
         var cleanupThreadIDs = cleanupThreadIDs(for: run)
+        defer {
+            for threadID in cleanupThreadIDs {
+                reviewEventSessionCanonicalThreadIDByThreadID.removeValue(forKey: threadID)
+            }
+            reviewThreadIDsForCleanupByThreadID.removeValue(forKey: run.threadID)
+        }
         let session = unregisterReviewEventSession(for: run)
         reviewStartRoutingAttemptIDs.remove(run.attemptID)
         discardUnmatchedReviewNotificationsIfIdle()
@@ -1041,41 +1252,80 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             }
         }
         var failureMessages: [String] = []
+        var shouldStopNetworkCleanup = false
+        var runtimeWasInvalidated = false
         do {
-            let _: EmptyResponse = try await client.send(AppServerAPI.Thread.BackgroundTerminals.Clean.Request(
+            let _: EmptyResponse = try await sendCleanupRequest(AppServerAPI.Thread.BackgroundTerminals.Clean.Request(
                 params: .init(threadID: run.threadID)
             ))
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let invalidated as AppServerCleanupTransportInvalidation {
+            if invalidated.callerWasCancelled {
+                throw invalidated
+            }
+            failureMessages.append(
+                "thread/backgroundTerminals/clean for \(run.threadID): \(invalidated.message)"
+            )
+            shouldStopNetworkCleanup = true
+            runtimeWasInvalidated = true
         } catch {
             failureMessages.append(
                 "thread/backgroundTerminals/clean for \(run.threadID): \(error.localizedDescription)"
             )
         }
-        do {
-            let _: AppServerAPI.Thread.Unsubscribe.Response = try await client.send(AppServerAPI.Thread.Unsubscribe.Request(
-                params: .init(threadID: run.threadID)
-            ))
-        } catch {
-            failureMessages.append(
-                "thread/unsubscribe for \(run.threadID): \(error.localizedDescription)"
-            )
-        }
-        for threadID in cleanupThreadIDs {
+        if shouldStopNetworkCleanup == false {
             do {
-                let _: EmptyResponse = try await client.send(AppServerAPI.Thread.Delete.Request(
-                    params: .init(threadID: threadID)
+                let _: AppServerAPI.Thread.Unsubscribe.Response = try await sendCleanupRequest(AppServerAPI.Thread.Unsubscribe.Request(
+                    params: .init(threadID: run.threadID)
                 ))
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let invalidated as AppServerCleanupTransportInvalidation {
+                if invalidated.callerWasCancelled {
+                    throw invalidated
+                }
+                failureMessages.append(
+                    "thread/unsubscribe for \(run.threadID): \(invalidated.message)"
+                )
+                shouldStopNetworkCleanup = true
+                runtimeWasInvalidated = true
             } catch {
                 failureMessages.append(
-                    "thread/delete for \(threadID): \(error.localizedDescription)"
+                    "thread/unsubscribe for \(run.threadID): \(error.localizedDescription)"
                 )
             }
         }
-        for threadID in cleanupThreadIDs {
-            reviewEventSessionCanonicalThreadIDByThreadID.removeValue(forKey: threadID)
+        if shouldStopNetworkCleanup == false {
+            for threadID in cleanupThreadIDs {
+                do {
+                    let _: EmptyResponse = try await sendCleanupRequest(AppServerAPI.Thread.Delete.Request(
+                        params: .init(threadID: threadID)
+                    ))
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch let invalidated as AppServerCleanupTransportInvalidation {
+                    if invalidated.callerWasCancelled {
+                        throw invalidated
+                    }
+                    failureMessages.append(
+                        "thread/delete for \(threadID): \(invalidated.message)"
+                    )
+                    shouldStopNetworkCleanup = true
+                    runtimeWasInvalidated = true
+                    break
+                } catch {
+                    failureMessages.append(
+                        "thread/delete for \(threadID): \(error.localizedDescription)"
+                    )
+                }
+            }
         }
-        reviewThreadIDsForCleanupByThreadID.removeValue(forKey: run.threadID)
         if failureMessages.isEmpty == false {
-            throw ReviewRuntimeCloseFailure.cleanup(failureMessages.joined(separator: "; "))
+            let message = failureMessages.joined(separator: "; ")
+            throw runtimeWasInvalidated
+                ? ReviewRuntimeCloseFailure.connection(message)
+                : ReviewRuntimeCloseFailure.cleanup(message)
         }
     }
 

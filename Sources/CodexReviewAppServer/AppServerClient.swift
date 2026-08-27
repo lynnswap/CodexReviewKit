@@ -27,6 +27,25 @@ package struct AppServerStartRequestFailure: LocalizedError, Equatable, Sendable
     }
 }
 
+package struct AppServerCleanupRequestFailure: LocalizedError, Equatable, Sendable {
+    package enum Stage: String, Equatable, Sendable {
+        case transport
+        case responseDecoding
+    }
+
+    package var stage: Stage
+    package var underlyingDescription: String
+
+    package init(stage: Stage, underlyingDescription: String) {
+        self.stage = stage
+        self.underlyingDescription = underlyingDescription
+    }
+
+    package var errorDescription: String? {
+        "App-server cleanup request failed during \(stage.rawValue): \(underlyingDescription)"
+    }
+}
+
 package actor AppServerClient {
     private static let appServerOverloadedErrorCode = -32001
     private static let overloadRetryDelays: [Duration] = [
@@ -38,7 +57,7 @@ package actor AppServerClient {
     private let transport: any JSONRPC.Transport
     private let overloadRetryDelay: @Sendable (Int) -> Duration?
     private let retrySleep: @Sendable (Duration) async throws -> Void
-    private let serializer = RequestSerializer()
+    private let serializer: RequestSerializer
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private var nextRequestID = 1
@@ -48,11 +67,13 @@ package actor AppServerClient {
     package init(
         transport: any JSONRPC.Transport,
         overloadRetryDelay: @escaping @Sendable (Int) -> Duration? = AppServerClient.defaultOverloadRetryDelay,
-        retrySleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
+        retrySleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+        serializer: RequestSerializer = .init()
     ) {
         self.transport = transport
         self.overloadRetryDelay = overloadRetryDelay
         self.retrySleep = retrySleep
+        self.serializer = serializer
     }
 
     package func initialize(
@@ -113,8 +134,21 @@ package actor AppServerClient {
             params: request.params,
             responseType: Request.Response.self,
             scope: request.scope,
-            normalizesStartFailure: true,
+            failureKind: .start,
             overloadRetryAdmission: overloadRetryAdmission
+        )
+    }
+
+    package func sendCleanupRequest<Request: AppServerAPI.Request>(
+        _ request: Request
+    ) async throws -> Request.Response {
+        try await performSend(
+            method: Request.method,
+            params: request.params,
+            responseType: Request.Response.self,
+            scope: request.scope,
+            failureKind: .cleanup,
+            overloadRetryAdmission: nil
         )
     }
 
@@ -129,7 +163,7 @@ package actor AppServerClient {
             params: params,
             responseType: responseType,
             scope: scope,
-            normalizesStartFailure: false,
+            failureKind: .none,
             overloadRetryAdmission: nil
         )
     }
@@ -139,7 +173,7 @@ package actor AppServerClient {
         params: Params,
         responseType: Response.Type,
         scope: AppServerAPI.RequestScope?,
-        normalizesStartFailure: Bool,
+        failureKind: FailureKind,
         overloadRetryAdmission: (@Sendable (AppServerOverloadRetryAdmissionEvent) async throws -> Void)?
     ) async throws -> Response {
         try await serializer.run(scope: scope) { [transport, encoder, decoder, self] in
@@ -161,28 +195,42 @@ package actor AppServerClient {
                     } catch let error as JSONRPC.Error {
                         throw error
                     } catch {
-                        guard normalizesStartFailure else {
+                        switch failureKind {
+                        case .none:
                             throw error
+                        case .start:
+                            logger.error(
+                                "JSON-RPC transport failed for request \(requestID, privacy: .public) -> \(method, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                            )
+                            throw AppServerStartRequestFailure(
+                                stage: .transport,
+                                underlyingDescription: error.localizedDescription
+                            )
+                        case .cleanup:
+                            throw AppServerCleanupRequestFailure(
+                                stage: .transport,
+                                underlyingDescription: error.localizedDescription
+                            )
                         }
-                        logger.error(
-                            "JSON-RPC transport failed for request \(requestID, privacy: .public) -> \(method, privacy: .public): \(error.localizedDescription, privacy: .public)"
-                        )
-                        throw AppServerStartRequestFailure(
-                            stage: .transport,
-                            underlyingDescription: error.localizedDescription
-                        )
                     }
                     let response: Response
                     do {
                         response = try decoder.decode(responseType, from: rawResponse)
                     } catch {
-                        guard normalizesStartFailure else {
+                        switch failureKind {
+                        case .none:
                             throw error
+                        case .start:
+                            throw AppServerStartRequestFailure(
+                                stage: .responseDecoding,
+                                underlyingDescription: error.localizedDescription
+                            )
+                        case .cleanup:
+                            throw AppServerCleanupRequestFailure(
+                                stage: .responseDecoding,
+                                underlyingDescription: error.localizedDescription
+                            )
                         }
-                        throw AppServerStartRequestFailure(
-                            stage: .responseDecoding,
-                            underlyingDescription: error.localizedDescription
-                        )
                     }
                     logger.debug("JSON-RPC response \(requestID, privacy: .public) <- \(method, privacy: .public)")
                     return response
@@ -208,6 +256,12 @@ package actor AppServerClient {
                 }
             }
         }
+    }
+
+    private enum FailureKind: Sendable {
+        case none
+        case start
+        case cleanup
     }
 
     package func notify<Params: Encodable & Sendable>(
@@ -253,9 +307,17 @@ package actor AppServerClient {
 }
 
 package actor RequestSerializer {
+    private let waiterQueued: (@Sendable () -> Void)?
+    private let waiterGranted: (@Sendable () async -> Void)?
     private var lanes: [AppServerAPI.RequestScope: SerialLane] = [:]
 
-    package init() {}
+    package init(
+        waiterQueued: (@Sendable () -> Void)? = nil,
+        waiterGranted: (@Sendable () async -> Void)? = nil
+    ) {
+        self.waiterQueued = waiterQueued
+        self.waiterGranted = waiterGranted
+    }
 
     package func run<Output: Sendable>(
         scope: AppServerAPI.RequestScope?,
@@ -265,8 +327,11 @@ package actor RequestSerializer {
             return try await operation()
         }
         let lane = lane(for: scope)
-        await lane.enter()
+        let waitedForAdmission = try await lane.enter()
         do {
+            if waitedForAdmission {
+                try Task.checkCancellation()
+            }
             let output = try await operation()
             await lane.leave()
             return output
@@ -280,24 +345,66 @@ package actor RequestSerializer {
         if let lane = lanes[scope] {
             return lane
         }
-        let lane = SerialLane()
+        let lane = SerialLane(
+            waiterQueued: waiterQueued,
+            waiterGranted: waiterGranted
+        )
         lanes[scope] = lane
         return lane
     }
 }
 
 private actor SerialLane {
-    private var isOccupied = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private struct Waiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Void, any Error>
+    }
 
-    func enter() async {
+    private var isOccupied = false
+    private var waiters: [Waiter] = []
+    private let waiterQueued: (@Sendable () -> Void)?
+    private let waiterGranted: (@Sendable () async -> Void)?
+
+    init(
+        waiterQueued: (@Sendable () -> Void)?,
+        waiterGranted: (@Sendable () async -> Void)?
+    ) {
+        self.waiterQueued = waiterQueued
+        self.waiterGranted = waiterGranted
+    }
+
+    func enter() async throws -> Bool {
         if isOccupied == false {
             isOccupied = true
-            return
+            return false
         }
-        await withCheckedContinuation { continuation in
-            waiters.append(continuation)
+
+        let waiterID = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                if Task.isCancelled {
+                    continuation.resume(throwing: CancellationError())
+                } else if isOccupied {
+                    waiters.append(.init(id: waiterID, continuation: continuation))
+                    waiterQueued?()
+                } else {
+                    isOccupied = true
+                    continuation.resume()
+                }
+            }
+        } onCancel: {
+            Task {
+                await self.cancelWaiter(id: waiterID)
+            }
         }
+        await waiterGranted?()
+        do {
+            try Task.checkCancellation()
+        } catch {
+            leave()
+            throw error
+        }
+        return true
     }
 
     func leave() {
@@ -305,7 +412,15 @@ private actor SerialLane {
             isOccupied = false
         } else {
             let next = waiters.removeFirst()
-            next.resume()
+            next.continuation.resume()
         }
+    }
+
+    private func cancelWaiter(id: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        let waiter = waiters.remove(at: index)
+        waiter.continuation.resume(throwing: CancellationError())
     }
 }

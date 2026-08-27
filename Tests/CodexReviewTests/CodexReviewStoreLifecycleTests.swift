@@ -1028,6 +1028,287 @@ struct CodexReviewStoreLifecycleTests {
         #expect(handle.closePurposes == [.runtimeFailure])
         #expect(handle.waitUntilClosedCallCount == 1)
     }
+
+    @Test func cleanupRecoveryClaimsHeldUnexpectedTeardownOnceAndConcurrentCallerJoins() async throws {
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+        let sourceHandle = try #require(backend.lastPreparedRuntimeHandle)
+        let sourceGeneration = ReviewRuntimeGeneration(
+            rawValue: store.runtimeLifecycleAdmissionGeneration
+        )
+        let closeGate = AsyncGate()
+        sourceHandle.holdClose(with: closeGate)
+        let successorPreparationGate = AsyncGate()
+        backend.holdRuntimePreparation(with: successorPreparationGate)
+
+        #expect(store.requestRuntimeFailure(
+            handle: sourceHandle,
+            cause: "Notification stream closed."
+        ))
+        await sourceHandle.waitForClose()
+
+        let admitted = store.requestRuntimeCleanupRecovery(
+            sourceHandle: sourceHandle,
+            sourceGeneration: sourceGeneration,
+            cause: "Cleanup closed the transport."
+        )
+        let joined = store.requestRuntimeCleanupRecovery(
+            sourceHandle: sourceHandle,
+            sourceGeneration: sourceGeneration,
+            cause: "Concurrent cleanup closed the transport."
+        )
+        let successorGeneration = sourceGeneration.successor().successor()
+        #expect(admitted == .admitted(
+            sourceGeneration: sourceGeneration,
+            successorGeneration: successorGeneration
+        ))
+        #expect(joined == .joined(
+            sourceGeneration: sourceGeneration,
+            successorGeneration: successorGeneration
+        ))
+        #expect(backend.startRequests == [false])
+        guard case .acquiring(let generation, _, let successorTask) = store.runtimeState else {
+            Issue.record("Expected one admitted cleanup-recovery acquisition.")
+            return
+        }
+        #expect(generation == successorGeneration)
+
+        await closeGate.open()
+        await backend.waitForRuntimePreparation()
+        #expect(backend.startRequests == [false, false])
+        await successorPreparationGate.open()
+        await successorTask.value
+
+        #expect(store.serverState == .running)
+        #expect(backend.startRequests == [false, false])
+        await store.stop()
+    }
+
+    @Test func cleanupRecoveryCanClaimCompletedUnexpectedTeardown() async throws {
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+        let sourceHandle = try #require(backend.lastPreparedRuntimeHandle)
+        let sourceGeneration = ReviewRuntimeGeneration(
+            rawValue: store.runtimeLifecycleAdmissionGeneration
+        )
+
+        #expect(store.requestRuntimeFailure(
+            handle: sourceHandle,
+            cause: "Notification stream closed."
+        ))
+        await store.waitUntilStopped()
+        #expect(store.serverState == .failed(
+            "Review runtime stopped unexpectedly: Notification stream closed."
+        ))
+        let successorPreparationGate = AsyncGate()
+        backend.holdRuntimePreparation(with: successorPreparationGate)
+
+        let admission = store.requestRuntimeCleanupRecovery(
+            sourceHandle: sourceHandle,
+            sourceGeneration: sourceGeneration,
+            cause: "Cleanup closed the transport."
+        )
+        let successorGeneration = sourceGeneration.successor().successor()
+        #expect(admission == .admitted(
+            sourceGeneration: sourceGeneration,
+            successorGeneration: successorGeneration
+        ))
+        guard case .acquiring(let generation, _, let successorTask) = store.runtimeState else {
+            Issue.record("Expected late cleanup recovery to acquire one successor.")
+            return
+        }
+        #expect(generation == successorGeneration)
+
+        await backend.waitForRuntimePreparation()
+        await successorPreparationGate.open()
+        await successorTask.value
+
+        #expect(store.serverState == .running)
+        #expect(backend.startRequests == [false, false])
+        await store.stop()
+    }
+
+    @Test func explicitStopSuppressesCleanupRecoveryForItsExactSource() async throws {
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+        let sourceHandle = try #require(backend.lastPreparedRuntimeHandle)
+        let sourceGeneration = ReviewRuntimeGeneration(
+            rawValue: store.runtimeLifecycleAdmissionGeneration
+        )
+        let closeGate = AsyncGate()
+        sourceHandle.holdClose(with: closeGate)
+
+        store.requestRuntimeTeardown(intent: .explicitStop)
+        await sourceHandle.waitForClose()
+
+        #expect(store.requestRuntimeCleanupRecovery(
+            sourceHandle: sourceHandle,
+            sourceGeneration: sourceGeneration,
+            cause: "Cleanup closed the transport."
+        ) == .suppressed(.explicitStop))
+        #expect(backend.startRequests == [false])
+
+        await closeGate.open()
+        await store.waitUntilStopped()
+        #expect(store.serverState == .stopped)
+        #expect(backend.startRequests == [false])
+    }
+
+    @Test func cleanupRecoveryRejectsSourceFromReplacedGeneration() async throws {
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+        let staleHandle = try #require(backend.lastPreparedRuntimeHandle)
+        let staleGeneration = ReviewRuntimeGeneration(
+            rawValue: store.runtimeLifecycleAdmissionGeneration
+        )
+        await store.restart()
+        let currentHandle = try #require(backend.lastPreparedRuntimeHandle)
+
+        #expect(store.requestRuntimeCleanupRecovery(
+            sourceHandle: staleHandle,
+            sourceGeneration: staleGeneration,
+            cause: "Late cleanup failure."
+        ) == .suppressed(.staleSource))
+        #expect(currentHandle !== staleHandle)
+        #expect(store.serverState == .running)
+        #expect(backend.startRequests == [false, true])
+        await store.stop()
+    }
+
+    @Test func failedCleanupRecoverySuccessorCannotBeRetriedByLateSourceFailure() async throws {
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+        let sourceHandle = try #require(backend.lastPreparedRuntimeHandle)
+        let sourceGeneration = ReviewRuntimeGeneration(
+            rawValue: store.runtimeLifecycleAdmissionGeneration
+        )
+        let preparationGate = AsyncGate()
+        backend.holdRuntimePreparation(with: preparationGate)
+        backend.failNextRuntimePreparation(message: "Replacement preparation failed.")
+
+        let admission = store.requestRuntimeCleanupRecovery(
+            sourceHandle: sourceHandle,
+            sourceGeneration: sourceGeneration,
+            cause: "Cleanup closed the transport."
+        )
+        let successorGeneration = sourceGeneration.successor().successor()
+        #expect(admission == .admitted(
+            sourceGeneration: sourceGeneration,
+            successorGeneration: successorGeneration
+        ))
+        guard case .acquiring(_, _, let successorTask) = store.runtimeState else {
+            Issue.record("Expected cleanup recovery successor acquisition.")
+            return
+        }
+        await backend.waitForRuntimePreparation()
+        await preparationGate.open()
+        await successorTask.value
+
+        #expect(store.serverState == .failed("Replacement preparation failed."))
+        #expect(store.requestRuntimeCleanupRecovery(
+            sourceHandle: sourceHandle,
+            sourceGeneration: sourceGeneration,
+            cause: "Late cleanup failure."
+        ) == .suppressed(.successorAlreadyFinished))
+        #expect(backend.startRequests == [false, false])
+        await store.stop()
+    }
+
+    @Test func cleanupRecoveryJoinsReplacementOfItsAdmittedSuccessor() async throws {
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+        let sourceHandle = try #require(backend.lastPreparedRuntimeHandle)
+        let sourceGeneration = ReviewRuntimeGeneration(
+            rawValue: store.runtimeLifecycleAdmissionGeneration
+        )
+        let preparationGate = AsyncGate()
+        backend.holdRuntimePreparation(with: preparationGate)
+
+        let admitted = store.requestRuntimeCleanupRecovery(
+            sourceHandle: sourceHandle,
+            sourceGeneration: sourceGeneration,
+            cause: "Cleanup closed the transport."
+        )
+        let firstSuccessorGeneration = sourceGeneration.successor().successor()
+        #expect(admitted == .admitted(
+            sourceGeneration: sourceGeneration,
+            successorGeneration: firstSuccessorGeneration
+        ))
+        await backend.waitForRuntimePreparation()
+
+        let restart = Task { @MainActor in
+            await store.restart()
+        }
+        let replacementGeneration = firstSuccessorGeneration.successor()
+        try #require(await waitForRuntimeGeneration(
+            replacementGeneration,
+            store: store
+        ))
+        #expect(store.requestRuntimeCleanupRecovery(
+            sourceHandle: sourceHandle,
+            sourceGeneration: sourceGeneration,
+            cause: "Concurrent late cleanup failure."
+        ) == .joined(
+            sourceGeneration: sourceGeneration,
+            successorGeneration: replacementGeneration
+        ))
+
+        await preparationGate.open()
+        await restart.value
+
+        #expect(store.serverState == .running)
+        #expect(store.runtimeLifecycleAdmissionGeneration == replacementGeneration.rawValue)
+        await store.stop()
+    }
+
+    @Test func cleanupRecoveryJoinsAccountRecycleReplacementGeneration() async throws {
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+        let sourceHandle = try #require(backend.lastPreparedRuntimeHandle)
+        let sourceGeneration = ReviewRuntimeGeneration(
+            rawValue: store.runtimeLifecycleAdmissionGeneration
+        )
+        let preparationGate = AsyncGate()
+        backend.holdRuntimePreparation(with: preparationGate)
+
+        _ = store.requestRuntimeCleanupRecovery(
+            sourceHandle: sourceHandle,
+            sourceGeneration: sourceGeneration,
+            cause: "Cleanup closed the transport."
+        )
+        await backend.waitForRuntimePreparation()
+
+        let recycle = Task { @MainActor in
+            await store.recycleRuntimeAfterAccountChange()
+        }
+        let recycledGeneration = sourceGeneration.successor().successor().successor()
+        try #require(await waitForRuntimeGeneration(
+            recycledGeneration,
+            store: store
+        ))
+        #expect(store.requestRuntimeCleanupRecovery(
+            sourceHandle: sourceHandle,
+            sourceGeneration: sourceGeneration,
+            cause: "Concurrent late cleanup failure."
+        ) == .joined(
+            sourceGeneration: sourceGeneration,
+            successorGeneration: recycledGeneration
+        ))
+
+        await preparationGate.open()
+        await recycle.value
+
+        #expect(store.serverState == .running)
+        #expect(store.runtimeLifecycleAdmissionGeneration == recycledGeneration.rawValue)
+        await store.stop()
+    }
 }
 
 private enum StoreWorkTestFailure: LocalizedError, Sendable {
@@ -1100,6 +1381,22 @@ private func waitForTeardownFinalState(
         }
         await Task.yield()
     }
+}
+
+@MainActor
+private func waitForRuntimeGeneration(
+    _ expected: ReviewRuntimeGeneration,
+    store: CodexReviewStore
+) async -> Bool {
+    let clock = ContinuousClock()
+    let deadline = clock.now + .seconds(2)
+    while store.runtimeLifecycleAdmissionGeneration != expected.rawValue {
+        guard clock.now < deadline else {
+            return false
+        }
+        await Task.yield()
+    }
+    return true
 }
 
 @MainActor

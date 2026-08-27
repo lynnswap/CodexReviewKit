@@ -1833,12 +1833,12 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
     func discardReviewRecovery(_ prepared: PreparedReviewRecovery) async throws {
         try await prepared.handoff.discard()
         let runtime = try reviewAttemptRuntimeRoutes.takePrepared(prepared)
-        try await runtime.backend.cleanupReview(prepared.receipt.sourceRun)
+        try await cleanupReview(prepared.receipt.sourceRun, using: runtime)
     }
 
     func discardReviewRecovery(_ staged: StagedReviewRecovery) async throws {
         let runtime = try reviewAttemptRuntimeRoutes.takeStaged(staged)
-        try await runtime.backend.cleanupReview(staged.attempt.run)
+        try await cleanupReview(staged.attempt.run, using: runtime)
     }
 
     func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws {
@@ -1854,7 +1854,47 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         } catch {
             throw ReviewRuntimeCloseFailure.cleanup(error.localizedDescription)
         }
-        try await runtime.backend.cleanupReview(run)
+        try await cleanupReview(run, using: runtime)
+    }
+
+    private func cleanupReview(
+        _ run: CodexReviewBackendModel.Review.Run,
+        using runtime: LiveRuntimeLifecycleHandle
+    ) async throws {
+        do {
+            try await runtime.backend.cleanupReview(run)
+        } catch let invalidation as AppServerCleanupTransportInvalidation {
+            invalidateRuntimeAfterCleanupFailure(
+                runtime,
+                cause: invalidation.failure.localizedDescription
+            )
+            if invalidation.callerWasCancelled {
+                throw CancellationError()
+            }
+            throw invalidation.failure
+        } catch let failure as ReviewRuntimeCloseFailure {
+            if case .connection = failure {
+                invalidateRuntimeAfterCleanupFailure(
+                    runtime,
+                    cause: failure.localizedDescription
+                )
+            }
+            throw failure
+        }
+    }
+
+    private func invalidateRuntimeAfterCleanupFailure(
+        _ handle: LiveRuntimeLifecycleHandle,
+        cause: String
+    ) {
+        guard let store = attachedStore else {
+            return
+        }
+        _ = store.requestRuntimeCleanupRecovery(
+            sourceHandle: handle,
+            sourceGeneration: handle.generation,
+            cause: cause
+        )
     }
 
     private func reviewRouteBindingFailure(
@@ -1868,7 +1908,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             message += " Original review start failure: \(startError.localizedDescription)"
         }
         do {
-            try await runtime.backend.cleanupReview(cleanupRun)
+            try await cleanupReview(cleanupRun, using: runtime)
         } catch {
             message += " Exact cleanup also failed: \(error.localizedDescription)"
         }
@@ -1880,7 +1920,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         cleanup: (CodexReviewBackendModel.Review.Run, LiveRuntimeLifecycleHandle)
     ) async -> any Error {
         do {
-            try await cleanup.1.backend.cleanupReview(cleanup.0)
+            try await cleanupReview(cleanup.0, using: cleanup.1)
             return primary
         } catch {
             return ReviewAttemptContractFailure(
