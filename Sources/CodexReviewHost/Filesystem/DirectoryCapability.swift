@@ -14,7 +14,6 @@ package enum DirectoryCapabilityError: Error, Equatable, LocalizedError, Sendabl
     case retryable(DirectoryPOSIXFailure)
     case ioFailure(DirectoryPOSIXFailure)
     case closed
-
     package var errorDescription: String? {
         switch self {
         case .invalidRequest(let message), .policyViolation(let message):
@@ -39,7 +38,6 @@ package final class DirectoryCapability: Sendable {
             self.value = value
         }
     }
-
     package struct Identity: Hashable, Sendable {
         package let deviceID: UInt64
         package let inode: UInt64
@@ -48,7 +46,6 @@ package final class DirectoryCapability: Sendable {
             inode = UInt64(status.st_ino)
         }
     }
-
     package struct Requirements: Equatable, Sendable {
         fileprivate enum Policy: Equatable, Sendable { case trustedAnchor, managed }
         fileprivate let policy: Policy
@@ -97,7 +94,6 @@ package final class DirectoryCapability: Sendable {
             url: absoluteURL
         )
     }
-
     package func directory(
         named name: Name,
         acquisition: Acquisition,
@@ -121,7 +117,6 @@ package final class DirectoryCapability: Sendable {
             )
         }
     }
-
     package func relationship(to other: DirectoryCapability) throws -> Relationship {
         try withBorrowedDescriptor { lhs in
             try other.withBorrowedDescriptor { rhs in
@@ -151,7 +146,6 @@ package final class DirectoryCapability: Sendable {
             return try body(url)
         }
     }
-
     package func close() throws {
         let path = url.path
         let failure = state.withLock { state -> DirectoryPOSIXFailure? in
@@ -167,7 +161,6 @@ package final class DirectoryCapability: Sendable {
         }
         if let failure { throw DirectoryCapabilityError.ioFailure(failure) }
     }
-
     private func withBorrowedDescriptor<Result>(_ body: (Int32) throws -> Result) throws -> Result {
         let path = url.path
         let descriptor = try state.withLock { state -> Int32 in
@@ -188,7 +181,6 @@ package final class DirectoryCapability: Sendable {
         }
         return value
     }
-
     private static func acquireChild(
         parent: Int32,
         name: Name,
@@ -286,9 +278,17 @@ package final class DirectoryCapability: Sendable {
             let inspected = name.value.withCString { pointer in
                 retryingEINTR { fstatat(parent, pointer, &status, AT_SYMLINK_NOFOLLOW) }
             }
-            guard inspected == 0,
-                  status.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else {
-                throw posixError(operation: "inspect created directory", code: errno, path: path)
+            if inspected != 0 || status.st_mode & mode_t(S_IFMT) != mode_t(S_IFDIR) {
+                let inspectionCode = inspected == 0 ? ENOTDIR : errno
+                // mkdirat created this name under a validated parent; same-UID replacement is
+                // outside the threat model, and AT_REMOVEDIR cannot unlink a non-directory.
+                let removed = name.value.withCString { pointer in
+                    retryingEINTR { unlinkat(parent, pointer, AT_REMOVEDIR) }
+                }
+                guard removed == 0 else {
+                    throw posixError(operation: "roll back uninspected directory", code: errno, path: path)
+                }
+                throw posixError(operation: "inspect created directory", code: inspectionCode, path: path)
             }
             return Identity(status)
         }
