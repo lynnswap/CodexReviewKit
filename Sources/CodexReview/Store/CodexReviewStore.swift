@@ -105,6 +105,7 @@ public final class CodexReviewStore {
         to availability: ReviewHistoryAvailability
     ) {
         historyAvailability = availability
+        writeDiagnosticsIfNeeded()
     }
     package var shouldAutoStartEmbeddedServer: Bool {
         backend.seed.shouldAutoStartEmbeddedServer
@@ -1675,18 +1676,49 @@ public final class CodexReviewStore {
             return
         }
         let jobs = orderedJobs.map { job in
-            CodexReviewStoreDiagnosticsSnapshot.Job(
+            let origin: String = switch job.origin {
+            case .live:
+                "live"
+            case .restoredHistory:
+                "restoredHistory"
+            }
+            return CodexReviewStoreDiagnosticsSnapshot.Job(
+                id: job.id,
+                cwd: job.cwd,
+                origin: origin,
+                target: job.target,
+                targetSummary: job.targetSummary,
+                model: job.core.run.model,
                 status: job.core.lifecycle.status.rawValue,
+                terminal: job.core.lifecycle.terminal.map(
+                    CodexReviewStoreDiagnosticsSnapshot.Job.Terminal.init
+                ),
+                startedAt: job.core.lifecycle.startedAt,
+                endedAt: job.core.lifecycle.endedAt,
                 summary: job.core.output.summary,
-                logText: job.logText,
-                rawLogText: job.rawLogText
+                canonicalReview: job.core.output.lastAgentMessage,
+                parsedResult: job.core.output.reviewResult.map(
+                    CodexReviewStoreDiagnosticsSnapshot.Job.ParsedResult.init
+                )
             )
+        }
+        let historyAvailability: String = switch historyAvailability {
+        case .loading:
+            "loading"
+        case .available:
+            "available"
+        case .failed:
+            "failed"
+        case .closed:
+            "closed"
         }
         let snapshot = CodexReviewStoreDiagnosticsSnapshot(
             serverState: serverState.displayText,
             failureMessage: serverState.failureMessage,
             serverURL: serverURL?.absoluteString,
             childRuntimePath: nil,
+            historyAvailability: historyAvailability,
+            historyFailureMessage: historyFailureMessage,
             jobs: jobs
         )
         do {

@@ -68,12 +68,6 @@ package final class PreparedRecoveryEnvironment: Sendable {
         try savedAccounts.withRevalidatedPath(body)
     }
 
-    package func withHistoryDatabaseURL<Result>(_ body: (URL) throws -> Result) throws -> Result {
-        try recovery.withRevalidatedPath {
-            try body($0.appendingPathComponent("review-history.sqlite", isDirectory: false))
-        }
-    }
-
     package func close() throws {
         let error = closeState.withLock { state -> PreparedRecoveryEnvironmentCloseError? in
             if case .closed(let error) = state { return error }

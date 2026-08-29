@@ -50,24 +50,47 @@ struct CodexReviewMonitorCITests {
         await store.startSignal.wait()
 
         #expect(store.startArguments == [true])
-        #expect(store.stopCallCount == 0)
+        #expect(store.shutdownCallCount == 0)
 
         let firstReply = lifecycle.applicationShouldTerminate(replyingTo: responder)
         #expect(firstReply == .terminateLater)
 
-        await store.stopStartedSignal.wait()
-        #expect(store.stopCallCount == 1)
+        await store.shutdownStartedSignal.wait()
+        #expect(store.shutdownCallCount == 1)
         #expect(responder.replies.isEmpty)
 
         let secondReply = lifecycle.applicationShouldTerminate(replyingTo: responder)
         #expect(secondReply == .terminateLater)
-        #expect(store.stopCallCount == 1)
+        #expect(store.shutdownCallCount == 1)
 
-        await store.stopGate.open()
+        await store.shutdownGate.open()
         let reply = await responder.waitForReply()
 
         #expect(reply == true)
         #expect(responder.replies == [true])
+    }
+
+    @Test func terminationCancelsAndAwaitsLaunchBeforeShutdown() async {
+        let store = FakeLifecycleStore(blocksStart: true)
+        let lifecycle = ReviewMonitorLifecycleController(store: store)
+        let responder = TerminationReplyRecorder()
+
+        lifecycle.applicationDidFinishLaunching(launchMode: .application)
+        await store.startSignal.wait()
+
+        #expect(lifecycle.applicationShouldTerminate(replyingTo: responder) == .terminateLater)
+        #expect(store.shutdownCallCount == 0)
+        #expect(responder.replies.isEmpty)
+
+        await store.startGate.open()
+        await store.shutdownStartedSignal.wait()
+
+        #expect(store.startObservedCancellation == [true])
+        #expect(store.shutdownCallCount == 1)
+        #expect(responder.replies.isEmpty)
+
+        await store.shutdownGate.open()
+        #expect(await responder.waitForReply() == true)
     }
 
     @Test func appDelegateUsesInjectedCompositionForStartupDependencies() {
@@ -222,7 +245,7 @@ struct CodexReviewMonitorCITests {
         var didCallLiveStoreFactory = false
         let composition = ReviewMonitorAppComposition.live(
             runtimePreferencesStore: runtimePreferencesStore,
-            makeLiveStore: { _, _ in
+            makeLiveStore: { _, _, _ in
                 didCallLiveStoreFactory = true
                 Issue.record("Preview store creation should not build a live store.")
                 return CodexReviewStore.makePreviewStore()
@@ -264,11 +287,13 @@ struct CodexReviewMonitorCITests {
         let expectedStore = CodexReviewStore.makePreviewStore()
         var capturedRuntimePreferences: CodexReviewRuntime.Preferences?
         var capturedAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration?
+        var capturedStoreMode: ReviewMonitorLiveStoreMode?
         let composition = ReviewMonitorAppComposition.live(
             runtimePreferencesStore: runtimePreferencesStore,
-            makeLiveStore: { runtimePreferences, authenticationConfiguration in
+            makeLiveStore: { runtimePreferences, authenticationConfiguration, storeMode in
                 capturedRuntimePreferences = runtimePreferences
                 capturedAuthenticationConfiguration = authenticationConfiguration
+                capturedStoreMode = storeMode
                 return expectedStore
             }
         )
@@ -286,6 +311,7 @@ struct CodexReviewMonitorCITests {
 
         #expect(store === expectedStore)
         #expect(capturedRuntimePreferences == expectedRuntimePreferences)
+        #expect(capturedStoreMode == .production)
         #expect(didRequestPresentationAnchor == false)
         #expect(capturedAuthenticationConfiguration?.callbackScheme == "lynnpd.CodexReviewMonitor.auth")
         if case .ephemeral? = capturedAuthenticationConfiguration?.browserSessionPolicy {
@@ -294,6 +320,54 @@ struct CodexReviewMonitorCITests {
         }
         #expect(capturedAuthenticationConfiguration?.presentationAnchorProvider() == nil)
         #expect(didRequestPresentationAnchor)
+    }
+
+    @Test func liveCompositionAppliesIsolatedE2EOverridesAtCompositionRoot() {
+        let expectedStore = CodexReviewStore.makePreviewStore()
+        var capturedRuntimePreferences: CodexReviewRuntime.Preferences?
+        var capturedStoreMode: ReviewMonitorLiveStoreMode?
+        let composition = ReviewMonitorAppComposition.live(
+            runtimePreferencesStore: RuntimePreferencesStoreStub(),
+            makeLiveStore: { runtimePreferences, _, storeMode in
+                capturedRuntimePreferences = runtimePreferences
+                capturedStoreMode = storeMode
+                return expectedStore
+            }
+        )
+        let context = ReviewMonitorLaunchContext(
+            environment: [
+                ReviewMonitorLaunchEnvironment.testPortKey: "39417",
+                ReviewMonitorLaunchEnvironment.testCodexCommandKey: "/opt/homebrew/bin/codex",
+                ReviewMonitorLaunchEnvironment.testDiagnosticsPathKey: "/tmp/review-monitor/diagnostics.json",
+                ReviewMonitorLaunchEnvironment.testHistoryPathKey: "/tmp/review-monitor/history.sqlite",
+            ],
+            arguments: [],
+            launchMode: .application
+        )
+
+        #expect(composition.makeStore(context) { nil } === expectedStore)
+        #expect(context.shouldStartEmbeddedServer)
+        #expect(capturedRuntimePreferences?.mcpPort == 39417)
+        #expect(capturedRuntimePreferences?.codexExecutablePath == "/opt/homebrew/bin/codex")
+        #expect(capturedStoreMode == .isolatedTest(
+            diagnosticsURL: URL(fileURLWithPath: "/tmp/review-monitor/diagnostics.json"),
+            historyDatabaseURL: URL(fileURLWithPath: "/tmp/review-monitor/history.sqlite")
+        ))
+    }
+
+    @Test func isolatedTestOverrideWithoutHistoryPathDoesNotStartProductionRuntime() {
+        let context = ReviewMonitorLaunchContext(
+            environment: [
+                ReviewMonitorLaunchEnvironment.testPortKey: "39417",
+            ],
+            arguments: [],
+            launchMode: .application
+        )
+
+        #expect(context.isolatedTestConfiguration?.validationFailure?.contains(
+            ReviewMonitorLaunchEnvironment.testHistoryPathKey
+        ) == true)
+        #expect(context.shouldStartEmbeddedServer == false)
     }
 
     @Test func liveCompositionBuildsLifecycleFromLaunchContext() async {
@@ -594,20 +668,31 @@ private func expectTextFinderMenuItem(
 @MainActor
 private final class FakeLifecycleStore: ReviewMonitorLifecycleStore {
     private(set) var startArguments: [Bool] = []
-    private(set) var stopCallCount = 0
+    private(set) var startObservedCancellation: [Bool] = []
+    private(set) var shutdownCallCount = 0
+    private let blocksStart: Bool
     let startSignal = TestSignal()
-    let stopStartedSignal = TestSignal()
-    let stopGate = TestGate()
+    let startGate = TestGate()
+    let shutdownStartedSignal = TestSignal()
+    let shutdownGate = TestGate()
+
+    init(blocksStart: Bool = false) {
+        self.blocksStart = blocksStart
+    }
 
     func start(forceRestartIfNeeded: Bool) async {
         startArguments.append(forceRestartIfNeeded)
         await startSignal.signal()
+        if blocksStart {
+            await startGate.wait()
+        }
+        startObservedCancellation.append(Task.isCancelled)
     }
 
-    func stop() async {
-        stopCallCount += 1
-        await stopStartedSignal.signal()
-        await stopGate.wait()
+    func shutdown() async {
+        shutdownCallCount += 1
+        await shutdownStartedSignal.signal()
+        await shutdownGate.wait()
     }
 }
 
