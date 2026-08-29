@@ -66,29 +66,41 @@ package struct ReviewHistoryOrdering: Sendable, Equatable {
 }
 
 package protocol ReviewHistoryPersistence: Sendable {
-    func load() async throws -> [ReviewHistoryRecord]
-    func recordStarted(_ record: ReviewHistoryRecord) async throws
+    func load(
+        retentionPolicy: ReviewHistoryRetentionPolicy
+    ) async throws -> [RestoredReviewRecord]
+
+    func recordStarted(_ record: StartedReviewRecord) async throws
+
     func recordTerminal(
-        _ record: ReviewHistoryRecord,
+        _ record: TerminalReviewRecord,
         retentionPolicy: ReviewHistoryRetentionPolicy
     ) async throws -> ReviewHistoryMutationResult
+
     func saveOrdering(_ ordering: ReviewHistoryOrdering) async throws
-    func deleteReview(id: String) async throws
-    func deleteAll() async throws
+
+    func deleteTerminalReview(
+        id: String
+    ) async throws -> ReviewHistoryMutationResult
+
+    func deleteAllTerminalReviews() async throws -> ReviewHistoryMutationResult
+
     func close() async throws
 }
 
 package struct DisabledReviewHistoryPersistence: ReviewHistoryPersistence {
     package init() {}
 
-    package func load() async throws -> [ReviewHistoryRecord] {
+    package func load(
+        retentionPolicy _: ReviewHistoryRetentionPolicy
+    ) async throws -> [RestoredReviewRecord] {
         []
     }
 
-    package func recordStarted(_: ReviewHistoryRecord) async throws {}
+    package func recordStarted(_: StartedReviewRecord) async throws {}
 
     package func recordTerminal(
-        _: ReviewHistoryRecord,
+        _: TerminalReviewRecord,
         retentionPolicy _: ReviewHistoryRetentionPolicy
     ) async throws -> ReviewHistoryMutationResult {
         .init()
@@ -96,9 +108,15 @@ package struct DisabledReviewHistoryPersistence: ReviewHistoryPersistence {
 
     package func saveOrdering(_: ReviewHistoryOrdering) async throws {}
 
-    package func deleteReview(id _: String) async throws {}
+    package func deleteTerminalReview(
+        id _: String
+    ) async throws -> ReviewHistoryMutationResult {
+        .init()
+    }
 
-    package func deleteAll() async throws {}
+    package func deleteAllTerminalReviews() async throws -> ReviewHistoryMutationResult {
+        .init()
+    }
 
     package func close() async throws {}
 }

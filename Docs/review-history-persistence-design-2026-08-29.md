@@ -1,6 +1,6 @@
 # Review history persistence design (2026-08-29)
 
-Status: Approved direction; implementation in progress
+Status: Re-gated after adversarial review; implementation in progress
 
 | Item | Value |
 | --- | --- |
@@ -41,6 +41,9 @@ The feature is complete when:
 6. Database open, migration, decode, or write failure is visible at the Store
    boundary and blocks new review admission instead of silently using empty or
    non-durable history.
+7. A rebuilt app passes an isolated end-to-end run: launch on a dedicated MCP
+   port and history path, complete a real review, terminate, relaunch, and verify
+   the restored sidebar/detail/findings state.
 
 ### Compatibility
 
@@ -166,9 +169,9 @@ Responsibilities:
 ```text
 ReviewMonitor composition
   -> prepare owner-only Application Support directory
-  -> create/migrate ReviewHistoryDatabase
+  -> construct ReviewHistoryDatabase with its exact URL
   -> inject persistence port into CodexReviewStore
-  -> Store loads/orphan-finalizes history once
+  -> first Store load opens/migrates the explicit DatabasePool and orphan-finalizes history
   -> runtime starts
   -> review admission persists a running header before backend dispatch
   -> worker finalization commits terminal result + findings + retention
@@ -181,6 +184,19 @@ ReviewMonitor composition
 Runtime restart/account switch does not close history. Application shutdown is a
 separate Store operation from runtime `stop()`.
 
+`CodexReviewStore` owns three internal linearization mechanisms:
+
+- `HistoryStartReceipt` captures validated target, model, job/workspace order,
+  session, and Store work admission before the start-header write. Pending receipts
+  are visible to session/runtime close. After the write it revalidates the same
+  receipt; stale starts are terminalized durably without backend dispatch.
+- One `HistoryTerminalReceipt` per live job owns the first terminal snapshot and
+  exactly one durable commit. Worker completion, cancel response, runtime detach,
+  waiter resumption, and application shutdown join that receipt.
+- `ReviewHistoryMutationCoordinator` executes database mutation and MainActor apply
+  in one ordinal lane. Reorder, terminal retention, and explicit delete cannot
+  apply results in a different order from their database commits.
+
 ## 4. Semantic surface
 
 All new declarations are `package` unless an existing public API requires otherwise.
@@ -188,13 +204,19 @@ No SQLiteData or GRDB type appears outside `CodexReviewPersistence`.
 
 ```swift
 package protocol ReviewHistoryPersistence: Sendable {
-    func load() async throws -> ReviewHistoryLoadResult
+    func load(retentionPolicy: ReviewHistoryRetentionPolicy)
+      async throws -> [RestoredReviewRecord]
     func recordStarted(_ record: StartedReviewRecord) async throws
-    func recordTerminal(_ record: TerminalReviewRecord) async throws
+    func recordTerminal(
+      _ record: TerminalReviewRecord,
+      retentionPolicy: ReviewHistoryRetentionPolicy
+    ) async throws
       -> ReviewHistoryMutationResult
     func saveOrdering(_ ordering: ReviewHistoryOrdering) async throws
-    func deleteReview(id: String) async throws
-    func deleteAll() async throws
+    func deleteTerminalReview(id: String) async throws
+      -> ReviewHistoryMutationResult
+    func deleteAllTerminalReviews() async throws
+      -> ReviewHistoryMutationResult
     func close() async throws
 }
 
@@ -209,15 +231,27 @@ package enum ReviewHistoryAvailability: Sendable, Equatable {
 extension CodexReviewStore {
     package func deleteReviewHistory(id: String) async
     package func deleteAllReviewHistory() async
-    package func shutdown() async
+    public func shutdown() async
 }
 ```
 
-The live SQLite implementation is an actor. It owns the database writer and close
-state. `CodexReviewStore` remains `@MainActor`; only immutable Sendable records cross
-the boundary. No fire-and-forget database task is permitted. Every start/terminal/
-delete operation is awaited by an existing Store-owned operation, and shutdown
-awaits final synchronization before close.
+The persistence boundary has phase-specific immutable values:
+
+- `StartedReviewRecord`: ID, cwd, workspace/job order, typed target, captured
+  model, and non-optional start time.
+- `TerminalReviewRecord`: ID, model, typed terminal, optional end time, summary,
+  and completed-only canonical result/parsed projection.
+- `RestoredReviewRecord`: one compatible started + terminal pair. An active row
+  cannot be represented as a restored value.
+
+The live SQLite implementation lazily constructs and then explicitly owns
+`any DatabaseWriter` and close state. Production constructs `DatabasePool` from
+the exact URL during the first load; tests inject
+`DatabaseQueue`/`DatabasePool`. Do not use `prepareDependencies`,
+`@Dependency(\.defaultDatabase)`, or SQLiteData `defaultDatabase(...)`.
+`CodexReviewStore` remains `@MainActor`; only immutable Sendable records cross the
+boundary. The Store-owned mutation lane retains every task/receipt and shutdown
+joins them before close.
 
 ### Consumer path
 
@@ -228,8 +262,9 @@ let store = CodexReviewStore.makeLiveStore(...)
 ReviewMonitorWindowController(store: store, ...)
 ```
 
-After: unchanged at the app/UI call site. `CodexReviewHost` composes the database
-behind `makeLiveStore`, and `ReviewUI` continues to observe the Store.
+After: construction stays unchanged. App termination calls the additive public
+`store.shutdown()` instead of runtime-only `stop()`. `CodexReviewHost` composes the
+database behind `makeLiveStore`, and `ReviewUI` continues to observe the Store.
 
 ## 5. Schema and invariants
 
@@ -246,11 +281,11 @@ SQLiteData `@Table` records are storage models, not the domain aggregate.
 - `cwd` foreign key to workspace
 - manual `sortOrder`
 - typed target discriminator and variant payload
-- effective/requested model and optional review/thread/turn provenance
+- captured/effective model
 - lifecycle phase and typed terminal/cancellation/interruption fields
 - `startedAt`, nullable `endedAt`, summary, canonical final review
-- parsed-result state and parser version
-- created/updated timestamps for migration and diagnostics
+- parsed-result state/source/parser version
+- `terminalCommittedAt` and created/updated timestamps for deterministic retention
 
 ### `review_findings`
 
@@ -267,15 +302,23 @@ Schema rules:
 - Succeeded rows require non-empty canonical final review text no larger than the
   existing 256 KiB domain limit.
 - Findings and parsed-result metadata are one transaction with terminal commit.
+- The persistence port does not carry session IDs, thread/turn IDs, exit code,
+  finding `rawText`, rendered projections, or raw log entries.
+- Terminal mutation updates only terminal/result fields of an existing active row;
+  it cannot overwrite cwd, target, or manual order.
 - Restored rows derive display title, elapsed time, final flag, compact log entries,
   and other projections; those values are not columns.
 
 ### Retention
 
 - Keep at most 50 terminal reviews per workspace and 500 terminal reviews globally.
-- Prune oldest terminal reviews after terminal commit and at startup.
+- Prune oldest terminal reviews by `(terminalCommittedAt, id)` after terminal commit
+  and at startup.
+- The terminal transaction protects its current review ID from pruning so the
+  completing API can always read its result.
 - Never prune the current nonterminal rows.
 - Return pruned IDs from the transaction so Store membership matches durable membership.
+- Remove workspace rows that no longer own active or terminal reviews.
 - No time-based expiry in v1.
 
 ## 6. Failure semantics
@@ -284,6 +327,8 @@ Schema rules:
   do not present empty history, continue runtime/auth/settings startup, reject new
   review admission with an explicit I/O error.
 - Start-header write failure: do not dispatch a backend review or publish a live row.
+- Session/runtime/application close during start-header suspension: the start receipt
+  commits one typed requested-interruption terminal and dispatches no backend work.
 - Terminal write failure: retain the current in-memory result, publish history
   `.failed`, let the already completed review return its real outcome, and reject
   subsequent starts until the next successful app launch.
@@ -294,6 +339,8 @@ Schema rules:
 - A queued/running row found at startup becomes
   `.interrupted(.previousProcessExit)` with unknown `endedAt`; UI must not show a
   running timer or invent an exact duration.
+- Once public application shutdown enters `.closing`, `start` and `restart` cannot
+  admit a new runtime. Repeated shutdown callers join the same terminal completion.
 
 ## 7. Variation points
 
@@ -325,6 +372,8 @@ Schema rules:
 - Do not persist MCP session identity as future authorization.
 - Do not use thread IDs as cross-process recovery tokens.
 - Do not create an unowned database Task or rely on deinit for async close.
+- Do not let the persistence executor serialize writes while MainActor applies their results
+  independently; both halves belong to the Store history-mutation lane.
 - Do not fall back to a second database path or recreate a corrupt database.
 
 ## 9. Test contract
@@ -344,12 +393,15 @@ Schema rules:
 
 - history loads once before accepting review starts
 - start header is durable before backend dispatch
+- blocked start revalidates exact session/work admission/model/order receipt before dispatch
 - start failure prevents dispatch and row publication
-- terminal persistence completes before worker result finalization
+- terminal persistence completes before waiter, cancel response, runtime detach, and worker result finalization
 - persistence failure is visible and blocks later starts without changing the real terminal outcome
 - restored rows remain inaccessible to a new MCP session
 - clean shutdown synchronizes terminal rows/order and closes history after workers
+- shutdown is one-shot and rejects concurrent restart/runtime acquisition
 - delete updates database, Store membership, workspace membership, and selection source
+- overlapping reorder/delete/terminal prune preserves identical DB and Store order/membership
 
 ### ReviewUI / app
 
@@ -360,6 +412,27 @@ Schema rules:
 - terminal context menu deletes; active context menu cancels
 - composition uses the production history path while preview/tests use injected stores
 - application termination awaits `shutdown()`
+
+### Isolated application E2E
+
+- Rebuild `CodexReviewMonitor.app` from the branch.
+- Launch that binary with a dedicated MCP port, diagnostics file, and temporary
+  history database path. Do not replace `HOME` or touch the user's production
+  history database.
+- The E2E-only overrides are explicit environment/argument inputs owned by the
+  ReviewMonitor composition root: `REVIEW_MONITOR_TEST_PORT`,
+  `REVIEW_MONITOR_TEST_CODEX_COMMAND`, `REVIEW_MONITOR_TEST_DIAGNOSTICS_PATH`, and
+  `REVIEW_MONITOR_TEST_HISTORY_PATH`. They are not production fallback paths.
+- Call its real Streamable HTTP MCP endpoint and complete a review against this
+  checkout.
+- Terminate through `NSRunningApplication.terminate()` and wait for application
+  shutdown completion.
+- Relaunch the same binary with the same isolated history path.
+- Verify diagnostics and visible UI show exactly one restored terminal row with
+  target/model/status/final detail/findings and no command/reasoning transcript.
+- Verify a newly initialized MCP session cannot list/read the restored row.
+- Capture a screenshot of the restored sidebar/detail for the PR when the visible
+  change is reviewable.
 
 ### Required gates
 
