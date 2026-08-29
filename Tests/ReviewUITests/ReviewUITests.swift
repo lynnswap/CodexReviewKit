@@ -1383,16 +1383,24 @@ struct ReviewUITests {
             reviewMonitorJobCellHostingViewIdentityForTesting(cellView)
         )
         let initialHostedJobID = reviewMonitorJobCellHostedJobIDForTesting(cellView)
+        let initialIsWorktree = reviewMonitorJobCellIsWorktreeForTesting(cellView)
 
-        configureReviewMonitorJobCellViewForTesting(cellView, job: loadedJob)
+        configureReviewMonitorJobCellViewForTesting(
+            cellView,
+            job: loadedJob,
+            fallbackIsWorktree: true
+        )
 
         let updatedHostingViewIdentity = try #require(
             reviewMonitorJobCellHostingViewIdentityForTesting(cellView)
         )
         let updatedHostedJobID = reviewMonitorJobCellHostedJobIDForTesting(cellView)
+        let updatedIsWorktree = reviewMonitorJobCellIsWorktreeForTesting(cellView)
 
         #expect(initialHostedJobID == placeholderJob.id)
+        #expect(initialIsWorktree == false)
         #expect(updatedHostedJobID == loadedJob.id)
+        #expect(updatedIsWorktree == true)
         #expect(initialHostingViewIdentity == updatedHostingViewIdentity)
         #expect(cellView.objectValue as? CodexReviewJob === loadedJob)
         #expect(cellView.toolTip == loadedJob.cwd)
@@ -2843,6 +2851,177 @@ struct ReviewUITests {
             window.title == "CodexReviewKit" &&
             window.subtitle == "2 workspaces"
         }
+    }
+
+    @Test func workspaceMetadataUsesOneRepositoryIdentityAndMarksOnlyTheLinkedWorktree() throws {
+        let fixture = try makeLinkedWorktreeFixtureForTesting(repositoryName: "CodexReviewKit")
+        defer {
+            try? FileManager.default.removeItem(at: fixture.rootURL)
+        }
+
+        let primaryMetadata = ReviewWorkspaceMetadata.resolve(cwd: fixture.repositoryURL.path)
+        let worktreeMetadata = ReviewWorkspaceMetadata.resolve(cwd: fixture.firstWorktreeURL.path)
+
+        #expect(primaryMetadata.repositoryIdentity == worktreeMetadata.repositoryIdentity)
+        #expect(primaryMetadata.displayTitle == "CodexReviewKit")
+        #expect(primaryMetadata.kind == .primaryCheckout)
+        #expect(worktreeMetadata.kind == .linkedWorktree)
+        #expect(primaryMetadata.isWorktree == false)
+        #expect(worktreeMetadata.isWorktree)
+    }
+
+    @Test func workspaceMetadataDoesNotTreatEveryGitFileAsALinkedWorktree() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexReviewKitSeparateGitDir-\(UUID().uuidString)", isDirectory: true)
+        let checkoutURL = rootURL.appendingPathComponent("Checkout", isDirectory: true)
+        let gitDirURL = rootURL
+            .appendingPathComponent("metadata", isDirectory: true)
+            .appendingPathComponent("Checkout.git", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: rootURL)
+        }
+        try FileManager.default.createDirectory(at: checkoutURL, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: gitDirURL, withIntermediateDirectories: true)
+        try "gitdir: \(gitDirURL.path)\n".write(
+            to: checkoutURL.appendingPathComponent(".git"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let metadata = ReviewWorkspaceMetadata.resolve(cwd: checkoutURL.path)
+
+        #expect(metadata.kind == .primaryCheckout)
+        #expect(metadata.isWorktree == false)
+        #expect(metadata.displayTitle == "Checkout")
+    }
+
+    @Test func deletedLegacyCodexWorktreeRecoversOnlyWithOneVerifiedRepository() throws {
+        let fixture = try makeLinkedWorktreeFixtureForTesting(repositoryName: "CodexReviewKit")
+        defer {
+            try? FileManager.default.removeItem(at: fixture.rootURL)
+        }
+        try FileManager.default.removeItem(at: fixture.firstWorktreeURL)
+
+        let primaryWorkspace = CodexReviewWorkspace(cwd: fixture.repositoryURL.path)
+        let deletedWorktree = CodexReviewWorkspace(cwd: fixture.firstWorktreeURL.path)
+        let managedRoot = fixture.rootURL.appendingPathComponent("worktrees", isDirectory: true)
+        let recovered = ReviewMonitorWorkspaceSectioning.presentations(
+            for: [primaryWorkspace, deletedWorktree],
+            managedWorktreeRoots: [managedRoot]
+        )
+
+        #expect(
+            recovered[primaryWorkspace.cwd]?.sectionIdentity
+                == recovered[deletedWorktree.cwd]?.sectionIdentity
+        )
+        #expect(recovered[primaryWorkspace.cwd]?.isWorktree == false)
+        #expect(recovered[deletedWorktree.cwd]?.isWorktree == true)
+
+        let otherPrimary = CodexReviewWorkspace(
+            cwd: "/tmp/other/CodexReviewKit",
+            metadata: ReviewWorkspaceMetadata(
+                repositoryIdentity: "git-common:/tmp/other/CodexReviewKit/.git",
+                displayTitle: "CodexReviewKit",
+                kind: .primaryCheckout
+            )
+        )
+        let ambiguous = ReviewMonitorWorkspaceSectioning.presentations(
+            for: [primaryWorkspace, otherPrimary, deletedWorktree],
+            managedWorktreeRoots: [managedRoot]
+        )
+        #expect(
+            ambiguous[deletedWorktree.cwd]?.sectionIdentity
+                != ambiguous[primaryWorkspace.cwd]?.sectionIdentity
+        )
+        #expect(
+            ambiguous[deletedWorktree.cwd]?.sectionIdentity
+                != ambiguous[otherPrimary.cwd]?.sectionIdentity
+        )
+
+        let invalidManagedLayout = CodexReviewWorkspace(
+            cwd: managedRoot
+                .appendingPathComponent("not-hex", isDirectory: true)
+                .appendingPathComponent("CodexReviewKit", isDirectory: true)
+                .path
+        )
+        let invalid = ReviewMonitorWorkspaceSectioning.presentations(
+            for: [primaryWorkspace, invalidManagedLayout],
+            managedWorktreeRoots: [managedRoot]
+        )
+        #expect(invalid[invalidManagedLayout.cwd]?.isWorktree == false)
+        #expect(
+            invalid[invalidManagedLayout.cwd]?.sectionIdentity
+                != invalid[primaryWorkspace.cwd]?.sectionIdentity
+        )
+    }
+
+    @Test func persistedWorkspaceMetadataGroupsDeletedWorktreeAndDrivesRowIndicator() throws {
+        let repositoryIdentity = "git-common:/removed/CodexReviewKit/.git"
+        let primaryWorkspace = CodexReviewWorkspace(
+            cwd: "/removed/primary/CodexReviewKit",
+            metadata: ReviewWorkspaceMetadata(
+                repositoryIdentity: repositoryIdentity,
+                displayTitle: "CodexReviewKit",
+                kind: .primaryCheckout
+            )
+        )
+        let worktreeWorkspace = CodexReviewWorkspace(
+            cwd: "/removed/worktrees/73d5/CodexReviewKit",
+            metadata: ReviewWorkspaceMetadata(
+                repositoryIdentity: repositoryIdentity,
+                displayTitle: "CodexReviewKit",
+                kind: .linkedWorktree
+            )
+        )
+        let primaryJob = makeJob(
+            id: "job-primary-checkout",
+            cwd: primaryWorkspace.cwd,
+            status: .succeeded,
+            targetSummary: "Primary checkout"
+        )
+        let worktreeJob = makeJob(
+            id: "job-deleted-worktree",
+            cwd: worktreeWorkspace.cwd,
+            status: .succeeded,
+            targetSummary: "Deleted worktree"
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [primaryWorkspace, worktreeWorkspace],
+            jobs: [primaryJob, worktreeJob]
+        )
+        let viewController = ReviewMonitorSplitViewController(
+            store: store,
+            uiState: ReviewMonitorUIState(auth: store.auth)
+        )
+        viewController.loadViewIfNeeded()
+        let sidebar = viewController.sidebarViewControllerForTesting
+
+        #expect(sidebar.displayedSectionTitlesForTesting == ["CodexReviewKit"])
+        #expect(sidebar.jobRowIsWorktreeForTesting(primaryJob) == false)
+        #expect(sidebar.jobRowIsWorktreeForTesting(worktreeJob) == true)
+        worktreeWorkspace.metadata = ReviewWorkspaceMetadata(
+            repositoryIdentity: repositoryIdentity,
+            displayTitle: "CodexReviewKit",
+            kind: .primaryCheckout
+        )
+        #expect(sidebar.jobRowIsWorktreeForTesting(worktreeJob) == false)
+        worktreeWorkspace.metadata = ReviewWorkspaceMetadata(
+            repositoryIdentity: repositoryIdentity,
+            displayTitle: "CodexReviewKit",
+            kind: .linkedWorktree
+        )
+        #expect(sidebar.jobRowIsWorktreeForTesting(worktreeJob) == true)
+        #expect(ReviewMonitorJobRowView.worktreeSymbolName == "arrow.trianglehead.branch")
+        #expect(ReviewMonitorJobRowView.worktreeSymbolRotation.degrees == 90)
+        #expect(
+            ReviewMonitorJobRowView(
+                job: worktreeJob,
+                workspace: worktreeWorkspace
+            ).titleAccessibilityLabel
+                == "Deleted worktree, Worktree"
+        )
     }
 
     @Test func sidebarLatestFinishedFilterUsesLinkedWorktreeGroupLatestJob() async throws {
@@ -6866,6 +7045,7 @@ func makeSidebarContent(from jobs: [CodexReviewJob]) -> (workspaces: [CodexRevie
 
 struct LinkedWorktreeFixtureForTesting {
     var rootURL: URL
+    var repositoryURL: URL
     var firstWorktreeURL: URL
     var secondWorktreeURL: URL
 }
@@ -6921,6 +7101,7 @@ func makeLinkedWorktreeFixtureForTesting(
 
     return LinkedWorktreeFixtureForTesting(
         rootURL: rootURL,
+        repositoryURL: repositoryURL,
         firstWorktreeURL: firstWorktreeURL,
         secondWorktreeURL: secondWorktreeURL
     )

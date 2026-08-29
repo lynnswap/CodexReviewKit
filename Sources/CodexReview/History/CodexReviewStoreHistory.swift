@@ -82,6 +82,7 @@ extension CodexReviewStore {
         let record = try StartedReviewRecord(
             id: id,
             cwd: request.cwd,
+            workspaceMetadata: ReviewWorkspaceMetadata.resolve(cwd: request.cwd),
             workspaceSortOrder: workspaceSortOrder,
             sortOrder: nextHistoryJobSortOrder(cwd: request.cwd),
             target: request.target,
@@ -631,6 +632,7 @@ extension CodexReviewStore {
 
         var seenReviewIDs: Set<String> = []
         var workspaceSortOrders: [String: Double] = [:]
+        var workspaceMetadataByCWD: [String: ReviewWorkspaceMetadata] = [:]
         var restoredJobs: [CodexReviewJob] = []
         restoredJobs.reserveCapacity(records.count)
 
@@ -648,11 +650,25 @@ extension CodexReviewStore {
                 )
             }
             workspaceSortOrders[record.started.cwd] = record.started.workspaceSortOrder
+            if let metadata = record.started.workspaceMetadata {
+                if let existing = workspaceMetadataByCWD[record.started.cwd],
+                   existing != metadata
+                {
+                    throw ReviewHistoryOperationFailure(
+                        message: "Loaded workspace \(record.started.cwd) has conflicting repository metadata."
+                    )
+                }
+                workspaceMetadataByCWD[record.started.cwd] = metadata
+            }
             restoredJobs.append(record.makeRestoredJob())
         }
 
         workspaces = Set(workspaceSortOrders.map { cwd, sortOrder in
-            CodexReviewWorkspace(cwd: cwd, sortOrder: sortOrder)
+            CodexReviewWorkspace(
+                cwd: cwd,
+                metadata: workspaceMetadataByCWD[cwd],
+                sortOrder: sortOrder
+            )
         })
         jobs = Set(restoredJobs)
         persistedTerminalReviewIDs = seenReviewIDs
@@ -690,9 +706,16 @@ extension CodexReviewStore {
 
     private func insertRestoredHistoryJob(_ restored: RestoredReviewRecord) {
         let job = restored.makeRestoredJob()
-        if workspace(cwd: job.cwd) == nil {
+        if let workspace = workspace(cwd: job.cwd) {
+            if let metadata = restored.started.workspaceMetadata,
+               workspace.metadata != metadata
+            {
+                workspace.metadata = metadata
+            }
+        } else {
             workspaces.insert(CodexReviewWorkspace(
                 cwd: job.cwd,
+                metadata: restored.started.workspaceMetadata,
                 sortOrder: restored.started.workspaceSortOrder
             ))
         }

@@ -67,7 +67,13 @@ struct ReviewHistorySchemaTests {
             "review_records",
             "review_workspaces",
         ])
-        #expect(workspaceColumns == ["cwd", "sortOrder"])
+        #expect(workspaceColumns == [
+            "cwd",
+            "sortOrder",
+            "repositoryIdentity",
+            "displayTitle",
+            "kind",
+        ])
         #expect(recordColumns == [
             "id",
             "cwd",
