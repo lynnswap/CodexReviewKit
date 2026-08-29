@@ -107,4 +107,25 @@ struct ArchitectureFenceTests {
 
         #expect(violations.isEmpty, Comment(rawValue: violations.joined(separator: "\n")))
     }
+
+    @Test func reviewUIDoesNotOwnSQLitePersistence() throws {
+        let repo = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let reviewUISources = repo.appending(path: "Sources/ReviewUI")
+        let files = try FileManager.default
+            .subpathsOfDirectory(atPath: reviewUISources.path)
+            .filter { $0.hasSuffix(".swift") }
+
+        let violations = try files.compactMap { file -> String? in
+            let url = reviewUISources.appending(path: file)
+            let text = try String(contentsOf: url, encoding: .utf8)
+            return text.split(separator: "\n").contains { line in
+                line.trimmingCharacters(in: .whitespaces) == "import SQLiteData"
+            } ? file : nil
+        }
+
+        #expect(violations.isEmpty, Comment(rawValue: violations.joined(separator: "\n")))
+    }
 }

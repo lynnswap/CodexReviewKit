@@ -374,14 +374,16 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         if sidebarSelection == .account {
             return .accountList
         }
+        let hasSidebarContent = hasReviewJobs || hasWorkspaces
+        if hasSidebarContent {
+            return .jobList
+        }
         switch serverState {
         case .failed, .starting, .stopped:
             return .unavailable
         case .running:
-            break
+            return .empty
         }
-        let hasSidebarContent = hasReviewJobs || hasWorkspaces
-        return hasSidebarContent ? .jobList : .empty
     }
 
     private func sidebarWorkspaceTopologies() -> [SidebarWorkspaceTopology] {

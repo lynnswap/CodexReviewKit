@@ -1,6 +1,11 @@
 import Foundation
 import Observation
 
+package enum CodexReviewJobOrigin: Sendable, Hashable {
+    case live(sessionID: String)
+    case restoredHistory
+}
+
 @MainActor
 @Observable
 public final class CodexReviewJob: Identifiable, Hashable {
@@ -446,6 +451,8 @@ public final class CodexReviewJob: Identifiable, Hashable {
     public nonisolated let id: String
     public let sessionID: String
     public let cwd: String
+    package let origin: CodexReviewJobOrigin
+    package let target: CodexReviewAPI.Target
     public internal(set) var sortOrder: Double
     public internal(set) var targetSummary: String
     public internal(set) var core: ReviewJobCore
@@ -496,6 +503,8 @@ public final class CodexReviewJob: Identifiable, Hashable {
         cwd: String,
         sortOrder: Double = 0,
         targetSummary: String,
+        target: CodexReviewAPI.Target = .uncommittedChanges,
+        origin: CodexReviewJobOrigin? = nil,
         core: ReviewJobCore,
         pendingCancellationRequest: ReviewCancellationRequestReceipt? = nil,
         logEntries: [ReviewLogEntry]
@@ -504,6 +513,8 @@ public final class CodexReviewJob: Identifiable, Hashable {
         self.id = id
         self.sessionID = sessionID
         self.cwd = cwd
+        self.origin = origin ?? .live(sessionID: sessionID)
+        self.target = target
         self.sortOrder = sortOrder
         self.targetSummary = targetSummary
         self.core = core
@@ -520,6 +531,13 @@ public final class CodexReviewJob: Identifiable, Hashable {
         self.cappedLogBytes = initialState.logState.cappedBytes
         self.logRevision = 0
         self.lastLogMutation = .reload
+    }
+
+    package func belongs(toLiveSession sessionID: String) -> Bool {
+        guard case .live(let ownedSessionID) = origin else {
+            return false
+        }
+        return ownedSessionID == sessionID
     }
 
     public nonisolated static func == (lhs: CodexReviewJob, rhs: CodexReviewJob) -> Bool {
