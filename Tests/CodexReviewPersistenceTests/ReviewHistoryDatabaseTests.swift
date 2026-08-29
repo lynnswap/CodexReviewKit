@@ -251,6 +251,48 @@ struct ReviewHistoryDatabaseTests {
         #expect(restored.started.sortOrder == 30)
     }
 
+    @Test("recording a start preserves current workspace order")
+    func startPreservesWorkspaceOrder() async throws {
+        let (database, writer) = try ReviewHistoryTestSupport.database()
+        try await database.recordStarted(ReviewHistoryTestSupport.started(
+            id: "existing",
+            cwd: "/tmp/shared",
+            workspaceSortOrder: 1,
+            sortOrder: 0
+        ))
+        try await database.saveOrdering(.init(
+            workspaces: [.init(cwd: "/tmp/shared", sortOrder: 20)],
+            reviews: [.init(id: "existing", sortOrder: 30)]
+        ))
+
+        try await database.recordStarted(ReviewHistoryTestSupport.started(
+            id: "new-shared",
+            cwd: "/tmp/shared",
+            workspaceSortOrder: 1,
+            sortOrder: 31
+        ))
+        try await database.recordStarted(ReviewHistoryTestSupport.started(
+            id: "new-workspace",
+            cwd: "/tmp/new",
+            workspaceSortOrder: 40,
+            sortOrder: 0
+        ))
+
+        let workspaceOrders = try await writer.read { db in
+            Dictionary(uniqueKeysWithValues:
+                try ReviewWorkspaceRow.fetchAll(db).map { ($0.cwd, $0.sortOrder) }
+            )
+        }
+        let reviewOrders = try await writer.read { db in
+            Dictionary(uniqueKeysWithValues:
+                try ReviewRecordRow.fetchAll(db).map { ($0.id, $0.sortOrder) }
+            )
+        }
+
+        #expect(workspaceOrders == ["/tmp/shared": 20, "/tmp/new": 40])
+        #expect(reviewOrders == ["existing": 30, "new-shared": 31, "new-workspace": 0])
+    }
+
     @Test("round trips a terminal timestamp from a backwards wall clock")
     func backwardsClockRoundTrip() async throws {
         let (database, _) = try ReviewHistoryTestSupport.database()

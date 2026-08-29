@@ -60,7 +60,7 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
             guard try ReviewRecordRow.where({ $0.id.eq(record.id) }).fetchOne(db) == nil else {
                 throw ReviewHistoryDatabaseError.duplicateReview(record.id)
             }
-            try Self.upsert(encoded.workspace, in: db)
+            try Self.insertWorkspaceIfMissing(encoded.workspace, in: db)
             try ReviewRecordRow.insert { encoded.review }.execute(db)
         }
     }
@@ -381,12 +381,14 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
         }
     }
 
-    private static func upsert(_ workspace: ReviewWorkspaceRow, in db: Database) throws {
-        if try ReviewWorkspaceRow.where({ $0.cwd.eq(workspace.cwd) }).fetchOne(db) == nil {
-            try ReviewWorkspaceRow.insert { workspace }.execute(db)
-        } else {
-            try ReviewWorkspaceRow.update(workspace).execute(db)
+    private static func insertWorkspaceIfMissing(
+        _ workspace: ReviewWorkspaceRow,
+        in db: Database
+    ) throws {
+        guard try ReviewWorkspaceRow.where({ $0.cwd.eq(workspace.cwd) }).fetchOne(db) == nil else {
+            return
         }
+        try ReviewWorkspaceRow.insert { workspace }.execute(db)
     }
 
     private static func validate(_ ordering: ReviewHistoryOrdering) throws {
