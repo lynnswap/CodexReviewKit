@@ -94,6 +94,19 @@ public final class CodexReviewStore {
     public package(set) var serverURL: URL?
     public package(set) var workspaces: Set<CodexReviewWorkspace> = []
     public package(set) var jobs: Set<CodexReviewJob> = []
+    package private(set) var historyAvailability: ReviewHistoryAvailability = .loading
+    package var historyFailureMessage: String? {
+        guard case .failed(let message) = historyAvailability else {
+            return nil
+        }
+        return message
+    }
+    package func transitionHistoryAvailability(
+        to availability: ReviewHistoryAvailability
+    ) {
+        historyAvailability = availability
+        writeDiagnosticsIfNeeded()
+    }
     package var shouldAutoStartEmbeddedServer: Bool {
         backend.seed.shouldAutoStartEmbeddedServer
     }
@@ -115,6 +128,21 @@ public final class CodexReviewStore {
     @ObservationIgnored package var previewSupportRetainer: AnyObject?
     @ObservationIgnored package let clock: CodexReviewClock
     @ObservationIgnored package let idGenerator: CodexReviewIDGenerator
+    @ObservationIgnored package let historyPersistence: any ReviewHistoryPersistence
+    @ObservationIgnored package let historyRetentionPolicy: ReviewHistoryRetentionPolicy
+    @ObservationIgnored package var historyLoadTask: Task<Result<[RestoredReviewRecord], ReviewHistoryOperationFailure>, Never>?
+    @ObservationIgnored package var historyLoadWasApplied = false
+    @ObservationIgnored package var historyLoadSucceeded = false
+    @ObservationIgnored package let historyMutationCoordinator = ReviewHistoryMutationCoordinator()
+    @ObservationIgnored package var historyStartReceipts: [String: HistoryStartReceipt] = [:]
+    @ObservationIgnored package var historyTerminalReceipts: [String: HistoryTerminalReceipt] = [:]
+    @ObservationIgnored package var historyResultLeaseIDs: [String: Set<UUID>] = [:]
+    @ObservationIgnored package var deferredHistoryRemovalIDs: Set<String> = []
+    @ObservationIgnored package var nextHistoryStartOrdinal: UInt64 = 0
+    @ObservationIgnored package var persistedStartedReviewIDs: Set<String> = []
+    @ObservationIgnored package var persistedTerminalReviewIDs: Set<String> = []
+    @ObservationIgnored package var applicationShutdownRequested = false
+    @ObservationIgnored package var applicationShutdownTask: Task<Void, Never>?
     @ObservationIgnored package var reviewAttemptOwnerships: [String: StoreReviewAttemptOwnership] = [:]
     @ObservationIgnored package var reviewWorkerTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored package var runtimeStopDetachedReviewWorkerTasks: [String: Task<Void, Never>] = [:]
@@ -135,7 +163,9 @@ public final class CodexReviewStore {
         clock: CodexReviewClock = .init(),
         idGenerator: CodexReviewIDGenerator = .init(),
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
-        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default
+        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
+        historyPersistence: any ReviewHistoryPersistence = DisabledReviewHistoryPersistence(),
+        historyRetentionPolicy: ReviewHistoryRetentionPolicy = .default
     ) {
         self.backend = backend
         self.networkMonitor = networkMonitor
@@ -143,6 +173,8 @@ public final class CodexReviewStore {
         self.diagnosticsURL = diagnosticsURL
         self.clock = clock
         self.idGenerator = idGenerator
+        self.historyPersistence = historyPersistence
+        self.historyRetentionPolicy = historyRetentionPolicy
         self.auth = CodexReviewAuthModel()
         self.settings = SettingsStore(snapshot: backend.seed.initialSettingsSnapshot)
         self.settingsService = settingsService ?? CodexReviewSettingsService(
@@ -168,6 +200,8 @@ public final class CodexReviewStore {
 
     isolated deinit {
         accountRateLimitAutoRefreshDriver?.cancel()
+        historyLoadTask?.cancel()
+        applicationShutdownTask?.cancel()
         storeWorkRegistry.cancelWithoutWaiting()
         switch runtimeState {
         case .acquiring(_, _, let task),
@@ -212,7 +246,9 @@ public final class CodexReviewStore {
         clock: CodexReviewClock = .init(),
         idGenerator: CodexReviewIDGenerator = .init(),
         networkMonitor: any CodexReviewNetworkMonitoring = StaticCodexReviewNetworkMonitor(),
-        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default
+        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
+        historyPersistence: any ReviewHistoryPersistence = DisabledReviewHistoryPersistence(),
+        historyRetentionPolicy: ReviewHistoryRetentionPolicy = .default
     ) -> CodexReviewStore {
         CodexReviewStore(
             backend: backend,
@@ -220,11 +256,22 @@ public final class CodexReviewStore {
             clock: clock,
             idGenerator: idGenerator,
             networkMonitor: networkMonitor,
-            networkRecoveryPolicy: networkRecoveryPolicy
+            networkRecoveryPolicy: networkRecoveryPolicy,
+            historyPersistence: historyPersistence,
+            historyRetentionPolicy: historyRetentionPolicy
         )
     }
 
     public func start(forceRestartIfNeeded: Bool = false) async {
+        guard applicationShutdownRequested == false else {
+            return
+        }
+        await loadReviewHistoryIfNeeded()
+        guard Task.isCancelled == false,
+              applicationShutdownRequested == false
+        else {
+            return
+        }
         guard let operation = admitRuntimeStart(
             forceRestartIfNeeded: forceRestartIfNeeded
         ) else {
@@ -508,6 +555,9 @@ public final class CodexReviewStore {
             ?? makeFailureIncident(for: previousState)
         closePublishedRuntimeAdmission(in: previousState)
         storeWorkRegistry.closeReviewAdmission()
+        let pendingHistoryStarts = requestHistoryStartCancellations(
+            cancellation: intent.reviewCancellation
+        )
         let generation = previousState.generation.successor()
         if case .replacing(let replacement, _) = previousState {
             replacement.finish(.superseded(runtimeTransitionPurpose(for: intent)))
@@ -519,6 +569,7 @@ public final class CodexReviewStore {
             guard let self else {
                 return
             }
+            await self.waitForHistoryStarts(pendingHistoryStarts)
             await self.performRuntimeTeardown(
                 previousState: previousState,
                 generation: generation,
@@ -658,12 +709,18 @@ public final class CodexReviewStore {
         }
 
         storeWorkRegistry.closeReviewAdmission()
+        let pendingHistoryStarts = requestHistoryStartCancellations(
+            cancellation: .system(message: "Review runtime restarted.")
+        )
         _ = context.failureIncident?.admitSuccessor(generation: generation)
 
         serverState = .starting
         serverURL = nil
         writeDiagnosticsIfNeeded()
         let task = Task<Void, Never> { @MainActor [weak self] in
+            if let self {
+                await self.waitForHistoryStarts(pendingHistoryStarts)
+            }
             if let predecessor {
                 await predecessor.value
             }
@@ -695,7 +752,8 @@ public final class CodexReviewStore {
     }
 
     package func closeRegisteredStoreWork(
-        reason: ReviewCancellation
+        reason: ReviewCancellation,
+        abandoningInvalidatedReviewWork: Bool = false
     ) async -> ReviewStoreWorkDrainResult {
         let reviewWorkerJobIDs: [String]
         let cancellationRegistrations: [ReviewRuntimeCancellationRegistration]
@@ -713,7 +771,9 @@ public final class CodexReviewStore {
             reviewWorkerJobIDs = []
             cancellationRegistrations = []
         }
-        let operation = storeWorkRegistry.beginClosing { [self] in
+        let operation = storeWorkRegistry.beginClosing(
+            abandoningInvalidatedReviewWork: abandoningInvalidatedReviewWork
+        ) { [self] in
             accountRateLimitAutoRefreshDriver?.closeAdmission()
         } beforeTaskCancellation: { [self] in
             for registration in cancellationRegistrations {
@@ -757,7 +817,7 @@ public final class CodexReviewStore {
                 case .skip:
                     return
                 case .runFinalizer(let finalizer):
-                    finalizer(self)
+                    await finalizer(self)
                     return
                 }
             }
@@ -1017,6 +1077,9 @@ public final class CodexReviewStore {
         retainedMCP: RetainedMCPServer
     ) -> RuntimeStartOperation {
         storeWorkRegistry.closeReviewAdmission()
+        let pendingHistoryStarts = requestHistoryStartCancellations(
+            cancellation: .system(message: "Review runtime restarted.")
+        )
         let replacement = ReviewRuntimeRecoveryReplacement(
             sourceGeneration: sourceGeneration,
             retiringRuntime: retiringRuntime,
@@ -1029,6 +1092,7 @@ public final class CodexReviewStore {
             guard let self else {
                 return
             }
+            await self.waitForHistoryStarts(pendingHistoryStarts)
             await self.performRuntimeReplacement(replacement)
         }
         runtimeState = .replacing(
@@ -1619,18 +1683,49 @@ public final class CodexReviewStore {
             return
         }
         let jobs = orderedJobs.map { job in
-            CodexReviewStoreDiagnosticsSnapshot.Job(
+            let origin: String = switch job.origin {
+            case .live:
+                "live"
+            case .restoredHistory:
+                "restoredHistory"
+            }
+            return CodexReviewStoreDiagnosticsSnapshot.Job(
+                id: job.id,
+                cwd: job.cwd,
+                origin: origin,
+                target: job.target,
+                targetSummary: job.targetSummary,
+                model: job.core.run.model,
                 status: job.core.lifecycle.status.rawValue,
+                terminal: job.core.lifecycle.terminal.map(
+                    CodexReviewStoreDiagnosticsSnapshot.Job.Terminal.init
+                ),
+                startedAt: job.core.lifecycle.startedAt,
+                endedAt: job.core.lifecycle.endedAt,
                 summary: job.core.output.summary,
-                logText: job.logText,
-                rawLogText: job.rawLogText
+                canonicalReview: job.core.output.lastAgentMessage,
+                parsedResult: job.core.output.reviewResult.map(
+                    CodexReviewStoreDiagnosticsSnapshot.Job.ParsedResult.init
+                )
             )
+        }
+        let historyAvailability: String = switch historyAvailability {
+        case .loading:
+            "loading"
+        case .available:
+            "available"
+        case .failed:
+            "failed"
+        case .closed:
+            "closed"
         }
         let snapshot = CodexReviewStoreDiagnosticsSnapshot(
             serverState: serverState.displayText,
             failureMessage: serverState.failureMessage,
             serverURL: serverURL?.absoluteString,
             childRuntimePath: nil,
+            historyAvailability: historyAvailability,
+            historyFailureMessage: historyFailureMessage,
             jobs: jobs
         )
         do {

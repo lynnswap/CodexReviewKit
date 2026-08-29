@@ -6,14 +6,40 @@
 //
 
 import AppKit
-import CodexReview
-import CodexReviewHost
+@_spi(ApplicationHostSupport) import CodexReview
+@_spi(ApplicationHostSupport) import CodexReviewHost
 @_spi(PreviewSupport) import ReviewUI
 
 enum ReviewMonitorLaunchMode: Sendable {
     case application
     case xctest
     case preview
+}
+
+enum ReviewMonitorLiveStoreMode: Equatable {
+    case production
+    case isolatedTest(diagnosticsURL: URL, historyDatabaseURL: URL)
+    case unavailableIsolatedTest(diagnosticsURL: URL?, message: String)
+}
+
+fileprivate struct ReviewMonitorIsolatedTestConfiguration {
+    var port: Int?
+    var codexExecutablePath: String?
+    var diagnosticsURL: URL?
+    var historyDatabaseURL: URL?
+    var validationFailure: String?
+
+    func applying(to preferences: CodexReviewRuntime.Preferences) -> CodexReviewRuntime.Preferences {
+        CodexReviewRuntime.Preferences(
+            codexHomePath: FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".codex", isDirectory: true)
+                .path,
+            mcpHost: "127.0.0.1",
+            mcpPort: port ?? preferences.mcpPort,
+            mcpPath: "/mcp",
+            codexExecutablePath: codexExecutablePath ?? preferences.codexExecutablePath
+        )
+    }
 }
 
 struct ReviewMonitorLaunchContext: Sendable {
@@ -40,7 +66,16 @@ struct ReviewMonitorLaunchContext: Sendable {
     }
 
     var shouldStartEmbeddedServer: Bool {
-        launchMode == .application && requestsPreviewContent == false
+        launchMode == .application
+            && requestsPreviewContent == false
+            && isolatedTestConfiguration?.validationFailure == nil
+    }
+
+    fileprivate var isolatedTestConfiguration: ReviewMonitorIsolatedTestConfiguration? {
+        ReviewMonitorLaunchEnvironment.isolatedTestConfiguration(
+            environment: environment,
+            arguments: arguments
+        )
     }
 }
 
@@ -56,11 +91,13 @@ enum ReviewMonitorLaunchEnvironment {
     static let testPortKey = CodexReviewStoreTestEnvironment.portKey
     static let testCodexCommandKey = CodexReviewStoreTestEnvironment.codexCommandKey
     static let testDiagnosticsPathKey = CodexReviewStoreTestEnvironment.diagnosticsPathKey
+    static let testHistoryPathKey = CodexReviewStoreTestEnvironment.historyPathKey
     static let reviewModeArgument = CodexReviewStoreTestEnvironment.reviewModeArgument
     static let mockJobsArgument = CodexReviewStoreTestEnvironment.mockJobsArgument
     static let testPortArgument = CodexReviewStoreTestEnvironment.portArgument
     static let testCodexCommandArgument = CodexReviewStoreTestEnvironment.codexCommandArgument
     static let testDiagnosticsPathArgument = CodexReviewStoreTestEnvironment.diagnosticsPathArgument
+    static let testHistoryPathArgument = CodexReviewStoreTestEnvironment.historyPathArgument
 
     static func launchMode(
         environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -122,9 +159,148 @@ enum ReviewMonitorLaunchEnvironment {
         environment[testPortKey] != nil
             || environment[testCodexCommandKey] != nil
             || environment[testDiagnosticsPathKey] != nil
+            || environment[testHistoryPathKey] != nil
             || arguments.contains(testPortArgument)
             || arguments.contains(testCodexCommandArgument)
             || arguments.contains(testDiagnosticsPathArgument)
+            || arguments.contains(testHistoryPathArgument)
+            || arguments.contains(where: { $0.hasPrefix(testPortArgument + "=") })
+            || arguments.contains(where: { $0.hasPrefix(testCodexCommandArgument + "=") })
+            || arguments.contains(where: { $0.hasPrefix(testDiagnosticsPathArgument + "=") })
+            || arguments.contains(where: { $0.hasPrefix(testHistoryPathArgument + "=") })
+    }
+
+    fileprivate static func isolatedTestConfiguration(
+        environment: [String: String],
+        arguments: [String]
+    ) -> ReviewMonitorIsolatedTestConfiguration? {
+        guard hasExplicitTestOverride(environment: environment, arguments: arguments) else {
+            return nil
+        }
+
+        var failures: [String] = []
+        let portValue = explicitTestValue(
+            environment: environment,
+            key: testPortKey,
+            arguments: arguments,
+            argument: testPortArgument
+        )
+        let port: Int?
+        if portValue.wasSpecified {
+            if let value = portValue.value,
+               let parsed = Int(value),
+               (1...65535).contains(parsed)
+            {
+                port = parsed
+            } else {
+                port = nil
+                failures.append("\(testPortKey) requires an integer from 1 through 65535.")
+            }
+        } else {
+            port = nil
+            failures.append("\(testPortKey) is required for an isolated ReviewMonitor test launch.")
+        }
+
+        let commandValue = explicitTestValue(
+            environment: environment,
+            key: testCodexCommandKey,
+            arguments: arguments,
+            argument: testCodexCommandArgument
+        )
+        let codexExecutablePath = absolutePath(
+            commandValue,
+            key: testCodexCommandKey,
+            isRequired: true,
+            failures: &failures
+        )
+
+        let diagnosticsValue = explicitTestValue(
+            environment: environment,
+            key: testDiagnosticsPathKey,
+            arguments: arguments,
+            argument: testDiagnosticsPathArgument
+        )
+        let diagnosticsURL = absolutePath(
+            diagnosticsValue,
+            key: testDiagnosticsPathKey,
+            isRequired: true,
+            failures: &failures
+        ).map { URL(fileURLWithPath: $0, isDirectory: false) }
+
+        let historyValue = explicitTestValue(
+            environment: environment,
+            key: testHistoryPathKey,
+            arguments: arguments,
+            argument: testHistoryPathArgument
+        )
+        let historyPath = absolutePath(
+            historyValue,
+            key: testHistoryPathKey,
+            isRequired: true,
+            failures: &failures
+        )
+        let historyDatabaseURL = historyPath.map {
+            URL(fileURLWithPath: $0, isDirectory: false)
+        }
+
+        return ReviewMonitorIsolatedTestConfiguration(
+            port: port,
+            codexExecutablePath: codexExecutablePath,
+            diagnosticsURL: diagnosticsURL,
+            historyDatabaseURL: historyDatabaseURL,
+            validationFailure: failures.first
+        )
+    }
+
+    private static func explicitTestValue(
+        environment: [String: String],
+        key: String,
+        arguments: [String],
+        argument: String
+    ) -> (wasSpecified: Bool, value: String?) {
+        if let value = environment[key] {
+            return (true, value.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        if let value = arguments.first(where: { $0.hasPrefix(argument + "=") }) {
+            return (
+                true,
+                String(value.dropFirst(argument.count + 1))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+        }
+        guard let index = arguments.firstIndex(of: argument) else {
+            return (false, nil)
+        }
+        let valueIndex = arguments.index(after: index)
+        guard valueIndex < arguments.endIndex else {
+            return (true, nil)
+        }
+        return (
+            true,
+            arguments[valueIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+
+    private static func absolutePath(
+        _ explicitValue: (wasSpecified: Bool, value: String?),
+        key: String,
+        isRequired: Bool = false,
+        failures: inout [String]
+    ) -> String? {
+        guard explicitValue.wasSpecified else {
+            if isRequired {
+                failures.append("\(key) is required for an isolated ReviewMonitor test launch.")
+            }
+            return nil
+        }
+        guard let value = explicitValue.value,
+              value.isEmpty == false,
+              value.hasPrefix("/")
+        else {
+            failures.append("\(key) requires an absolute path.")
+            return nil
+        }
+        return value
     }
 
     private static func isEnabledFlag(_ value: String?) -> Bool {
@@ -144,7 +320,7 @@ enum ReviewMonitorLaunchEnvironment {
 @MainActor
 protocol ReviewMonitorLifecycleStore: AnyObject {
     func start(forceRestartIfNeeded: Bool) async
-    func stop() async
+    func shutdown() async
 }
 
 extension CodexReviewStore: ReviewMonitorLifecycleStore {}
@@ -165,6 +341,8 @@ final class ReviewMonitorLifecycleController {
     private let store: any ReviewMonitorLifecycleStore
     private let managesEmbeddedServerOnApplicationLaunch: Bool
     private var shouldManageEmbeddedServer = true
+    private var launchTask: Task<Void, Never>?
+    private var launchTaskID: UUID?
     private var terminationTask: Task<Void, Never>?
 
     init(
@@ -182,8 +360,19 @@ final class ReviewMonitorLifecycleController {
         guard shouldManageEmbeddedServer else {
             return
         }
-        Task { @MainActor in
+        guard launchTask == nil else {
+            return
+        }
+        let id = UUID()
+        let store = store
+        launchTaskID = id
+        launchTask = Task { @MainActor [weak self] in
             await store.start(forceRestartIfNeeded: true)
+            guard self?.launchTaskID == id else {
+                return
+            }
+            self?.launchTask = nil
+            self?.launchTaskID = nil
         }
     }
 
@@ -196,9 +385,15 @@ final class ReviewMonitorLifecycleController {
         guard terminationTask == nil else {
             return .terminateLater
         }
-        terminationTask = Task { @MainActor in
-            await store.stop()
-            terminationTask = nil
+        let launchTask = launchTask
+        launchTask?.cancel()
+        self.launchTask = nil
+        launchTaskID = nil
+        let store = store
+        terminationTask = Task { @MainActor [weak self] in
+            await launchTask?.value
+            await store.shutdown()
+            self?.terminationTask = nil
             application.replyToApplicationShouldTerminate(true)
         }
         return .terminateLater
@@ -219,7 +414,8 @@ struct ReviewMonitorAppComposition {
     typealias PresentationAnchorProvider = @MainActor () -> NSWindow?
     typealias LiveStoreFactory = (
         CodexReviewRuntime.Preferences,
-        CodexReviewNativeAuthentication.Configuration?
+        CodexReviewNativeAuthentication.Configuration?,
+        ReviewMonitorLiveStoreMode
     ) -> CodexReviewStore
 
     var makeStore: (ReviewMonitorLaunchContext, @escaping PresentationAnchorProvider) -> CodexReviewStore
@@ -262,11 +458,26 @@ struct ReviewMonitorAppComposition {
 
     static func live(
         runtimePreferencesStore: any CodexReviewRuntime.PreferencesStore = CodexReviewRuntime.UserDefaultsPreferencesStore(),
-        makeLiveStore: @escaping LiveStoreFactory = { runtimePreferences, nativeAuthenticationConfiguration in
-            CodexReviewStore.makeLiveStore(
-                runtimePreferences: runtimePreferences,
-                nativeAuthenticationConfiguration: nativeAuthenticationConfiguration
-            )
+        makeLiveStore: @escaping LiveStoreFactory = { runtimePreferences, nativeAuthenticationConfiguration, mode in
+            switch mode {
+            case .production:
+                CodexReviewStore.makeLiveStore(
+                    runtimePreferences: runtimePreferences,
+                    nativeAuthenticationConfiguration: nativeAuthenticationConfiguration
+                )
+            case .isolatedTest(let diagnosticsURL, let historyDatabaseURL):
+                CodexReviewStore.makeLiveStore(
+                    runtimePreferences: runtimePreferences,
+                    nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
+                    diagnosticsURL: diagnosticsURL,
+                    reviewHistoryDatabaseURL: historyDatabaseURL
+                )
+            case .unavailableIsolatedTest(let diagnosticsURL, let message):
+                CodexReviewStore.makeUnavailableReviewMonitorStore(
+                    diagnosticsURL: diagnosticsURL,
+                    reviewHistoryFailureMessage: message
+                )
+            }
         }
     ) -> ReviewMonitorAppComposition {
         ReviewMonitorAppComposition(
@@ -274,13 +485,40 @@ struct ReviewMonitorAppComposition {
                 if context.requestsPreviewContent {
                     return ReviewMonitorPreviewContent.makeStore()
                 }
+                let testConfiguration = context.isolatedTestConfiguration
+                let runtimePreferences = testConfiguration?.applying(
+                    to: runtimePreferencesStore.load()
+                ) ?? runtimePreferencesStore.load()
+                let storeMode: ReviewMonitorLiveStoreMode
+                if let testConfiguration {
+                    if let failure = testConfiguration.validationFailure {
+                        storeMode = .unavailableIsolatedTest(
+                            diagnosticsURL: testConfiguration.diagnosticsURL,
+                            message: failure
+                        )
+                    } else if let diagnosticsURL = testConfiguration.diagnosticsURL,
+                              let historyDatabaseURL = testConfiguration.historyDatabaseURL {
+                        storeMode = .isolatedTest(
+                            diagnosticsURL: diagnosticsURL,
+                            historyDatabaseURL: historyDatabaseURL
+                        )
+                    } else {
+                        storeMode = .unavailableIsolatedTest(
+                            diagnosticsURL: testConfiguration.diagnosticsURL,
+                            message: "The isolated ReviewMonitor launch is missing its history database path."
+                        )
+                    }
+                } else {
+                    storeMode = .production
+                }
                 return makeLiveStore(
-                    runtimePreferencesStore.load(),
+                    runtimePreferences,
                     .init(
                         callbackScheme: ReviewMonitorNativeAuthentication.callbackScheme,
                         browserSessionPolicy: .ephemeral,
                         presentationAnchorProvider: presentationAnchorProvider
-                    )
+                    ),
+                    storeMode
                 )
             },
             makeWindowController: { store, showSettings in

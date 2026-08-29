@@ -168,6 +168,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private var workspaceSectionsByID: [String: SidebarWorkspaceSection] = [:]
     private var currentRootTopologies: [SidebarRootTopology] = []
     private var isReconcilingSelection = false
+    private var historyActionTasks: [UUID: Task<Void, Never>] = [:]
 #if DEBUG
     private var fullReloadCountForTesting = 0
     private var workspaceReloadCountForTesting = 0
@@ -193,6 +194,9 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         sidebarKindObservation?.cancel()
         sidebarTopologyObservation?.cancel()
         sidebarFilterObservation?.cancel()
+        for task in historyActionTasks.values {
+            task.cancel()
+        }
     }
 
     override func loadView() {
@@ -374,14 +378,16 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         if sidebarSelection == .account {
             return .accountList
         }
+        let hasSidebarContent = hasReviewJobs || hasWorkspaces
+        if hasSidebarContent {
+            return .jobList
+        }
         switch serverState {
         case .failed, .starting, .stopped:
             return .unavailable
         case .running:
-            break
+            return .empty
         }
-        let hasSidebarContent = hasReviewJobs || hasWorkspaces
-        return hasSidebarContent ? .jobList : .empty
     }
 
     private func sidebarWorkspaceTopologies() -> [SidebarWorkspaceTopology] {
@@ -698,12 +704,27 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func triggerCancellation(for job: CodexReviewJob) {
-        Task { @MainActor [weak self] in
-            guard let self else {
-                return
-            }
-            await performCancellation(for: job)
+        startHistoryAction { [weak self] in
+            await self?.performCancellation(for: job)
         }
+    }
+
+    private func triggerHistoryDeletion(for job: CodexReviewJob) {
+        let store = store
+        startHistoryAction {
+            await store.deleteReviewHistory(id: job.id)
+        }
+    }
+
+    private func startHistoryAction(
+        _ operation: @escaping @MainActor @Sendable () async -> Void
+    ) {
+        let id = UUID()
+        let task = Task { @MainActor [weak self] in
+            await operation()
+            self?.historyActionTasks.removeValue(forKey: id)
+        }
+        historyActionTasks[id] = task
     }
 
     private func toggleWorkspaceExpansion(_ workspace: CodexReviewWorkspace) {
@@ -747,15 +768,27 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         let menu = NSMenu()
         menu.autoenablesItems = false
 
-        let cancelItem = NSMenuItem(
-            title: "Cancel",
-            action: #selector(handleCancelMenuItem(_:)),
-            keyEquivalent: ""
-        )
-        cancelItem.target = self
-        cancelItem.representedObject = job
-        cancelItem.isEnabled = job.isTerminal == false && job.cancellationRequested == false
-        menu.addItem(cancelItem)
+        if job.isTerminal {
+            let deleteItem = NSMenuItem(
+                title: "Delete from History",
+                action: #selector(handleDeleteHistoryMenuItem(_:)),
+                keyEquivalent: ""
+            )
+            deleteItem.target = self
+            deleteItem.representedObject = job
+            deleteItem.isEnabled = store.canDeleteReviewHistory(id: job.id)
+            menu.addItem(deleteItem)
+        } else {
+            let cancelItem = NSMenuItem(
+                title: "Cancel",
+                action: #selector(handleCancelMenuItem(_:)),
+                keyEquivalent: ""
+            )
+            cancelItem.target = self
+            cancelItem.representedObject = job
+            cancelItem.isEnabled = job.cancellationRequested == false
+            menu.addItem(cancelItem)
+        }
         return menu
     }
 
@@ -765,6 +798,16 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return
         }
         triggerCancellation(for: job)
+    }
+
+    @objc
+    private func handleDeleteHistoryMenuItem(_ sender: NSMenuItem) {
+        guard let job = sender.representedObject as? CodexReviewJob,
+              job.isTerminal
+        else {
+            return
+        }
+        triggerHistoryDeletion(for: job)
     }
 
     private func requestCancellation(for job: CodexReviewJob) async throws {
@@ -1574,14 +1617,29 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         case .none:
             return false
         case .reorderWorkspaceSection(let id, let cwds, let storeIndex, let displayIndex):
-            store.reorderWorkspaces(cwds: cwds, toIndex: storeIndex)
-            moveWorkspaceSectionInOutline(id: id, toRootIndex: displayIndex)
+            let store = store
+            startHistoryAction { [weak self] in
+                guard await store.reorderWorkspaces(cwds: cwds, toIndex: storeIndex),
+                      let self
+                else {
+                    return
+                }
+                self.moveWorkspaceSectionInOutline(id: id, toRootIndex: displayIndex)
+            }
             return true
         case .reorderJob(let id, let cwd, let storeIndex, let displayIndex):
-            let workspace = workspace(cwd: cwd)
-            store.reorderJob(id: id, inWorkspace: cwd, toIndex: storeIndex)
-            if let workspace {
-                moveJobInOutline(id: id, in: workspace, toIndex: displayIndex)
+            let store = store
+            startHistoryAction { [weak self] in
+                guard await store.reorderJob(
+                    id: id,
+                    inWorkspace: cwd,
+                    toIndex: storeIndex
+                ), let self,
+                   let workspace = self.workspace(cwd: cwd)
+                else {
+                    return
+                }
+                self.moveJobInOutline(id: id, in: workspace, toIndex: displayIndex)
             }
             return true
         }
@@ -1955,6 +2013,15 @@ extension ReviewMonitorSidebarViewController {
 
     func cancelJobForTesting(_ job: CodexReviewJob) async {
         await performCancellation(for: job)
+    }
+
+    func waitForHistoryActionsForTesting() async {
+        while historyActionTasks.isEmpty == false {
+            let tasks = Array(historyActionTasks.values)
+            for task in tasks {
+                await task.value
+            }
+        }
     }
 
     func clickBlankAreaForTesting() {

@@ -36,10 +36,6 @@ struct RecoveryEnvironmentTests {
         try prepared.withCodexSQLiteHomeURL { #expect($0.lastPathComponent == "sqlite") }
         try prepared.withLoginStagingDirectoryURL { #expect($0.lastPathComponent == "LoginStaging") }
         try prepared.withSavedAccountsDirectoryURL { #expect($0.lastPathComponent == "SavedAccounts") }
-        try prepared.withHistoryDatabaseURL {
-            #expect($0.lastPathComponent == "review-history.sqlite")
-            #expect(FileManager.default.fileExists(atPath: $0.path) == false)
-        }
         expectRecoveryError(.invalidRequest) { _ = try plan.prepare() }
     }
 
@@ -338,7 +334,6 @@ struct RecoveryEnvironmentTests {
         expectRecoveryError(.closed) { try prepared.withCodexSQLiteHomeURL { _ in } }
         expectRecoveryError(.closed) { try prepared.withLoginStagingDirectoryURL { _ in } }
         expectRecoveryError(.closed) { try prepared.withSavedAccountsDirectoryURL { _ in } }
-        expectRecoveryError(.closed) { try prepared.withHistoryDatabaseURL { _ in } }
     }
 }
 

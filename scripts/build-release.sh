@@ -67,6 +67,9 @@ xcodebuild build \
   -configuration Release \
   -destination 'generic/platform=macOS' \
   -derivedDataPath "$derived_data_path" \
+  -disableAutomaticPackageResolution \
+  -onlyUsePackageVersionsFromResolvedFile \
+  -skipMacroValidation \
   ARCHS="$arch" \
   ONLY_ACTIVE_ARCH=NO \
   CODE_SIGNING_ALLOWED=NO \

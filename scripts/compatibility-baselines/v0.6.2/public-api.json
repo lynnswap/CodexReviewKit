@@ -16952,6 +16952,32 @@
                 "kind": "TypeNominal",
                 "name": "Void",
                 "printedName": "()"
+              }
+            ],
+            "declAttributes": [
+              "Final",
+              "SPIAccessControl",
+              "Custom"
+            ],
+            "declKind": "Func",
+            "funcSelfKind": "NonMutating",
+            "isFromExtension": true,
+            "kind": "Function",
+            "mangledName": "$s11CodexReview0aB5StoreC8shutdownyyYaF",
+            "moduleName": "CodexReview",
+            "name": "shutdown",
+            "printedName": "shutdown()",
+            "spi_group_names": [
+              "ApplicationHostSupport"
+            ],
+            "usr": "s:11CodexReview0aB5StoreC8shutdownyyYaF"
+          },
+          {
+            "children": [
+              {
+                "kind": "TypeNominal",
+                "name": "Void",
+                "printedName": "()"
               },
               {
                 "hasDefaultArg": true,
@@ -17207,6 +17233,203 @@
             "printedName": "makeLiveStore(runtimePreferences:nativeAuthenticationConfiguration:webAuthenticationSessionFactory:)",
             "static": true,
             "usr": "s:11CodexReview0aB5StoreC0aB4HostE08makeLiveC018runtimePreferences33nativeAuthenticationConfiguration03webJ14SessionFactoryAcD0aB7RuntimeO0H0V_AD0ab6NativeJ0O0K0VSgAN03WebM0_p10Foundation3URLV_SSAP07BrowserM6PolicyOSo8NSWindowCSgyYbScMYcctYaYbKScMYcctFZ"
+          },
+          {
+            "children": [
+              {
+                "kind": "TypeNominal",
+                "name": "CodexReviewStore",
+                "printedName": "CodexReview.CodexReviewStore",
+                "usr": "s:11CodexReview0aB5StoreC"
+              },
+              {
+                "children": [
+                  {
+                    "kind": "TypeNominal",
+                    "name": "URL",
+                    "printedName": "Foundation.URL",
+                    "usr": "s:10Foundation3URLV"
+                  }
+                ],
+                "kind": "TypeNominal",
+                "name": "Optional",
+                "printedName": "Foundation.URL?",
+                "usr": "s:Sq"
+              },
+              {
+                "kind": "TypeNominal",
+                "name": "String",
+                "printedName": "Swift.String",
+                "usr": "s:SS"
+              }
+            ],
+            "declAttributes": [
+              "Final",
+              "SPIAccessControl",
+              "Custom"
+            ],
+            "declKind": "Func",
+            "funcSelfKind": "NonMutating",
+            "isFromExtension": true,
+            "kind": "Function",
+            "mangledName": "$s11CodexReview0aB5StoreC0aB4HostE015makeUnavailableb7MonitorC014diagnosticsURL27reviewHistoryFailureMessageAC10Foundation0I0VSg_SStFZ",
+            "moduleName": "CodexReviewHost",
+            "name": "makeUnavailableReviewMonitorStore",
+            "printedName": "makeUnavailableReviewMonitorStore(diagnosticsURL:reviewHistoryFailureMessage:)",
+            "spi_group_names": [
+              "ApplicationHostSupport"
+            ],
+            "static": true,
+            "usr": "s:11CodexReview0aB5StoreC0aB4HostE015makeUnavailableb7MonitorC014diagnosticsURL27reviewHistoryFailureMessageAC10Foundation0I0VSg_SStFZ"
+          },
+          {
+            "children": [
+              {
+                "kind": "TypeNominal",
+                "name": "CodexReviewStore",
+                "printedName": "CodexReview.CodexReviewStore",
+                "usr": "s:11CodexReview0aB5StoreC"
+              },
+              {
+                "hasDefaultArg": true,
+                "kind": "TypeNominal",
+                "name": "Preferences",
+                "printedName": "CodexReviewHost.CodexReviewRuntime.Preferences",
+                "usr": "s:15CodexReviewHost0aB7RuntimeO11PreferencesV"
+              },
+              {
+                "children": [
+                  {
+                    "kind": "TypeNominal",
+                    "name": "Configuration",
+                    "printedName": "CodexReviewHost.CodexReviewNativeAuthentication.Configuration",
+                    "usr": "s:15CodexReviewHost0aB20NativeAuthenticationO13ConfigurationV"
+                  }
+                ],
+                "hasDefaultArg": true,
+                "kind": "TypeNominal",
+                "name": "Optional",
+                "printedName": "CodexReviewHost.CodexReviewNativeAuthentication.Configuration?",
+                "usr": "s:Sq"
+              },
+              {
+                "children": [
+                  {
+                    "children": [
+                      {
+                        "kind": "TypeNominal",
+                        "name": "WebSession",
+                        "printedName": "any CodexReviewHost.CodexReviewNativeAuthentication.WebSession",
+                        "usr": "s:15CodexReviewHost0aB20NativeAuthenticationO10WebSessionP"
+                      },
+                      {
+                        "children": [
+                          {
+                            "kind": "TypeNominal",
+                            "name": "URL",
+                            "printedName": "Foundation.URL",
+                            "usr": "s:10Foundation3URLV"
+                          },
+                          {
+                            "kind": "TypeNominal",
+                            "name": "String",
+                            "printedName": "Swift.String",
+                            "usr": "s:SS"
+                          },
+                          {
+                            "kind": "TypeNominal",
+                            "name": "BrowserSessionPolicy",
+                            "printedName": "CodexReviewHost.CodexReviewNativeAuthentication.Configuration.BrowserSessionPolicy",
+                            "usr": "s:15CodexReviewHost0aB20NativeAuthenticationO13ConfigurationV20BrowserSessionPolicyO"
+                          },
+                          {
+                            "children": [
+                              {
+                                "children": [
+                                  {
+                                    "children": [
+                                      {
+                                        "kind": "TypeNominal",
+                                        "name": "NSWindow",
+                                        "printedName": "AppKit.NSWindow",
+                                        "usr": "c:objc(cs)NSWindow"
+                                      }
+                                    ],
+                                    "kind": "TypeNameAlias",
+                                    "name": "ASPresentationAnchor",
+                                    "printedName": "AuthenticationServices.ASPresentationAnchor"
+                                  }
+                                ],
+                                "kind": "TypeNominal",
+                                "name": "Optional",
+                                "printedName": "AuthenticationServices.ASPresentationAnchor?",
+                                "usr": "s:Sq"
+                              },
+                              {
+                                "kind": "TypeNominal",
+                                "name": "Void",
+                                "printedName": "()"
+                              }
+                            ],
+                            "kind": "TypeFunc",
+                            "name": "Function",
+                            "printedName": "() -> AuthenticationServices.ASPresentationAnchor?"
+                          }
+                        ],
+                        "kind": "TypeNominal",
+                        "name": "Tuple",
+                        "printedName": "(Foundation.URL, Swift.String, CodexReviewHost.CodexReviewNativeAuthentication.Configuration.BrowserSessionPolicy, () -> AuthenticationServices.ASPresentationAnchor?)"
+                      }
+                    ],
+                    "kind": "TypeFunc",
+                    "name": "Function",
+                    "printedName": "(Foundation.URL, Swift.String, CodexReviewHost.CodexReviewNativeAuthentication.Configuration.BrowserSessionPolicy, @escaping () -> AuthenticationServices.ASPresentationAnchor?) async throws -> any CodexReviewHost.CodexReviewNativeAuthentication.WebSession"
+                  }
+                ],
+                "hasDefaultArg": true,
+                "kind": "TypeNameAlias",
+                "name": "WebSessionFactory",
+                "printedName": "CodexReviewHost.CodexReviewNativeAuthentication.WebSessionFactory"
+              },
+              {
+                "children": [
+                  {
+                    "kind": "TypeNominal",
+                    "name": "URL",
+                    "printedName": "Foundation.URL",
+                    "usr": "s:10Foundation3URLV"
+                  }
+                ],
+                "kind": "TypeNominal",
+                "name": "Optional",
+                "printedName": "Foundation.URL?",
+                "usr": "s:Sq"
+              },
+              {
+                "kind": "TypeNominal",
+                "name": "URL",
+                "printedName": "Foundation.URL",
+                "usr": "s:10Foundation3URLV"
+              }
+            ],
+            "declAttributes": [
+              "Final",
+              "SPIAccessControl",
+              "Custom"
+            ],
+            "declKind": "Func",
+            "funcSelfKind": "NonMutating",
+            "isFromExtension": true,
+            "kind": "Function",
+            "mangledName": "$s11CodexReview0aB5StoreC0aB4HostE08makeLiveC018runtimePreferences33nativeAuthenticationConfiguration03webJ14SessionFactory14diagnosticsURL021reviewHistoryDatabaseP0AcD0aB7RuntimeO0H0V_AD0ab6NativeJ0O0K0VSgAP03WebM0_p10Foundation0P0V_SSAR07BrowserM6PolicyOSo8NSWindowCSgyYbScMYcctYaYbKScMYccAWSgAWtFZ",
+            "moduleName": "CodexReviewHost",
+            "name": "makeLiveStore",
+            "printedName": "makeLiveStore(runtimePreferences:nativeAuthenticationConfiguration:webAuthenticationSessionFactory:diagnosticsURL:reviewHistoryDatabaseURL:)",
+            "spi_group_names": [
+              "ApplicationHostSupport"
+            ],
+            "static": true,
+            "usr": "s:11CodexReview0aB5StoreC0aB4HostE08makeLiveC018runtimePreferences33nativeAuthenticationConfiguration03webJ14SessionFactory14diagnosticsURL021reviewHistoryDatabaseP0AcD0aB7RuntimeO0H0V_AD0ab6NativeJ0O0K0VSgAP03WebM0_p10Foundation0P0V_SSAR07BrowserM6PolicyOSo8NSWindowCSgyYbScMYcctYaYbKScMYccAWSgAWtFZ"
           }
         ],
         "conformances": [
@@ -17524,6 +17747,62 @@
                 "declKind": "Accessor",
                 "implicit": true,
                 "kind": "Accessor",
+                "mangledName": "$s11CodexReview0aB20StoreTestEnvironmentO14historyPathKeySSvgZ",
+                "moduleName": "CodexReview",
+                "name": "Get",
+                "printedName": "Get()",
+                "spi_group_names": [
+                  "ApplicationHostSupport"
+                ],
+                "static": true,
+                "usr": "s:11CodexReview0aB20StoreTestEnvironmentO14historyPathKeySSvgZ"
+              }
+            ],
+            "children": [
+              {
+                "kind": "TypeNominal",
+                "name": "String",
+                "printedName": "Swift.String",
+                "usr": "s:SS"
+              }
+            ],
+            "declAttributes": [
+              "HasInitialValue",
+              "SPIAccessControl",
+              "HasStorage"
+            ],
+            "declKind": "Var",
+            "hasStorage": true,
+            "isLet": true,
+            "kind": "Var",
+            "mangledName": "$s11CodexReview0aB20StoreTestEnvironmentO14historyPathKeySSvpZ",
+            "moduleName": "CodexReview",
+            "name": "historyPathKey",
+            "printedName": "historyPathKey",
+            "spi_group_names": [
+              "ApplicationHostSupport"
+            ],
+            "static": true,
+            "usr": "s:11CodexReview0aB20StoreTestEnvironmentO14historyPathKeySSvpZ"
+          },
+          {
+            "accessors": [
+              {
+                "accessorKind": "get",
+                "children": [
+                  {
+                    "kind": "TypeNominal",
+                    "name": "String",
+                    "printedName": "Swift.String",
+                    "usr": "s:SS"
+                  }
+                ],
+                "declAttributes": [
+                  "Transparent"
+                ],
+                "declKind": "Accessor",
+                "implicit": true,
+                "kind": "Accessor",
                 "mangledName": "$s11CodexReview0aB20StoreTestEnvironmentO18reviewModeArgumentSSvgZ",
                 "moduleName": "CodexReview",
                 "name": "Get",
@@ -17750,6 +18029,62 @@
             "printedName": "diagnosticsPathArgument",
             "static": true,
             "usr": "s:11CodexReview0aB20StoreTestEnvironmentO23diagnosticsPathArgumentSSvpZ"
+          },
+          {
+            "accessors": [
+              {
+                "accessorKind": "get",
+                "children": [
+                  {
+                    "kind": "TypeNominal",
+                    "name": "String",
+                    "printedName": "Swift.String",
+                    "usr": "s:SS"
+                  }
+                ],
+                "declAttributes": [
+                  "Transparent"
+                ],
+                "declKind": "Accessor",
+                "implicit": true,
+                "kind": "Accessor",
+                "mangledName": "$s11CodexReview0aB20StoreTestEnvironmentO19historyPathArgumentSSvgZ",
+                "moduleName": "CodexReview",
+                "name": "Get",
+                "printedName": "Get()",
+                "spi_group_names": [
+                  "ApplicationHostSupport"
+                ],
+                "static": true,
+                "usr": "s:11CodexReview0aB20StoreTestEnvironmentO19historyPathArgumentSSvgZ"
+              }
+            ],
+            "children": [
+              {
+                "kind": "TypeNominal",
+                "name": "String",
+                "printedName": "Swift.String",
+                "usr": "s:SS"
+              }
+            ],
+            "declAttributes": [
+              "HasInitialValue",
+              "SPIAccessControl",
+              "HasStorage"
+            ],
+            "declKind": "Var",
+            "hasStorage": true,
+            "isLet": true,
+            "kind": "Var",
+            "mangledName": "$s11CodexReview0aB20StoreTestEnvironmentO19historyPathArgumentSSvpZ",
+            "moduleName": "CodexReview",
+            "name": "historyPathArgument",
+            "printedName": "historyPathArgument",
+            "spi_group_names": [
+              "ApplicationHostSupport"
+            ],
+            "static": true,
+            "usr": "s:11CodexReview0aB20StoreTestEnvironmentO19historyPathArgumentSSvpZ"
           }
         ],
         "conformances": [

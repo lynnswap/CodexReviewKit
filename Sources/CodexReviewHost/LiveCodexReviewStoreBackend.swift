@@ -4,6 +4,7 @@ import OSLog
 import CodexReview
 import CodexReviewAppServer
 import CodexReviewMCPServer
+import CodexReviewPersistence
 
 private let logger = Logger(subsystem: "CodexReviewKit", category: "live-store-backend")
 private typealias ExternalURLOpener = @MainActor @Sendable (URL) -> Void
@@ -148,11 +149,101 @@ public extension CodexReviewStore {
         nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration? = nil,
         webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory = CodexReviewNativeAuthentication.WebSessions.system
     ) -> CodexReviewStore {
-        CodexReviewStore(backend: LiveCodexReviewStoreBackend(
+        makeLiveStore(
             runtimePreferences: runtimePreferences,
             nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
-            webAuthenticationSessionFactory: webAuthenticationSessionFactory
+            webAuthenticationSessionFactory: webAuthenticationSessionFactory,
+            diagnosticsURL: nil,
+            historyPersistence: makeLiveReviewHistoryPersistence()
+        )
+    }
+
+    @_spi(ApplicationHostSupport)
+    static func makeUnavailableReviewMonitorStore(
+        diagnosticsURL: URL?,
+        reviewHistoryFailureMessage: String
+    ) -> CodexReviewStore {
+        let store = CodexReviewStore(
+            backend: PreviewCodexReviewStoreBackend(),
+            diagnosticsURL: diagnosticsURL,
+            historyPersistence: UnavailableReviewHistoryPersistence(
+                message: reviewHistoryFailureMessage
+            )
+        )
+        store.publishReviewHistoryFailure(ReviewHistoryOperationFailure(
+            message: reviewHistoryFailureMessage
         ))
+        return store
+    }
+
+    @_spi(ApplicationHostSupport)
+    static func makeLiveStore(
+        runtimePreferences: CodexReviewRuntime.Preferences = .defaults,
+        nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration? = nil,
+        webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory = CodexReviewNativeAuthentication.WebSessions.system,
+        diagnosticsURL: URL?,
+        reviewHistoryDatabaseURL: URL
+    ) -> CodexReviewStore {
+        makeLiveStore(
+            runtimePreferences: runtimePreferences,
+            nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
+            webAuthenticationSessionFactory: webAuthenticationSessionFactory,
+            diagnosticsURL: diagnosticsURL,
+            historyPersistence: makeExplicitReviewHistoryPersistence(
+                databaseURL: reviewHistoryDatabaseURL
+            )
+        )
+    }
+
+    private static func makeLiveStore(
+        runtimePreferences: CodexReviewRuntime.Preferences,
+        nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration?,
+        webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory,
+        diagnosticsURL: URL?,
+        historyPersistence: any ReviewHistoryPersistence
+    ) -> CodexReviewStore {
+        CodexReviewStore(
+            backend: LiveCodexReviewStoreBackend(
+                runtimePreferences: runtimePreferences,
+                nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
+                webAuthenticationSessionFactory: webAuthenticationSessionFactory
+            ),
+            diagnosticsURL: diagnosticsURL,
+            historyPersistence: historyPersistence
+        )
+    }
+
+    private static func makeExplicitReviewHistoryPersistence(
+        databaseURL: URL
+    ) -> any ReviewHistoryPersistence {
+        guard databaseURL.isFileURL,
+              databaseURL.path.hasPrefix("/"),
+              databaseURL.host == nil || databaseURL.host == ""
+        else {
+            return UnavailableReviewHistoryPersistence(
+                DirectoryCapabilityError.invalidRequest(
+                    "The explicit review history database requires an absolute local file URL."
+                )
+            )
+        }
+        return ReviewHistoryDatabase(databaseURL: databaseURL)
+    }
+
+    private static func makeLiveReviewHistoryPersistence() -> any ReviewHistoryPersistence {
+        do {
+            let location = try ReviewHistoryLocation.prepareProduction()
+            do {
+                return OwnedReviewHistoryPersistence(
+                    location: location,
+                    databaseURL: try location.databaseURL()
+                )
+            } catch {
+                try? location.close()
+                throw error
+            }
+        } catch {
+            return UnavailableReviewHistoryPersistence(error)
+        }
     }
 
     package static func makeLiveStoreForTesting(
