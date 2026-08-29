@@ -3,14 +3,33 @@ import SwiftUI
 import CodexReview
 
 struct ReviewMonitorJobRowView: View {
+    static let worktreeSymbolName = "arrow.trianglehead.branch"
+    static let worktreeSymbolRotation = Angle.degrees(90)
+
     var job: CodexReviewJob
+    var workspace: CodexReviewWorkspace? = nil
+    var fallbackIsWorktree = false
+
+    var isWorktree: Bool {
+        workspace?.metadata?.isWorktree ?? fallbackIsWorktree
+    }
 
     var body: some View {
         Label {
             VStack {
-                HStack {
+                HStack(spacing: 4) {
                     Text(job.displayTitle)
                         .truncationMode(.tail)
+                        .accessibilityLabel(Text(verbatim: titleAccessibilityLabel))
+                    if isWorktree {
+                        Image(systemName: Self.worktreeSymbolName)
+                            .imageScale(.small)
+                            .foregroundStyle(.secondary)
+                            .rotationEffect(Self.worktreeSymbolRotation)
+                            .fixedSize()
+                            .help("Worktree")
+                            .accessibilityHidden(true)
+                    }
                     Spacer(minLength: 0)
                     TimerLabelView(job: job)
                         .foregroundStyle(.secondary)
@@ -45,6 +64,10 @@ struct ReviewMonitorJobRowView: View {
         .transaction(value: job.id) { transaction in
             transaction.disablesAnimations = true
         }
+    }
+
+    var titleAccessibilityLabel: String {
+        isWorktree ? "\(job.displayTitle), Worktree" : job.displayTitle
     }
 
     private var subtitleText: String? {

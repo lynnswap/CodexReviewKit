@@ -385,10 +385,34 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
         _ workspace: ReviewWorkspaceRow,
         in db: Database
     ) throws {
-        guard try ReviewWorkspaceRow.where({ $0.cwd.eq(workspace.cwd) }).fetchOne(db) == nil else {
+        guard let existing = try ReviewWorkspaceRow
+            .where({ $0.cwd.eq(workspace.cwd) })
+            .fetchOne(db)
+        else {
+            try ReviewWorkspaceRow.insert { workspace }.execute(db)
             return
         }
-        try ReviewWorkspaceRow.insert { workspace }.execute(db)
+
+        let existingMetadata = try ReviewHistoryRecordCodec.decodeWorkspaceMetadata(
+            existing,
+            reviewID: workspace.cwd
+        )
+        let incomingMetadata = try ReviewHistoryRecordCodec.decodeWorkspaceMetadata(
+            workspace,
+            reviewID: workspace.cwd
+        )
+        switch incomingMetadata {
+        case let incoming? where existingMetadata != incoming:
+            try ReviewWorkspaceRow.find(workspace.cwd)
+                .update {
+                    $0.repositoryIdentity = #bind(incoming.repositoryIdentity)
+                    $0.displayTitle = #bind(incoming.displayTitle)
+                    $0.kind = #bind(incoming.kind.rawValue)
+                }
+                .execute(db)
+        default:
+            break
+        }
     }
 
     private static func validate(_ ordering: ReviewHistoryOrdering) throws {

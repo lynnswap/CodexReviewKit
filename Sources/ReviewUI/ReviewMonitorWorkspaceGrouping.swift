@@ -1,4 +1,5 @@
 import Foundation
+import CodexReview
 
 struct ReviewMonitorWorkspaceSectionSelection: Hashable, Sendable {
     var id: String
@@ -15,136 +16,145 @@ struct ReviewMonitorWorkspaceSectionIdentity: Hashable, Sendable {
     var title: String
 }
 
+struct ReviewMonitorWorkspacePresentation: Hashable, Sendable {
+    var sectionIdentity: ReviewMonitorWorkspaceSectionIdentity
+    var isWorktree: Bool
+}
+
 enum ReviewMonitorWorkspaceSectioning {
-    static func identity(for cwd: String, fileManager: FileManager = .default) -> ReviewMonitorWorkspaceSectionIdentity {
-        let cwdURL = standardizedDirectoryURL(cwd)
-        guard let gitMetadataURL = enclosingGitMetadataURL(startingAt: cwdURL, fileManager: fileManager) else {
-            return ReviewMonitorWorkspaceSectionIdentity(
-                id: "cwd:\(cwdURL.path)",
-                title: fallbackTitle(for: cwdURL)
+    private struct Candidate {
+        var cwd: String
+        var metadata: ReviewWorkspaceMetadata
+        var legacyManagedWorktreeTitle: String?
+    }
+
+    @MainActor
+    static func presentations(
+        for workspaces: [CodexReviewWorkspace],
+        fileManager: FileManager = .default,
+        managedWorktreeRoots: [URL]? = nil
+    ) -> [String: ReviewMonitorWorkspacePresentation] {
+        let managedWorktreeRoots = managedWorktreeRoots ?? defaultManagedWorktreeRoots()
+        let candidates = workspaces.map { workspace in
+            let resolvedMetadata = workspace.metadata
+                ?? ReviewWorkspaceMetadata.resolve(cwd: workspace.cwd, fileManager: fileManager)
+            let legacyManagedWorktreeTitle: String?
+            if workspace.metadata == nil,
+               resolvedMetadata.kind == .directory,
+               fileManager.fileExists(atPath: workspace.cwd) == false
+            {
+                legacyManagedWorktreeTitle = managedWorktreeRepositoryTitle(
+                    cwd: workspace.cwd,
+                    roots: managedWorktreeRoots
+                )
+            } else {
+                legacyManagedWorktreeTitle = nil
+            }
+            return Candidate(
+                cwd: workspace.cwd,
+                metadata: resolvedMetadata,
+                legacyManagedWorktreeTitle: legacyManagedWorktreeTitle
             )
         }
 
-        var isDirectory: ObjCBool = false
-        let gitMetadataPath = gitMetadataURL.path
-        guard fileManager.fileExists(atPath: gitMetadataPath, isDirectory: &isDirectory) else {
-            return ReviewMonitorWorkspaceSectionIdentity(
-                id: "cwd:\(cwdURL.path)",
-                title: fallbackTitle(for: cwdURL)
+        var verifiedGitIdentitiesByTitle: [String: Set<ReviewMonitorWorkspaceSectionIdentity>] = [:]
+        for candidate in candidates where candidate.metadata.kind != .directory {
+            let identity = sectionIdentity(for: candidate.metadata)
+            verifiedGitIdentitiesByTitle[identity.title, default: []].insert(identity)
+        }
+
+        return Dictionary(uniqueKeysWithValues: candidates.map { candidate in
+            let fallbackIdentity = sectionIdentity(for: candidate.metadata)
+            let recoveredIdentity: ReviewMonitorWorkspaceSectionIdentity?
+            if let repositoryTitle = candidate.legacyManagedWorktreeTitle,
+               let identities = verifiedGitIdentitiesByTitle[repositoryTitle],
+               identities.count == 1
+            {
+                recoveredIdentity = identities.first
+            } else {
+                recoveredIdentity = nil
+            }
+            return (
+                candidate.cwd,
+                ReviewMonitorWorkspacePresentation(
+                    sectionIdentity: recoveredIdentity ?? fallbackIdentity,
+                    isWorktree: candidate.metadata.isWorktree
+                        || candidate.legacyManagedWorktreeTitle != nil
+                )
             )
-        }
+        })
+    }
 
-        let gitRootURL = gitMetadataURL.deletingLastPathComponent()
-        let commonDirURL: URL?
-        if isDirectory.boolValue {
-            commonDirURL = gitMetadataURL
-        } else if let gitDirURL = linkedGitDirURL(from: gitMetadataURL) {
-            commonDirURL = linkedCommonDirURL(for: gitDirURL) ?? gitDirURL
-        } else {
-            commonDirURL = nil
-        }
-
-        guard let commonDirURL else {
-            return ReviewMonitorWorkspaceSectionIdentity(
-                id: "cwd:\(cwdURL.path)",
-                title: fallbackTitle(for: cwdURL)
-            )
-        }
-
-        let standardizedCommonDirURL = commonDirURL.standardizedFileURL.resolvingSymlinksInPath()
-        return ReviewMonitorWorkspaceSectionIdentity(
-            id: "git-common:\(standardizedCommonDirURL.path)",
-            title: sectionTitle(commonDirURL: standardizedCommonDirURL, gitRootURL: gitRootURL, fallbackURL: cwdURL)
+    private static func sectionIdentity(
+        for metadata: ReviewWorkspaceMetadata
+    ) -> ReviewMonitorWorkspaceSectionIdentity {
+        ReviewMonitorWorkspaceSectionIdentity(
+            id: metadata.repositoryIdentity,
+            title: metadata.displayTitle
         )
     }
 
-    private static func enclosingGitMetadataURL(startingAt cwdURL: URL, fileManager: FileManager) -> URL? {
-        var directoryURL = cwdURL
-        while true {
-            let gitURL = directoryURL.appendingPathComponent(".git")
-            if fileManager.fileExists(atPath: gitURL.path) {
-                return gitURL
-            }
-
-            let parentURL = directoryURL.deletingLastPathComponent()
-            guard parentURL.path != directoryURL.path else {
-                return nil
-            }
-            directoryURL = parentURL
+    private static func defaultManagedWorktreeRoots() -> [URL] {
+        var roots: [URL] = []
+        if let codexHome = ProcessInfo.processInfo.environment["CODEX_HOME"],
+           codexHome.isEmpty == false,
+           codexHome.hasPrefix("/")
+        {
+            roots.append(
+                URL(fileURLWithPath: codexHome, isDirectory: true)
+                    .appendingPathComponent("worktrees", isDirectory: true)
+            )
+        }
+        roots.append(
+            FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".codex", isDirectory: true)
+                .appendingPathComponent("worktrees", isDirectory: true)
+        )
+        var seenPaths: Set<String> = []
+        return roots.compactMap { root in
+            let standardized = root.standardizedFileURL.resolvingSymlinksInPath()
+            return seenPaths.insert(standardized.path).inserted ? standardized : nil
         }
     }
 
-    private static func linkedGitDirURL(from gitFileURL: URL) -> URL? {
-        guard let contents = try? String(contentsOf: gitFileURL, encoding: .utf8),
-              let firstLine = contents.split(whereSeparator: \.isNewline).first
-        else {
-            return nil
-        }
-
-        let prefix = "gitdir:"
-        let line = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard line.lowercased().hasPrefix(prefix) else {
-            return nil
-        }
-
-        let path = line.dropFirst(prefix.count).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard path.isEmpty == false else {
-            return nil
-        }
-        return resolvedURL(path: path, relativeTo: gitFileURL.deletingLastPathComponent())
-    }
-
-    private static func linkedCommonDirURL(for gitDirURL: URL) -> URL? {
-        let commonDirFileURL = gitDirURL.appendingPathComponent("commondir")
-        guard let contents = try? String(contentsOf: commonDirFileURL, encoding: .utf8),
-              let firstLine = contents.split(whereSeparator: \.isNewline).first
-        else {
-            return nil
-        }
-
-        let path = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard path.isEmpty == false else {
-            return nil
-        }
-        return resolvedURL(path: path, relativeTo: gitDirURL)
-    }
-
-    private static func resolvedURL(path: String, relativeTo baseURL: URL) -> URL {
-        let url = path.hasPrefix("/")
-            ? URL(fileURLWithPath: path, isDirectory: true)
-            : baseURL.appendingPathComponent(path, isDirectory: true)
-        return url.standardizedFileURL.resolvingSymlinksInPath()
-    }
-
-    private static func sectionTitle(
-        commonDirURL: URL,
-        gitRootURL: URL,
-        fallbackURL: URL
-    ) -> String {
-        if commonDirURL.lastPathComponent == ".git" {
-            let title = commonDirURL.deletingLastPathComponent().lastPathComponent
-            if title.isEmpty == false {
-                return title
-            }
-        }
-
-        let commonDirName = commonDirURL.lastPathComponent
-        if commonDirName.hasSuffix(".git"), commonDirName.count > ".git".count {
-            return String(commonDirName.dropLast(".git".count))
-        }
-
-        let rootTitle = gitRootURL.lastPathComponent
-        return rootTitle.isEmpty ? fallbackTitle(for: fallbackURL) : rootTitle
-    }
-
-    private static func fallbackTitle(for url: URL) -> String {
-        let title = url.lastPathComponent
-        return title.isEmpty ? url.path : title
-    }
-
-    private static func standardizedDirectoryURL(_ path: String) -> URL {
-        URL(fileURLWithPath: path, isDirectory: true)
+    private static func managedWorktreeRepositoryTitle(
+        cwd: String,
+        roots: [URL]
+    ) -> String? {
+        let cwdComponents = URL(fileURLWithPath: cwd, isDirectory: true)
             .standardizedFileURL
             .resolvingSymlinksInPath()
+            .pathComponents
+        for root in roots {
+            let rootComponents = root.standardizedFileURL
+                .resolvingSymlinksInPath()
+                .pathComponents
+            guard cwdComponents.count == rootComponents.count + 2,
+                  Array(cwdComponents.prefix(rootComponents.count)) == rootComponents
+            else {
+                continue
+            }
+            let bucket = cwdComponents[rootComponents.count]
+            let repositoryTitle = cwdComponents[rootComponents.count + 1]
+            guard bucket.count == 4,
+                  bucket.utf8.allSatisfy({ $0.isASCIIHexDigit }),
+                  repositoryTitle.isEmpty == false
+            else {
+                continue
+            }
+            return repositoryTitle
+        }
+        return nil
+    }
+}
+
+private extension UInt8 {
+    var isASCIIHexDigit: Bool {
+        switch self {
+        case 48...57, 65...70, 97...102:
+            true
+        default:
+            false
+        }
     }
 }

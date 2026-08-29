@@ -27,7 +27,10 @@ enum ReviewHistoryRecordCodec {
         return EncodedStartedReview(
             workspace: ReviewWorkspaceRow(
                 cwd: record.cwd,
-                sortOrder: record.workspaceSortOrder
+                sortOrder: record.workspaceSortOrder,
+                repositoryIdentity: record.workspaceMetadata?.repositoryIdentity,
+                displayTitle: record.workspaceMetadata?.displayTitle,
+                kind: record.workspaceMetadata?.kind.rawValue
             ),
             review: ReviewRecordRow(
                 id: record.id,
@@ -133,11 +136,13 @@ enum ReviewHistoryRecordCodec {
             throw invalid(row.id, "workspace foreign key does not match loaded workspace")
         }
         let target = try decodeTarget(row)
+        let workspaceMetadata = try decodeWorkspaceMetadata(workspace, reviewID: row.id)
         let started: StartedReviewRecord
         do {
             started = try StartedReviewRecord(
                 id: row.id,
                 cwd: row.cwd,
+                workspaceMetadata: workspaceMetadata,
                 workspaceSortOrder: workspace.sortOrder,
                 sortOrder: row.sortOrder,
                 target: target,
@@ -162,6 +167,33 @@ enum ReviewHistoryRecordCodec {
             }
         }
         return started
+    }
+
+    static func decodeWorkspaceMetadata(
+        _ workspace: ReviewWorkspaceRow,
+        reviewID: String
+    ) throws -> ReviewWorkspaceMetadata? {
+        switch (workspace.repositoryIdentity, workspace.displayTitle, workspace.kind) {
+        case (nil, nil, nil):
+            return nil
+        case let (repositoryIdentity?, displayTitle?, kindValue?):
+            guard let kind = ReviewWorkspaceMetadata.Kind(rawValue: kindValue) else {
+                throw invalid(reviewID, "workspace metadata has unknown kind \(kindValue)")
+            }
+            let metadata = ReviewWorkspaceMetadata(
+                repositoryIdentity: repositoryIdentity,
+                displayTitle: displayTitle,
+                kind: kind
+            )
+            guard metadata.repositoryIdentity.nilIfEmpty != nil,
+                  metadata.displayTitle.nilIfEmpty != nil
+            else {
+                throw invalid(reviewID, "workspace metadata contains an empty identity or title")
+            }
+            return metadata
+        default:
+            throw invalid(reviewID, "workspace metadata columns must be all present or all absent")
+        }
     }
 
     static func decodeTarget(_ row: ReviewRecordRow) throws -> CodexReviewAPI.Target {
