@@ -155,6 +155,27 @@ struct CodexReviewHostTests {
         _ = try await reviewTask.value
     }
 
+    @Test func hostPreservesReasoningEffortWireValues() async throws {
+        let backend = FakeCodexReviewBackend(settings: .init(reasoningEffort: "ultra"))
+        let host = CodexReviewHost(backend: backend)
+
+        await host.start()
+
+        #expect(host.store.settings.selectedReasoningEffort == .ultra)
+
+        let modelDefined = try #require(CodexReviewSettings.ReasoningEffort(rawValue: "future-effort"))
+        await host.store.updateSettingsReasoningEffort(modelDefined)
+
+        let commands = await backend.recordedCommands()
+        guard case .applySettings(let change) = try #require(commands.last) else {
+            Issue.record("Expected a settings write.")
+            return
+        }
+        #expect(change.reasoningEffort == "future-effort")
+        #expect(change.updatesReasoningEffort)
+        #expect(host.store.settings.selectedReasoningEffort == modelDefined)
+    }
+
     @Test func hostStartPreservesBackendAccountID() async {
         let backend = FakeCodexReviewBackend(auth: .init(
             accounts: [

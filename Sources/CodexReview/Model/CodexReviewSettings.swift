@@ -3,29 +3,70 @@ import Foundation
 package enum CodexReviewSettings {}
 
 package extension CodexReviewSettings {
-enum ReasoningEffort: String, CaseIterable, Codable, Sendable {
-    case none
-    case minimal
-    case low
-    case medium
-    case high
-    case xhigh
+struct ReasoningEffort: RawRepresentable, Codable, Hashable, Sendable {
+    package static let none = Self(knownRawValue: "none")
+    package static let minimal = Self(knownRawValue: "minimal")
+    package static let low = Self(knownRawValue: "low")
+    package static let medium = Self(knownRawValue: "medium")
+    package static let high = Self(knownRawValue: "high")
+    package static let xhigh = Self(knownRawValue: "xhigh")
+    package static let max = Self(knownRawValue: "max")
+    package static let ultra = Self(knownRawValue: "ultra")
+    package static let persistent = Self(knownRawValue: "persistent")
+
+    package let rawValue: String
+
+    package init?(rawValue: String) {
+        guard rawValue.isEmpty == false else {
+            return nil
+        }
+        self.rawValue = rawValue
+    }
 
     package var displayText: String {
-        switch self {
-        case .none:
+        switch rawValue {
+        case "none":
             "None"
-        case .minimal:
+        case "minimal":
             "Minimal"
-        case .low:
-            "Low"
-        case .medium:
+        case "low":
+            "Light"
+        case "medium":
             "Medium"
-        case .high:
+        case "high":
             "High"
-        case .xhigh:
-            "Extra high"
+        case "xhigh":
+            "Extra High"
+        case "max":
+            "Max"
+        case "ultra":
+            "Ultra"
+        case "persistent":
+            "Persistent"
+        default:
+            rawValue
         }
+    }
+
+    package init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let rawValue = try container.decode(String.self)
+        guard let reasoningEffort = Self(rawValue: rawValue) else {
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Reasoning effort must be a non-empty string."
+            )
+        }
+        self = reasoningEffort
+    }
+
+    package func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+
+    private init(knownRawValue: String) {
+        self.rawValue = knownRawValue
     }
 }
 }
@@ -89,11 +130,6 @@ struct ModelCatalogItem: Codable, Identifiable, Equatable, Sendable {
         case supportedServiceTiers = "additionalSpeedTiers"
         case serviceTiers
         case isDefault
-    }
-
-    private struct RawReasoningOption: Decodable {
-        let reasoningEffort: String
-        let description: String
     }
 
     private struct RawServiceTier: Decodable {
@@ -177,20 +213,14 @@ struct ModelCatalogItem: Codable, Identifiable, Equatable, Sendable {
         model = try container.decode(String.self, forKey: .model)
         displayName = try container.decode(String.self, forKey: .displayName)
         hidden = try container.decode(Bool.self, forKey: .hidden)
-        let rawReasoningEfforts = try container.decode(
-            [RawReasoningOption].self,
+        supportedReasoningEfforts = try container.decode(
+            [CodexReviewSettings.ReasoningOption].self,
             forKey: .supportedReasoningEfforts
         )
-        supportedReasoningEfforts = rawReasoningEfforts.compactMap { item in
-            guard let reasoningEffort = CodexReviewSettings.ReasoningEffort(rawValue: item.reasoningEffort) else {
-                return nil
-            }
-            return .init(reasoningEffort: reasoningEffort, description: item.description)
-        }
         let decodedDefaultReasoningEffort = try container.decodeIfPresent(
-            String.self,
+            CodexReviewSettings.ReasoningEffort.self,
             forKey: .defaultReasoningEffort
-        ).flatMap(CodexReviewSettings.ReasoningEffort.init(rawValue:))
+        )
         defaultReasoningEffort = decodedDefaultReasoningEffort
             ?? supportedReasoningEfforts.first?.reasoningEffort
             ?? .medium
