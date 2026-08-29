@@ -351,6 +351,9 @@ private enum ReviewMonitorLogStyler {
         source: String,
         blockID: ReviewMonitorLog.BlockID
     ) -> Presentation {
+        // Outer separators belong to the document; collapsed panels replace block text,
+        // while sourceText retains the raw output for expansion and copy.
+        let source = source.trimmingCharacters(in: .newlines)
         switch kind {
         case .agentMessage, .reasoning, .reasoningSummary, .rawReasoning:
             return renderMarkdown(source, blockID: blockID)
@@ -971,14 +974,8 @@ struct Projection: Sendable {
                 source: block.text,
                 blockID: block.id
             )
-            let appended = appendedText(
-                renderedText,
-                after: document.text
-            )
-            let appendedSource = appendedText(
-                block.text,
-                after: document.sourceText
-            )
+            let appended = appendedText(renderedText)
+            let appendedSource = appendedSourceText(block.text)
             if hasVisibleSections == false {
                 hasVisibleSections = true
             }
@@ -1130,18 +1127,16 @@ struct Projection: Sendable {
             )
         }
 
-        private func appendedText(_ blockText: String, after existingText: String) -> String {
+        private func appendedText(_ blockText: String) -> String {
             guard hasVisibleSections else {
                 return blockText
             }
-            if blockText.isEmpty {
-                return "\n\n"
-            }
-            if existingText.hasSuffix("\n\n") {
+            return "\n" + blockText
+        }
+
+        private func appendedSourceText(_ blockText: String) -> String {
+            guard hasVisibleSections else {
                 return blockText
-            }
-            if existingText.hasSuffix("\n") || blockText.hasPrefix("\n") {
-                return "\n" + blockText
             }
             return "\n\n" + blockText
         }
@@ -1288,16 +1283,13 @@ struct Projection: Sendable {
                         }
                         return .needsReload(replacementBlockID: blockID)
                     }
-                    if let append = appendTailGroupDelta(
+                    return appendTailGroupDelta(
                         block: blocks[blockIndex],
                         oldText: oldText,
                         newText: newText,
                         blockIndex: blockIndex,
                         delta: entry.text
-                    ) {
-                        return .changed(.append(append))
-                    }
-                    return .noVisibleChange
+                    )
                 }
 
                 indexByGroup[key] = blocks.count
@@ -1355,7 +1347,7 @@ struct Projection: Sendable {
             newText: String,
             blockIndex: Int,
             delta: String
-        ) -> ReviewMonitorLog.Append? {
+        ) -> AppendResult {
             let wasVisible = ReviewMonitorLog.Projection.isVisible(
                 kind: block.kind,
                 audience: block.audience,
@@ -1369,18 +1361,32 @@ struct Projection: Sendable {
 
             switch (wasVisible, isVisible) {
             case (false, false):
-                return nil
+                return .noVisibleChange
             case (false, true):
-                return projection.appendBlock(block, at: blockIndex)
+                return .changed(.append(projection.appendBlock(block, at: blockIndex)))
             case (true, true):
-                return projection.appendToCurrentBlock(
+                guard let previousBlock = projection.document.blocks.last(where: { $0.id == block.id }) else {
+                    return .needsReload(replacementBlockID: block.id)
+                }
+                let renderedDelta = ReviewMonitorLog.Projection.plainRenderedDelta(
+                    oldText: oldText,
+                    delta: delta,
+                    previousRenderedTextIsEmpty: previousBlock.range.length == 0
+                )
+                if let append = projection.appendToCurrentBlock(
                     block,
                     at: blockIndex,
                     sourceDelta: delta,
-                    renderedDelta: delta
-                )
+                    renderedDelta: renderedDelta
+                ) {
+                    return .changed(.append(append))
+                }
+                if let replacement = projection.replaceCurrentBlock(block, at: blockIndex) {
+                    return .changed(.replace(replacement))
+                }
+                return .needsReload(replacementBlockID: block.id)
             case (true, false):
-                return nil
+                return .needsReload(replacementBlockID: block.id)
             }
         }
 
@@ -1609,6 +1615,35 @@ struct Projection: Sendable {
         case .command, .commandOutput, .toolCall, .diagnostic, .error, .progress, .event, .contextCompaction:
             return false
         }
+    }
+
+    private static func plainRenderedDelta(
+        oldText: String,
+        delta: String,
+        previousRenderedTextIsEmpty: Bool
+    ) -> String {
+        if previousRenderedTextIsEmpty {
+            return (oldText + delta).trimmingCharacters(in: .newlines)
+        }
+
+        // Appended content can turn formerly trailing newlines into internal content.
+        let boundaryDelta = trailingNewlines(in: oldText) + delta
+        guard let lastContentIndex = boundaryDelta.lastIndex(where: { isNewline($0) == false }) else {
+            return ""
+        }
+        return String(boundaryDelta[...lastContentIndex])
+    }
+
+    private static func trailingNewlines(in text: String) -> String {
+        guard let lastContentIndex = text.lastIndex(where: { isNewline($0) == false }) else {
+            return text
+        }
+        let suffixStart = text.index(after: lastContentIndex)
+        return String(text[suffixStart...])
+    }
+
+    private static func isNewline(_ character: Character) -> Bool {
+        character.unicodeScalars.allSatisfy(CharacterSet.newlines.contains)
     }
 
     private static func suffix(in text: String, afterPrefix prefix: String) -> String? {

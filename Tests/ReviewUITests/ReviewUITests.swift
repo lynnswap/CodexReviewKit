@@ -4006,6 +4006,8 @@ struct ReviewUITests {
         #expect(transport.clickLogCommandOutputPanelHeaderForTesting(blockID: secondBlockID))
         await awaitNativeLayoutTurn()
 
+        #expect(transport.logExpandedCommandOutputPanelCountForTesting == 2)
+        #expect(transport.logCommandOutputPanelAttachmentIsInstalledForTesting(blockID: secondBlockID))
         #expect(transport.logCommandOutputPanelTerminalTextForTesting(blockID: firstBlockID)?
             .contains("first output line 80") == true)
         #expect(transport.logCommandOutputPanelTerminalTextForTesting(blockID: secondBlockID)?
@@ -6062,7 +6064,7 @@ struct ReviewUITests {
     @Test func logFindContentReuseClearsSnapshotWhenSameTextSkipsRender() async throws {
         let initialLog = "needle initial"
         let appendedLine = "needle appended"
-        let reusedLog = initialLog + "\n\n" + appendedLine
+        let reusedLog = initialLog + "\n" + appendedLine
         let firstJob = makeJob(
             id: "job-log-find-same-text-reuse-first",
             status: .running,
