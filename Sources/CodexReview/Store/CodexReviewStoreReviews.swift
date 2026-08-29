@@ -2029,7 +2029,10 @@ extension CodexReviewStore {
                 } catch {
                     return
                 }
-                self?.resumeReviewWaiter(jobID: jobID, waiterID: waiterID)
+                self?.resumeReviewWaiterAfterTimeout(
+                    jobID: jobID,
+                    waiterID: waiterID
+                )
             }
         }
 
@@ -2078,6 +2081,14 @@ extension CodexReviewStore {
         // detachment is the explicit boundary that transfers only lifecycle cleanup ownership.
         return reviewWorkerTasks[jobID] == nil
             && historyTerminalCommitIsResolved(jobID: jobID)
+    }
+
+    private func resumeReviewWaiterAfterTimeout(jobID: String, waiterID: UUID) {
+        guard job(id: jobID)?.isTerminal == true else {
+            resumeReviewWaiter(jobID: jobID, waiterID: waiterID)
+            return
+        }
+        resumeReviewWaiters(for: jobID)
     }
 
     private func resumeReviewWaiter(jobID: String, waiterID: UUID) {

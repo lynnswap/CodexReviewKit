@@ -525,6 +525,53 @@ struct CodexReviewStoreHistoryTests {
         #expect(await completion.isComplete())
     }
 
+    @Test func boundedAwaitKeepsTerminalResultBehindHistoryReceipt() async throws {
+        let entered = AsyncGate()
+        let release = AsyncGate()
+        let completion = HistoryTestCompletion()
+        let history = ReviewHistoryPersistenceProbe(
+            terminalWriteEntered: entered,
+            terminalWriteRelease: release
+        )
+        let backend = FakeCodexReviewBackend()
+        let store = makeStore(
+            history: history,
+            backend: backend,
+            idGenerator: .init(next: { "job-1" })
+        )
+        let running = try await store.startReview(
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+            waitTimeout: .zero
+        )
+        await backend.waitForStartReview()
+        await backend.yield(.completed(summary: "Done", result: "No findings."))
+        await entered.wait()
+
+        let awaiting = Task { @MainActor in
+            let result = try await store.awaitReview(
+                sessionID: "session-1",
+                jobID: running.jobID,
+                timeout: .zero
+            )
+            await completion.complete()
+            return result
+        }
+        try #require(await waitForHistoryTestCondition {
+            store.reviewTerminalWaiters[running.jobID]?.count == 1
+        })
+        let timeoutTask = try #require(
+            store.reviewTerminalWaiters[running.jobID]?.first?.timeoutTask
+        )
+        await timeoutTask.value
+
+        #expect(await completion.isComplete() == false)
+        #expect(store.reviewTerminalWaiters[running.jobID]?.count == 1)
+        await release.open()
+        #expect(try await awaiting.value.core.lifecycle.status == .succeeded)
+        #expect(await completion.isComplete())
+    }
+
     @Test func runtimeDetachWaitsForTerminalHistoryReceipt() async throws {
         let entered = AsyncGate()
         let release = AsyncGate()
