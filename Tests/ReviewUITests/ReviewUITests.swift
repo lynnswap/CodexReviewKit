@@ -1455,6 +1455,161 @@ struct ReviewUITests {
         #expect(store.orderedJobs(in: betaWorkspace).map(\.id) == ["job-beta"])
     }
 
+    @Test func sidebarShowsShowMoreOnlyWhenMoreThanFiveFilteredJobsRemain() throws {
+        for jobCount in [4, 5, 6] {
+            let jobs = (0..<jobCount).map { index in
+                makeJob(
+                    id: "job-\(jobCount)-\(index)",
+                    cwd: "/tmp/workspace-alpha",
+                    status: .running,
+                    targetSummary: "Review \(index)"
+                )
+            }
+            let store = CodexReviewStore.makePreviewStore()
+            store.loadForTesting(
+                serverState: .running,
+                content: makeSidebarContent(from: jobs)
+            )
+            let workspace = try #require(store.workspaces.first)
+            let viewController = ReviewMonitorSplitViewController(
+                store: store,
+                uiState: ReviewMonitorUIState(auth: store.auth)
+            )
+            viewController.loadViewIfNeeded()
+
+            let orderedJobIDs = store.orderedJobs(in: workspace).map(\.id)
+            var expectedChildren = orderedJobIDs.prefix(5).map {
+                ReviewMonitorSidebarChildForTesting.job(id: $0)
+            }
+            if jobCount > 5 {
+                expectedChildren.append(.showMore(hiddenJobCount: jobCount - 5))
+            }
+
+            #expect(
+                viewController.sidebarViewControllerForTesting
+                    .displayedSectionChildrenForTesting(containing: workspace)
+                    == expectedChildren
+            )
+        }
+
+        let filteredJobs = (0..<7).map { index in
+            makeJob(
+                id: "job-filtered-\(index)",
+                cwd: "/tmp/workspace-filtered",
+                status: index < 4 ? .running : .succeeded,
+                targetSummary: "Filtered review \(index)"
+            )
+        }
+        let filteredStore = CodexReviewStore.makePreviewStore()
+        filteredStore.loadForTesting(
+            serverState: .running,
+            content: makeSidebarContent(from: filteredJobs)
+        )
+        let filteredWorkspace = try #require(filteredStore.workspaces.first)
+        let filteredUIState = ReviewMonitorUIState(auth: filteredStore.auth)
+        filteredUIState.sidebarJobFilter = .running
+        let filteredViewController = ReviewMonitorSplitViewController(
+            store: filteredStore,
+            uiState: filteredUIState
+        )
+        filteredViewController.loadViewIfNeeded()
+
+        #expect(
+            filteredViewController.sidebarViewControllerForTesting
+                .displayedSectionChildrenForTesting(containing: filteredWorkspace)
+                == filteredStore.orderedJobs(in: filteredWorkspace)
+                    .filter { $0.core.lifecycle.status == .running }
+                    .map { .job(id: $0.id) }
+        )
+    }
+
+    @Test func showMoreButtonRevealsAllJobsAndRestoresHiddenSelection() throws {
+        let jobs = (0..<7).map { index in
+            makeJob(
+                id: "job-show-more-\(index)",
+                cwd: "/tmp/workspace-alpha",
+                status: .running,
+                targetSummary: "Review \(index)"
+            )
+        }
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            content: makeSidebarContent(from: jobs)
+        )
+        let workspace = try #require(store.workspaces.first)
+        let orderedJobs = store.orderedJobs(in: workspace)
+        let hiddenSelectedJob = try #require(orderedJobs.last)
+        let uiState = ReviewMonitorUIState(auth: store.auth)
+        uiState.selection = .job(hiddenSelectedJob)
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 360, height: 520))
+        viewController.loadViewIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        #expect(sidebar.selectedJobForTesting?.id == hiddenSelectedJob.id)
+        #expect(sidebar.selectedOutlineJobIDForTesting == nil)
+        #expect(sidebar.showMoreButtonAccessibilityLabelForTesting(containing: workspace) == "Show 2 more reviews")
+        #expect(sidebar.showMoreButtonAccessibilityRoleForTesting(containing: workspace) == .button)
+        #expect(sidebar.showMoreRowCanStartDragForTesting(containing: workspace) == false)
+        #expect(sidebar.showMoreRowIsSelectableForTesting(containing: workspace) == false)
+
+        sidebar.clickShowMoreForTesting(containing: workspace)
+
+        #expect(
+            sidebar.displayedSectionChildrenForTesting(containing: workspace)
+                == orderedJobs.map { .job(id: $0.id) }
+        )
+        #expect(sidebar.showMoreButtonAccessibilityLabelForTesting(containing: workspace) == nil)
+        #expect(sidebar.selectedJobForTesting?.id == hiddenSelectedJob.id)
+        #expect(sidebar.selectedOutlineJobIDForTesting == hiddenSelectedJob.id)
+        #expect(store.orderedJobs(in: workspace).map(\.id) == orderedJobs.map(\.id))
+    }
+
+    @Test func collapsedSidebarJobDropMapsOnlyPresentedRows() async throws {
+        let jobs = (0..<7).map { index in
+            makeJob(
+                id: "job-collapsed-drop-\(index)",
+                cwd: "/tmp/workspace-alpha",
+                status: .running,
+                targetSummary: "Review \(index)"
+            )
+        }
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            content: makeSidebarContent(from: jobs)
+        )
+        let workspace = try #require(store.workspaces.first)
+        let viewController = ReviewMonitorSplitViewController(
+            store: store,
+            uiState: ReviewMonitorUIState(auth: store.auth)
+        )
+        viewController.loadViewIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        let originalJobs = store.orderedJobs(in: workspace)
+        let movingJob = try #require(originalJobs.first)
+        #expect(sidebar.performJobDropForTesting(movingJob, proposedWorkspace: workspace, childIndex: 6) == false)
+        #expect(store.orderedJobs(in: workspace).map(\.id) == originalJobs.map(\.id))
+
+        #expect(sidebar.performJobDropForTesting(movingJob, proposedWorkspace: workspace, childIndex: 5))
+        await sidebar.waitForHistoryActionsForTesting()
+
+        var expectedJobs = originalJobs
+        expectedJobs.removeFirst()
+        expectedJobs.insert(movingJob, at: 4)
+        #expect(store.orderedJobs(in: workspace).map(\.id) == expectedJobs.map(\.id))
+        #expect(
+            sidebar.displayedSectionChildrenForTesting(containing: workspace)
+                == expectedJobs.prefix(5).map { .job(id: $0.id) }
+                    + [.showMore(hiddenJobCount: 2)]
+        )
+    }
+
     @Test func sidebarWorkspaceRowsStayExpandedAndUseExpectedCellViews() {
         let job = makeJob(
             cwd: "/tmp/workspace-alpha",
@@ -1613,6 +1768,7 @@ struct ReviewUITests {
 
         let workspace = try #require(store.workspaces.first(where: { $0.cwd == "/tmp/workspace-alpha" }))
         let sidebar = viewController.sidebarViewControllerForTesting
+        sidebar.clickShowMoreForTesting(containing: workspace)
         sidebar.scrollSidebarToOffsetForTesting(80)
 
         #expect(sidebar.workspaceRowIsFloatingForTesting(workspace) == false)
@@ -1646,7 +1802,7 @@ struct ReviewUITests {
         #expect(sidebar.sidebarMaximumVerticalScrollOffsetForTesting < 0.5)
     }
 
-    @Test func sidebarTopRowIsFullyVisibleAtMinimumScrollOffset() {
+    @Test func sidebarTopRowIsFullyVisibleAtMinimumScrollOffset() throws {
         let jobs = (0..<12).map { index in
             makeJob(
                 id: "job-\(index)",
@@ -1669,14 +1825,16 @@ struct ReviewUITests {
         window.layoutIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
 
+        let workspace = try #require(store.workspaces.first)
         let sidebar = viewController.sidebarViewControllerForTesting
+        sidebar.clickShowMoreForTesting(containing: workspace)
         sidebar.scrollSidebarToOffsetForTesting(0)
 
         #expect(sidebar.sidebarFirstRowRectForTesting.minY >= sidebar.sidebarVisibleRectForTesting.minY - 0.5)
         #expect(sidebar.sidebarFirstRowRectForTesting.maxY <= sidebar.sidebarVisibleRectForTesting.maxY + 0.5)
     }
 
-    @Test func sidebarBottomRowRemainsVisibleAtMaximumScrollOffset() {
+    @Test func sidebarBottomRowRemainsVisibleAtMaximumScrollOffset() throws {
         let jobs = (0..<12).map { index in
             makeJob(
                 id: "job-\(index)",
@@ -1699,7 +1857,9 @@ struct ReviewUITests {
         window.layoutIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
 
+        let workspace = try #require(store.workspaces.first)
         let sidebar = viewController.sidebarViewControllerForTesting
+        sidebar.clickShowMoreForTesting(containing: workspace)
         sidebar.scrollSidebarToOffsetForTesting(10_000)
 
         #expect(sidebar.sidebarLastRowRectForTesting.maxY <= sidebar.sidebarVisibleRectForTesting.maxY + 0.5)
