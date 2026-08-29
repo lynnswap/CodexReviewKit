@@ -502,7 +502,7 @@ struct ReviewHistoryDatabaseTests {
         #expect(restored.terminal.endedAt == endedAt)
     }
 
-    @Test("terminal-only deletes preserve active rows and return exact membership")
+    @Test("terminal-only batch deletes preserve active rows and return exact membership")
     func terminalDeletionSemantics() async throws {
         let (database, writer) = try ReviewHistoryTestSupport.database()
         try await database.recordStarted(ReviewHistoryTestSupport.started(
@@ -510,26 +510,25 @@ struct ReviewHistoryDatabaseTests {
             cwd: "/tmp/active",
             sortOrder: 0
         ))
-        _ = try await ReviewHistoryTestSupport.record(
-            started: ReviewHistoryTestSupport.started(
-                id: "terminal",
-                cwd: "/tmp/terminal",
-                sortOrder: 1
-            ),
-            terminal: ReviewHistoryTestSupport.completed(id: "terminal"),
-            in: database
-        )
+        for (index, id) in ["terminal-1", "terminal-2", "terminal-3"].enumerated() {
+            _ = try await ReviewHistoryTestSupport.record(
+                started: ReviewHistoryTestSupport.started(
+                    id: id,
+                    cwd: "/tmp/terminal",
+                    sortOrder: Double(index + 1)
+                ),
+                terminal: ReviewHistoryTestSupport.completed(id: id),
+                in: database
+            )
+        }
 
-        #expect(
-            try await database.deleteTerminalReview(id: "active").removedReviewIDs == []
-        )
-        #expect(
-            try await database.deleteTerminalReview(id: "missing").removedReviewIDs == []
-        )
-        #expect(
-            try await database.deleteTerminalReview(id: "terminal").removedReviewIDs
-                == ["terminal"]
-        )
+        let result = try await database.deleteTerminalReviews(withIDs: [
+            "active",
+            "missing",
+            "terminal-1",
+            "terminal-2",
+        ])
+        #expect(result.removedReviewIDs == ["terminal-1", "terminal-2"])
 
         let reviewIDs = try await writer.read { db in
             try #sql("SELECT id FROM review_records ORDER BY id", as: String.self).fetchAll(db)
@@ -537,8 +536,43 @@ struct ReviewHistoryDatabaseTests {
         let workspaceIDs = try await writer.read { db in
             try #sql("SELECT cwd FROM review_workspaces ORDER BY cwd", as: String.self).fetchAll(db)
         }
-        #expect(reviewIDs == ["active"])
-        #expect(workspaceIDs == ["/tmp/active"])
+        #expect(reviewIDs == ["active", "terminal-3"])
+        #expect(workspaceIDs == ["/tmp/active", "/tmp/terminal"])
+    }
+
+    @Test("batch deletion rolls back every row when one selected record is invalid")
+    func terminalDeletionRollback() async throws {
+        let (database, writer) = try ReviewHistoryTestSupport.database()
+        for (index, id) in ["a", "b"].enumerated() {
+            _ = try await ReviewHistoryTestSupport.record(
+                started: ReviewHistoryTestSupport.started(
+                    id: id,
+                    cwd: "/tmp/\(id)",
+                    sortOrder: Double(index)
+                ),
+                terminal: ReviewHistoryTestSupport.completed(id: id),
+                in: database
+            )
+        }
+        try await writer.write { db in
+            try #sql(
+                """
+                UPDATE "review_workspaces"
+                SET "repositoryIdentity" = 'incomplete'
+                WHERE "cwd" = '/tmp/b'
+                """
+            )
+            .execute(db)
+        }
+
+        await #expect(throws: ReviewHistoryDatabaseError.self) {
+            _ = try await database.deleteTerminalReviews(withIDs: ["a", "b"])
+        }
+
+        let reviewIDs = try await writer.read { db in
+            try #sql("SELECT id FROM review_records ORDER BY id", as: String.self).fetchAll(db)
+        }
+        #expect(reviewIDs == ["a", "b"])
     }
 
     @Test("delete-all removes only terminal rows and reports every removed ID")
@@ -590,7 +624,7 @@ struct ReviewHistoryDatabaseTests {
             try await database.saveOrdering(.init(workspaces: [], reviews: []))
         }
         await #expect(throws: ReviewHistoryDatabaseError.closed) {
-            _ = try await database.deleteTerminalReview(id: "closed")
+            _ = try await database.deleteTerminalReviews(withIDs: ["closed"])
         }
         await #expect(throws: ReviewHistoryDatabaseError.closed) {
             _ = try await database.deleteAllTerminalReviews()

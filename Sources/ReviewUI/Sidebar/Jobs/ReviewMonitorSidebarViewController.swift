@@ -374,7 +374,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         outlineView.usesAlternatingRowBackgroundColors = false
         outlineView.intercellSpacing = NSSize(width: 0, height: 12)
         outlineView.allowsEmptySelection = true
-        outlineView.allowsMultipleSelection = false
+        outlineView.allowsMultipleSelection = true
         outlineView.setAccessibilityIdentifier("review-monitor.job-list")
         outlineView.registerForDraggedTypes([DragType.sidebarItem])
         outlineView.setDraggingSourceOperationMask(.move, forLocal: true)
@@ -818,10 +818,10 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
     }
 
-    private func triggerHistoryDeletion(for job: CodexReviewJob) {
+    private func triggerHistoryDeletion(forIDs ids: Set<String>) {
         let store = store
         startHistoryAction {
-            await store.deleteReviewHistory(id: job.id)
+            await store.deleteReviewHistory(withIDs: ids)
         }
     }
 
@@ -910,36 +910,54 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private func makeContextMenu(at point: NSPoint) -> NSMenu? {
         let row = outlineView.row(at: point)
         guard row != -1,
-              let job = job(atRow: row)
+              let clickedJob = job(atRow: row)
         else {
             return nil
         }
 
+        let actionJobs: [CodexReviewJob]
+        if outlineView.selectedRowIndexes.contains(row) {
+            actionJobs = outlineView.selectedRowIndexes.compactMap(job(atRow:))
+        } else {
+            actionJobs = [clickedJob]
+        }
+        let actionJobIDs = Set(actionJobs.map(\.id))
+
         let menu = NSMenu()
         menu.autoenablesItems = false
 
-        if job.isTerminal {
+        if actionJobs.allSatisfy(\.isTerminal) {
             let deleteItem = NSMenuItem(
                 title: "Delete from History",
                 action: #selector(handleDeleteHistoryMenuItem(_:)),
                 keyEquivalent: ""
             )
             deleteItem.target = self
-            deleteItem.representedObject = job
-            deleteItem.isEnabled = store.canDeleteReviewHistory(id: job.id)
+            deleteItem.representedObject = actionJobIDs
+            deleteItem.isEnabled = store.canDeleteReviewHistory(withIDs: actionJobIDs)
             menu.addItem(deleteItem)
-        } else {
+        } else if actionJobs.count == 1 {
             let cancelItem = NSMenuItem(
                 title: "Cancel",
                 action: #selector(handleCancelMenuItem(_:)),
                 keyEquivalent: ""
             )
             cancelItem.target = self
-            cancelItem.representedObject = job
-            cancelItem.isEnabled = job.cancellationRequested == false
+            cancelItem.representedObject = clickedJob
+            cancelItem.isEnabled = clickedJob.cancellationRequested == false
             menu.addItem(cancelItem)
+        } else if actionJobs.contains(where: \.isTerminal) {
+            let deleteItem = NSMenuItem(
+                title: "Delete from History",
+                action: #selector(handleDeleteHistoryMenuItem(_:)),
+                keyEquivalent: ""
+            )
+            deleteItem.target = self
+            deleteItem.representedObject = actionJobIDs
+            deleteItem.isEnabled = false
+            menu.addItem(deleteItem)
         }
-        return menu
+        return menu.items.isEmpty ? nil : menu
     }
 
     @objc
@@ -952,12 +970,12 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
     @objc
     private func handleDeleteHistoryMenuItem(_ sender: NSMenuItem) {
-        guard let job = sender.representedObject as? CodexReviewJob,
-              job.isTerminal
+        guard let ids = sender.representedObject as? Set<String>,
+              ids.isEmpty == false
         else {
             return
         }
-        triggerHistoryDeletion(for: job)
+        triggerHistoryDeletion(forIDs: ids)
     }
 
     private func requestCancellation(for job: CodexReviewJob) async throws {
@@ -1211,6 +1229,40 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         workspaceSection(from: item) != nil || job(from: item) != nil
     }
 
+    private func selectionIndexes(
+        accepting proposedSelectionIndexes: IndexSet
+    ) -> IndexSet {
+        var selectableRows = IndexSet()
+        var jobRows = IndexSet()
+        for row in proposedSelectionIndexes {
+            guard row >= 0,
+                  let item = outlineView.item(atRow: row),
+                  shouldAllowSelection(of: item)
+            else {
+                continue
+            }
+            selectableRows.insert(row)
+            if job(from: item) != nil {
+                jobRows.insert(row)
+            }
+        }
+
+        guard selectableRows.count > 1 else {
+            return selectableRows
+        }
+        if jobRows.isEmpty == false {
+            return jobRows
+        }
+        let retainedSelection = selectableRows.intersection(outlineView.selectedRowIndexes)
+        if let retainedRow = retainedSelection.last {
+            return IndexSet(integer: retainedRow)
+        }
+        guard let firstRow = selectableRows.first else {
+            return []
+        }
+        return IndexSet(integer: firstRow)
+    }
+
     private func workspaces() -> [CodexReviewWorkspace] {
         store.orderedWorkspaces
     }
@@ -1338,6 +1390,15 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         let item = NSPasteboardItem()
         item.setData(data, forType: DragType.sidebarItem)
         return item
+    }
+
+    private func pasteboardWriter(for item: Any) -> (any NSPasteboardWriting)? {
+        guard outlineView.selectedRowIndexes.count <= 1,
+              let payload = dragPayload(for: item)
+        else {
+            return nil
+        }
+        return makePasteboardItem(for: payload)
     }
 
     private func dragPayload(from draggingInfo: any NSDraggingInfo) -> SidebarDragPayload? {
@@ -1825,18 +1886,18 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         true
     }
 
-    func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool {
-        shouldAllowSelection(of: item)
+    func outlineView(
+        _ outlineView: NSOutlineView,
+        selectionIndexesForProposedSelection proposedSelectionIndexes: IndexSet
+    ) -> IndexSet {
+        selectionIndexes(accepting: proposedSelectionIndexes)
     }
 
     func outlineView(
         _ outlineView: NSOutlineView,
         pasteboardWriterForItem item: Any
     ) -> (any NSPasteboardWriting)? {
-        guard let payload = dragPayload(for: item) else {
-            return nil
-        }
-        return makePasteboardItem(for: payload)
+        pasteboardWriter(for: item)
     }
 
     func outlineView(
@@ -2116,11 +2177,49 @@ extension ReviewMonitorSidebarViewController {
         emptyStateViewController.view.isHidden == false
     }
 
-    func selectJobForTesting(_ job: CodexReviewJob) {
+    func selectJobForTesting(
+        _ job: CodexReviewJob,
+        byExtendingSelection: Bool = false
+    ) {
         guard let row = row(forJobID: job.id) else {
             return
         }
-        outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        outlineView.selectRowIndexes(
+            IndexSet(integer: row),
+            byExtendingSelection: byExtendingSelection
+        )
+    }
+
+    func proposeSelectionForTesting(
+        jobs: [CodexReviewJob],
+        workspace: CodexReviewWorkspace? = nil
+    ) {
+        var proposedRows = IndexSet()
+        for job in jobs {
+            if let row = row(forJobID: job.id) {
+                proposedRows.insert(row)
+            }
+        }
+        if let workspace,
+           let row = row(for: workspace) {
+            proposedRows.insert(row)
+        }
+        outlineView.selectRowIndexes(
+            selectionIndexes(accepting: proposedRows),
+            byExtendingSelection: false
+        )
+    }
+
+    var selectedJobIDsForTesting: Set<String> {
+        Set(outlineView.selectedRowIndexes.compactMap(job(atRow:)).map(\.id))
+    }
+
+    var allowsMultipleSelectionForTesting: Bool {
+        outlineView.allowsMultipleSelection
+    }
+
+    func selectedJobCanStartDragForTesting(_ job: CodexReviewJob) -> Bool {
+        pasteboardWriter(for: job) != nil
     }
 
     func selectWorkspaceForTesting(_ workspace: CodexReviewWorkspace) {

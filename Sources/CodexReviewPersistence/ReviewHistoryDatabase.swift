@@ -157,24 +157,28 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
         }
     }
 
-    package func deleteTerminalReview(
-        id: String
+    package func deleteTerminalReviews(
+        withIDs ids: Set<String>
     ) async throws -> ReviewHistoryMutationResult {
         let database = try preparedDatabase()
         return try write(database) { db in
-            guard let row = try ReviewRecordRow.where({ $0.id.eq(id) }).fetchOne(db) else {
-                return ReviewHistoryMutationResult()
-            }
-            let decoded = try Self.decode(row, in: db)
-            guard case .terminal = decoded else {
-                return ReviewHistoryMutationResult()
-            }
-            try ReviewRecordRow.find(id).delete().execute(db)
-            guard db.changesCount == 1 else {
-                throw ReviewHistoryDatabaseError.reviewNotFound(id)
+            var removedIDs = Set<String>()
+            for id in ids.sorted() {
+                guard let row = try ReviewRecordRow.where({ $0.id.eq(id) }).fetchOne(db) else {
+                    continue
+                }
+                let decoded = try Self.decode(row, in: db)
+                guard case .terminal = decoded else {
+                    continue
+                }
+                try ReviewRecordRow.find(id).delete().execute(db)
+                guard db.changesCount == 1 else {
+                    throw ReviewHistoryDatabaseError.reviewNotFound(id)
+                }
+                removedIDs.insert(id)
             }
             try ReviewHistoryRetention.deleteEmptyWorkspaces(in: db)
-            return ReviewHistoryMutationResult(removedReviewIDs: [id])
+            return ReviewHistoryMutationResult(removedReviewIDs: removedIDs)
         }
     }
 

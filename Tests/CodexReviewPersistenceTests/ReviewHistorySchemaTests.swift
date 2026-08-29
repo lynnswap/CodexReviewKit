@@ -447,7 +447,7 @@ struct ReviewHistorySchemaTests {
             )
             .fetchOne(db)
         }
-        _ = try await database.deleteTerminalReview(id: "cascade")
+        _ = try await database.deleteTerminalReviews(withIDs: ["cascade"])
         let after = try findingCount(writer)
         #expect(before == 1)
         #expect(persistedSentinelCount == 0)
