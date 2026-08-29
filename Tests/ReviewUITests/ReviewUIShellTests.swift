@@ -9,6 +9,13 @@ import Testing
 import CodexReviewTesting
 
 @MainActor
+private func descendantViews(in view: NSView) -> [NSView] {
+    view.subviews.flatMap { subview in
+        [subview] + descendantViews(in: subview)
+    }
+}
+
+@MainActor
 extension ReviewUITests {
     @Test func rootViewControllerLoadsContentDuringViewLifecycle() {
         let rootViewController = makeReviewMonitorPreviewContentViewControllerForPreview()
@@ -257,6 +264,19 @@ extension ReviewUITests {
         #expect(abs(emptyStateFrame.minY - viewBounds.minY) < 0.5)
         #expect(abs(emptyStateFrame.maxY - viewBounds.maxY) < 0.5)
         #expect(safeAreaFrame.maxY < viewBounds.maxY)
+    }
+
+    @Test func placeholderDoesNotInstallScrollViewWhenContentFits() {
+        let viewController = PlaceholderViewController(content: .noFindings)
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 600, height: 400))
+        window.layoutIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+
+        let containsScrollView = descendantViews(in: viewController.view)
+            .contains(where: { $0 is NSScrollView })
+        #expect(containsScrollView == false)
     }
 
     @Test func sidebarScrollViewExtendsBehindBottomAccessory() {
@@ -881,7 +901,7 @@ extension ReviewUITests {
         #expect(window.toolbar != nil)
     }
 
-    @Test func windowControllerUsesDefaultContentSizeWithoutSavedFrame() {
+    @Test func windowControllerUsesDefaultSizeAndEnforcesMinimumContentSize() {
         let store = CodexReviewStore.makePreviewStore()
         let autosaveName = NSWindow.FrameAutosaveName(
             "ReviewMonitor.MainWindow.Tests.\(UUID().uuidString)"
@@ -904,6 +924,10 @@ extension ReviewUITests {
         let contentSize = window.contentView?.bounds.size ?? .zero
         #expect(abs(contentSize.width - 600) < 0.5)
         #expect(abs(contentSize.height - 400) < 0.5)
+
+        let minimumFittingSize = window.contentView?.fittingSize ?? .zero
+        #expect(minimumFittingSize.width >= 360)
+        #expect(minimumFittingSize.height >= 360)
     }
 
     @Test func windowControllerKeepsSplitViewForUnsavedCurrentSession() {

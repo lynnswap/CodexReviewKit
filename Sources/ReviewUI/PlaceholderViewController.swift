@@ -55,19 +55,16 @@ struct PlaceholderView: View {
     var content: PlaceholderContent
 
     var body: some View {
-        ScrollView(.vertical) {
-            ContentUnavailableView {
-                Text(content.title)
-                    .textScale(.secondary)
-                    .accessibilityIdentifier(content.titleAccessibilityIdentifier)
-            } description: {
-                Text(content.description)
-                    .accessibilityIdentifier(content.descriptionAccessibilityIdentifier)
-            }
+        ContentUnavailableView {
+            Text(content.title)
+                .textScale(.secondary)
+                .accessibilityIdentifier(content.titleAccessibilityIdentifier)
+        } description: {
+            Text(content.description)
+                .accessibilityIdentifier(content.descriptionAccessibilityIdentifier)
         }
-        .scrollBounceBehavior(.basedOnSize)
-        .defaultScrollAnchor(.center)
-        .ignoresSafeArea(.all,edges: .vertical)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .ignoresSafeArea(.all, edges: .vertical)
     }
 }
 
