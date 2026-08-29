@@ -279,6 +279,23 @@ extension ReviewUITests {
         #expect(containsScrollView == false)
     }
 
+    @Test func placeholderUsesNativeScrollViewWhenContentDoesNotFit() throws {
+        let viewController = PlaceholderViewController(content: .noReviewJobs)
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 220, height: 100))
+        window.layoutIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+
+        let scrollView = try #require(
+            descendantViews(in: viewController.view)
+                .compactMap { $0 as? NSScrollView }
+                .first
+        )
+        let documentHeight = try #require(scrollView.documentView).frame.height
+        #expect(documentHeight > scrollView.contentView.bounds.height)
+    }
+
     @Test func sidebarScrollViewExtendsBehindBottomAccessory() {
         let store = ReviewMonitorPreviewContent.makeStore(
             streamInterval: nil
