@@ -41,7 +41,7 @@ package enum ReviewStoreWorkKind: Hashable, Sendable {
 
 package enum ReviewStoreWorkCancelledBeforeEntryPolicy: Sendable {
     case skip
-    case runFinalizer(@MainActor @Sendable (CodexReviewStore) -> Void)
+    case runFinalizer(@MainActor @Sendable (CodexReviewStore) async -> Void)
 }
 
 package enum ReviewStoreWorkFailureCause: LocalizedError, Equatable, Sendable {

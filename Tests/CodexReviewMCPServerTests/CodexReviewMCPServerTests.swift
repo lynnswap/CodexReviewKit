@@ -91,4 +91,66 @@ struct CodexReviewMCPServerTests {
         #expect(allRead.logs.map(\.audience) == [.product, .developer])
         #expect(defaultRead.rawLogText == allRead.rawLogText)
     }
+
+    @Test func restoredJobRejectsMatchingSessionString() async throws {
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(
+                reviewBackend: FakeCodexReviewBackend()
+            )
+        )
+        let restored = CodexReviewJob(
+            id: "restored-review",
+            sessionID: "session-1",
+            cwd: "/tmp/project",
+            targetSummary: "Uncommitted changes",
+            target: .uncommittedChanges,
+            origin: .restoredHistory,
+            core: .init(
+                lifecycle: .init(status: .running),
+                output: .init(summary: "running")
+            ),
+            logEntries: []
+        )
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [.init(cwd: "/tmp/project")],
+            jobs: [restored]
+        )
+        let server = CodexReviewMCPServer(store: store)
+
+        let list = try await server.handle(.reviewList(
+            sessionID: "session-1",
+            cwd: nil,
+            statuses: nil,
+            limit: nil
+        ))
+        guard case .reviewList(let result) = list else {
+            Issue.record("Expected reviewList response")
+            return
+        }
+        #expect(result.items.isEmpty)
+        #expect(server.hasActiveReviews(in: "session-1") == false)
+        await #expect(throws: CodexReviewAPI.Error.self) {
+            try await server.handle(.reviewRead(
+                sessionID: "session-1",
+                jobID: restored.id,
+                logFilter: .defaultSetting,
+                logPage: .default
+            ))
+        }
+        await #expect(throws: CodexReviewAPI.Error.self) {
+            try await server.handle(.reviewAwait(
+                sessionID: "session-1",
+                jobID: restored.id,
+                waitTimeout: .zero
+            ))
+        }
+        await #expect(throws: CodexReviewAPI.Error.self) {
+            try await server.handle(.reviewCancel(
+                sessionID: "session-1",
+                selector: .init(jobID: restored.id),
+                reason: .mcpClient(message: "Stop")
+            ))
+        }
+    }
 }

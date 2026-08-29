@@ -2900,6 +2900,7 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
+            await backend.waitForStartReview()
 
             await #expect(throws: (any Error).self) {
                 try await store.cancelReview(
