@@ -89,6 +89,64 @@ extension ReviewUITests {
         #expect(viewController.sidebarPresentationForTesting == .unavailable)
     }
 
+    @Test(
+        arguments: [
+            CodexReviewServerState.starting,
+            .stopped,
+            .failed("The embedded server is unavailable."),
+        ]
+    )
+    func splitViewKeepsReviewHistoryVisibleWhileServerIsUnavailable(
+        serverState: CodexReviewServerState
+    ) {
+        let job = makeJob(
+            id: "persisted-review",
+            cwd: "/tmp/persisted-workspace",
+            status: .succeeded,
+            targetSummary: "Base branch: main",
+            summary: "No findings."
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: serverState,
+            content: makeSidebarContent(from: [job])
+        )
+        let viewController = ReviewMonitorSplitViewController(
+            store: store,
+            uiState: ReviewMonitorUIState(auth: store.auth)
+        )
+        viewController.loadViewIfNeeded()
+
+        #expect(viewController.sidebarPresentationForTesting == .jobList)
+        #expect(viewController.sidebarViewControllerForTesting.displayedSectionTitlesForTesting == [
+            "persisted-workspace"
+        ])
+    }
+
+    @Test func terminalReviewWithUnknownEndDoesNotDisplayALiveTimer() {
+        let interrupted = CodexReviewJob.makeForTesting(
+            id: "interrupted-review",
+            cwd: "/tmp/persisted-workspace",
+            targetSummary: "Uncommitted changes",
+            status: .failed,
+            startedAt: Date(timeIntervalSince1970: 100),
+            endedAt: nil,
+            summary: "The previous review process exited before completion.",
+            errorMessage: "The previous review process exited before completion."
+        )
+        let running = makeJob(
+            id: "running-review",
+            cwd: "/tmp/persisted-workspace",
+            startedAt: Date(timeIntervalSince1970: 100),
+            status: .running,
+            targetSummary: "Uncommitted changes",
+            summary: "Running."
+        )
+
+        #expect(TimerLabelView(job: interrupted).displaysTimer == false)
+        #expect(TimerLabelView(job: running).displaysTimer)
+    }
+
     @Test func splitViewShowsJobSidebarWhenServerRunningOnLoad() {
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
