@@ -52,6 +52,9 @@ extension CodexReviewStore {
         for (workspaceIndex, workspace) in workspaces.enumerated() {
             let sortOrder = Double(workspaces.count - workspaceIndex - 1)
             if let existingWorkspace = existingByCWD.removeValue(forKey: workspace.cwd) {
+                if let metadata = workspace.metadata {
+                    existingWorkspace.metadata = metadata
+                }
                 existingWorkspace.sortOrder = sortOrder
                 resolvedWorkspaces.append(existingWorkspace)
             } else {

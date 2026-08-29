@@ -37,6 +37,7 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
         let timestamp = now()
         return try write(database) { db in
             _ = try Self.decodeAll(in: db)
+            try Self.backfillWorkspaceMetadata(in: db)
             try Self.finalizeOrphanedReviews(in: db, committedAt: timestamp)
             _ = try ReviewHistoryRetention.prune(
                 in: db,
@@ -276,6 +277,29 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
         }
     }
 
+    private static func backfillWorkspaceMetadata(
+        in db: Database,
+        fileManager: FileManager = .default
+    ) throws {
+        for workspace in try ReviewWorkspaceRow.fetchAll(db)
+        where workspace.repositoryIdentity == nil
+            && workspace.displayTitle == nil
+            && workspace.kind == nil
+            && fileManager.fileExists(atPath: workspace.cwd) {
+            let metadata = ReviewWorkspaceMetadata.resolve(
+                cwd: workspace.cwd,
+                fileManager: fileManager
+            )
+            try ReviewWorkspaceRow.find(workspace.cwd)
+                .update {
+                    $0.repositoryIdentity = #bind(metadata.repositoryIdentity)
+                    $0.displayTitle = #bind(metadata.displayTitle)
+                    $0.kind = #bind(metadata.kind.rawValue)
+                }
+                .execute(db)
+        }
+    }
+
     private static func decodeAll(in db: Database) throws -> [DecodedReviewHistoryRow] {
         let workspaces = try ReviewWorkspaceRow.fetchAll(db)
         let workspacesByCWD = Dictionary(uniqueKeysWithValues: workspaces.map { ($0.cwd, $0) })
@@ -385,10 +409,34 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
         _ workspace: ReviewWorkspaceRow,
         in db: Database
     ) throws {
-        guard try ReviewWorkspaceRow.where({ $0.cwd.eq(workspace.cwd) }).fetchOne(db) == nil else {
+        guard let existing = try ReviewWorkspaceRow
+            .where({ $0.cwd.eq(workspace.cwd) })
+            .fetchOne(db)
+        else {
+            try ReviewWorkspaceRow.insert { workspace }.execute(db)
             return
         }
-        try ReviewWorkspaceRow.insert { workspace }.execute(db)
+
+        let existingMetadata = try ReviewHistoryRecordCodec.decodeWorkspaceMetadata(
+            existing,
+            reviewID: workspace.cwd
+        )
+        let incomingMetadata = try ReviewHistoryRecordCodec.decodeWorkspaceMetadata(
+            workspace,
+            reviewID: workspace.cwd
+        )
+        switch incomingMetadata {
+        case let incoming? where existingMetadata != incoming:
+            try ReviewWorkspaceRow.find(workspace.cwd)
+                .update {
+                    $0.repositoryIdentity = #bind(incoming.repositoryIdentity)
+                    $0.displayTitle = #bind(incoming.displayTitle)
+                    $0.kind = #bind(incoming.kind.rawValue)
+                }
+                .execute(db)
+        default:
+            break
+        }
     }
 
     private static func validate(_ ordering: ReviewHistoryOrdering) throws {

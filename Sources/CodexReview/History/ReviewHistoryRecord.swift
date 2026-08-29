@@ -15,6 +15,7 @@ package struct ReviewHistoryRecordError: LocalizedError, Sendable, Equatable {
 package struct StartedReviewRecord: Sendable, Hashable {
     package var id: String
     package var cwd: String
+    package var workspaceMetadata: ReviewWorkspaceMetadata?
     package var workspaceSortOrder: Double
     package var sortOrder: Double
     package var target: CodexReviewAPI.Target
@@ -24,6 +25,7 @@ package struct StartedReviewRecord: Sendable, Hashable {
     package init(
         id: String,
         cwd: String,
+        workspaceMetadata: ReviewWorkspaceMetadata? = nil,
         workspaceSortOrder: Double,
         sortOrder: Double,
         target: CodexReviewAPI.Target,
@@ -36,11 +38,20 @@ package struct StartedReviewRecord: Sendable, Hashable {
         guard cwd.nilIfEmpty != nil else {
             throw ReviewHistoryRecordError("A persisted review requires a workspace path.")
         }
+        if let workspaceMetadata {
+            guard workspaceMetadata.repositoryIdentity.nilIfEmpty != nil else {
+                throw ReviewHistoryRecordError("Workspace metadata requires a repository identity.")
+            }
+            guard workspaceMetadata.displayTitle.nilIfEmpty != nil else {
+                throw ReviewHistoryRecordError("Workspace metadata requires a display title.")
+            }
+        }
         guard workspaceSortOrder.isFinite, sortOrder.isFinite else {
             throw ReviewHistoryRecordError("Persisted review ordering must be finite.")
         }
         self.id = id
         self.cwd = cwd
+        self.workspaceMetadata = workspaceMetadata
         self.workspaceSortOrder = workspaceSortOrder
         self.sortOrder = sortOrder
         self.target = target

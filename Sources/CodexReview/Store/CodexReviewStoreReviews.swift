@@ -186,7 +186,11 @@ extension CodexReviewStore {
             )
             throw CodexReviewAPI.Error.io("Review Store work admission is closed.")
         }
-        insertReviewJob(job, workspaceSortOrder: started.workspaceSortOrder)
+        insertReviewJob(
+            job,
+            workspaceMetadata: started.workspaceMetadata,
+            workspaceSortOrder: started.workspaceSortOrder
+        )
         reviewAttemptOwnerships[jobID] = .starting(admission)
         reviewWorkerTasks[jobID]?.cancel()
         reviewWorkerTasks[jobID] = workerTask
@@ -1338,11 +1342,17 @@ extension CodexReviewStore {
 
     private func insertReviewJob(
         _ job: CodexReviewJob,
+        workspaceMetadata: ReviewWorkspaceMetadata?,
         workspaceSortOrder: Double
     ) {
-        if workspace(cwd: job.cwd) == nil {
+        if let workspace = workspace(cwd: job.cwd) {
+            if let workspaceMetadata, workspace.metadata != workspaceMetadata {
+                workspace.metadata = workspaceMetadata
+            }
+        } else {
             let workspace = CodexReviewWorkspace(
                 cwd: job.cwd,
+                metadata: workspaceMetadata,
                 sortOrder: workspaceSortOrder
             )
             workspaces.insert(workspace)

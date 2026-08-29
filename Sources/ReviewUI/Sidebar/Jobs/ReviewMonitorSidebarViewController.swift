@@ -67,7 +67,11 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
                 logEntries: []
             )
             let cellView = ReviewMonitorJobCellView()
-            cellView.configure(with: job)
+            cellView.configure(
+                with: job,
+                workspace: CodexReviewWorkspace(cwd: job.cwd),
+                fallbackIsWorktree: false
+            )
             return ceil(cellView.fittingSize.height)
         }
     }
@@ -216,7 +220,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private var sidebarKindObservation: PortableObservationTracking.Token?
     private var sidebarTopologyObservation: PortableObservationTracking.Token?
     private var sidebarFilterObservation: PortableObservationTracking.Token?
-    private var workspaceSectionIdentitiesByCWD: [String: ReviewMonitorWorkspaceSectionIdentity] = [:]
+    private var workspacePresentationsByCWD: [String: ReviewMonitorWorkspacePresentation] = [:]
     private var workspaceSectionsByID: [String: SidebarWorkspaceSection] = [:]
     private var currentRootTopologies: [SidebarRootTopology] = []
     private var isReconcilingSelection = false
@@ -455,12 +459,18 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         from workspaceTopologies: [SidebarWorkspaceTopology],
         filter: SidebarJobFilter
     ) -> [SidebarRootTopology] {
+        let presentationsByCWD = ReviewMonitorWorkspaceSectioning.presentations(
+            for: workspaceTopologies.map(\.workspace)
+        )
+        workspacePresentationsByCWD = presentationsByCWD
         var topologiesBySectionID: [String: [SidebarWorkspaceTopology]] = [:]
         var sectionIdentityByID: [String: ReviewMonitorWorkspaceSectionIdentity] = [:]
         var sectionOrder: [String] = []
 
         for topology in workspaceTopologies {
-            let identity = workspaceSectionIdentity(for: topology.workspace)
+            guard let identity = presentationsByCWD[topology.workspace.cwd]?.sectionIdentity else {
+                continue
+            }
             if topologiesBySectionID[identity.id] == nil {
                 sectionOrder.append(identity.id)
             }
@@ -493,15 +503,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
         workspaceSectionsByID = workspaceSectionsByID.filter { renderedSectionIDs.contains($0.key) }
         return rootTopologies
-    }
-
-    private func workspaceSectionIdentity(for workspace: CodexReviewWorkspace) -> ReviewMonitorWorkspaceSectionIdentity {
-        if let identity = workspaceSectionIdentitiesByCWD[workspace.cwd] {
-            return identity
-        }
-        let identity = ReviewMonitorWorkspaceSectioning.identity(for: workspace.cwd)
-        workspaceSectionIdentitiesByCWD[workspace.cwd] = identity
-        return identity
     }
 
     private func workspaceSection(
@@ -1934,7 +1935,11 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             let view = (outlineView.makeView(withIdentifier: Identifier.jobCell, owner: self) as? ReviewMonitorJobCellView)
                 ?? ReviewMonitorJobCellView()
             view.identifier = Identifier.jobCell
-            view.configure(with: job)
+            view.configure(
+                with: job,
+                workspace: store.workspace(cwd: job.cwd),
+                fallbackIsWorktree: workspacePresentationsByCWD[job.cwd]?.isWorktree ?? false
+            )
             return view
         }
         if let showMoreItem = showMoreItem(from: item) {
@@ -2224,6 +2229,19 @@ extension ReviewMonitorSidebarViewController {
             return false
         }
         return cellView.isHostingReviewMonitorJobRowViewForTesting
+    }
+
+    func jobRowIsWorktreeForTesting(_ job: CodexReviewJob) -> Bool? {
+        guard let row = row(forJobID: job.id),
+              let cellView = outlineView.view(
+                atColumn: 0,
+                row: row,
+                makeIfNecessary: true
+              ) as? ReviewMonitorJobCellView
+        else {
+            return nil
+        }
+        return cellView.hostedIsWorktreeForTesting
     }
 
     func cancelJobForTesting(_ job: CodexReviewJob) async {
@@ -2871,14 +2889,24 @@ private final class ReviewMonitorJobCellView: NSTableCellView {
         nil
     }
 
-    func configure(with job: CodexReviewJob) {
+    func configure(
+        with job: CodexReviewJob,
+        workspace: CodexReviewWorkspace?,
+        fallbackIsWorktree: Bool
+    ) {
         objectValue = job
         toolTip = job.cwd
         if let hostingView {
             hostingView.rootView.job = job
+            hostingView.rootView.workspace = workspace
+            hostingView.rootView.fallbackIsWorktree = fallbackIsWorktree
         } else {
             let hostingView = NSHostingView(
-                rootView: ReviewMonitorJobRowView(job: job)
+                rootView: ReviewMonitorJobRowView(
+                    job: job,
+                    workspace: workspace,
+                    fallbackIsWorktree: fallbackIsWorktree
+                )
             )
             hostingView.translatesAutoresizingMaskIntoConstraints = false
             hostingView.setAccessibilityIdentifier("review-monitor.job-row")
@@ -2906,6 +2934,10 @@ private final class ReviewMonitorJobCellView: NSTableCellView {
         hostingView?.rootView.job.id
     }
 
+    var hostedIsWorktreeForTesting: Bool? {
+        hostingView?.rootView.isWorktree
+    }
+
     var hostingViewIdentityForTesting: ObjectIdentifier? {
         hostingView.map(ObjectIdentifier.init)
     }
@@ -2922,21 +2954,35 @@ private final class ReviewMonitorJobCellView: NSTableCellView {
 
 #if DEBUG
 @MainActor
-func makeReviewMonitorJobCellViewForTesting(job: CodexReviewJob) -> NSTableCellView {
+func makeReviewMonitorJobCellViewForTesting(
+    job: CodexReviewJob,
+    workspace: CodexReviewWorkspace? = nil,
+    fallbackIsWorktree: Bool = false
+) -> NSTableCellView {
     let cellView = ReviewMonitorJobCellView()
-    cellView.configure(with: job)
+    cellView.configure(
+        with: job,
+        workspace: workspace,
+        fallbackIsWorktree: fallbackIsWorktree
+    )
     return cellView
 }
 
 @MainActor
 func configureReviewMonitorJobCellViewForTesting(
     _ cellView: NSTableCellView,
-    job: CodexReviewJob
+    job: CodexReviewJob,
+    workspace: CodexReviewWorkspace? = nil,
+    fallbackIsWorktree: Bool = false
 ) {
     guard let cellView = cellView as? ReviewMonitorJobCellView else {
         fatalError("Expected ReviewMonitorJobCellView.")
     }
-    cellView.configure(with: job)
+    cellView.configure(
+        with: job,
+        workspace: workspace,
+        fallbackIsWorktree: fallbackIsWorktree
+    )
 }
 
 @MainActor
@@ -2955,6 +3001,16 @@ func reviewMonitorJobCellHostingViewIdentityForTesting(
         return nil
     }
     return cellView.hostingViewIdentityForTesting
+}
+
+@MainActor
+func reviewMonitorJobCellIsWorktreeForTesting(
+    _ cellView: NSTableCellView
+) -> Bool? {
+    guard let cellView = cellView as? ReviewMonitorJobCellView else {
+        return nil
+    }
+    return cellView.hostedIsWorktreeForTesting
 }
 #endif
 
