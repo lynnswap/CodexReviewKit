@@ -18,7 +18,7 @@ package struct ReviewHistoryOperationFailure: LocalizedError, Sendable, Equatabl
 
 private enum DeleteReviewHistoryPlan: Sendable {
     case none
-    case review(String)
+    case reviews(Set<String>)
     case allTerminal
 }
 
@@ -370,33 +370,34 @@ extension CodexReviewStore {
         removeHistoryJobs(ids: [jobID])
     }
 
-    package func deleteReviewHistory(id: String) async {
+    package func deleteReviewHistory(withIDs ids: Set<String>) async {
         await loadReviewHistoryIfNeeded()
-        guard historyAvailability == .available,
+        guard ids.isEmpty == false,
+              historyAvailability == .available,
               applicationShutdownRequested == false
         else {
             return
         }
         let persistence = historyPersistence
         guard let receipt = historyMutationCoordinator.enqueue(
-            intent: id,
-            prepare: { [weak self] id -> DeleteReviewHistoryPlan in
+            intent: ids,
+            prepare: { [weak self] ids -> DeleteReviewHistoryPlan in
                 guard let self,
                       historyAvailability == .available,
-                      let job = job(id: id),
-                      job.isTerminal,
-                      persistedTerminalReviewIDs.contains(id)
+                      ids.isEmpty == false,
+                      ids.isSubset(of: persistedTerminalReviewIDs),
+                      ids.allSatisfy({ job(id: $0)?.isTerminal == true })
                 else {
                     return .none
                 }
-                return .review(id)
+                return .reviews(ids)
             },
             operation: { (plan: DeleteReviewHistoryPlan) async throws -> ReviewHistoryMutationResult in
                 switch plan {
                 case .none, .allTerminal:
                     return ReviewHistoryMutationResult()
-                case .review(let id):
-                    return try await persistence.deleteTerminalReview(id: id)
+                case .reviews(let ids):
+                    return try await persistence.deleteTerminalReviews(withIDs: ids)
                 }
             },
             apply: { [weak self] _, result in
@@ -416,11 +417,12 @@ extension CodexReviewStore {
         _ = await receipt.wait()
     }
 
-    package func canDeleteReviewHistory(id: String) -> Bool {
-        historyAvailability == .available
+    package func canDeleteReviewHistory(withIDs ids: Set<String>) -> Bool {
+        ids.isEmpty == false
+            && historyAvailability == .available
             && applicationShutdownRequested == false
-            && persistedTerminalReviewIDs.contains(id)
-            && job(id: id)?.isTerminal == true
+            && ids.isSubset(of: persistedTerminalReviewIDs)
+            && ids.allSatisfy { job(id: $0)?.isTerminal == true }
     }
 
     package func deleteAllReviewHistory() async {
@@ -444,7 +446,7 @@ extension CodexReviewStore {
             },
             operation: { (plan: DeleteReviewHistoryPlan) async throws -> ReviewHistoryMutationResult in
                 switch plan {
-                case .none, .review:
+                case .none, .reviews:
                     return ReviewHistoryMutationResult()
                 case .allTerminal:
                     return try await persistence.deleteAllTerminalReviews()
