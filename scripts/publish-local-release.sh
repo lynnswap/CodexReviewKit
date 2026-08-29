@@ -201,6 +201,9 @@ if [[ "$skip_tests" -eq 0 ]]; then
     -project Tools/ReviewMonitor/CodexReviewMonitor.xcodeproj \
     -scheme CodexReviewMonitor \
     -destination 'platform=macOS,arch=arm64' \
+    -disableAutomaticPackageResolution \
+    -onlyUsePackageVersionsFromResolvedFile \
+    -skipMacroValidation \
     CODE_SIGNING_ALLOWED=NO \
     CODE_SIGNING_REQUIRED=NO
 fi
