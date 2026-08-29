@@ -132,7 +132,7 @@ struct CodexReviewStoreHistoryTests {
                 ))
             )
         }
-        await entered.wait()
+        try await entered.wait(timeout: .seconds(2), operation: "history persistence operation")
 
         #expect(store.jobs.isEmpty)
         #expect(await backend.recordedCommands().contains {
@@ -273,7 +273,7 @@ struct CodexReviewStoreHistoryTests {
                 waitTimeout: .zero
             )
         }
-        await historyEntered.wait()
+        try await historyEntered.wait(timeout: .seconds(2), operation: "first history start write")
         let second = Task { @MainActor in
             try await store.startReview(
                 sessionID: "session-1",
@@ -355,7 +355,7 @@ struct CodexReviewStoreHistoryTests {
                 return Result<CodexReviewAPI.Read.Result, any Error>.failure(error)
             }
         }
-        await entered.wait()
+        try await entered.wait(timeout: .seconds(2), operation: "history persistence operation")
         let close = Task { @MainActor in
             await store.closeSession("session-1")
         }
@@ -395,7 +395,7 @@ struct CodexReviewStoreHistoryTests {
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
         }
-        await entered.wait()
+        try await entered.wait(timeout: .seconds(2), operation: "history persistence operation")
         let stop = Task { @MainActor in await store.stop() }
 
         await release.open()
@@ -428,7 +428,7 @@ struct CodexReviewStoreHistoryTests {
                 waitTimeout: .zero
             )
         }
-        await entered.wait()
+        try await entered.wait(timeout: .seconds(2), operation: "history persistence operation")
         let startReceipt = try #require(store.historyStartReceipts["job-1"])
         let capturedModel = startReceipt.started.model
         await store.updateSettingsModel("changed-model")
@@ -484,6 +484,7 @@ struct CodexReviewStoreHistoryTests {
             id: "old-1",
             cwd: "/tmp/old-1",
             workspaceSortOrder: 0,
+            sortOrder: 0,
             lifecycle: .init(
                 status: .failed,
                 startedAt: Date(timeIntervalSince1970: 1),
@@ -496,6 +497,7 @@ struct CodexReviewStoreHistoryTests {
             id: "old-2",
             cwd: "/tmp/old-2",
             workspaceSortOrder: 1,
+            sortOrder: 1,
             lifecycle: .init(
                 status: .failed,
                 startedAt: Date(timeIntervalSince1970: 1),
@@ -525,7 +527,7 @@ struct CodexReviewStoreHistoryTests {
                 waitTimeout: .zero
             )
         }
-        await entered.wait()
+        try await entered.wait(timeout: .seconds(2), operation: "history persistence operation")
         let reorder = Task { @MainActor in
             await store.reorderWorkspaces(cwds: [first.cwd], toIndex: 0)
         }
@@ -572,7 +574,7 @@ struct CodexReviewStoreHistoryTests {
         await backend.waitForStartReview()
         await backend.yield(.message("partial assistant output"))
         await backend.yield(.failed("review failed"))
-        await entered.wait()
+        try await entered.wait(timeout: .seconds(2), operation: "history persistence operation")
 
         let terminal = try #require(await history.terminalRecords().first)
         #expect(terminal.terminal == .failed(message: "review failed"))
@@ -649,7 +651,7 @@ struct CodexReviewStoreHistoryTests {
         }
         try await backend.waitForInterruptReview(timeout: .seconds(2))
         await backend.yield(.cancelled("Stop"))
-        await entered.wait()
+        try await entered.wait(timeout: .seconds(2), operation: "history persistence operation")
 
         #expect(await completion.isComplete() == false)
         await release.open()
@@ -687,7 +689,7 @@ struct CodexReviewStoreHistoryTests {
         }
 
         await backend.yield(.completed(summary: "Done", result: "No findings."))
-        await entered.wait()
+        try await entered.wait(timeout: .seconds(2), operation: "history persistence operation")
         #expect(await completion.isComplete() == false)
 
         await release.open()
@@ -716,7 +718,7 @@ struct CodexReviewStoreHistoryTests {
         )
         await backend.waitForStartReview()
         await backend.yield(.completed(summary: "Done", result: "No findings."))
-        await entered.wait()
+        try await entered.wait(timeout: .seconds(2), operation: "history persistence operation")
 
         let awaiting = Task { @MainActor in
             let result = try await store.awaitReview(
@@ -782,7 +784,10 @@ struct CodexReviewStoreHistoryTests {
         )
 
         await backend.yield(.completed(summary: "Done", result: "No findings."))
-        await terminalWriteEntered.wait()
+        try await terminalWriteEntered.wait(
+            timeout: .seconds(2),
+            operation: "cancelled terminal history write"
+        )
         await backend.waitForCleanupReview()
         awaiting.cancel()
         try #require(await waitForHistoryTestCondition {
@@ -867,7 +872,7 @@ struct CodexReviewStoreHistoryTests {
         )
         await backend.waitForStartReview()
         await backend.yield(.completed(summary: "Done", result: "No findings."))
-        await entered.wait()
+        try await entered.wait(timeout: .seconds(2), operation: "history persistence operation")
 
         let detach = Task { @MainActor in
             await store.cancelAndDetachReviewWorkersForRuntimeStop(
@@ -1134,6 +1139,7 @@ struct CodexReviewStoreHistoryTests {
             id: "first",
             cwd: "/tmp/first",
             workspaceSortOrder: 0,
+            sortOrder: 0,
             lifecycle: .init(
                 status: .failed,
                 startedAt: Date(timeIntervalSince1970: 1),
@@ -1145,6 +1151,7 @@ struct CodexReviewStoreHistoryTests {
             id: "second",
             cwd: "/tmp/second",
             workspaceSortOrder: 1,
+            sortOrder: 1,
             lifecycle: .init(
                 status: .failed,
                 startedAt: Date(timeIntervalSince1970: 1),
@@ -1168,7 +1175,7 @@ struct CodexReviewStoreHistoryTests {
                 toIndex: 0
             )
         }
-        await entered.wait()
+        try await entered.wait(timeout: .seconds(2), operation: "history persistence operation")
         #expect(store.orderedWorkspaces.map(\.cwd) == [second.cwd, first.cwd])
 
         await release.open()
@@ -1313,7 +1320,7 @@ struct CodexReviewStoreHistoryTests {
                 before: "worktree-second"
             )
         }
-        await entered.wait()
+        try await entered.wait(timeout: .seconds(2), operation: "history persistence operation")
         #expect(store.orderedJobs(inWorkspaces: sectionCWDs).map(\.id) == [
             "primary-first",
             "primary-second",
@@ -1381,7 +1388,7 @@ struct CodexReviewStoreHistoryTests {
         let reorder = Task { @MainActor in
             await store.reorderWorkspaces(cwds: [old.cwd], toIndex: 0)
         }
-        await orderingEntered.wait()
+        try await orderingEntered.wait(timeout: .seconds(2), operation: "history ordering write")
         await backend.yield(.completed(summary: "Done", result: "No findings."))
         try #require(await waitForHistoryTestCondition {
             store.historyTerminalReceipts[live.jobID] != nil
@@ -1403,7 +1410,7 @@ struct CodexReviewStoreHistoryTests {
         #expect(await history.durableTerminalIDs() == Set([live.jobID]))
     }
 
-    @Test func cancelledLaunchDoesNotStartRuntimeAfterHistoryLoadResumes() async {
+    @Test func cancelledLaunchDoesNotStartRuntimeAfterHistoryLoadResumes() async throws {
         let entered = AsyncGate()
         let release = AsyncGate()
         let history = ReviewHistoryPersistenceProbe(
@@ -1421,7 +1428,7 @@ struct CodexReviewStoreHistoryTests {
         let launch = Task { @MainActor in
             await store.start(forceRestartIfNeeded: true)
         }
-        await entered.wait()
+        try await entered.wait(timeout: .seconds(2), operation: "history persistence operation")
         launch.cancel()
         await release.open()
         await launch.value
@@ -1489,7 +1496,7 @@ struct CodexReviewStoreHistoryTests {
             Issue.record("Expected mutation receipt")
             return
         }
-        await entered.wait()
+        try await entered.wait(timeout: .seconds(2), operation: "history persistence operation")
 
         coordinator = nil
 

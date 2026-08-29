@@ -188,33 +188,30 @@ struct CodexReviewHostTests {
         #expect(preferences.codexExecutablePath == nil)
     }
 
-    @Test func runtimePreferencesDefaultInvalidMCPHosts() {
-        for host in [
-            "::1",
-            "[::1]",
-            "localhost:9417",
-            "http://localhost",
-            "256.256.256.256",
-            "-foo",
-            "..",
-        ] {
-            let preferences = CodexReviewRuntime.Preferences(mcpHost: host)
-            #expect(preferences.mcpHost == "localhost")
-        }
+    @Test(arguments: [
+        "::1",
+        "[::1]",
+        "localhost:9417",
+        "http://localhost",
+        "256.256.256.256",
+        "-foo",
+        "..",
+    ])
+    func runtimePreferencesDefaultInvalidMCPHosts(host: String) {
+        let preferences = CodexReviewRuntime.Preferences(mcpHost: host)
+        #expect(preferences.mcpHost == "localhost")
     }
 
-    @Test func runtimePreferencesKeepValidMCPHosts() {
-        for host in ["localhost", "127.0.0.1", "0.0.0.0", "example.com", "xn--bcher-kva.de"] {
-            let preferences = CodexReviewRuntime.Preferences(mcpHost: host)
-            #expect(preferences.mcpHost == host)
-        }
+    @Test(arguments: ["localhost", "127.0.0.1", "0.0.0.0", "example.com", "xn--bcher-kva.de"])
+    func runtimePreferencesKeepValidMCPHosts(host: String) {
+        let preferences = CodexReviewRuntime.Preferences(mcpHost: host)
+        #expect(preferences.mcpHost == host)
     }
 
-    @Test func runtimePreferencesDefaultEscapedMCPPaths() {
-        for path in ["custom mcp", "/custom?mcp", "/custom#mcp", "/custom%20mcp"] {
-            let preferences = CodexReviewRuntime.Preferences(mcpPath: path)
-            #expect(preferences.mcpPath == "/mcp")
-        }
+    @Test(arguments: ["custom mcp", "/custom?mcp", "/custom#mcp", "/custom%20mcp"])
+    func runtimePreferencesDefaultEscapedMCPPaths(path: String) {
+        let preferences = CodexReviewRuntime.Preferences(mcpPath: path)
+        #expect(preferences.mcpPath == "/mcp")
     }
 
     @Test func runtimePreferencesDefaultRelativePaths() {

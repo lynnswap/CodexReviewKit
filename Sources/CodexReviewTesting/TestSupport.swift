@@ -28,6 +28,26 @@ package actor AsyncGate {
         }
     }
 
+    package func wait(
+        timeout: Duration,
+        operation: String
+    ) async throws {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                await self.wait()
+            }
+            group.addTask {
+                try await Task.sleep(for: timeout)
+                throw TestSynchronizationTimeout(operation: operation)
+            }
+            defer {
+                group.cancelAll()
+            }
+            _ = try await group.next()
+            try Task.checkCancellation()
+        }
+    }
+
     package func waitIgnoringCancellation() async {
         if isOpen {
             return
@@ -56,6 +76,18 @@ package actor AsyncGate {
 
     private func cancelWaiter(id: UUID) {
         waiters.removeValue(forKey: id)?.resume()
+    }
+}
+
+package struct TestSynchronizationTimeout: LocalizedError, Equatable, Sendable {
+    package var operation: String
+
+    package init(operation: String) {
+        self.operation = operation
+    }
+
+    package var errorDescription: String? {
+        "Timed out waiting for \(operation)."
     }
 }
 
