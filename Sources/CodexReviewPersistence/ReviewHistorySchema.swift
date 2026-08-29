@@ -6,6 +6,9 @@ struct ReviewWorkspaceRow: Equatable, Sendable {
     @Column(primaryKey: true)
     var cwd: String
     var sortOrder: Double
+    var repositoryIdentity: String?
+    var displayTitle: String?
+    var kind: String?
 }
 
 @Table("review_records")
@@ -274,6 +277,31 @@ enum ReviewHistorySchema {
                 """
                 CREATE INDEX "review_records_retention"
                 ON "review_records" ("phase", "terminalCommittedAt", "id")
+                """
+            )
+            .execute(db)
+        }
+
+        migrator.registerMigration("v2_add_workspace_metadata") { db in
+            try #sql(
+                """
+                ALTER TABLE "review_workspaces"
+                ADD COLUMN "repositoryIdentity" TEXT
+                """
+            )
+            .execute(db)
+            try #sql(
+                """
+                ALTER TABLE "review_workspaces"
+                ADD COLUMN "displayTitle" TEXT
+                """
+            )
+            .execute(db)
+            try #sql(
+                """
+                ALTER TABLE "review_workspaces"
+                ADD COLUMN "kind" TEXT
+                CHECK ("kind" IS NULL OR "kind" IN ('directory', 'primaryCheckout', 'linkedWorktree'))
                 """
             )
             .execute(db)

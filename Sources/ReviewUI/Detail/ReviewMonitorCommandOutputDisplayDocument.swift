@@ -45,6 +45,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         }
 
         let sourceString = source.text as NSString
+        let rawSourceString = source.sourceText as NSString
         var text = ""
         var textUTF16Length = 0
         var blocks: [ReviewMonitorLog.Block] = []
@@ -110,7 +111,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                 )
                 let outputText = commandOutputText(
                     for: panelSource,
-                    sourceString: sourceString,
+                    rawSourceString: rawSourceString,
                     isExpanded: isExpanded
                 )
                 let placeholder = commandOutputPlaceholder(
@@ -144,7 +145,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                     outputSourceRange: panelSource.output?.sourceRange,
                     lineCount: commandOutputLineCount(
                         for: panelSource,
-                        sourceString: sourceString,
+                        rawSourceString: rawSourceString,
                         isExpanded: isExpanded
                     ),
                     isExpanded: isExpanded,
@@ -436,7 +437,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
 
     private static func commandOutputLineCount(
         for panelSource: CommandPanelSource,
-        sourceString: NSString,
+        rawSourceString: NSString,
         isExpanded: Bool
     ) -> Int {
         guard isExpanded else {
@@ -445,12 +446,12 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         guard let output = panelSource.output else {
             return 0
         }
-        return ReviewMonitorLog.LineCounter.lineCount(in: sourceString, range: output.range)
+        return ReviewMonitorLog.LineCounter.lineCount(in: rawSourceString, range: output.sourceRange)
     }
 
     private static func commandOutputText(
         for panelSource: CommandPanelSource,
-        sourceString: NSString,
+        rawSourceString: NSString,
         isExpanded: Bool
     ) -> String {
         guard isExpanded else {
@@ -459,7 +460,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         guard let output = panelSource.output else {
             return ""
         }
-        return sourceString.substring(with: output.range)
+        return rawSourceString.substring(with: output.sourceRange)
     }
 
     private static func commandOutputTitle(

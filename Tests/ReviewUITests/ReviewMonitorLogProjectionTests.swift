@@ -40,6 +40,11 @@ struct ReviewMonitorLogProjectionTests {
 
         #expect(document.text == """
         $ git diff --stat
+        README.md | 1 +
+        No correctness issues found.
+        """)
+        #expect(document.sourceText == """
+        $ git diff --stat
 
         README.md | 1 +
 
@@ -51,11 +56,11 @@ struct ReviewMonitorLogProjectionTests {
             length: ("$ git diff --stat" as NSString).length
         ))
         #expect(document.blocks[1].range == NSRange(
-            location: ("$ git diff --stat\n\n" as NSString).length,
+            location: ("$ git diff --stat\n" as NSString).length,
             length: ("README.md | 1 +" as NSString).length
         ))
         #expect(document.blocks[2].range == NSRange(
-            location: ("$ git diff --stat\n\nREADME.md | 1 +\n\n" as NSString).length,
+            location: ("$ git diff --stat\nREADME.md | 1 +\n" as NSString).length,
             length: ("No correctness issues found." as NSString).length
         ))
     }
@@ -203,12 +208,12 @@ struct ReviewMonitorLogProjectionTests {
             Issue.record("Expected reasoning to remain a display append.")
             return
         }
-        #expect(append.text == "\n\nI found the relevant update path.")
+        #expect(append.text == "\nI found the relevant update path.")
         #expect(append.animationSpans == [
             .init(
                 kind: .wordFade,
                 range: NSRange(
-                    location: ("\n\n" as NSString).length,
+                    location: ("\n" as NSString).length,
                     length: ("I found the relevant update path." as NSString).length
                 )
             ),
@@ -259,14 +264,14 @@ struct ReviewMonitorLogProjectionTests {
             return
         }
         #expect(append.blockID == ReviewMonitorLog.BlockID("commandOutput:cmd-1"))
-        #expect(append.text.hasPrefix("\n\n"))
+        #expect(append.text.hasPrefix("\n"))
         #expect(ReviewMonitorCommandOutputDisplayDocument.userVisibleText(
             from: append.text
-        ).hasPrefix("\n\nRunning git diff"))
+        ).hasPrefix("\nRunning git diff"))
         #expect(append.animationSpans.isEmpty)
     }
 
-    @Test func rendererKeepsBlankSeparatorBetweenCommandPanelAndFollowingReasoning() async throws {
+    @Test func rendererKeepsStructuralParagraphBoundaryBetweenCommandPanelAndFollowingReasoning() async throws {
         let startedAt = Date(timeIntervalSince1970: 200)
         let completedAt = Date(timeIntervalSince1970: 213)
         let initialEntries: [ReviewLogEntry] = [
@@ -306,17 +311,17 @@ struct ReviewMonitorLogProjectionTests {
             from: reasoningAppendDocument.display.text
         )
 
-        #expect(visibleText.contains("Ran sed -n for 13s\n\nInspecting network components"))
+        #expect(visibleText.contains("Ran sed -n for 13s\nInspecting network components"))
         guard case .append(let append) = reasoningAppendDocument.display.lastChange else {
             Issue.record("Expected following reasoning to remain a display append.")
             return
         }
-        #expect(append.text.hasPrefix("\n\nInspecting network components"))
+        #expect(append.text.hasPrefix("\nInspecting network components"))
         #expect(append.animationSpans == [
             .init(
                 kind: .wordFade,
                 range: NSRange(
-                    location: ("\n\n" as NSString).length,
+                    location: ("\n" as NSString).length,
                     length: ("Inspecting network components\n\nI need to inspect the details." as NSString).length
                 )
             ),
@@ -358,7 +363,7 @@ struct ReviewMonitorLogProjectionTests {
             Issue.record("Expected later append to keep its append change.")
             return
         }
-        #expect(append.text == "\n\nI found the second update.")
+        #expect(append.text == "\nI found the second update.")
     }
 
     @Test func contextCompactionMarkerUsesDedicatedProjectionStyle() {
@@ -503,7 +508,6 @@ struct ReviewMonitorLogProjectionTests {
 
         #expect(updatedDocument.text == """
         $ git diff --stat
-
         README.md | 1 +
         Sources/App.swift | 2 +
         """)
@@ -512,7 +516,7 @@ struct ReviewMonitorLogProjectionTests {
             kind: .commandOutput,
             blockID: ReviewMonitorLog.BlockID("commandOutput:cmd-1"),
             range: NSRange(
-                location: ("$ git diff --stat\n\nREADME.md | 1 +" as NSString).length,
+                location: ("$ git diff --stat\nREADME.md | 1 +" as NSString).length,
                 length: ("\nSources/App.swift | 2 +" as NSString).length
             ),
             text: "\nSources/App.swift | 2 +"
@@ -579,6 +583,167 @@ struct ReviewMonitorLogProjectionTests {
         #expect(displayDocument.commandOutputPanels.count == 2)
         #expect(Set(blockIDs).count == blockIDs.count)
         #expect(blockIDs.first == ReviewMonitorLog.BlockID("commandOutput:cmd-1"))
+    }
+
+    @Test func collapsedCommandSpacingDoesNotDependOnRawOutputNewlines() throws {
+        func documents(firstOutput: String) -> (
+            source: ReviewMonitorLog.Document,
+            collapsed: ReviewMonitorLog.Document,
+            expanded: ReviewMonitorLog.Document
+        ) {
+            var projection = ReviewMonitorLog.Projection()
+            let source = projection.render(entries: [
+                .init(kind: .command, groupID: "cmd-1", text: "$ first"),
+                .init(
+                    kind: .commandOutput,
+                    groupID: "cmd-1",
+                    text: firstOutput,
+                    metadata: .init(sourceType: "command", title: "First")
+                ),
+                .init(
+                    kind: .command,
+                    groupID: "cmd-2",
+                    text: "$ second",
+                    metadata: .init(sourceType: "command", title: "Second")
+                ),
+            ])
+            return (
+                source,
+                ReviewMonitorCommandOutputDisplayDocument.make(from: source),
+                ReviewMonitorCommandOutputDisplayDocument.make(
+                    from: source,
+                    expandedBlockIDs: [ReviewMonitorLog.BlockID("commandOutput:cmd-1")]
+                )
+            )
+        }
+
+        let withoutTerminator = documents(firstOutput: "output")
+        let withTerminator = documents(firstOutput: "\noutput\n")
+        let onlyNewlines = documents(firstOutput: "\n\n")
+        let visibleWithoutTerminator = ReviewMonitorCommandOutputDisplayDocument.userVisibleText(
+            from: withoutTerminator.collapsed.text
+        )
+        let visibleWithTerminator = ReviewMonitorCommandOutputDisplayDocument.userVisibleText(
+            from: withTerminator.collapsed.text
+        )
+
+        #expect(visibleWithoutTerminator == "First\nSecond")
+        #expect(visibleWithTerminator == visibleWithoutTerminator)
+        #expect(ReviewMonitorCommandOutputDisplayDocument.userVisibleText(
+            from: onlyNewlines.collapsed.text
+        ) == visibleWithoutTerminator)
+        let outputBlock = try #require(withTerminator.source.blocks.first(where: {
+            $0.kind == .commandOutput
+        }))
+        #expect(
+            (withTerminator.source.sourceText as NSString).substring(with: outputBlock.sourceRange)
+                == "\noutput\n"
+        )
+        #expect(withTerminator.expanded.commandOutputPanels.first?.outputText == "\noutput\n")
+        #expect(withTerminator.expanded.commandOutputPanels.first?.lineCount == 2)
+        #expect(onlyNewlines.expanded.commandOutputPanels.first?.outputText == "\n\n")
+    }
+
+    @Test func incrementalTrailingCommandOutputNewlineMatchesFullProjection() {
+        let initialEntries: [ReviewLogEntry] = [
+            .init(kind: .command, groupID: "cmd-1", text: "$ first"),
+            .init(
+                kind: .commandOutput,
+                groupID: "cmd-1",
+                text: "output",
+                metadata: .init(sourceType: "command", title: "First")
+            ),
+        ]
+        let trailingNewline = ReviewLogEntry(
+            kind: .commandOutput,
+            groupID: "cmd-1",
+            text: "\n"
+        )
+        let secondCommand = ReviewLogEntry(
+            kind: .command,
+            groupID: "cmd-2",
+            text: "$ second",
+            metadata: .init(sourceType: "command", title: "Second")
+        )
+        let allEntries = initialEntries + [trailingNewline, secondCommand]
+
+        var incrementalProjection = ReviewMonitorLog.Projection()
+        _ = incrementalProjection.render(entries: initialEntries)
+        let sourceOnlyUpdate = incrementalProjection.render(entries: initialEntries + [trailingNewline])
+        let incremental = incrementalProjection.render(entries: allEntries)
+        var fullProjection = ReviewMonitorLog.Projection()
+        let full = fullProjection.render(entries: allEntries)
+
+        #expect(sourceOnlyUpdate.text == "$ first\noutput")
+        #expect(sourceOnlyUpdate.sourceText.hasSuffix("output\n"))
+        #expect(incremental.text == full.text)
+        #expect(incremental.sourceText == full.sourceText)
+        #expect(incremental.blocks == full.blocks)
+        #expect(incremental.styleRuns == full.styleRuns)
+        #expect(ReviewMonitorCommandOutputDisplayDocument.userVisibleText(
+            from: ReviewMonitorCommandOutputDisplayDocument.make(from: incremental).text
+        ) == "First\nSecond")
+    }
+
+    @Test func incrementalCommandOutputBoundaryNormalizationMatchesFullProjection() {
+        let cases: [(initial: String, delta: String)] = [
+            ("output", "\n"),
+            ("output\n", "next\n"),
+            ("output\n", "\nnext\n"),
+            ("\n", "text\n"),
+            ("\n\n", "\ntext\n\n"),
+        ]
+
+        for testCase in cases {
+            let initial = ReviewLogEntry(
+                kind: .commandOutput,
+                groupID: "cmd-1",
+                text: testCase.initial
+            )
+            let delta = ReviewLogEntry(
+                kind: .commandOutput,
+                groupID: "cmd-1",
+                text: testCase.delta
+            )
+            var incrementalProjection = ReviewMonitorLog.Projection()
+            _ = incrementalProjection.render(entries: [initial])
+            let incremental = incrementalProjection.render(entries: [initial, delta])
+            var fullProjection = ReviewMonitorLog.Projection()
+            let full = fullProjection.render(entries: [initial, delta])
+
+            #expect(incremental.text == full.text)
+            #expect(incremental.sourceText == full.sourceText)
+            #expect(incremental.blocks == full.blocks)
+        }
+    }
+
+    @Test func textKitUsesParagraphSpacingForDisplayBlockBoundaries() {
+        var projection = ReviewMonitorLog.Projection()
+        let source = projection.render(entries: [
+            .init(kind: .command, groupID: "cmd-1", text: "$ first"),
+            .init(
+                kind: .commandOutput,
+                groupID: "cmd-1",
+                text: "output\n",
+                metadata: .init(sourceType: "command", title: "First")
+            ),
+            .init(
+                kind: .command,
+                groupID: "cmd-2",
+                text: "$ second",
+                metadata: .init(sourceType: "command", title: "Second")
+            ),
+        ])
+        let view = ReviewMonitorLogScrollView()
+        view.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+
+        #expect(view.render(document: source, restoring: .top, allowIncrementalUpdate: false))
+        #expect(view.displayedTextForTesting == "First\nSecond")
+        #expect(view.accessibilityValueForTesting == "First\nSecond")
+        let spacings = view.displayedBlockParagraphSpacingsBeforeForTesting
+        #expect(spacings.count == 2)
+        #expect(spacings.first == 0)
+        #expect(spacings.last.map { $0 > 0 } == true)
     }
 
     @Test func activeCommandLifecycleDisplaysRunningTitle() {
@@ -978,7 +1143,7 @@ struct ReviewMonitorLogProjectionTests {
         )
 
         let displayText = ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: displayDocument.text)
-        #expect(displayText.hasPrefix("Ran command for 3s\n\nMCP codex_review.review_read started."))
+        #expect(displayText.hasPrefix("Ran command for 3s\nMCP codex_review.review_read started."))
         #expect(displayDocument.text.contains("$ swift test") == false)
     }
 

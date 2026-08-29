@@ -285,6 +285,10 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         ceil(baseFont.ascender - baseFont.descender + baseFont.leading)
     }
 
+    private var interBlockParagraphSpacing: CGFloat {
+        estimatedBaseLineHeight
+    }
+
     private func estimatedLineCount(in text: String) -> Int {
         let unitsPerLine = estimatedUTF16UnitsPerVisualLine
         var currentLineLength = 0
@@ -404,6 +408,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
            let invalidationRange = styleInvalidationRange(for: append, in: document) {
             applyStyleRuns(
                 document.styleRuns,
+                blocks: document.blocks,
                 commandOutputPanels: commandOutputPanels,
                 in: [invalidationRange] + changedPanelRanges
             )
@@ -411,11 +416,16 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
                   let invalidationRange = styleInvalidationRange(for: replacement, in: document) {
             applyStyleRuns(
                 document.styleRuns,
+                blocks: document.blocks,
                 commandOutputPanels: commandOutputPanels,
                 in: [invalidationRange] + changedPanelRanges
             )
         } else {
-            applyStyleRuns(document.styleRuns, commandOutputPanels: commandOutputPanels)
+            applyStyleRuns(
+                document.styleRuns,
+                blocks: document.blocks,
+                commandOutputPanels: commandOutputPanels
+            )
         }
         updateDecorationRects()
     }
@@ -451,6 +461,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
 
     private func applyStyleRuns(
         _ styleRuns: [ReviewMonitorLog.TextRun],
+        blocks: [ReviewMonitorLog.Block],
         commandOutputPanels: [ReviewMonitorLog.CommandOutputPanel]
     ) {
         guard textStorage.length > 0 else {
@@ -468,20 +479,28 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
                 textStorage.addAttributes(attributes(for: styleRun.style), range: range)
             }
             applyCommandOutputAttachments(commandOutputPanels, in: fullRange)
+            applyBlockParagraphSpacing(blocks, in: fullRange)
         }
         invalidateTextLayout(measureEstimatedHeightImmediately: true)
     }
 
     private func applyStyleRuns(
         _ styleRuns: [ReviewMonitorLog.TextRun],
+        blocks: [ReviewMonitorLog.Block],
         commandOutputPanels: [ReviewMonitorLog.CommandOutputPanel],
         in invalidationRange: NSRange
     ) {
-        applyStyleRuns(styleRuns, commandOutputPanels: commandOutputPanels, in: [invalidationRange])
+        applyStyleRuns(
+            styleRuns,
+            blocks: blocks,
+            commandOutputPanels: commandOutputPanels,
+            in: [invalidationRange]
+        )
     }
 
     private func applyStyleRuns(
         _ styleRuns: [ReviewMonitorLog.TextRun],
+        blocks: [ReviewMonitorLog.Block],
         commandOutputPanels: [ReviewMonitorLog.CommandOutputPanel],
         in invalidationRanges: [NSRange]
     ) {
@@ -506,6 +525,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
                     textStorage.addAttributes(attributes(for: styleRun.style), range: range)
                 }
                 applyCommandOutputAttachments(commandOutputPanels, in: targetRange)
+                applyBlockParagraphSpacing(blocks, in: targetRange)
             }
         }
         for targetRange in targetRanges {
@@ -643,6 +663,41 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
                 ),
                 range: panelAttachmentRange
             )
+        }
+    }
+
+    private func applyBlockParagraphSpacing(
+        _ blocks: [ReviewMonitorLog.Block],
+        in targetRange: NSRange
+    ) {
+        let visibleBlocks = blocks.filter { $0.range.length > 0 }
+        let fullRange = NSRange(location: 0, length: textStorage.length)
+        for (index, block) in visibleBlocks.enumerated() {
+            guard NSLocationInRange(block.range.location, targetRange),
+                  block.range.location < textStorage.length
+            else {
+                continue
+            }
+
+            let paragraphRange = NSIntersectionRange(
+                (textStorage.string as NSString).paragraphRange(
+                    for: NSRange(location: block.range.location, length: 0)
+                ),
+                fullRange
+            )
+            guard paragraphRange.length > 0 else {
+                continue
+            }
+
+            let currentStyle = textStorage.attribute(
+                .paragraphStyle,
+                at: block.range.location,
+                effectiveRange: nil
+            ) as? NSParagraphStyle ?? .default
+            let paragraphStyle = NSMutableParagraphStyle()
+            paragraphStyle.setParagraphStyle(currentStyle)
+            paragraphStyle.paragraphSpacingBefore = index == 0 ? 0 : interBlockParagraphSpacing
+            textStorage.addAttribute(.paragraphStyle, value: paragraphStyle, range: paragraphRange)
         }
     }
 
@@ -2482,6 +2537,17 @@ extension ReviewMonitorLogDocumentView {
             textContentStorage.textLayoutManagers.contains(textLayoutManager)
     }
 
+    func paragraphSpacingBeforeForTesting(atUTF16Offset offset: Int) -> CGFloat? {
+        guard offset >= 0, offset < textStorage.length else {
+            return nil
+        }
+        return (textStorage.attribute(
+            .paragraphStyle,
+            at: offset,
+            effectiveRange: nil
+        ) as? NSParagraphStyle)?.paragraphSpacingBefore ?? 0
+    }
+
     var hitTestTargetsDocumentViewForTesting: Bool {
         guard bounds.isEmpty == false else {
             return false
@@ -2596,6 +2662,22 @@ extension ReviewMonitorLogDocumentView {
     func commandOutputPanelTerminalTextForTesting(blockID: ReviewMonitorLog.BlockID) -> String? {
         layoutTextViewport(force: true)
         return visibleCommandOutputPanelAttachmentViewForTesting(blockID: blockID)?.terminalTextForTesting
+    }
+
+    func commandOutputPanelAttachmentIsInstalledForTesting(
+        blockID: ReviewMonitorLog.BlockID
+    ) -> Bool {
+        guard let panel = currentCommandOutputPanels.first(where: { $0.blockID == blockID }),
+              let attachmentRange = commandOutputPanelAttachmentRange(for: panel),
+              attachmentRange.location < textStorage.length
+        else {
+            return false
+        }
+        return textStorage.attribute(
+            .attachment,
+            at: attachmentRange.location,
+            effectiveRange: nil
+        ) is ReviewMonitorCommandOutputPanelAttachment
     }
 
     var commandOutputPanelCommandLineTextForTesting: String? {
@@ -2723,32 +2805,10 @@ extension ReviewMonitorLogDocumentView {
     @discardableResult
     func clickCommandOutputPanelHeaderForTesting(blockID: ReviewMonitorLog.BlockID) -> Bool {
         layoutTextViewport(force: true)
-        guard let panel = currentCommandOutputPanels.first(where: { $0.blockID == blockID }),
-              let rect = rects(forCharacterRange: NSRange(location: panel.range.location, length: 1)).first?.rectValue,
-              let event = NSEvent.mouseEvent(
-                  with: .leftMouseDown,
-                  location: convert(NSPoint(x: rect.midX, y: rect.midY), to: nil),
-                  modifierFlags: [],
-                  timestamp: 0,
-                  windowNumber: window?.windowNumber ?? 0,
-                  context: nil,
-                  eventNumber: 0,
-                  clickCount: 1,
-                  pressure: 1
-              )
-        else {
+        guard let button = commandOutputToggleButtonForTesting(blockID: blockID) else {
             return false
         }
-
-        let documentPoint = convert(event.locationInWindow, from: nil)
-        guard let target = hitTest(documentPoint) else {
-            return false
-        }
-        if let button = target as? ReviewMonitorCommandOutputToggleButton {
-            button.performClick(nil)
-            return true
-        }
-        target.mouseDown(with: event)
+        button.performClick(nil)
         return true
     }
 
@@ -2767,6 +2827,15 @@ extension ReviewMonitorLogDocumentView {
             .sorted { $0.frame.minY < $1.frame.minY }
             .compactMap(\.firstCommandOutputToggleButtonForTesting)
             .first
+    }
+
+    private func commandOutputToggleButtonForTesting(
+        blockID: ReviewMonitorLog.BlockID
+    ) -> ReviewMonitorCommandOutputToggleButton? {
+        visibleFragmentViews.lazy
+            .flatMap(\.subviews)
+            .compactMap { $0 as? ReviewMonitorCommandOutputToggleButton }
+            .first { $0.blockID == blockID }
     }
 
     private func firstVisibleCommandOutputPanelViewForTesting() -> ReviewMonitorCommandOutputPanelAttachmentView? {

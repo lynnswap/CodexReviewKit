@@ -1303,6 +1303,17 @@ extension ReviewMonitorLogScrollView {
         ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: displayedText)
     }
 
+    var displayedBlockParagraphSpacingsBeforeForTesting: [CGFloat] {
+        currentDisplayDocument?.blocks.compactMap { block in
+            guard block.range.length > 0 else {
+                return nil
+            }
+            return logDocumentView.paragraphSpacingBeforeForTesting(
+                atUTF16Offset: block.range.location
+            )
+        } ?? []
+    }
+
     func displayTextForTesting(sourceDocument: ReviewMonitorLog.Document) -> String {
         ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: displayDocument(for: sourceDocument).text)
     }
@@ -1532,6 +1543,12 @@ extension ReviewMonitorLogScrollView {
 
     func commandOutputPanelTerminalTextForTesting(blockID: ReviewMonitorLog.BlockID) -> String? {
         logDocumentView.commandOutputPanelTerminalTextForTesting(blockID: blockID)
+    }
+
+    func commandOutputPanelAttachmentIsInstalledForTesting(
+        blockID: ReviewMonitorLog.BlockID
+    ) -> Bool {
+        logDocumentView.commandOutputPanelAttachmentIsInstalledForTesting(blockID: blockID)
     }
 
     var commandOutputPanelCommandLineTextForTesting: String? {

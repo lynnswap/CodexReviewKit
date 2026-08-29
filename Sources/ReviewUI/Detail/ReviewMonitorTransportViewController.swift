@@ -716,6 +716,12 @@ extension ReviewMonitorTransportViewController {
         logScrollView.commandOutputPanelTerminalTextForTesting(blockID: blockID)
     }
 
+    func logCommandOutputPanelAttachmentIsInstalledForTesting(
+        blockID: ReviewMonitorLog.BlockID
+    ) -> Bool {
+        logScrollView.commandOutputPanelAttachmentIsInstalledForTesting(blockID: blockID)
+    }
+
     var logCommandOutputPanelCommandLineTextForTesting: String? {
         logScrollView.commandOutputPanelCommandLineTextForTesting
     }

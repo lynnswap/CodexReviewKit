@@ -23,6 +23,7 @@ enum ReviewHistoryTestSupport {
     static func started(
         id: String,
         cwd: String = "/tmp/workspace",
+        workspaceMetadata: ReviewWorkspaceMetadata? = nil,
         workspaceSortOrder: Double = 0,
         sortOrder: Double = 0,
         target: CodexReviewAPI.Target = .uncommittedChanges,
@@ -32,6 +33,7 @@ enum ReviewHistoryTestSupport {
         try StartedReviewRecord(
             id: id,
             cwd: cwd,
+            workspaceMetadata: workspaceMetadata,
             workspaceSortOrder: workspaceSortOrder,
             sortOrder: sortOrder,
             target: target,

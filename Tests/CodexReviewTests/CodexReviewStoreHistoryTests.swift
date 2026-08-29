@@ -46,6 +46,32 @@ struct CodexReviewStoreHistoryTests {
         }
     }
 
+    @Test func loadRestoresWorkspaceRepositoryMetadataWithoutReadingTheCheckout() async throws {
+        let metadata = ReviewWorkspaceMetadata(
+            repositoryIdentity: "git-common:/removed/CodexReviewKit/.git",
+            displayTitle: "CodexReviewKit",
+            kind: .linkedWorktree
+        )
+        let history = ReviewHistoryPersistenceProbe(records: [
+            try historyRecord(
+                id: "removed-worktree-review",
+                cwd: "/removed/worktrees/73d5/CodexReviewKit",
+                workspaceMetadata: metadata,
+                lifecycle: .init(
+                    status: .failed,
+                    startedAt: Date(timeIntervalSince1970: 100),
+                    terminal: .interrupted(.previousProcessExit)
+                ),
+                output: .init(summary: "Interrupted by previous process.")
+            ),
+        ])
+        let store = makeStore(history: history)
+
+        await store.loadReviewHistoryIfNeeded()
+
+        #expect(store.workspace(cwd: "/removed/worktrees/73d5/CodexReviewKit")?.metadata == metadata)
+    }
+
     @Test func startHeaderCompletesBeforeBackendDispatch() async throws {
         let entered = AsyncGate()
         let release = AsyncGate()
@@ -87,6 +113,82 @@ struct CodexReviewStoreHistoryTests {
         let terminalRecord = try #require(await history.terminalRecords().first)
         #expect(terminalRecord.canonicalReview == "No findings.")
         #expect(terminalRecord.parsedResult?.state == .noFindings)
+    }
+
+    @Test func reusedWorkspaceUpdatesMetadataInPlaceFromTheLatestAdmission() async throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexReviewWorkspaceReuse-\(UUID().uuidString)", isDirectory: true)
+        let workspaceURL = rootURL.appendingPathComponent("CodexReviewKit", isDirectory: true)
+        let initialGitURL = workspaceURL.appendingPathComponent(".git", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: rootURL)
+        }
+        try FileManager.default.createDirectory(at: initialGitURL, withIntermediateDirectories: true)
+
+        let history = ReviewHistoryPersistenceProbe()
+        let backend = FakeCodexReviewBackend()
+        let ids = SequentialHistoryTestIDs(["job-primary", "job-worktree"])
+        let store = makeStore(
+            history: history,
+            backend: backend,
+            idGenerator: .init(next: { ids.next() })
+        )
+        let firstReview = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: workspaceURL.path, target: .uncommittedChanges)
+            )
+        }
+        await backend.waitForStartReview()
+        await backend.yield(.completed(summary: "Done", result: "No findings."))
+        _ = try await firstReview.value
+
+        let workspace = try #require(store.workspace(cwd: workspaceURL.path))
+        #expect(workspace.metadata?.kind == .primaryCheckout)
+        let commonDirURL = rootURL
+            .appendingPathComponent("Primary", isDirectory: true)
+            .appendingPathComponent(".git", isDirectory: true)
+        let gitDirURL = commonDirURL
+            .appendingPathComponent("worktrees", isDirectory: true)
+            .appendingPathComponent("reused", isDirectory: true)
+        try FileManager.default.removeItem(at: initialGitURL)
+        try FileManager.default.createDirectory(at: gitDirURL, withIntermediateDirectories: true)
+        try "../..\n".write(
+            to: gitDirURL.appendingPathComponent("commondir"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try "gitdir: \(gitDirURL.path)\n".write(
+            to: workspaceURL.appendingPathComponent(".git"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let secondRun = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-2",
+            turnID: "turn-2",
+            reviewThreadID: "review-thread-2"
+        )
+        await backend.setNextRun(secondRun)
+
+        let secondReview = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: workspaceURL.path, target: .baseBranch("main"))
+            )
+        }
+        try #require(await waitForHistoryTestCondition {
+            store.jobs.count == 2
+        })
+
+        #expect(store.workspace(cwd: workspaceURL.path) === workspace)
+        #expect(workspace.metadata?.kind == .linkedWorktree)
+        #expect(workspace.metadata?.repositoryIdentity == "git-common:\(commonDirURL.path)")
+
+        await backend.yield(
+            .completed(summary: "Done", result: "No findings."),
+            for: secondRun
+        )
+        _ = try await secondReview.value
     }
 
     @Test func loadFailureKeepsRuntimeAvailableButBlocksReviewAdmission() async {
@@ -1219,6 +1321,7 @@ struct CodexReviewStoreHistoryTests {
     private func historyRecord(
         id: String,
         cwd: String,
+        workspaceMetadata: ReviewWorkspaceMetadata? = nil,
         workspaceSortOrder: Double = 0,
         sortOrder: Double = 0,
         target: CodexReviewAPI.Target = .uncommittedChanges,
@@ -1233,6 +1336,7 @@ struct CodexReviewStoreHistoryTests {
         let started = try StartedReviewRecord(
             id: id,
             cwd: cwd,
+            workspaceMetadata: workspaceMetadata,
             workspaceSortOrder: workspaceSortOrder,
             sortOrder: sortOrder,
             target: target,
