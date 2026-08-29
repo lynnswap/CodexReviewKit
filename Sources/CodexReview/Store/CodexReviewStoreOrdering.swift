@@ -156,7 +156,6 @@ extension CodexReviewStore {
                 job.sortOrder = sortOrder
             }
         }
-        noteHistoryMembershipOrOrderingMutation()
         writeDiagnosticsIfNeeded()
     }
 }
