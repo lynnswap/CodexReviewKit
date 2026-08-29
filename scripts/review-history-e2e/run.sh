@@ -872,13 +872,25 @@ if [[ "$keep_restored_app_running" == true ]]; then
   current_app_pid=""
   [[ "$restored_app_wait_status" -eq 0 ]] \
     || die "restored app exited with status $restored_app_wait_status during UI inspection"
+  ui_evidence_status="$(/usr/bin/jq -r '.uiEvidenceStatus // empty' \
+    "$artifacts_dir/e2e-summary.json")"
+  ui_screenshot_path="$(/usr/bin/jq -r '.uiScreenshot // empty' \
+    "$artifacts_dir/e2e-summary.json")"
+  ui_accessibility_path="$(/usr/bin/jq -r '.uiAccessibility // empty' \
+    "$artifacts_dir/e2e-summary.json")"
+  [[ "$ui_evidence_status" == "verified" ]] \
+    || die "restored app exited before its UI evidence was marked verified"
+  [[ -s "$ui_screenshot_path" ]] \
+    || die "verified UI screenshot is missing: $ui_screenshot_path"
+  [[ -s "$ui_accessibility_path" ]] \
+    || die "verified UI accessibility evidence is missing: $ui_accessibility_path"
 else
   terminate_current_app
 fi
 
 e2e_succeeded=true
 if [[ "$keep_restored_app_running" == true ]]; then
-  echo "Review history semantic E2E passed for job $job_id; UI evidence is pending."
+  echo "Review history E2E passed for job $job_id, including verified UI evidence."
 else
   echo "Review history semantic E2E passed for job $job_id (visible UI was not inspected)."
 fi
