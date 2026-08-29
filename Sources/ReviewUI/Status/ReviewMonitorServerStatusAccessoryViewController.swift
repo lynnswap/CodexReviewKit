@@ -173,6 +173,9 @@ struct StatusView: View {
     var body: some View {
         let currentAccount = store.auth.selectedAccount
         let usagePresentation = AccountUsageSummaryPresentation(account: currentAccount)
+        let historyStatus = ReviewMonitorHistoryStatusPresentation(
+            failureMessage: store.historyFailureMessage
+        )
         VStack{
             Menu {
                 if let currentAccount,
@@ -260,6 +263,14 @@ struct StatusView: View {
                     || settings.isLoading
                     || settings.displayedModels.isEmpty
             )
+            if let historyStatus {
+                Label(historyStatus.title, systemImage: "externaldrive.badge.exclamationmark")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .help(historyStatus.detail)
+                    .accessibilityValue(historyStatus.detail)
+            }
         }
         .padding(8)
     }
@@ -271,6 +282,21 @@ struct StatusView: View {
         case .running:
             false
         }
+    }
+}
+
+struct ReviewMonitorHistoryStatusPresentation: Equatable {
+    let title: String
+    let detail: String
+
+    init?(failureMessage: String?) {
+        guard let failureMessage,
+              failureMessage.isEmpty == false
+        else {
+            return nil
+        }
+        title = "History unavailable"
+        detail = failureMessage
     }
 }
 

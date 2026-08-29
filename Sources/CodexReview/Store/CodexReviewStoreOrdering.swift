@@ -20,7 +20,7 @@ private struct ReviewHistoryReorderPlan: Sendable {
 }
 
 extension CodexReviewStore {
-    package func reorderWorkspaces(cwds: [String], toIndex: Int) async {
+    package func reorderWorkspaces(cwds: [String], toIndex: Int) async -> Bool {
         await performHistoryReorder(.init(
             kind: .workspaces(cwds: cwds, toIndex: toIndex)
         ))
@@ -30,18 +30,18 @@ extension CodexReviewStore {
         id: String,
         inWorkspace cwd: String,
         toIndex: Int
-    ) async {
+    ) async -> Bool {
         await performHistoryReorder(.init(
             kind: .job(id: id, cwd: cwd, toIndex: toIndex)
         ))
     }
 
-    private func performHistoryReorder(_ intent: ReviewHistoryReorderIntent) async {
+    private func performHistoryReorder(_ intent: ReviewHistoryReorderIntent) async -> Bool {
         await loadReviewHistoryIfNeeded()
         guard historyAvailability == .available,
               applicationShutdownRequested == false
         else {
-            return
+            return false
         }
         let persistence = historyPersistence
         guard let receipt = historyMutationCoordinator.enqueue(
@@ -70,9 +70,14 @@ extension CodexReviewStore {
                 }
             }
         ) else {
-            return
+            return false
         }
-        _ = await receipt.wait()
+        switch await receipt.wait() {
+        case .success(let didApply):
+            return didApply
+        case .failure:
+            return false
+        }
     }
 
     private func makeHistoryReorderPlan(

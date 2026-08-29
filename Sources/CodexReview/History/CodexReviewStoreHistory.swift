@@ -415,6 +415,13 @@ extension CodexReviewStore {
         _ = await receipt.wait()
     }
 
+    package func canDeleteReviewHistory(id: String) -> Bool {
+        historyAvailability == .available
+            && applicationShutdownRequested == false
+            && persistedTerminalReviewIDs.contains(id)
+            && job(id: id)?.isTerminal == true
+    }
+
     package func deleteAllReviewHistory() async {
         await loadReviewHistoryIfNeeded()
         guard historyAvailability == .available,
@@ -459,6 +466,7 @@ extension CodexReviewStore {
         _ = await receipt.wait()
     }
 
+    @_spi(ApplicationHostSupport)
     public func shutdown() async {
         if let task = applicationShutdownTask {
             await task.value

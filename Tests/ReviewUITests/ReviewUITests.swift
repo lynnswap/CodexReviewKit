@@ -84,7 +84,7 @@ struct ReviewUITests {
         let workspaceReloadCountBeforeDrop = sidebar.sidebarWorkspaceReloadCountForTesting
         let incrementalMoveCountBeforeDrop = sidebar.sidebarIncrementalMoveCountForTesting
         #expect(sidebar.performWorkspaceDropForTesting(workspaceAlpha, toIndex: store.workspaces.count))
-        await Task.yield()
+        await sidebar.waitForHistoryActionsForTesting()
 
         #expect(sidebar.displayedSectionTitlesForTesting == [
             "workspace-beta",
@@ -95,7 +95,7 @@ struct ReviewUITests {
         #expect(sidebar.sidebarIncrementalMoveCountForTesting == incrementalMoveCountBeforeDrop + 1)
     }
 
-    @Test func workspaceDropOnWorkspaceRowReordersDisplayedSections() {
+    @Test func workspaceDropOnWorkspaceRowReordersDisplayedSections() async {
         let workspaceAlphaJob = makeJob(
             id: "job-workspace-alpha-on-row",
             cwd: "/tmp/workspace-alpha",
@@ -125,6 +125,7 @@ struct ReviewUITests {
         }
 
         #expect(sidebar.performWorkspaceDropForTesting(workspaceBeta, proposedWorkspace: workspaceAlpha))
+        await sidebar.waitForHistoryActionsForTesting()
         #expect(sidebar.displayedSectionTitlesForTesting == [
             "workspace-beta",
             "workspace-alpha",
@@ -392,7 +393,7 @@ struct ReviewUITests {
             proposedJob: secondJob,
             hoveringBelowMidpoint: true
         ))
-        await Task.yield()
+        await sidebar.waitForHistoryActionsForTesting()
         #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-2", "job-1"])
         #expect(sidebar.selectedJobForTesting?.id == "job-1")
         #expect(sidebar.sidebarFullReloadCountForTesting == fullReloadCountBeforeDrop)
@@ -804,7 +805,7 @@ struct ReviewUITests {
             proposedJob: runningB,
             hoveringBelowMidpoint: true
         ))
-        await Task.yield()
+        await sidebar.waitForHistoryActionsForTesting()
 
         #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-running-b", "job-running-a"])
         #expect(store.orderedJobs(in: workspace).map(\.id) == [
@@ -892,7 +893,7 @@ struct ReviewUITests {
         let sidebar = viewController.sidebarViewControllerForTesting
         #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-running", "job-finished-latest"])
         #expect(sidebar.performJobDropForTesting(runningJob, proposedWorkspace: workspace, childIndex: 2))
-        await Task.yield()
+        await sidebar.waitForHistoryActionsForTesting()
 
         try await waitForObservedValueFromCurrentObservation(
             from: { sidebar.sidebarTopologyObservationForTesting },
@@ -1391,7 +1392,7 @@ struct ReviewUITests {
         #expect(cellView.toolTip == loadedJob.cwd)
     }
 
-    @Test func workspaceDropPreservesExpansionState() {
+    @Test func workspaceDropPreservesExpansionState() async {
         let alphaJob = makeJob(
             id: "job-alpha",
             cwd: "/tmp/workspace-alpha",
@@ -1420,6 +1421,7 @@ struct ReviewUITests {
         sidebar.collapseWorkspaceInOutlineForTesting(betaWorkspace)
         #expect(sidebar.workspaceIsExpandedForTesting(betaWorkspace) == false)
         #expect(sidebar.performWorkspaceDropForTesting(betaWorkspace, toIndex: 0))
+        await sidebar.waitForHistoryActionsForTesting()
         #expect(sidebar.workspaceIsExpandedForTesting(betaWorkspace) == false)
     }
 
@@ -2757,7 +2759,7 @@ struct ReviewUITests {
             proposedWorkspaceSectionContaining: firstWorkspace,
             childIndex: 2
         ))
-        await Task.yield()
+        await sidebar.waitForHistoryActionsForTesting()
 
         #expect(sidebar.displayedJobIDsForTesting(in: firstWorkspace) == [
             "job-first-worktree-queued-b",
@@ -2920,7 +2922,7 @@ struct ReviewUITests {
 
         let incrementalMoveCountBeforeDrop = sidebar.sidebarIncrementalMoveCountForTesting
         #expect(sidebar.performWorkspaceDropForTesting(standaloneWorkspace, toIndex: 0))
-        await Task.yield()
+        await sidebar.waitForHistoryActionsForTesting()
 
         #expect(sidebar.displayedSectionTitlesForTesting == ["Standalone", "CodexReviewKit"])
         #expect(sidebar.sidebarIncrementalMoveCountForTesting == incrementalMoveCountBeforeDrop + 1)
@@ -2971,7 +2973,7 @@ struct ReviewUITests {
             containing: firstWorkspace,
             toIndex: 2
         ))
-        await Task.yield()
+        await sidebar.waitForHistoryActionsForTesting()
 
         #expect(sidebar.displayedSectionTitlesForTesting == ["Standalone", "CodexReviewKit"])
         #expect(store.orderedWorkspaces.map(\.cwd) == [
@@ -3039,7 +3041,7 @@ struct ReviewUITests {
             proposedJob: secondWorkspaceSecondJob,
             hoveringBelowMidpoint: true
         ))
-        await Task.yield()
+        await sidebar.waitForHistoryActionsForTesting()
 
         #expect(sidebar.displayedJobIDsForTesting(in: firstWorkspace) == ["job-first-workspace"])
         #expect(sidebar.displayedJobIDsForTesting(in: secondWorkspace) == [

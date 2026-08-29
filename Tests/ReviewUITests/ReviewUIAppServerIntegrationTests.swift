@@ -470,13 +470,13 @@ extension ReviewUITests {
             }
             #expect(await backend.reviewEventSessionCountForTesting() == 0)
 
-            var terminalCancelItemIsDisabled = false
+            var terminalHistoryItemDeletes = false
             sidebar.presentContextMenuForTesting(for: job) { menu in
-                terminalCancelItemIsDisabled = menu.items.first.map {
-                    $0.title == "Cancel" && $0.isEnabled == false
+                terminalHistoryItemDeletes = menu.items.first.map {
+                    $0.title == "Delete from History" && $0.isEnabled
                 } ?? false
             }
-            #expect(terminalCancelItemIsDisabled)
+            #expect(terminalHistoryItemDeletes)
 
             let requestMethods = await transport.recordedRequests().map(\.method)
             #expect(requestMethods.filter { $0 == "turn/interrupt" }.count == 1)

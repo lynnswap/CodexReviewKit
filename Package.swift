@@ -79,6 +79,7 @@ let package = Package(
                 "CodexReview",
                 "CodexReviewAppServer",
                 "CodexReviewMCPServer",
+                "CodexReviewPersistence",
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
@@ -152,7 +153,12 @@ let package = Package(
         ),
         .testTarget(
             name: "CodexReviewHostTests",
-            dependencies: ["CodexReviewAppServer", "CodexReviewHost", "CodexReviewTesting"],
+            dependencies: [
+                "CodexReviewAppServer",
+                "CodexReviewHost",
+                "CodexReviewPersistence",
+                "CodexReviewTesting",
+            ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]
