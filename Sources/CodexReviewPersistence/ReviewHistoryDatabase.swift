@@ -11,6 +11,7 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
     }
 
     private var storage: Storage
+    private var fileOwnership: ReviewHistoryDatabaseOwnership?
     private let now: @Sendable () -> Date
 
     package init(
@@ -203,10 +204,22 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
             return
         }
         storage = .closed(failure: nil)
+        var failures: [String] = []
         do {
             try database?.close()
         } catch {
-            let failure = ReviewHistoryDatabaseError.closeFailed(error.localizedDescription)
+            failures.append(error.localizedDescription)
+        }
+        do {
+            try fileOwnership?.close()
+        } catch {
+            failures.append(error.localizedDescription)
+        }
+        fileOwnership = nil
+        if failures.isEmpty == false {
+            let failure = ReviewHistoryDatabaseError.closeFailed(
+                failures.joined(separator: "; ")
+            )
             storage = .closed(failure: failure)
             throw failure
         }
@@ -215,6 +228,9 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
     private func preparedDatabase() throws -> any DatabaseWriter {
         switch storage {
         case .unopenedURL(let url):
+            if fileOwnership == nil {
+                fileOwnership = try ReviewHistoryDatabaseOwnership(databaseURL: url)
+            }
             let database = try DatabasePool(path: url.path(percentEncoded: false))
             storage = .open(database, prepared: false)
             try ReviewHistorySchema.migrate(database)

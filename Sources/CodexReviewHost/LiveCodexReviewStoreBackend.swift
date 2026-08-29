@@ -163,13 +163,17 @@ public extension CodexReviewStore {
         diagnosticsURL: URL?,
         reviewHistoryFailureMessage: String
     ) -> CodexReviewStore {
-        CodexReviewStore(
+        let store = CodexReviewStore(
             backend: PreviewCodexReviewStoreBackend(),
             diagnosticsURL: diagnosticsURL,
             historyPersistence: UnavailableReviewHistoryPersistence(
                 message: reviewHistoryFailureMessage
             )
         )
+        store.publishReviewHistoryFailure(ReviewHistoryOperationFailure(
+            message: reviewHistoryFailureMessage
+        ))
+        return store
     }
 
     @_spi(ApplicationHostSupport)

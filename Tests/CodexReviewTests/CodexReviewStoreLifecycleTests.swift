@@ -781,6 +781,58 @@ struct CodexReviewStoreLifecycleTests {
         }
     }
 
+    @Test func registeredWorkCloseAbandonsOnlyInvalidatedReviewGeneration() async throws {
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(
+                reviewBackend: FakeCodexReviewBackend()
+            )
+        )
+        let reviewEntered = AsyncGate()
+        let reviewRelease = AsyncGate()
+        let settingsEntered = AsyncGate()
+        let settingsRelease = AsyncGate()
+        let review = try #require(store.startRegisteredStoreWork(
+            kind: .reviewMutation("held review work")
+        ) { _ in
+            await reviewEntered.open()
+            await reviewRelease.waitIgnoringCancellation()
+        })
+        let settings = try #require(store.startRegisteredStoreWork(
+            kind: .settingsMutation("held settings work")
+        ) { _ in
+            await settingsEntered.open()
+            await settingsRelease.waitIgnoringCancellation()
+        })
+        await reviewEntered.wait()
+        await settingsEntered.wait()
+        store.storeWorkRegistry.closeReviewAdmission()
+
+        let closeCompletion = StoreWorkCompletion()
+        let close = Task { @MainActor in
+            let result = await store.closeRegisteredStoreWork(
+                reason: .system(message: "Store work owner closed."),
+                abandoningInvalidatedReviewWork: true
+            )
+            await closeCompletion.complete()
+            return result
+        }
+        try await waitForStoreWorkStatus(.closing, store: store)
+        try await waitForStoreWorkTaskCancellation(review)
+
+        #expect(review.isCancelled)
+        #expect(store.storeWorkRegistry.activeOrdinals == [2])
+        #expect(await closeCompletion.isComplete() == false)
+
+        await settingsRelease.open()
+        await settings.value
+        #expect(await close.value == .success)
+        #expect(await closeCompletion.isComplete())
+        #expect(store.storeWorkRegistry.activeOrdinals.isEmpty)
+
+        await reviewRelease.open()
+        await review.value
+    }
+
     @Test func registeredWorkCloseJoinsCancelledSettingsMutationAndRejectsLaterWrite() async throws {
         let reviewBackend = FakeCodexReviewBackend(settings: .init(model: "initial-model"))
         let store = CodexReviewStore.makeTestingStore(
@@ -1598,6 +1650,20 @@ private func waitForStoreWorkStatus(
     let clock = ContinuousClock()
     let deadline = clock.now + .seconds(2)
     while store.storeWorkRegistryStatus != expected {
+        guard clock.now < deadline else {
+            throw CancellationError()
+        }
+        await Task.yield()
+    }
+}
+
+@MainActor
+private func waitForStoreWorkTaskCancellation(
+    _ task: Task<Void, Never>
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now + .seconds(2)
+    while task.isCancelled == false {
         guard clock.now < deadline else {
             throw CancellationError()
         }

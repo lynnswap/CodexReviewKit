@@ -8,6 +8,13 @@ import Testing
 @Suite(.serialized)
 @MainActor
 struct CodexReviewMonitorCITests {
+    @Test func applicationBundleProhibitsMultipleLaunchServicesInstances() {
+        #expect(
+            Bundle.main.object(forInfoDictionaryKey: "LSMultipleInstancesProhibited") as? Bool
+                == true
+        )
+    }
+
     @Test func ciSchemeBuildsPreviewLaunchContextWithoutStartingServer() {
         let environment = ProcessInfo.processInfo.environment
         let context = ReviewMonitorLaunchContext(
@@ -393,6 +400,39 @@ struct CodexReviewMonitorCITests {
         }
         #expect(message.contains(ReviewMonitorLaunchEnvironment.testCodexCommandKey))
         #expect(context.shouldStartEmbeddedServer == false)
+    }
+
+    @Test func invalidIsolatedTestConfigurationPublishesHistoryFailureWithoutStartingRuntime() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "invalid-review-monitor-launch-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let diagnosticsURL = directory.appending(path: "diagnostics.json")
+        let historyDatabaseURL = directory.appending(path: "history.sqlite")
+        let failureMessage = "\(ReviewMonitorLaunchEnvironment.testPortKey) requires an integer from 1 through 65535."
+        let context = ReviewMonitorLaunchContext(
+            environment: [
+                ReviewMonitorLaunchEnvironment.testPortKey: "invalid",
+                ReviewMonitorLaunchEnvironment.testCodexCommandKey: "/usr/bin/true",
+                ReviewMonitorLaunchEnvironment.testDiagnosticsPathKey: diagnosticsURL.path,
+                ReviewMonitorLaunchEnvironment.testHistoryPathKey: historyDatabaseURL.path,
+            ],
+            arguments: [],
+            launchMode: .application
+        )
+
+        let store = ReviewMonitorAppComposition.live().makeStore(context) { nil }
+        let diagnosticsData = try Data(contentsOf: diagnosticsURL)
+        let diagnostics = try #require(
+            JSONSerialization.jsonObject(with: diagnosticsData) as? [String: Any]
+        )
+
+        #expect(context.shouldStartEmbeddedServer == false)
+        #expect(store.serverState == .stopped)
+        #expect(diagnostics["serverState"] as? String == "Stopped")
+        #expect(diagnostics["historyAvailability"] as? String == "failed")
+        #expect(diagnostics["historyFailureMessage"] as? String == failureMessage)
+        #expect(FileManager.default.fileExists(atPath: historyDatabaseURL.path) == false)
     }
 
     @Test func liveCompositionBuildsLifecycleFromLaunchContext() async {

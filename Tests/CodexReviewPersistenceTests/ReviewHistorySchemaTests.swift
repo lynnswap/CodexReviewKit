@@ -424,6 +424,39 @@ struct ReviewHistorySchemaTests {
         try await second.close()
     }
 
+    @Test("URL owner excludes a second live database without orphaning its active review")
+    func temporaryFileOwnership() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(
+                path: "CodexReviewHistoryOwnershipTests-\(UUID().uuidString)",
+                directoryHint: .isDirectory
+            )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appending(path: "review-history.sqlite")
+        let started = try ReviewHistoryTestSupport.started(id: "live-review")
+
+        let first = ReviewHistoryDatabase(databaseURL: url)
+        try await first.recordStarted(started)
+        let second = ReviewHistoryDatabase(databaseURL: url)
+        await #expect(throws: ReviewHistoryDatabaseError.databaseInUse) {
+            _ = try await second.load(retentionPolicy: .default)
+        }
+
+        _ = try await first.recordTerminal(
+            ReviewHistoryTestSupport.completed(id: started.id),
+            retentionPolicy: .default
+        )
+        try await first.close()
+        try await second.close()
+
+        let successor = ReviewHistoryDatabase(databaseURL: url)
+        let restored = try await successor.load(retentionPolicy: .default)
+        #expect(restored.map(\.started.id) == [started.id])
+        #expect(restored.first?.terminal.terminal == .completed)
+        try await successor.close()
+    }
+
     private func findingCount(_ writer: any DatabaseWriter) throws -> Int? {
         try writer.read { db in
             try #sql("SELECT count(*) FROM review_findings", as: Int.self).fetchOne(db)

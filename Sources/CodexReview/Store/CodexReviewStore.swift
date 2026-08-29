@@ -752,7 +752,8 @@ public final class CodexReviewStore {
     }
 
     package func closeRegisteredStoreWork(
-        reason: ReviewCancellation
+        reason: ReviewCancellation,
+        abandoningInvalidatedReviewWork: Bool = false
     ) async -> ReviewStoreWorkDrainResult {
         let reviewWorkerJobIDs: [String]
         let cancellationRegistrations: [ReviewRuntimeCancellationRegistration]
@@ -770,7 +771,9 @@ public final class CodexReviewStore {
             reviewWorkerJobIDs = []
             cancellationRegistrations = []
         }
-        let operation = storeWorkRegistry.beginClosing { [self] in
+        let operation = storeWorkRegistry.beginClosing(
+            abandoningInvalidatedReviewWork: abandoningInvalidatedReviewWork
+        ) { [self] in
             accountRateLimitAutoRefreshDriver?.closeAdmission()
         } beforeTaskCancellation: { [self] in
             for registration in cancellationRegistrations {

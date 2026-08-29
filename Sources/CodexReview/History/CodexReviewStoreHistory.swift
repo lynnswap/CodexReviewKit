@@ -576,11 +576,12 @@ extension CodexReviewStore {
         }
 
         await stop(intent: .explicitStop)
-        _ = await closeRegisteredStoreWork(
-            reason: .system(message: "The review application is shutting down.")
-        )
         await waitForAllHistoryStarts()
         await waitForAllHistoryTerminalCommits()
+        _ = await closeRegisteredStoreWork(
+            reason: .system(message: "The review application is shutting down."),
+            abandoningInvalidatedReviewWork: true
+        )
 
         if historyLoadSucceeded {
             await persistCurrentHistoryOrderingForShutdown()

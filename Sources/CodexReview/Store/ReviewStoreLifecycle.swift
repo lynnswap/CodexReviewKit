@@ -246,6 +246,7 @@ package final class ReviewStoreWorkRegistry {
     }
 
     package func beginClosing(
+        abandoningInvalidatedReviewWork: Bool = false,
         onAdmissionClosed: () -> Void,
         beforeTaskCancellation: @escaping @MainActor @Sendable () async -> Void = {}
     ) -> CloseOperation {
@@ -253,8 +254,28 @@ package final class ReviewStoreWorkRegistry {
         case .open:
             admissionIsOpen = false
             onAdmissionClosed()
-            let tasks = registeredTasks.values.sorted {
+            let registeredTasksInAdmissionOrder = registeredTasks.values.sorted {
                 $0.admission.ordinal < $1.admission.ordinal
+            }
+            let abandonedTasks: [RegisteredTask]
+            let tasks: [RegisteredTask]
+            if abandoningInvalidatedReviewWork {
+                abandonedTasks = registeredTasksInAdmissionOrder.filter { task in
+                    guard let generation = task.admission.reviewGeneration else {
+                        return false
+                    }
+                    return generation != reviewAdmissionGeneration
+                }
+                for task in abandonedTasks {
+                    registeredTasks.removeValue(forKey: task.admission.ordinal)
+                }
+                let abandonedOrdinals = Set(abandonedTasks.map(\.admission.ordinal))
+                tasks = registeredTasksInAdmissionOrder.filter {
+                    abandonedOrdinals.contains($0.admission.ordinal) == false
+                }
+            } else {
+                abandonedTasks = []
+                tasks = registeredTasksInAdmissionOrder
             }
             guard nextCloseID < UInt64.max else {
                 preconditionFailure("ReviewStoreWorkRegistry close ordinal exhausted.")
@@ -264,6 +285,9 @@ package final class ReviewStoreWorkRegistry {
                 id: nextCloseID,
                 task: Task { @MainActor in
                     await beforeTaskCancellation()
+                    for task in abandonedTasks {
+                        task.cancel()
+                    }
                     for task in tasks {
                         task.cancel()
                     }

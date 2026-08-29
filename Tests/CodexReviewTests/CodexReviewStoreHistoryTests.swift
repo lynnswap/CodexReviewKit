@@ -902,6 +902,63 @@ struct CodexReviewStoreHistoryTests {
         #expect(await history.closeCallCount() == 1)
     }
 
+    @Test func shutdownAbandonsDurableInvalidatedReviewWork() async throws {
+        let startGate = AsyncGate()
+        let history = ReviewHistoryPersistenceProbe()
+        let backend = FakeCodexReviewBackend()
+        await backend.holdStartReviewIgnoringCancellation(with: startGate)
+        let store = makeStore(
+            history: history,
+            backend: backend,
+            idGenerator: .init(next: { "job-1" })
+        )
+        await store.start()
+
+        let reviewCompletion = HistoryTestCompletion()
+        let review = Task { @MainActor in
+            let result = try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .seconds(30)
+            )
+            await reviewCompletion.complete()
+            return result
+        }
+        try await backend.waitForStartReview(timeout: .seconds(2))
+
+        let shutdownCompletion = HistoryTestCompletion()
+        let shutdown = Task { @MainActor in
+            await store.shutdown()
+            await shutdownCompletion.complete()
+        }
+        let completedBeforeWorkerReleased = await waitForHistoryTestCondition(
+            timeout: .seconds(1)
+        ) {
+            await shutdownCompletion.isComplete()
+        }
+
+        #expect(completedBeforeWorkerReleased)
+        #expect(await reviewCompletion.isComplete() == false)
+        #expect(store.historyAvailability == .closed)
+        #expect(store.reviewWorkerTasks["job-1"] == nil)
+        #expect(store.runtimeStopDetachedReviewWorkerTasks["job-1"] != nil)
+        #expect(await history.closeCallCount() == 1)
+        #expect(await history.terminalRecords().count == 1)
+        #expect(await history.mutationOperations() == ["started", "terminal", "ordering"])
+
+        await startGate.open()
+        try await backend.waitForInterruptReview(timeout: .seconds(2))
+        await backend.yield(.cancelled("Review runtime stopped."))
+        await shutdown.value
+        let result = try await review.value
+
+        #expect(result.core.lifecycle.status == .cancelled)
+        #expect(store.runtimeStopDetachedReviewWorkerTasks["job-1"] == nil)
+        #expect(await history.closeCallCount() == 1)
+        #expect(await history.terminalRecords().count == 1)
+        #expect(await history.mutationOperations() == ["started", "terminal", "ordering"])
+    }
+
     @Test func workspaceReorderPersistsBeforeApplyingMemoryOrder() async throws {
         let first = try historyRecord(
             id: "first",
