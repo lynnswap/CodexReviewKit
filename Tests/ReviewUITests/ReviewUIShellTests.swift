@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import ObservationBridge
+import Synchronization
 import SwiftUI
 import Testing
 @_spi(Testing) @testable import CodexReview
@@ -524,6 +525,60 @@ extension ReviewUITests {
         try await waitForCondition {
             viewController.sidebarJobFilterToolbarItemIsHiddenForTesting == false
         }
+    }
+
+    @Test func sidebarPickerAppliesContextualToolbarItemsAsOneDiff() async throws {
+        let store = CodexReviewStore.makePreviewStore()
+        let harness = makeWindowHarness(store: store)
+        let viewController = harness.viewController
+        let window = harness.window
+        defer { window.close() }
+        let sidebarItem = try #require(viewController.splitViewItems.first)
+        sidebarItem.isCollapsed = false
+        try await waitForCondition {
+            viewController.sidebarJobFilterToolbarItemIsHiddenForTesting == false
+        }
+
+        let toolbar = try #require(window.toolbar)
+        let initialIdentifiers = toolbar.itemIdentifiers
+        let pickerIdentifier = viewController.sidebarPickerToolbarItemIdentifierForTesting
+        let filterIdentifier = viewController.sidebarJobFilterToolbarItemIdentifierForTesting
+        let addAccountIdentifier = viewController.addAccountToolbarItemIdentifierForTesting
+        let initialPicker = try #require(toolbar.items.first(where: {
+            $0.itemIdentifier == pickerIdentifier
+        }))
+        let expectedIdentifiers = initialIdentifiers.map { identifier in
+            identifier == filterIdentifier ? addAccountIdentifier : identifier
+        }
+        let transitions = Mutex<[
+            (oldValue: [NSToolbarItem.Identifier], newValue: [NSToolbarItem.Identifier])
+        ]>([])
+        let observation = toolbar.observe(\.itemIdentifiers, options: [.old, .new]) { _, change in
+            guard let oldValue = change.oldValue,
+                  let newValue = change.newValue
+            else {
+                return
+            }
+            transitions.withLock {
+                $0.append((oldValue: oldValue, newValue: newValue))
+            }
+        }
+        defer { observation.invalidate() }
+
+        viewController.selectSidebarPickerToolbarSegmentForTesting(.account)
+        try await waitForAddAccountToolbarItemHidden(viewController, false)
+
+        #expect(toolbar.itemIdentifiers == expectedIdentifiers)
+        #expect(transitions.withLock { transitions in
+            transitions.contains { transition in
+                transition.oldValue == initialIdentifiers &&
+                    transition.newValue == expectedIdentifiers
+            }
+        })
+        let updatedPicker = try #require(toolbar.items.first(where: {
+            $0.itemIdentifier == pickerIdentifier
+        }))
+        #expect(updatedPicker === initialPicker)
     }
 
     @Test func sidebarPickerToolbarItemSwitchesSidebarPresentation() async throws {
