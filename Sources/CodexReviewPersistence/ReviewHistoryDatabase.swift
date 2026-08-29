@@ -33,7 +33,7 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
         retentionPolicy: ReviewHistoryRetentionPolicy
     ) async throws -> [RestoredReviewRecord] {
         let database = try preparedDatabase()
-        let timestamp = try ReviewHistoryTimestamp.normalize(now())
+        let timestamp = now()
         return try write(database) { db in
             _ = try Self.decodeAll(in: db)
             try Self.finalizeOrphanedReviews(in: db, committedAt: timestamp)
@@ -49,7 +49,7 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
 
     package func recordStarted(_ record: StartedReviewRecord) async throws {
         let database = try preparedDatabase()
-        let timestamp = try ReviewHistoryTimestamp.normalize(now())
+        let timestamp = now()
         let encoded = try ReviewHistoryRecordCodec.encodeStarted(
             record,
             createdAt: timestamp,
@@ -69,7 +69,7 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
         retentionPolicy: ReviewHistoryRetentionPolicy
     ) async throws -> ReviewHistoryMutationResult {
         let database = try preparedDatabase()
-        let timestamp = try ReviewHistoryTimestamp.normalize(now())
+        let timestamp = now()
         return try write(database) { db in
             guard let existing = try ReviewRecordRow.where({ $0.id.eq(record.id) }).fetchOne(db)
             else {
@@ -122,7 +122,7 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
 
     package func saveOrdering(_ ordering: ReviewHistoryOrdering) async throws {
         let database = try preparedDatabase()
-        let timestamp = try ReviewHistoryTimestamp.normalize(now())
+        let timestamp = ReviewHistoryTimestamp.encode(now())
         try Self.validate(ordering)
         try write(database) { db in
             let existingWorkspaces = Set(try ReviewWorkspaceRow.fetchAll(db).map(\.cwd))

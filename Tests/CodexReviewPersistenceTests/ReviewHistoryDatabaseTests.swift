@@ -251,6 +251,30 @@ struct ReviewHistoryDatabaseTests {
         #expect(restored.started.sortOrder == 30)
     }
 
+    @Test("round trips a terminal timestamp from a backwards wall clock")
+    func backwardsClockRoundTrip() async throws {
+        let (database, _) = try ReviewHistoryTestSupport.database()
+        let startedAt = Date(timeIntervalSinceReferenceDate: 100.123_456_789)
+        let endedAt = Date(timeIntervalSinceReferenceDate: 99.987_654_321)
+        _ = try await ReviewHistoryTestSupport.record(
+            started: ReviewHistoryTestSupport.started(
+                id: "backwards-clock",
+                startedAt: startedAt
+            ),
+            terminal: ReviewHistoryTestSupport.nonCompleted(
+                id: "backwards-clock",
+                endedAt: endedAt
+            ),
+            in: database
+        )
+
+        let restored = try #require(
+            try await database.load(retentionPolicy: .default).first
+        )
+        #expect(restored.started.startedAt == startedAt)
+        #expect(restored.terminal.endedAt == endedAt)
+    }
+
     @Test("terminal-only deletes preserve active rows and return exact membership")
     func terminalDeletionSemantics() async throws {
         let (database, writer) = try ReviewHistoryTestSupport.database()

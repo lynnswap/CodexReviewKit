@@ -39,7 +39,7 @@ enum ReviewHistoryRecordCodec {
                 targetCommitTitle: targetColumns.commitTitle,
                 targetInstructions: targetColumns.instructions,
                 startedModel: record.model,
-                startedAt: try ReviewHistoryTimestamp.normalize(record.startedAt),
+                startedAt: ReviewHistoryTimestamp.encode(record.startedAt),
                 phase: "active",
                 terminalModel: nil,
                 terminalKind: nil,
@@ -55,8 +55,8 @@ enum ReviewHistoryRecordCodec {
                 parsedSource: nil,
                 parserVersion: nil,
                 terminalCommittedAt: nil,
-                createdAt: createdAt,
-                updatedAt: updatedAt
+                createdAt: ReviewHistoryTimestamp.encode(createdAt),
+                updatedAt: ReviewHistoryTimestamp.encode(updatedAt)
             )
         )
     }
@@ -69,9 +69,6 @@ enum ReviewHistoryRecordCodec {
     ) throws -> EncodedTerminalReview {
         guard record.id == existing.id else {
             throw invalid(record.id, "terminal identity does not match the active row")
-        }
-        if let endedAt = record.endedAt, endedAt < existing.startedAt {
-            throw invalid(record.id, "endedAt precedes startedAt")
         }
         if let parsedResult = record.parsedResult {
             try validate(parsedResult, id: record.id)
@@ -87,7 +84,7 @@ enum ReviewHistoryRecordCodec {
         review.cancellationMessage = terminalColumns.cancellation?.message
         review.terminalMessage = terminalColumns.message
         if let endedAt = record.endedAt {
-            review.endedAt = try ReviewHistoryTimestamp.normalize(endedAt)
+            review.endedAt = ReviewHistoryTimestamp.encode(endedAt)
         } else {
             review.endedAt = nil
         }
@@ -97,8 +94,8 @@ enum ReviewHistoryRecordCodec {
         review.parsedFindingCount = record.parsedResult?.findingCount
         review.parsedSource = record.parsedResult?.source.rawValue
         review.parserVersion = record.parsedResult?.parserVersion
-        review.terminalCommittedAt = terminalCommittedAt
-        review.updatedAt = updatedAt
+        review.terminalCommittedAt = ReviewHistoryTimestamp.encode(terminalCommittedAt)
+        review.updatedAt = ReviewHistoryTimestamp.encode(updatedAt)
 
         let findings = try record.parsedResult?.findings.map {
             try encode($0, reviewID: record.id)
@@ -145,7 +142,7 @@ enum ReviewHistoryRecordCodec {
                 sortOrder: row.sortOrder,
                 target: target,
                 model: row.startedModel,
-                startedAt: row.startedAt
+                startedAt: ReviewHistoryTimestamp.decode(row.startedAt)
             )
         } catch {
             throw invalid(row.id, error.localizedDescription)
@@ -157,8 +154,8 @@ enum ReviewHistoryRecordCodec {
         if row.phase == "active" {
             let reencoded = try encodeStarted(
                 started,
-                createdAt: row.createdAt,
-                updatedAt: row.updatedAt
+                createdAt: ReviewHistoryTimestamp.decode(row.createdAt),
+                updatedAt: ReviewHistoryTimestamp.decode(row.updatedAt)
             )
             guard reencoded.workspace == workspace, reencoded.review == row else {
                 throw invalid(row.id, "active storage columns are not canonical")
@@ -228,7 +225,7 @@ enum ReviewHistoryRecordCodec {
                 id: row.id,
                 model: row.terminalModel,
                 terminal: terminalValue,
-                endedAt: row.endedAt,
+                endedAt: row.endedAt.map(ReviewHistoryTimestamp.decode),
                 summary: row.summary ?? "",
                 canonicalReview: row.canonicalReview,
                 parsedResult: parsedResult
@@ -246,8 +243,8 @@ enum ReviewHistoryRecordCodec {
         let reencoded = try encodeTerminal(
             terminal,
             replacing: row,
-            terminalCommittedAt: terminalCommittedAt,
-            updatedAt: row.updatedAt
+            terminalCommittedAt: ReviewHistoryTimestamp.decode(terminalCommittedAt),
+            updatedAt: ReviewHistoryTimestamp.decode(row.updatedAt)
         )
         guard reencoded.review == row,
               reencoded.findings.sorted(by: { $0.ordinal < $1.ordinal })

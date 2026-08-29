@@ -26,29 +26,88 @@ struct ReviewHistorySchemaTests {
         let foreignKeysEnabled = try await writer.read { db in
             try #sql("PRAGMA foreign_keys", as: Int.self).fetchOne(db)
         }
+        let tableNames = try await writer.read { db in
+            try #sql(
+                """
+                SELECT name
+                FROM pragma_table_list
+                WHERE schema = 'main' AND name NOT LIKE 'sqlite_%'
+                ORDER BY name
+                """,
+                as: String.self
+            )
+            .fetchAll(db)
+        }
+        let workspaceColumns = try await writer.read { db in
+            try #sql(
+                "SELECT name FROM pragma_table_info('review_workspaces') ORDER BY cid",
+                as: String.self
+            )
+            .fetchAll(db)
+        }
         let recordColumns = try await writer.read { db in
             try #sql(
-                "SELECT name FROM pragma_table_info('review_records')",
+                "SELECT name FROM pragma_table_info('review_records') ORDER BY cid",
+                as: String.self
+            )
+            .fetchAll(db)
+        }
+        let findingColumns = try await writer.read { db in
+            try #sql(
+                "SELECT name FROM pragma_table_info('review_findings') ORDER BY cid",
                 as: String.self
             )
             .fetchAll(db)
         }
         #expect(strictTableCount == 3)
         #expect(foreignKeysEnabled == 1)
-        #expect(recordColumns.contains("terminalCommittedAt"))
-        #expect(
-            Set(recordColumns).isDisjoint(with: [
-                "sessionID",
-                "reviewThreadID",
-                "threadID",
-                "turnID",
-                "exitCode",
-                "errorMessage",
-                "hasFinalReview",
-                "rawText",
-                "logEntries",
-            ])
-        )
+        #expect(tableNames == [
+            "grdb_migrations",
+            "review_findings",
+            "review_records",
+            "review_workspaces",
+        ])
+        #expect(workspaceColumns == ["cwd", "sortOrder"])
+        #expect(recordColumns == [
+            "id",
+            "cwd",
+            "sortOrder",
+            "targetKind",
+            "targetBranch",
+            "targetCommitSHA",
+            "targetCommitTitle",
+            "targetInstructions",
+            "startedModel",
+            "startedAt",
+            "phase",
+            "terminalModel",
+            "terminalKind",
+            "interruptionKind",
+            "cancellationSource",
+            "cancellationMessage",
+            "terminalMessage",
+            "endedAt",
+            "summary",
+            "canonicalReview",
+            "parsedState",
+            "parsedFindingCount",
+            "parsedSource",
+            "parserVersion",
+            "terminalCommittedAt",
+            "createdAt",
+            "updatedAt",
+        ])
+        #expect(findingColumns == [
+            "id",
+            "reviewID",
+            "ordinal",
+            "priority",
+            "title",
+            "body",
+            "path",
+            "startLine",
+            "endLine",
+        ])
 
         await #expect(throws: (any Error).self) {
             try await writer.write { db in
@@ -77,9 +136,153 @@ struct ReviewHistorySchemaTests {
         }
     }
 
+    @Test("rejects NULL required variant fields instead of accepting UNKNOWN checks")
+    func nullableRequiredVariantConstraints() async throws {
+        let (database, writer) = try ReviewHistoryTestSupport.database()
+        let validActiveIDs = [
+            "missing-terminal-kind",
+            "missing-canonical-review",
+            "missing-parser",
+            "missing-interruption-kind",
+            "missing-cancellation-source",
+        ]
+        for id in validActiveIDs {
+            try await database.recordStarted(ReviewHistoryTestSupport.started(id: id))
+        }
+
+        for (id, targetKind) in [
+            ("missing-base-branch", "baseBranch"),
+            ("missing-commit-sha", "commit"),
+            ("missing-custom-instructions", "custom"),
+        ] {
+            await #expect(throws: (any Error).self) {
+                try await writer.write { db in
+                    try #sql(
+                        """
+                        INSERT INTO review_records (
+                          id, cwd, sortOrder, targetKind, startedAt, phase, createdAt, updatedAt
+                        ) VALUES (
+                          \(bind: id), \(bind: "/tmp/workspace"), 0, \(bind: targetKind),
+                          0, 'active', 0, 0
+                        )
+                        """
+                    )
+                    .execute(db)
+                }
+            }
+        }
+
+        await #expect(throws: (any Error).self) {
+            try await writer.write { db in
+                try #sql(
+                    """
+                    UPDATE review_records
+                    SET phase = 'terminal',
+                        summary = 'Done',
+                        terminalCommittedAt = 60,
+                        updatedAt = 60
+                    WHERE id = 'missing-terminal-kind'
+                    """
+                )
+                .execute(db)
+            }
+        }
+        await #expect(throws: (any Error).self) {
+            try await writer.write { db in
+                try #sql(
+                    """
+                    UPDATE review_records
+                    SET phase = 'terminal',
+                        terminalKind = 'completed',
+                        endedAt = 60,
+                        summary = 'Done',
+                        parsedState = 'noFindings',
+                        parsedFindingCount = 0,
+                        parsedSource = 'parsedFinalReviewText',
+                        parserVersion = 1,
+                        terminalCommittedAt = 60,
+                        updatedAt = 60
+                    WHERE id = 'missing-canonical-review'
+                    """
+                )
+                .execute(db)
+            }
+        }
+        await #expect(throws: (any Error).self) {
+            try await writer.write { db in
+                try #sql(
+                    """
+                    UPDATE review_records
+                    SET phase = 'terminal',
+                        terminalKind = 'completed',
+                        endedAt = 60,
+                        summary = 'Done',
+                        canonicalReview = 'No findings.',
+                        terminalCommittedAt = 60,
+                        updatedAt = 60
+                    WHERE id = 'missing-parser'
+                    """
+                )
+                .execute(db)
+            }
+        }
+        await #expect(throws: (any Error).self) {
+            try await writer.write { db in
+                try #sql(
+                    """
+                    UPDATE review_records
+                    SET phase = 'terminal',
+                        terminalKind = 'interrupted',
+                        endedAt = 60,
+                        summary = 'Interrupted',
+                        terminalCommittedAt = 60,
+                        updatedAt = 60
+                    WHERE id = 'missing-interruption-kind'
+                    """
+                )
+                .execute(db)
+            }
+        }
+        await #expect(throws: (any Error).self) {
+            try await writer.write { db in
+                try #sql(
+                    """
+                    UPDATE review_records
+                    SET phase = 'terminal',
+                        terminalKind = 'interrupted',
+                        interruptionKind = 'requested',
+                        cancellationMessage = 'Stop',
+                        endedAt = 60,
+                        summary = 'Interrupted',
+                        terminalCommittedAt = 60,
+                        updatedAt = 60
+                    WHERE id = 'missing-cancellation-source'
+                    """
+                )
+                .execute(db)
+            }
+        }
+        await #expect(throws: (any Error).self) {
+            try await writer.write { db in
+                try #sql(
+                    """
+                    INSERT INTO review_findings (
+                      id, reviewID, ordinal, title, body, path
+                    ) VALUES (
+                      'missing-location-lines', 'missing-terminal-kind', 0,
+                      'Finding', 'Body', 'File.swift'
+                    )
+                    """
+                )
+                .execute(db)
+            }
+        }
+    }
+
     @Test("deletes finding projections through the review foreign key")
     func cascadeDelete() async throws {
         let (database, writer) = try ReviewHistoryTestSupport.database()
+        let rawTextSentinel = "RAW-TEXT-SENTINEL-MUST-NOT-BE-DURABLE"
         let parsedResult = ParsedReviewResult(
             state: .hasFindings,
             findingCount: 1,
@@ -89,7 +292,7 @@ struct ReviewHistorySchemaTests {
                     body: "Body",
                     priority: 1,
                     location: .init(path: "File.swift", startLine: 1, endLine: 1),
-                    rawText: "not persisted"
+                    rawText: rawTextSentinel
                 )
             ],
             source: .parsedFinalReviewText
@@ -105,9 +308,47 @@ struct ReviewHistorySchemaTests {
         )
 
         let before = try findingCount(writer)
+        let persistedSentinelCount = try await writer.read { db in
+            try #sql(
+                """
+                SELECT count(*)
+                FROM (
+                  SELECT cwd AS value FROM review_workspaces
+                  UNION ALL SELECT id FROM review_records
+                  UNION ALL SELECT cwd FROM review_records
+                  UNION ALL SELECT targetKind FROM review_records
+                  UNION ALL SELECT targetBranch FROM review_records
+                  UNION ALL SELECT targetCommitSHA FROM review_records
+                  UNION ALL SELECT targetCommitTitle FROM review_records
+                  UNION ALL SELECT targetInstructions FROM review_records
+                  UNION ALL SELECT startedModel FROM review_records
+                  UNION ALL SELECT phase FROM review_records
+                  UNION ALL SELECT terminalModel FROM review_records
+                  UNION ALL SELECT terminalKind FROM review_records
+                  UNION ALL SELECT interruptionKind FROM review_records
+                  UNION ALL SELECT cancellationSource FROM review_records
+                  UNION ALL SELECT cancellationMessage FROM review_records
+                  UNION ALL SELECT terminalMessage FROM review_records
+                  UNION ALL SELECT summary FROM review_records
+                  UNION ALL SELECT canonicalReview FROM review_records
+                  UNION ALL SELECT parsedState FROM review_records
+                  UNION ALL SELECT parsedSource FROM review_records
+                  UNION ALL SELECT id FROM review_findings
+                  UNION ALL SELECT reviewID FROM review_findings
+                  UNION ALL SELECT title FROM review_findings
+                  UNION ALL SELECT body FROM review_findings
+                  UNION ALL SELECT path FROM review_findings
+                )
+                WHERE value = \(bind: rawTextSentinel)
+                """,
+                as: Int.self
+            )
+            .fetchOne(db)
+        }
         _ = try await database.deleteTerminalReview(id: "cascade")
         let after = try findingCount(writer)
         #expect(before == 1)
+        #expect(persistedSentinelCount == 0)
         #expect(after == 0)
     }
 

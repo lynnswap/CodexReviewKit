@@ -22,7 +22,7 @@ struct ReviewRecordRow: Equatable, Sendable {
     var targetInstructions: String?
 
     var startedModel: String?
-    var startedAt: Date
+    var startedAt: Double
 
     var phase: String
     var terminalModel: String?
@@ -31,17 +31,17 @@ struct ReviewRecordRow: Equatable, Sendable {
     var cancellationSource: String?
     var cancellationMessage: String?
     var terminalMessage: String?
-    var endedAt: Date?
+    var endedAt: Double?
     var summary: String?
     var canonicalReview: String?
     var parsedState: String?
     var parsedFindingCount: Int?
     var parsedSource: String?
     var parserVersion: Int?
-    var terminalCommittedAt: Date?
+    var terminalCommittedAt: Double?
 
-    var createdAt: Date
-    var updatedAt: Date
+    var createdAt: Double
+    var updatedAt: Double
 }
 
 @Table("review_findings")
@@ -86,7 +86,7 @@ enum ReviewHistorySchema {
                   "targetInstructions" TEXT,
 
                   "startedModel" TEXT,
-                  "startedAt" TEXT NOT NULL,
+                  "startedAt" REAL NOT NULL,
 
                   "phase" TEXT NOT NULL,
                   "terminalModel" TEXT,
@@ -95,40 +95,43 @@ enum ReviewHistorySchema {
                   "cancellationSource" TEXT,
                   "cancellationMessage" TEXT,
                   "terminalMessage" TEXT,
-                  "endedAt" TEXT,
+                  "endedAt" REAL,
                   "summary" TEXT,
                   "canonicalReview" TEXT,
                   "parsedState" TEXT,
                   "parsedFindingCount" INTEGER,
                   "parsedSource" TEXT,
                   "parserVersion" INTEGER,
-                  "terminalCommittedAt" TEXT,
+                  "terminalCommittedAt" REAL,
 
-                  "createdAt" TEXT NOT NULL,
-                  "updatedAt" TEXT NOT NULL,
+                  "createdAt" REAL NOT NULL,
+                  "updatedAt" REAL NOT NULL,
 
-                  CHECK (
+                  CHECK (COALESCE(
                     ("targetKind" = 'uncommittedChanges'
                       AND "targetBranch" IS NULL
                       AND "targetCommitSHA" IS NULL
                       AND "targetCommitTitle" IS NULL
                       AND "targetInstructions" IS NULL)
                     OR ("targetKind" = 'baseBranch'
+                      AND "targetBranch" IS NOT NULL
                       AND length(trim("targetBranch")) > 0
                       AND "targetCommitSHA" IS NULL
                       AND "targetCommitTitle" IS NULL
                       AND "targetInstructions" IS NULL)
                     OR ("targetKind" = 'commit'
                       AND "targetBranch" IS NULL
+                      AND "targetCommitSHA" IS NOT NULL
                       AND length(trim("targetCommitSHA")) > 0
                       AND "targetInstructions" IS NULL)
                     OR ("targetKind" = 'custom'
                       AND "targetBranch" IS NULL
                       AND "targetCommitSHA" IS NULL
                       AND "targetCommitTitle" IS NULL
+                      AND "targetInstructions" IS NOT NULL
                       AND length(trim("targetInstructions")) > 0)
-                  ),
-                  CHECK (
+                  , 0)),
+                  CHECK (COALESCE(
                     ("phase" = 'active'
                       AND "terminalModel" IS NULL
                       AND "terminalKind" IS NULL
@@ -147,6 +150,7 @@ enum ReviewHistorySchema {
                     OR ("phase" = 'terminal'
                       AND "summary" IS NOT NULL
                       AND "terminalCommittedAt" IS NOT NULL
+                      AND "terminalKind" IS NOT NULL
                       AND (
                         ("terminalKind" = 'completed'
                           AND "endedAt" IS NOT NULL
@@ -154,7 +158,11 @@ enum ReviewHistorySchema {
                           AND "cancellationSource" IS NULL
                           AND "cancellationMessage" IS NULL
                           AND "terminalMessage" IS NULL
+                          AND "canonicalReview" IS NOT NULL
                           AND length(trim("canonicalReview")) > 0
+                          AND "parsedState" IS NOT NULL
+                          AND "parsedSource" IS NOT NULL
+                          AND "parserVersion" IS NOT NULL
                           AND "parserVersion" > 0
                           AND (
                             ("parsedState" = 'hasFindings'
@@ -222,7 +230,7 @@ enum ReviewHistorySchema {
                           AND "parsedSource" IS NULL
                           AND "parserVersion" IS NULL)
                       ))
-                  )
+                  , 0))
                 ) STRICT
                 """
             )
@@ -241,12 +249,15 @@ enum ReviewHistorySchema {
                   "startLine" INTEGER,
                   "endLine" INTEGER,
                   UNIQUE ("reviewID", "ordinal"),
-                  CHECK (
+                  CHECK (COALESCE(
                     ("path" IS NULL AND "startLine" IS NULL AND "endLine" IS NULL)
-                    OR (length(trim("path")) > 0
+                    OR ("path" IS NOT NULL
+                      AND "startLine" IS NOT NULL
+                      AND "endLine" IS NOT NULL
+                      AND length(trim("path")) > 0
                       AND "startLine" > 0
                       AND "endLine" >= "startLine")
-                  )
+                  , 0))
                 ) STRICT
                 """
             )
