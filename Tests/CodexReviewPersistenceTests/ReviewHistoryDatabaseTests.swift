@@ -318,6 +318,61 @@ struct ReviewHistoryDatabaseTests {
         #expect(restored.started.workspaceMetadata == metadata)
     }
 
+    @Test("loading v1 history backfills a live linked worktree before it is removed")
+    func legacyWorkspaceMetadataBackfill() async throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexReviewHistoryBackfill-\(UUID().uuidString)", isDirectory: true)
+        let repositoryURL = rootURL.appendingPathComponent("CodexReviewKit", isDirectory: true)
+        let commonDirURL = repositoryURL.appendingPathComponent(".git", isDirectory: true)
+        let worktreeURL = rootURL
+            .appendingPathComponent("worktrees", isDirectory: true)
+            .appendingPathComponent("825b", isDirectory: true)
+            .appendingPathComponent("CodexReviewKit", isDirectory: true)
+        let gitDirURL = commonDirURL
+            .appendingPathComponent("worktrees", isDirectory: true)
+            .appendingPathComponent("825b", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: rootURL)
+        }
+        try FileManager.default.createDirectory(at: worktreeURL, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: gitDirURL, withIntermediateDirectories: true)
+        try "gitdir: \(gitDirURL.path)\n".write(
+            to: worktreeURL.appendingPathComponent(".git"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try "../..\n".write(
+            to: gitDirURL.appendingPathComponent("commondir"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let (database, _) = try ReviewHistoryTestSupport.database()
+        _ = try await ReviewHistoryTestSupport.record(
+            started: ReviewHistoryTestSupport.started(
+                id: "legacy-live-worktree",
+                cwd: worktreeURL.path,
+                workspaceMetadata: nil
+            ),
+            terminal: ReviewHistoryTestSupport.completed(id: "legacy-live-worktree"),
+            in: database
+        )
+
+        let backfilled = try #require(
+            try await database.load(retentionPolicy: .default).first
+        )
+        #expect(backfilled.started.workspaceMetadata?.kind == .linkedWorktree)
+        #expect(
+            backfilled.started.workspaceMetadata?.repositoryIdentity
+                == "git-common:\(commonDirURL.path)"
+        )
+
+        try FileManager.default.removeItem(at: rootURL)
+        let restoredAfterRemoval = try #require(
+            try await database.load(retentionPolicy: .default).first
+        )
+        #expect(restoredAfterRemoval.started.workspaceMetadata == backfilled.started.workspaceMetadata)
+    }
+
     @Test("a new review replaces stale repository metadata at a reused workspace path")
     func workspaceMetadataFollowsCurrentAdmission() async throws {
         let (database, writer) = try ReviewHistoryTestSupport.database()

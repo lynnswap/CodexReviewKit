@@ -198,14 +198,13 @@ public final class CodexReviewWorkspace: Hashable {
         self.sortOrder = sortOrder
     }
 
-    package init(
+    package convenience init(
         cwd: String,
         metadata: ReviewWorkspaceMetadata?,
         sortOrder: Double = 0
     ) {
-        self.cwd = cwd
+        self.init(cwd: cwd, sortOrder: sortOrder)
         self.metadata = metadata
-        self.sortOrder = sortOrder
     }
 
     public nonisolated static func == (lhs: CodexReviewWorkspace, rhs: CodexReviewWorkspace) -> Bool {
