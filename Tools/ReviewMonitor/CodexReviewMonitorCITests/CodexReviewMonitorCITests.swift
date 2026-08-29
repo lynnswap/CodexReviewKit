@@ -355,7 +355,10 @@ struct CodexReviewMonitorCITests {
 
         #expect(composition.makeStore(context) { nil } === expectedStore)
         #expect(context.shouldStartEmbeddedServer)
-        #expect(capturedRuntimePreferences?.codexHomePath == "/tmp/e2e-codex-home")
+        #expect(capturedRuntimePreferences?.codexHomePath == FileManager.default
+            .homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex", isDirectory: true)
+            .path)
         #expect(capturedRuntimePreferences?.mcpHost == "127.0.0.1")
         #expect(capturedRuntimePreferences?.mcpPort == 39417)
         #expect(capturedRuntimePreferences?.mcpPath == "/mcp")

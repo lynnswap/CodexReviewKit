@@ -31,7 +31,9 @@ fileprivate struct ReviewMonitorIsolatedTestConfiguration {
 
     func applying(to preferences: CodexReviewRuntime.Preferences) -> CodexReviewRuntime.Preferences {
         CodexReviewRuntime.Preferences(
-            codexHomePath: preferences.codexHomePath,
+            codexHomePath: FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".codex", isDirectory: true)
+                .path,
             mcpHost: "127.0.0.1",
             mcpPort: port ?? preferences.mcpPort,
             mcpPath: "/mcp",
