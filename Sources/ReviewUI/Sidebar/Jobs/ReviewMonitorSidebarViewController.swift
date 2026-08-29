@@ -30,12 +30,14 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private struct SidebarRowHeights {
         let workspace: CGFloat
         let job: CGFloat
+        let showMore: CGFloat
 
         @MainActor
         static func measure() -> SidebarRowHeights {
             SidebarRowHeights(
                 workspace: measuredWorkspaceRowHeight(),
-                job: measuredJobRowHeight()
+                job: measuredJobRowHeight(),
+                showMore: measuredShowMoreRowHeight()
             )
         }
 
@@ -73,6 +75,11 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
                 fallbackIsWorktree: false
             )
             return ceil(cellView.fittingSize.height)
+        }
+
+        @MainActor
+        private static func measuredShowMoreRowHeight() -> CGFloat {
+            ceil(ReviewMonitorShowMoreCellView().fittingSize.height)
         }
     }
 
@@ -1838,7 +1845,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return rowHeights.job
         }
         if showMoreItem(from: item) != nil {
-            return rowHeights.job
+            return rowHeights.showMore
         }
         return rowHeights.job
     }
@@ -2229,6 +2236,10 @@ extension ReviewMonitorSidebarViewController {
         rowHeights.job + outlineView.intercellSpacing.height
     }
 
+    var expectedShowMoreRowRectHeightForTesting: CGFloat {
+        rowHeights.showMore + outlineView.intercellSpacing.height
+    }
+
     func workspaceRowHeightForTesting(_ workspace: CodexReviewWorkspace) -> CGFloat? {
         guard let row = row(for: workspace) else {
             return nil
@@ -2239,6 +2250,20 @@ extension ReviewMonitorSidebarViewController {
 
     func jobRowHeightForTesting(_ job: CodexReviewJob) -> CGFloat? {
         guard let row = row(forJobID: job.id) else {
+            return nil
+        }
+        view.layoutSubtreeIfNeeded()
+        return outlineView.rect(ofRow: row).height
+    }
+
+    func showMoreRowHeightForTesting(
+        containing workspace: CodexReviewWorkspace
+    ) -> CGFloat? {
+        guard let section = workspaceSection(containing: workspace) else {
+            return nil
+        }
+        let row = outlineView.row(forItem: section.showMoreItem)
+        guard row != -1 else {
             return nil
         }
         view.layoutSubtreeIfNeeded()

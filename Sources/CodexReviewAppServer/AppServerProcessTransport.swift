@@ -713,6 +713,24 @@ private final class AppServerPipeReadEventSource: @unchecked Sendable {
 }
 
 private final class AppServerSpawnedProcess: @unchecked Sendable {
+    private struct ProcessIdentity: Hashable {
+        var processIdentifier: pid_t
+        var startedAtSeconds: UInt64
+        var startedAtMicroseconds: UInt64
+    }
+
+    private struct ProcessSnapshot {
+        var identity: ProcessIdentity
+        var parentProcessIdentifier: pid_t
+        var processGroupIdentifier: pid_t
+        var status: UInt32
+
+        var isLive: Bool {
+            // A non-child zombie is no longer executing and can only be reaped by its new parent.
+            status != UInt32(SZOMB)
+        }
+    }
+
     let processIdentifier: pid_t
 
     private let processGroupID: pid_t
@@ -767,7 +785,21 @@ private final class AppServerSpawnedProcess: @unchecked Sendable {
         ] {
             try check(posix_spawn_file_actions_addclose(&fileActions, fileDescriptor))
         }
-        try check(posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP)))
+        // posix_spawn preserves ignored dispositions and the caller's signal mask. The
+        // transport owns SIGTERM delivery, so its child must always receive that signal.
+        var defaultSignals = sigset_t()
+        try checkErrno(sigemptyset(&defaultSignals))
+        try checkErrno(sigaddset(&defaultSignals, SIGTERM))
+        try check(posix_spawnattr_setsigdefault(&attributes, &defaultSignals))
+
+        var signalMask = sigset_t()
+        try checkErrno(sigemptyset(&signalMask))
+        try check(posix_spawnattr_setsigmask(&attributes, &signalMask))
+
+        let spawnFlags = POSIX_SPAWN_SETPGROUP
+            | POSIX_SPAWN_SETSIGDEF
+            | POSIX_SPAWN_SETSIGMASK
+        try check(posix_spawnattr_setflags(&attributes, Int16(spawnFlags)))
         try check(posix_spawnattr_setpgroup(&attributes, 0))
 
         let executablePath = executableURL.path
@@ -808,37 +840,55 @@ private final class AppServerSpawnedProcess: @unchecked Sendable {
         graceDuration: Duration = .seconds(2),
         killDuration: Duration = .seconds(1)
     ) async throws {
-        let trackedProcessIDs = descendantProcessIDs()
-        guard isFullyTerminated(trackedProcessIDs: trackedProcessIDs) == false else {
+        let processIdentity = Self.processSnapshot(processIdentifier)?.identity
+        let trackedProcesses = descendantProcesses()
+        guard isFullyTerminated(trackedProcesses: trackedProcesses) == false else {
             return
         }
-        signalProcessTree(SIGTERM, trackedProcessIDs: trackedProcessIDs)
-        guard await waitUntilExit(timeout: graceDuration, trackedProcessIDs: trackedProcessIDs) == false else {
+        signalProcessTree(
+            SIGTERM,
+            processIdentity: processIdentity,
+            trackedProcesses: trackedProcesses
+        )
+        guard await waitUntilExit(timeout: graceDuration, trackedProcesses: trackedProcesses) == false else {
             return
         }
-        signalProcessTree(SIGKILL, trackedProcessIDs: trackedProcessIDs)
-        guard await waitUntilExit(timeout: killDuration, trackedProcessIDs: trackedProcessIDs) else {
-            throw AppServerProcessTransportError.processDidNotTerminate(processIdentifier)
+        signalProcessTree(
+            SIGKILL,
+            processIdentity: processIdentity,
+            trackedProcesses: trackedProcesses
+        )
+        guard await waitUntilExit(timeout: killDuration, trackedProcesses: trackedProcesses) else {
+            throw AppServerProcessTransportError.processDidNotTerminate(
+                processIdentifier,
+                liveProcessIdentifiers: liveProcessIdentifiers(trackedProcesses: trackedProcesses)
+            )
         }
     }
 
-    private func signalProcessTree(_ signal: Int32, trackedProcessIDs: Set<pid_t>) {
+    private func signalProcessTree(
+        _ signal: Int32,
+        processIdentity: ProcessIdentity?,
+        trackedProcesses: Set<ProcessIdentity>
+    ) {
         if Darwin.kill(-processGroupID, signal) == 0 {
-            for processID in trackedProcessIDs {
-                _ = Darwin.kill(processID, signal)
+            for process in trackedProcesses where Self.processIsLive(process) {
+                _ = Darwin.kill(process.processIdentifier, signal)
             }
             return
         }
-        for processID in trackedProcessIDs {
-            _ = Darwin.kill(processID, signal)
+        for process in trackedProcesses where Self.processIsLive(process) {
+            _ = Darwin.kill(process.processIdentifier, signal)
         }
-        _ = Darwin.kill(processIdentifier, signal)
+        if let processIdentity, Self.processIsLive(processIdentity) {
+            _ = Darwin.kill(processIdentifier, signal)
+        }
     }
 
-    private func waitUntilExit(timeout: Duration, trackedProcessIDs: Set<pid_t>) async -> Bool {
+    private func waitUntilExit(timeout: Duration, trackedProcesses: Set<ProcessIdentity>) async -> Bool {
         let clock = ContinuousClock()
         let deadline = clock.now + timeout
-        while isFullyTerminated(trackedProcessIDs: trackedProcessIDs) == false {
+        while isFullyTerminated(trackedProcesses: trackedProcesses) == false {
             if clock.now >= deadline {
                 return false
             }
@@ -847,75 +897,171 @@ private final class AppServerSpawnedProcess: @unchecked Sendable {
         return true
     }
 
-    private func isFullyTerminated(trackedProcessIDs: Set<pid_t>) -> Bool {
-        reapIfExited()
-            && processGroupIsEmpty()
-            && trackedProcessIDs.allSatisfy(Self.processIsGone)
+    private func isFullyTerminated(trackedProcesses: Set<ProcessIdentity>) -> Bool {
+        let processHasExited = directProcessHasExited()
+        return liveProcessIdentifiersInGroup(
+            excludingDirectProcess: processHasExited
+        )?.isEmpty == true
+            && trackedProcesses.allSatisfy(Self.processHasTerminated)
+            && processHasExited
+            && reapIfExited()
     }
 
-    private func processGroupIsEmpty() -> Bool {
-        if Darwin.kill(-processGroupID, 0) == 0 {
+    private func liveProcessIdentifiers(trackedProcesses: Set<ProcessIdentity>) -> [pid_t] {
+        var processIdentifiers = liveProcessIdentifiersInGroup(
+            excludingDirectProcess: directProcessHasExited()
+        ) ?? [processIdentifier]
+        processIdentifiers.formUnion(
+            trackedProcesses.lazy
+                .filter { Self.processHasTerminated($0) == false }
+                .map(\.processIdentifier)
+        )
+        return processIdentifiers.sorted()
+    }
+
+    private func liveProcessIdentifiersInGroup(
+        excludingDirectProcess: Bool
+    ) -> Set<pid_t>? {
+        guard let processIdentifiers = Self.processIdentifiers(
+            listType: UInt32(PROC_PGRP_ONLY),
+            typeInfo: UInt32(processGroupID)
+        ) else {
+            return nil
+        }
+        if processIdentifiers.isEmpty {
+            return []
+        }
+        return Set(processIdentifiers.filter { processIdentifier in
+            if excludingDirectProcess, processIdentifier == self.processIdentifier {
+                return false
+            }
+            guard let snapshot = Self.processSnapshot(processIdentifier) else {
+                if Darwin.kill(processIdentifier, 0) == 0 {
+                    return true
+                }
+                return errno != ESRCH
+            }
+            return snapshot.processGroupIdentifier == processGroupID && snapshot.isLive
+        })
+    }
+
+    private func directProcessHasExited() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        if didReap {
+            return true
+        }
+        var info = siginfo_t()
+        let result = waitid(
+            P_PID,
+            id_t(processIdentifier),
+            &info,
+            WEXITED | WNOHANG | WNOWAIT
+        )
+        if result == 0 {
+            return info.si_pid == processIdentifier
+        }
+        return errno == ECHILD
+    }
+
+    private static func processHasTerminated(_ identity: ProcessIdentity) -> Bool {
+        guard let snapshot = processSnapshot(identity.processIdentifier) else {
+            if Darwin.kill(identity.processIdentifier, 0) == 0 {
+                return false
+            }
+            return errno == ESRCH
+        }
+        guard snapshot.identity == identity else {
+            return true
+        }
+        return snapshot.isLive == false
+    }
+
+    private static func processIsLive(_ identity: ProcessIdentity) -> Bool {
+        guard let snapshot = processSnapshot(identity.processIdentifier) else {
             return false
         }
-        return errno == ESRCH
+        return snapshot.identity == identity && snapshot.isLive
     }
 
-    private static func processIsGone(_ processID: pid_t) -> Bool {
-        if Darwin.kill(processID, 0) == 0 {
-            return false
-        }
-        return errno == ESRCH
-    }
-
-    private func descendantProcessIDs() -> Set<pid_t> {
-        let parentByProcessID = Self.parentProcessMap()
-        var descendants = Set<pid_t>()
+    private func descendantProcesses() -> Set<ProcessIdentity> {
+        let snapshots = Self.processSnapshots()
+        var descendants = Set<ProcessIdentity>()
         var stack = [processIdentifier]
         while let parent = stack.popLast() {
-            for (processID, parentProcessID) in parentByProcessID where parentProcessID == parent {
-                if descendants.insert(processID).inserted {
-                    stack.append(processID)
+            for snapshot in snapshots where snapshot.parentProcessIdentifier == parent {
+                if descendants.insert(snapshot.identity).inserted {
+                    stack.append(snapshot.identity.processIdentifier)
                 }
             }
         }
         return descendants
     }
 
-    private static func parentProcessMap() -> [pid_t: pid_t] {
-        let bytesNeeded = proc_listpids(UInt32(PROC_ALL_PIDS), 0, nil, 0)
+    private static func processSnapshots() -> [ProcessSnapshot] {
+        guard let processIdentifiers = processIdentifiers(
+            listType: UInt32(PROC_ALL_PIDS),
+            typeInfo: 0
+        ) else {
+            return []
+        }
+        return processIdentifiers.compactMap(processSnapshot)
+    }
+
+    private static func processIdentifiers(listType: UInt32, typeInfo: UInt32) -> [pid_t]? {
+        let bytesNeeded = proc_listpids(listType, typeInfo, nil, 0)
+        guard bytesNeeded >= 0 else {
+            return nil
+        }
         guard bytesNeeded > 0 else {
-            return [:]
+            return []
         }
         let processIDSize = MemoryLayout<pid_t>.stride
-        var processIDs = [pid_t](repeating: 0, count: Int(bytesNeeded) / processIDSize)
+        var processIDs = [pid_t](
+            repeating: 0,
+            count: Int(bytesNeeded) / processIDSize + 32
+        )
         let bytesWritten = processIDs.withUnsafeMutableBufferPointer { buffer in
             proc_listpids(
-                UInt32(PROC_ALL_PIDS),
-                0,
+                listType,
+                typeInfo,
                 buffer.baseAddress,
                 Int32(buffer.count * processIDSize)
             )
         }
+        guard bytesWritten >= 0 else {
+            return nil
+        }
         guard bytesWritten > 0 else {
-            return [:]
+            return []
         }
         let count = min(Int(bytesWritten) / processIDSize, processIDs.count)
-        var parentByProcessID: [pid_t: pid_t] = [:]
-        for processID in processIDs.prefix(count) where processID > 0 {
-            var info = proc_bsdinfo()
-            let infoSize = MemoryLayout<proc_bsdinfo>.stride
-            let result = proc_pidinfo(
-                processID,
-                PROC_PIDTBSDINFO,
-                0,
-                &info,
-                Int32(infoSize)
-            )
-            if result == Int32(infoSize) {
-                parentByProcessID[processID] = pid_t(info.pbi_ppid)
-            }
+        return Array(processIDs.prefix(count).filter { $0 > 0 })
+    }
+
+    private static func processSnapshot(_ processIdentifier: pid_t) -> ProcessSnapshot? {
+        var info = proc_bsdinfo()
+        let infoSize = MemoryLayout<proc_bsdinfo>.stride
+        let result = proc_pidinfo(
+            processIdentifier,
+            PROC_PIDTBSDINFO,
+            0,
+            &info,
+            Int32(infoSize)
+        )
+        guard result == Int32(infoSize) else {
+            return nil
         }
-        return parentByProcessID
+        return ProcessSnapshot(
+            identity: .init(
+                processIdentifier: processIdentifier,
+                startedAtSeconds: info.pbi_start_tvsec,
+                startedAtMicroseconds: info.pbi_start_tvusec
+            ),
+            parentProcessIdentifier: pid_t(info.pbi_ppid),
+            processGroupIdentifier: pid_t(info.pbi_pgid),
+            status: info.pbi_status
+        )
     }
 
     private func reapIfExited() -> Bool {
@@ -940,6 +1086,12 @@ private final class AppServerSpawnedProcess: @unchecked Sendable {
     private static func check(_ result: Int32) throws {
         guard result == 0 else {
             throw POSIXError(POSIXErrorCode(rawValue: result) ?? .EINVAL)
+        }
+    }
+
+    private static func checkErrno(_ result: Int32) throws {
+        guard result == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EINVAL)
         }
     }
 
@@ -968,14 +1120,14 @@ private final class AppServerSpawnedProcess: @unchecked Sendable {
 
 private enum AppServerProcessTransportError: LocalizedError {
     case invalidExecutable(path: String)
-    case processDidNotTerminate(pid_t)
+    case processDidNotTerminate(pid_t, liveProcessIdentifiers: [pid_t])
 
     var errorDescription: String? {
         switch self {
         case .invalidExecutable(let path):
             return "Resolved Codex executable is not an executable regular file: \(path)"
-        case .processDidNotTerminate(let processIdentifier):
-            return "Codex app-server process \(processIdentifier) did not terminate after SIGKILL."
+        case .processDidNotTerminate(let processIdentifier, let liveProcessIdentifiers):
+            return "Codex app-server process \(processIdentifier) did not terminate after SIGKILL; live process IDs: \(liveProcessIdentifiers)."
         }
     }
 }

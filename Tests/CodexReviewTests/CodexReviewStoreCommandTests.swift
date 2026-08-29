@@ -960,7 +960,10 @@ struct CodexReviewStoreCommandTests {
             _ = try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1"))
 
             networkMonitor.yield(.init(status: .unsatisfied))
-            await outageSleepStarted.wait()
+            try await outageSleepStarted.wait(
+                timeout: .seconds(2),
+                operation: "network outage debounce start"
+            )
             await backend.finishEvents(
                 throwing: ReviewAttemptStreamFailure.recoverableNetwork(.connection("Network closed")),
                 for: run
@@ -2179,7 +2182,10 @@ struct CodexReviewStoreCommandTests {
             try await resolveTypedRecoveryDisposition(backend: reviewBackend, store: store)
             _ = try await running
             networkMonitor.yield(.satisfied())
-            await settleStarted.wait()
+            try await settleStarted.wait(
+                timeout: .seconds(2),
+                operation: "network recovery settle start"
+            )
             let reason = ReviewCancellation.system(message: "Review runtime stopped.")
             let jobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(reason: reason)
             await store.cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: jobIDs, reason: reason)
@@ -2540,6 +2546,7 @@ struct CodexReviewStoreCommandTests {
     @Test func runtimeStopBoundedDrainReturnsWhileBackendStartIsStuck() async throws {
         let backend = FakeCodexReviewBackend()
         let startReviewGate = AsyncGate()
+        let runningCompleted = AsyncGate()
         await backend.holdStartReviewIgnoringCancellation(with: startReviewGate)
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -2547,10 +2554,17 @@ struct CodexReviewStoreCommandTests {
         )
         try await withStoreCommandTestCleanup(backend: backend, store: store) {
             let running = Task { @MainActor in
-                try await store.startReview(
-                    sessionID: "session-1",
-                    request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
-                )
+                do {
+                    let result = try await store.startReview(
+                        sessionID: "session-1",
+                        request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+                    )
+                    await runningCompleted.open()
+                    return result
+                } catch {
+                    await runningCompleted.open()
+                    throw error
+                }
             }
             try await backend.waitForStartReview(timeout: .seconds(2))
             let admission = try #require(startingAdmission(in: store, jobID: "job-1"))
@@ -2565,10 +2579,17 @@ struct CodexReviewStoreCommandTests {
             let didDrain = await store.drainReviewWorkersForRuntimeStop(
                 timeout: .milliseconds(20)
             )
-            let resultBeforeStartReviewUnblocked = try await waitForTaskValue(
-                running,
-                timeout: .seconds(1)
-            )
+            do {
+                try await runningCompleted.wait(
+                    timeout: .seconds(1),
+                    operation: "the locally cancelled review start"
+                )
+            } catch {
+                await startReviewGate.open()
+                _ = try? await running.value
+                throw error
+            }
+            let resultBeforeStartReviewUnblocked = try await running.value
             #expect(startingAdmission(in: store, jobID: "job-1") === admission)
             guard case .startingReview(_, .outcomeUnknown) = await admission.currentPhase() else {
                 Issue.record("Detached worker did not retain its exact in-flight admission.")
@@ -2578,7 +2599,7 @@ struct CodexReviewStoreCommandTests {
             try await backend.waitForInterruptReview(timeout: .seconds(2))
             await backend.yield(.cancelled("Review runtime stopped."))
             await store.cancelAndDrainReviewWorkersForTesting()
-            let result = try #require(resultBeforeStartReviewUnblocked)
+            let result = resultBeforeStartReviewUnblocked
 
             #expect(locallyCancelledJobIDs == ["job-1"])
             #expect(didDrain == false)
@@ -2760,7 +2781,10 @@ struct CodexReviewStoreCommandTests {
             try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
 
             networkMonitor.yield(.init(status: .unsatisfied))
-            await outageSleepStarted.wait()
+            try await outageSleepStarted.wait(
+                timeout: .seconds(2),
+                operation: "network outage debounce start"
+            )
             await backend.finishEvents(
                 throwing: ReviewAttemptStreamFailure.recoverableNetwork(.connection("Network closed")),
                 for: run
@@ -3052,7 +3076,10 @@ struct CodexReviewStoreCommandTests {
             try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
 
             networkMonitor.yield(.init(status: .unsatisfied))
-            await outageSleepStarted.wait()
+            try await outageSleepStarted.wait(
+                timeout: .seconds(2),
+                operation: "network outage debounce start"
+            )
             await backend.finishEvents(
                 throwing: ReviewAttemptStreamFailure.recoverableNetwork(.connection("Network closed")),
                 for: initialRun
@@ -3450,7 +3477,10 @@ struct CodexReviewStoreCommandTests {
                 request: { _, _ in await successorDispatched.open() }
             )
         }
-        await successorDispatched.wait()
+        try await successorDispatched.wait(
+            timeout: .seconds(2),
+            operation: "successor cancellation dispatch"
+        )
 
         #expect(successor.id != first.id)
         try store.recordCancellationFailure(
@@ -4257,24 +4287,6 @@ private func waitForRunAttemptActivation(
 ) async -> Bool {
     await StoreSnapshotProbe(store: store)
         .waitUntilRunAttempt(run.attemptID, timeout: timeout) != nil
-}
-
-private func waitForTaskValue<T: Sendable>(
-    _ task: Task<T, any Error>,
-    timeout: Duration
-) async throws -> T? {
-    try await withThrowingTaskGroup(of: T?.self) { group in
-        group.addTask {
-            try await task.value
-        }
-        group.addTask {
-            try await Task.sleep(for: timeout)
-            return nil
-        }
-        let result = try await group.next() ?? nil
-        group.cancelAll()
-        return result
-    }
 }
 
 private actor StoreCommandTaskCompletion {

@@ -344,16 +344,26 @@ struct ReviewInterruptAdmissionTests {
     ) async throws -> ReviewInterruptResolution {
         let (admission, run) = try await makeActiveInterruptAdmission()
         let requestStarted = AsyncGate()
-        let interruption = Task {
-            try await admission.interrupt(
-                run,
-                cancellation: .system(message: "Stop"),
-                request: { _, _ in await requestStarted.open() }
+        async let interruption = admission.interrupt(
+            run,
+            cancellation: .system(message: "Stop"),
+            request: { _, _ in await requestStarted.open() }
+        )
+        do {
+            try await requestStarted.wait(
+                timeout: .seconds(2),
+                operation: "canonical-terminal interrupt request"
             )
+        } catch let timeout as TestSynchronizationTimeout {
+            _ = try? await admission.recordCanonicalTerminal(
+                .failed(message: timeout.localizedDescription),
+                for: run
+            )
+            _ = try? await interruption
+            throw timeout
         }
-        await requestStarted.wait()
         try await admission.recordCanonicalTerminal(terminal, for: run)
-        return try await interruption.value
+        return try await interruption
     }
 }
 

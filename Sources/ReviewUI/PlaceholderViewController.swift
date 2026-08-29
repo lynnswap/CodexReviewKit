@@ -71,23 +71,22 @@ struct PlaceholderView: View {
         .ignoresSafeArea(.all,edges: .vertical)
     }
 }
-private extension View{
-    func contentUnavailableTextTitleStyle() -> some View{
-        return if #available(anyAppleOS 27.0, *){
-            self
-                .textScale(.default)
-        }else{
-            self
-                .textScale(.secondary)
+private extension View {
+    @ViewBuilder
+    func contentUnavailableTextTitleStyle() -> some View {
+        if #available(macOS 27.0, *) {
+            textScale(.default)
+        } else {
+            textScale(.secondary)
         }
     }
-    func contentUnavailableTextDescriptionStyle() -> some View{
-        return if #available(anyAppleOS 27.0, *){
-            self
-                .textScale(.secondary)
-        }else{
-            self
-                .textScale(.default)
+
+    @ViewBuilder
+    func contentUnavailableTextDescriptionStyle() -> some View {
+        if #available(macOS 27.0, *) {
+            textScale(.secondary)
+        } else {
+            textScale(.default)
         }
     }
 }

@@ -556,17 +556,20 @@ struct AppServerClientTests {
         let childPIDText = try String(contentsOf: childPIDFile, encoding: .utf8)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let childPID = try #require(pid_t(childPIDText))
+        let childIdentity = try #require(processIdentity(childPID))
         defer {
-            _ = Darwin.kill(childPID, SIGKILL)
+            if processMatchesLiveIdentity(childIdentity) {
+                _ = Darwin.kill(childPID, SIGKILL)
+            }
         }
-        #expect(Darwin.kill(childPID, 0) == 0)
+        #expect(processIsLive(childIdentity))
 
         try await transport.close()
 
-        let childExited = await waitUntil(timeout: .seconds(2)) {
-            Darwin.kill(childPID, 0) != 0 && errno == ESRCH
+        let childTerminated = await waitUntil(timeout: .seconds(2)) {
+            processIsLive(childIdentity) == false
         }
-        #expect(childExited)
+        #expect(childTerminated)
 
         let notifications = await transport.notificationStream()
         var iterator = notifications.makeAsyncIterator()
@@ -7437,6 +7440,61 @@ struct AppServerClientTests {
         }
         return true
     }
+}
+
+private struct TestProcessIdentity: Equatable, Sendable {
+    var processIdentifier: pid_t
+    var startedAtSeconds: UInt64
+    var startedAtMicroseconds: UInt64
+}
+
+private struct TestProcessSnapshot {
+    var identity: TestProcessIdentity
+    var isLive: Bool
+}
+
+private func processSnapshot(_ processIdentifier: pid_t) -> TestProcessSnapshot? {
+    var info = proc_bsdinfo()
+    let infoSize = MemoryLayout<proc_bsdinfo>.stride
+    let result = proc_pidinfo(
+        processIdentifier,
+        PROC_PIDTBSDINFO,
+        0,
+        &info,
+        Int32(infoSize)
+    )
+    guard result == Int32(infoSize) else {
+        return nil
+    }
+    return TestProcessSnapshot(
+        identity: .init(
+            processIdentifier: processIdentifier,
+            startedAtSeconds: info.pbi_start_tvsec,
+            startedAtMicroseconds: info.pbi_start_tvusec
+        ),
+        isLive: info.pbi_status != UInt32(SZOMB)
+    )
+}
+
+private func processIdentity(_ processIdentifier: pid_t) -> TestProcessIdentity? {
+    processSnapshot(processIdentifier)?.identity
+}
+
+private func processIsLive(_ identity: TestProcessIdentity) -> Bool {
+    guard let snapshot = processSnapshot(identity.processIdentifier) else {
+        if Darwin.kill(identity.processIdentifier, 0) == 0 {
+            return true
+        }
+        return errno != ESRCH
+    }
+    return snapshot.identity == identity && snapshot.isLive
+}
+
+private func processMatchesLiveIdentity(_ identity: TestProcessIdentity) -> Bool {
+    guard let snapshot = processSnapshot(identity.processIdentifier) else {
+        return false
+    }
+    return snapshot.identity == identity && snapshot.isLive
 }
 
 private func enqueueInitialize(_ transport: FakeJSONRPCTransport) async throws {
