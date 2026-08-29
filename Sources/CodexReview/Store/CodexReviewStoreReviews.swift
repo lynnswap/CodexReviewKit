@@ -2029,10 +2029,7 @@ extension CodexReviewStore {
                 } catch {
                     return
                 }
-                self?.resumeReviewWaiterAfterTimeout(
-                    jobID: jobID,
-                    waiterID: waiterID
-                )
+                self?.resumeReviewWaiter(jobID: jobID, waiterID: waiterID)
             }
         }
 
@@ -2056,6 +2053,10 @@ extension CodexReviewStore {
             }
         }
         timeoutTask?.cancel()
+        if job(id: jobID)?.isTerminal == true,
+           isReviewResultFinalized(jobID: jobID) == false {
+            await waitForReviewTerminal(jobID: jobID, timeout: nil)
+        }
     }
 
     package func resumeReviewWaiters(for jobID: String) {
@@ -2083,15 +2084,11 @@ extension CodexReviewStore {
             && historyTerminalCommitIsResolved(jobID: jobID)
     }
 
-    private func resumeReviewWaiterAfterTimeout(jobID: String, waiterID: UUID) {
-        guard job(id: jobID)?.isTerminal == true else {
-            resumeReviewWaiter(jobID: jobID, waiterID: waiterID)
+    private func resumeReviewWaiter(jobID: String, waiterID: UUID) {
+        guard job(id: jobID)?.isTerminal != true else {
+            resumeReviewWaiters(for: jobID)
             return
         }
-        resumeReviewWaiters(for: jobID)
-    }
-
-    private func resumeReviewWaiter(jobID: String, waiterID: UUID) {
         guard var waiters = reviewTerminalWaiters[jobID],
               let index = waiters.firstIndex(where: { $0.id == waiterID })
         else {

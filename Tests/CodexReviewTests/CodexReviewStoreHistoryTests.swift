@@ -572,6 +572,111 @@ struct CodexReviewStoreHistoryTests {
         #expect(await completion.isComplete())
     }
 
+    @Test func cancelledAwaitKeepsTerminalResultBehindHistoryFinality() async throws {
+        let terminalWriteEntered = AsyncGate()
+        let terminalWriteRelease = AsyncGate()
+        let cleanupRelease = AsyncGate()
+        let completion = HistoryTestCompletion()
+        let history = ReviewHistoryPersistenceProbe(
+            terminalWriteEntered: terminalWriteEntered,
+            terminalWriteRelease: terminalWriteRelease
+        )
+        let backend = FakeCodexReviewBackend()
+        await backend.holdCleanupReview(with: cleanupRelease)
+        let store = makeStore(
+            history: history,
+            backend: backend,
+            idGenerator: .init(next: { "job-1" })
+        )
+        let running = try await store.startReview(
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+            waitTimeout: .zero
+        )
+        await backend.waitForStartReview()
+
+        let awaiting = Task { @MainActor in
+            let result = try await store.awaitReview(
+                sessionID: "session-1",
+                jobID: running.jobID,
+                timeout: .seconds(30)
+            )
+            await completion.complete()
+            return result
+        }
+        try #require(await waitForHistoryTestCondition {
+            store.reviewTerminalWaiters[running.jobID]?.count == 1
+        })
+        let timeoutTask = try #require(
+            store.reviewTerminalWaiters[running.jobID]?.first?.timeoutTask
+        )
+
+        await backend.yield(.completed(summary: "Done", result: "No findings."))
+        await terminalWriteEntered.wait()
+        await backend.waitForCleanupReview()
+        awaiting.cancel()
+        try #require(await waitForHistoryTestCondition {
+            timeoutTask.isCancelled
+        })
+
+        await terminalWriteRelease.open()
+        try #require(await waitForHistoryTestCondition {
+            store.persistedTerminalReviewIDs.contains(running.jobID)
+        })
+        #expect(await completion.isComplete() == false)
+        #expect(store.reviewTerminalWaiters[running.jobID]?.count == 1)
+        #expect(store.reviewWorkerTasks[running.jobID] != nil)
+
+        await cleanupRelease.open()
+        #expect(try await awaiting.value.core.lifecycle.status == .succeeded)
+        #expect(await completion.isComplete())
+        #expect(store.reviewTerminalWaiters[running.jobID] == nil)
+        #expect(store.historyResultLeaseIDs[running.jobID] == nil)
+        #expect(store.reviewWorkerTasks[running.jobID] == nil)
+    }
+
+    @Test func cancelledAwaitStillReturnsANonterminalSnapshot() async throws {
+        let history = ReviewHistoryPersistenceProbe()
+        let backend = FakeCodexReviewBackend()
+        let store = makeStore(
+            history: history,
+            backend: backend,
+            idGenerator: .init(next: { "job-1" })
+        )
+        let running = try await store.startReview(
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+            waitTimeout: .zero
+        )
+        await backend.waitForStartReview()
+
+        let awaiting = Task { @MainActor in
+            try await store.awaitReview(
+                sessionID: "session-1",
+                jobID: running.jobID,
+                timeout: .seconds(30)
+            )
+        }
+        try #require(await waitForHistoryTestCondition {
+            store.reviewTerminalWaiters[running.jobID]?.count == 1
+        })
+        let timeoutTask = try #require(
+            store.reviewTerminalWaiters[running.jobID]?.first?.timeoutTask
+        )
+
+        awaiting.cancel()
+        let cancelledSnapshot = try await awaiting.value
+        #expect(timeoutTask.isCancelled)
+        #expect(cancelledSnapshot.core.lifecycle.status == .running)
+        #expect(store.reviewTerminalWaiters[running.jobID] == nil)
+
+        await backend.yield(.completed(summary: "Done", result: "No findings."))
+        _ = try await store.awaitReview(
+            sessionID: "session-1",
+            jobID: running.jobID
+        )
+    }
+
     @Test func runtimeDetachWaitsForTerminalHistoryReceipt() async throws {
         let entered = AsyncGate()
         let release = AsyncGate()
