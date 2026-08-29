@@ -142,10 +142,16 @@ package actor BackendReviewEventMailbox {
         return true
     }
 
-    package func append(contentsOf events: [CodexReviewBackendModel.Review.Event]) {
+    @discardableResult
+    package func append(contentsOf events: [CodexReviewBackendModel.Review.Event]) -> Int {
+        var acceptedCount = 0
         for event in events {
-            append(event)
+            guard append(event) else {
+                break
+            }
+            acceptedCount += 1
         }
+        return acceptedCount
     }
 
     package func finish() {

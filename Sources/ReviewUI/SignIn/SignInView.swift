@@ -46,10 +46,15 @@ struct SignInView: View {
             .accessibilityIdentifier("review-monitor.sign-in-button")
 
             if store.auth.isAuthenticating == false {
-                Button("Sign in with API Key") {
+                Button {
                     startAPIKeySignIn()
+                } label: {
+                    Text("Sign in another way")
+                        .padding(.vertical, 4)
                 }
-                .buttonStyle(.link)
+                .buttonSizing(.flexible)
+                .buttonBorderShape(.capsule)
+                .buttonStyle(.bordered)
                 .disabled(store.canPerformPrimaryAuthenticationAction == false)
                 .accessibilityIdentifier("review-monitor.api-key-sign-in-button")
             }
@@ -87,7 +92,7 @@ struct SignInView: View {
 
 @MainActor
 func makeSignInPreviewStore() -> CodexReviewStore {
-    ReviewMonitorPreviewContent.makeStore()
+    CodexReviewStore.makePreviewStore()
 }
 
 @MainActor
