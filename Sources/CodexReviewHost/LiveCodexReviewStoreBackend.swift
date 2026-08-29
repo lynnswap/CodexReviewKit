@@ -158,6 +158,21 @@ public extension CodexReviewStore {
         )
     }
 
+    @_spi(ApplicationHostSupport)
+    static func makeUnavailableReviewMonitorStore(
+        diagnosticsURL: URL?,
+        reviewHistoryFailureMessage: String
+    ) -> CodexReviewStore {
+        CodexReviewStore(
+            backend: PreviewCodexReviewStoreBackend(),
+            diagnosticsURL: diagnosticsURL,
+            historyPersistence: UnavailableReviewHistoryPersistence(
+                message: reviewHistoryFailureMessage
+            )
+        )
+    }
+
+    @_spi(ApplicationHostSupport)
     static func makeLiveStore(
         runtimePreferences: CodexReviewRuntime.Preferences = .defaults,
         nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration? = nil,

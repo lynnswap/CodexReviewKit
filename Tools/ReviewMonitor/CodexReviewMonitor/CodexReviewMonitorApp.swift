@@ -6,8 +6,8 @@
 //
 
 import AppKit
-import CodexReview
-import CodexReviewHost
+@_spi(ApplicationHostSupport) import CodexReview
+@_spi(ApplicationHostSupport) import CodexReviewHost
 @_spi(PreviewSupport) import ReviewUI
 
 enum ReviewMonitorLaunchMode: Sendable {
@@ -18,22 +18,23 @@ enum ReviewMonitorLaunchMode: Sendable {
 
 enum ReviewMonitorLiveStoreMode: Equatable {
     case production
-    case isolatedTest(diagnosticsURL: URL?, historyDatabaseURL: URL)
+    case isolatedTest(diagnosticsURL: URL, historyDatabaseURL: URL)
+    case unavailableIsolatedTest(diagnosticsURL: URL?, message: String)
 }
 
-private struct ReviewMonitorIsolatedTestConfiguration {
+fileprivate struct ReviewMonitorIsolatedTestConfiguration {
     var port: Int?
     var codexExecutablePath: String?
     var diagnosticsURL: URL?
-    var historyDatabaseURL: URL
+    var historyDatabaseURL: URL?
     var validationFailure: String?
 
     func applying(to preferences: CodexReviewRuntime.Preferences) -> CodexReviewRuntime.Preferences {
         CodexReviewRuntime.Preferences(
             codexHomePath: preferences.codexHomePath,
-            mcpHost: preferences.mcpHost,
+            mcpHost: "127.0.0.1",
             mcpPort: port ?? preferences.mcpPort,
-            mcpPath: preferences.mcpPath,
+            mcpPath: "/mcp",
             codexExecutablePath: codexExecutablePath ?? preferences.codexExecutablePath
         )
     }
@@ -195,6 +196,7 @@ enum ReviewMonitorLaunchEnvironment {
             }
         } else {
             port = nil
+            failures.append("\(testPortKey) is required for an isolated ReviewMonitor test launch.")
         }
 
         let commandValue = explicitTestValue(
@@ -206,6 +208,7 @@ enum ReviewMonitorLaunchEnvironment {
         let codexExecutablePath = absolutePath(
             commandValue,
             key: testCodexCommandKey,
+            isRequired: true,
             failures: &failures
         )
 
@@ -218,6 +221,7 @@ enum ReviewMonitorLaunchEnvironment {
         let diagnosticsURL = absolutePath(
             diagnosticsValue,
             key: testDiagnosticsPathKey,
+            isRequired: true,
             failures: &failures
         ).map { URL(fileURLWithPath: $0, isDirectory: false) }
 
@@ -235,7 +239,7 @@ enum ReviewMonitorLaunchEnvironment {
         )
         let historyDatabaseURL = historyPath.map {
             URL(fileURLWithPath: $0, isDirectory: false)
-        } ?? URL(string: "review-monitor-invalid://history")!
+        }
 
         return ReviewMonitorIsolatedTestConfiguration(
             port: port,
@@ -466,6 +470,11 @@ struct ReviewMonitorAppComposition {
                     diagnosticsURL: diagnosticsURL,
                     reviewHistoryDatabaseURL: historyDatabaseURL
                 )
+            case .unavailableIsolatedTest(let diagnosticsURL, let message):
+                CodexReviewStore.makeUnavailableReviewMonitorStore(
+                    diagnosticsURL: diagnosticsURL,
+                    reviewHistoryFailureMessage: message
+                )
             }
         }
     ) -> ReviewMonitorAppComposition {
@@ -478,13 +487,27 @@ struct ReviewMonitorAppComposition {
                 let runtimePreferences = testConfiguration?.applying(
                     to: runtimePreferencesStore.load()
                 ) ?? runtimePreferencesStore.load()
-                let storeMode: ReviewMonitorLiveStoreMode = if let testConfiguration {
-                    .isolatedTest(
-                        diagnosticsURL: testConfiguration.diagnosticsURL,
-                        historyDatabaseURL: testConfiguration.historyDatabaseURL
-                    )
+                let storeMode: ReviewMonitorLiveStoreMode
+                if let testConfiguration {
+                    if let failure = testConfiguration.validationFailure {
+                        storeMode = .unavailableIsolatedTest(
+                            diagnosticsURL: testConfiguration.diagnosticsURL,
+                            message: failure
+                        )
+                    } else if let diagnosticsURL = testConfiguration.diagnosticsURL,
+                              let historyDatabaseURL = testConfiguration.historyDatabaseURL {
+                        storeMode = .isolatedTest(
+                            diagnosticsURL: diagnosticsURL,
+                            historyDatabaseURL: historyDatabaseURL
+                        )
+                    } else {
+                        storeMode = .unavailableIsolatedTest(
+                            diagnosticsURL: testConfiguration.diagnosticsURL,
+                            message: "The isolated ReviewMonitor launch is missing its history database path."
+                        )
+                    }
                 } else {
-                    .production
+                    storeMode = .production
                 }
                 return makeLiveStore(
                     runtimePreferences,

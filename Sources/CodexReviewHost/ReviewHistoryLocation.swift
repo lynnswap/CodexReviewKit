@@ -3,14 +3,30 @@ import Foundation
 import CodexReview
 import CodexReviewPersistence
 
+package struct ReviewHistoryLocationCloseError: LocalizedError, Sendable {
+    package let failures: [String]
+
+    package var errorDescription: String? {
+        failures.joined(separator: "; ")
+    }
+}
+
 package final class ReviewHistoryLocation: Sendable {
     package static let applicationDirectoryName = "CodexReviewMonitor"
     package static let recoveryDirectoryName = "RecoveryV1"
     package static let databaseFileName = "review-history.sqlite"
 
+    private let applicationSupportDirectory: DirectoryCapability
+    private let applicationDirectory: DirectoryCapability
     private let recoveryDirectory: DirectoryCapability
 
-    private init(recoveryDirectory: DirectoryCapability) {
+    private init(
+        applicationSupportDirectory: DirectoryCapability,
+        applicationDirectory: DirectoryCapability,
+        recoveryDirectory: DirectoryCapability
+    ) {
+        self.applicationSupportDirectory = applicationSupportDirectory
+        self.applicationDirectory = applicationDirectory
         self.recoveryDirectory = recoveryDirectory
     }
 
@@ -18,21 +34,27 @@ package final class ReviewHistoryLocation: Sendable {
         applicationSupportDirectory: URL? = nil,
         ownerUserID: uid_t = geteuid()
     ) throws -> ReviewHistoryLocation {
-        let applicationSupportDirectory = try applicationSupportDirectory
-            ?? FileManager.default.urls(
+        let resolvedApplicationSupportDirectory: URL
+        if let explicitApplicationSupportDirectory = applicationSupportDirectory {
+            resolvedApplicationSupportDirectory = explicitApplicationSupportDirectory
+        } else {
+            guard let userApplicationSupportDirectory = FileManager.default.urls(
                 for: .applicationSupportDirectory,
                 in: .userDomainMask
-            ).first.unwrap(or: DirectoryCapabilityError.invalidRequest(
-                "The user Application Support directory is unavailable."
-            ))
+            ).first else {
+                throw DirectoryCapabilityError.invalidRequest(
+                    "The user Application Support directory is unavailable."
+                )
+            }
+            resolvedApplicationSupportDirectory = userApplicationSupportDirectory
+        }
         let trustedRequirements = DirectoryCapability.Requirements.trustedAnchor(
             ownerUserID: ownerUserID
         )
         let applicationSupport = try DirectoryCapability.openExisting(
-            at: applicationSupportDirectory,
+            at: resolvedApplicationSupportDirectory,
             requirements: trustedRequirements
         )
-        defer { try? applicationSupport.close() }
 
         let applicationDirectory = try applicationSupport.directory(
             named: .init(applicationDirectoryName),
@@ -42,7 +64,6 @@ package final class ReviewHistoryLocation: Sendable {
                 deviceID: applicationSupport.identity.deviceID
             )
         )
-        defer { try? applicationDirectory.close() }
 
         let recoveryDirectory = try applicationDirectory.directory(
             named: .init(recoveryDirectoryName),
@@ -52,7 +73,11 @@ package final class ReviewHistoryLocation: Sendable {
                 deviceID: applicationDirectory.identity.deviceID
             )
         )
-        return ReviewHistoryLocation(recoveryDirectory: recoveryDirectory)
+        return ReviewHistoryLocation(
+            applicationSupportDirectory: applicationSupport,
+            applicationDirectory: applicationDirectory,
+            recoveryDirectory: recoveryDirectory
+        )
     }
 
     package func databaseURL() throws -> URL {
@@ -62,16 +87,21 @@ package final class ReviewHistoryLocation: Sendable {
     }
 
     package func close() throws {
-        try recoveryDirectory.close()
-    }
-}
-
-private extension Optional {
-    func unwrap(or error: @autoclosure () -> any Error) throws -> Wrapped {
-        guard let self else {
-            throw error()
+        var failures: [String] = []
+        for directory in [
+            recoveryDirectory,
+            applicationDirectory,
+            applicationSupportDirectory,
+        ] {
+            do {
+                try directory.close()
+            } catch {
+                failures.append(error.localizedDescription)
+            }
         }
-        return self
+        if failures.isEmpty == false {
+            throw ReviewHistoryLocationCloseError(failures: failures)
+        }
     }
 }
 
@@ -152,6 +182,10 @@ package struct UnavailableReviewHistoryPersistence: ReviewHistoryPersistence {
 
     package init(_ error: any Error) {
         failure = Failure(message: error.localizedDescription)
+    }
+
+    package init(message: String) {
+        failure = Failure(message: message)
     }
 
     package func load(

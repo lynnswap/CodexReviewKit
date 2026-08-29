@@ -327,7 +327,15 @@ struct CodexReviewMonitorCITests {
         var capturedRuntimePreferences: CodexReviewRuntime.Preferences?
         var capturedStoreMode: ReviewMonitorLiveStoreMode?
         let composition = ReviewMonitorAppComposition.live(
-            runtimePreferencesStore: RuntimePreferencesStoreStub(),
+            runtimePreferencesStore: RuntimePreferencesStoreStub(
+                preferences: .init(
+                    codexHomePath: "/tmp/e2e-codex-home",
+                    mcpHost: "custom.example.test",
+                    mcpPort: 12345,
+                    mcpPath: "/custom-mcp",
+                    codexExecutablePath: "/tmp/old-codex"
+                )
+            ),
             makeLiveStore: { runtimePreferences, _, storeMode in
                 capturedRuntimePreferences = runtimePreferences
                 capturedStoreMode = storeMode
@@ -347,7 +355,10 @@ struct CodexReviewMonitorCITests {
 
         #expect(composition.makeStore(context) { nil } === expectedStore)
         #expect(context.shouldStartEmbeddedServer)
+        #expect(capturedRuntimePreferences?.codexHomePath == "/tmp/e2e-codex-home")
+        #expect(capturedRuntimePreferences?.mcpHost == "127.0.0.1")
         #expect(capturedRuntimePreferences?.mcpPort == 39417)
+        #expect(capturedRuntimePreferences?.mcpPath == "/mcp")
         #expect(capturedRuntimePreferences?.codexExecutablePath == "/opt/homebrew/bin/codex")
         #expect(capturedStoreMode == .isolatedTest(
             diagnosticsURL: URL(fileURLWithPath: "/tmp/review-monitor/diagnostics.json"),
@@ -355,7 +366,7 @@ struct CodexReviewMonitorCITests {
         ))
     }
 
-    @Test func isolatedTestOverrideWithoutHistoryPathDoesNotStartProductionRuntime() {
+    @Test func partialIsolatedTestOverridesDoNotUseProductionStoreMode() {
         let context = ReviewMonitorLaunchContext(
             environment: [
                 ReviewMonitorLaunchEnvironment.testPortKey: "39417",
@@ -363,10 +374,21 @@ struct CodexReviewMonitorCITests {
             arguments: [],
             launchMode: .application
         )
+        var capturedMode: ReviewMonitorLiveStoreMode?
+        let composition = ReviewMonitorAppComposition.live(
+            makeLiveStore: { _, _, mode in
+                capturedMode = mode
+                return CodexReviewStore.makePreviewStore()
+            }
+        )
 
-        #expect(context.isolatedTestConfiguration?.validationFailure?.contains(
-            ReviewMonitorLaunchEnvironment.testHistoryPathKey
-        ) == true)
+        _ = composition.makeStore(context) { nil }
+
+        guard case .unavailableIsolatedTest(_, let message) = capturedMode else {
+            Issue.record("Expected partial test inputs to build a visibly unavailable isolated store.")
+            return
+        }
+        #expect(message.contains(ReviewMonitorLaunchEnvironment.testCodexCommandKey))
         #expect(context.shouldStartEmbeddedServer == false)
     }
 

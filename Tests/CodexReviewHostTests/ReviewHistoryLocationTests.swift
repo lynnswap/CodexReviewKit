@@ -6,7 +6,7 @@ import Testing
 @Suite("review history location")
 struct ReviewHistoryLocationTests {
     @Test func productionLocationOwnsExactPrivateApplicationSupportDirectory() throws {
-        let applicationSupport = FileManager.default.temporaryDirectory
+        let applicationSupport = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
             .appendingPathComponent(
                 "review-history-location-\(UUID().uuidString)",
                 isDirectory: true
@@ -43,7 +43,7 @@ struct ReviewHistoryLocationTests {
     }
 
     @Test func closedLocationRejectsPathHandoff() throws {
-        let applicationSupport = FileManager.default.temporaryDirectory
+        let applicationSupport = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
             .appendingPathComponent(
                 "closed-review-history-location-\(UUID().uuidString)",
                 isDirectory: true

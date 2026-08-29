@@ -52,7 +52,8 @@ struct ReviewUIHistoryTests {
             cwd: "/tmp/workspace",
             targetSummary: "Uncommitted changes",
             status: .running,
-            startedAt: Date(timeIntervalSince1970: 100)
+            startedAt: Date(timeIntervalSince1970: 100),
+            summary: "Review running."
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
@@ -84,10 +85,8 @@ struct ReviewUIHistoryTests {
             failureMessage: "database is unavailable"
         )
 
-        #expect(presentation == .init(
-            title: "History unavailable",
-            detail: "database is unavailable"
-        ))
+        #expect(presentation?.title == "History unavailable")
+        #expect(presentation?.detail == "database is unavailable")
         #expect(ReviewMonitorHistoryStatusPresentation(failureMessage: nil) == nil)
     }
 

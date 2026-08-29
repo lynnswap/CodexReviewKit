@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @_spi(Testing) @testable import CodexReview
+@_spi(ApplicationHostSupport) import CodexReview
 import CodexReviewTesting
 
 @Suite("review history store", .serialized)
@@ -364,7 +365,7 @@ struct CodexReviewStoreHistoryTests {
 
         await release.open()
         let running = try await start.value
-        await reorder.value
+        _ = await reorder.value
         await deletion.value
         await backend.waitForStartReview()
         #expect(await backend.recordedCommands().contains {
@@ -792,7 +793,7 @@ struct CodexReviewStoreHistoryTests {
         #expect(store.orderedWorkspaces.map(\.cwd) == [second.cwd, first.cwd])
 
         await release.open()
-        await reorder.value
+        _ = await reorder.value
         #expect(store.orderedWorkspaces.map(\.cwd) == [first.cwd, second.cwd])
         #expect(await history.orderings().count == 1)
     }
@@ -827,11 +828,11 @@ struct CodexReviewStoreHistoryTests {
         let store = makeStore(history: history)
         await store.loadReviewHistoryIfNeeded()
 
-        await store.reorderJob(
+        #expect(await store.reorderJob(
             id: first.id,
             inWorkspace: first.cwd,
             toIndex: 0
-        )
+        ) == false)
 
         #expect(store.orderedJobs(inWorkspace: first.cwd).map(\.id) == [second.id, first.id])
         #expect(store.historyAvailability == .failed("ordering failed"))
@@ -885,7 +886,7 @@ struct CodexReviewStoreHistoryTests {
         }
 
         await orderingRelease.open()
-        await reorder.value
+        _ = await reorder.value
         _ = try await store.awaitReview(sessionID: "session-1", jobID: live.jobID)
         await deletion.value
 

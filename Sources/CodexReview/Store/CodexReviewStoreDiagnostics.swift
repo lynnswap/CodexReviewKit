@@ -6,13 +6,13 @@ public enum CodexReviewStoreTestEnvironment {
     public static let portKey = "REVIEW_MONITOR_TEST_PORT"
     public static let codexCommandKey = "REVIEW_MONITOR_TEST_CODEX_COMMAND"
     public static let diagnosticsPathKey = "REVIEW_MONITOR_TEST_DIAGNOSTICS_PATH"
-    public static let historyPathKey = "REVIEW_MONITOR_TEST_HISTORY_PATH"
+    @_spi(ApplicationHostSupport) public static let historyPathKey = "REVIEW_MONITOR_TEST_HISTORY_PATH"
     public static let reviewModeArgument = "--review-monitor-review-mode"
     public static let mockJobsArgument = "--review-monitor-mock-jobs"
     public static let portArgument = "--review-monitor-test-port"
     public static let codexCommandArgument = "--review-monitor-test-codex-command"
     public static let diagnosticsPathArgument = "--review-monitor-test-diagnostics-path"
-    public static let historyPathArgument = "--review-monitor-test-history-path"
+    @_spi(ApplicationHostSupport) public static let historyPathArgument = "--review-monitor-test-history-path"
 }
 
 struct CodexReviewStoreDiagnosticsSnapshot: Encodable {

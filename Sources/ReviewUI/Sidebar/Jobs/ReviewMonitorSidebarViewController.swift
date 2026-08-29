@@ -776,7 +776,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             )
             deleteItem.target = self
             deleteItem.representedObject = job
-            deleteItem.isEnabled = store.historyAvailability == .available
+            deleteItem.isEnabled = store.canDeleteReviewHistory(id: job.id)
             menu.addItem(deleteItem)
         } else {
             let cancelItem = NSMenuItem(
