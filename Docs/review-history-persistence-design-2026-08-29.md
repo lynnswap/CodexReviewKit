@@ -467,33 +467,33 @@ Then run branch-wide local Codex review against `main` until it reports no findi
 
 Budget: 6 hours; at most 10 production and 4 test files.
 
-- [ ] Add SQLiteData dependency and internal target.
-- [ ] Add schema, migrations, codec, retention, close owner.
-- [ ] Pass focused persistence tests.
+- [x] Add SQLiteData dependency and internal target.
+- [x] Add schema, migrations, codec, retention, close owner.
+- [x] Pass focused persistence tests.
 
 ### Slice B — Store cutover
 
 Budget: 8 hours; at most 12 production and 5 test files.
 
-- [ ] Add semantic port/records and injected disabled/test implementations.
-- [ ] Load history, persist start/terminal, synchronize ordering, and delete.
-- [ ] Add application shutdown separate from runtime stop.
-- [ ] Pass focused Store/MCP tests.
+- [x] Add semantic port/records and injected disabled/test implementations.
+- [x] Load history, persist start/terminal, synchronize ordering, and delete.
+- [x] Add application shutdown separate from runtime stop.
+- [x] Pass focused Store/MCP tests.
 
 ### Slice C — ReviewMonitor/UI composition
 
 Budget: 5 hours; at most 8 production and 4 test files.
 
-- [ ] Compose production path/database.
-- [ ] Keep history visible during runtime failure.
-- [ ] Render history health and deletion semantics.
-- [ ] Pass focused ReviewUI/app tests.
+- [x] Compose production path/database.
+- [x] Keep history visible during runtime failure.
+- [x] Render history health and deletion semantics.
+- [x] Pass focused ReviewUI/app tests.
 
 ### Slice D — integration and delivery
 
-- [ ] Run all repository gates.
+- [x] Run all repository gates.
 - [ ] Run branch-wide local Codex review to clean.
-- [ ] Commit final fixes and verify clean worktree.
+- [x] Commit final fixes and verify clean worktree.
 - [ ] Push branch and create Ready PR to `main`.
 
 ## 12. Acceptance remeasurement
@@ -507,3 +507,42 @@ At completion, record:
 - the concrete path owner and DB close proof;
 - old path/helper and alternate persistence routes removed;
 - exact test/review results.
+
+Completion remeasurement before publication:
+
+- `swift package dump-package` confirms `CodexReviewPersistence` is internal and
+  depends only on `CodexReview` and `SQLiteData`; `CodexReviewHost` composes it;
+  `ReviewUI` has no persistence dependency.
+- The only additive application-host surface is SPI
+  `ApplicationHostSupport`: one-shot `CodexReviewStore.shutdown()`, explicit
+  isolated-store factories, and the history-path test keys. The reviewed API
+  baseline and checksum include those additions; the original public live-store
+  factory is unchanged.
+- Persistence behavior lives in `CodexReviewStoreHistory.swift` (760 lines) and
+  the internal adapter/codec/schema files (444/479/290 lines). Store adds the
+  availability, port, mutation-lane receipts, durable-ID sets, result leases, and
+  one-shot shutdown state; it does not add a second UI model or log cache.
+- Production owns
+  `Application Support/CodexReviewMonitor/RecoveryV1/review-history.sqlite` via
+  the retained Application Support/application/recovery capability chain. App
+  termination cancels and joins launch, Store work, history receipts, database
+  close, and directory close in that order. Runtime restart does not close it.
+- The unused whole-recovery history URL helper is removed. There is no alternate
+  persistence route, generic log table, raw transcript column, or SQLite import
+  in `ReviewUI`.
+- `swift test --build-system swiftbuild --no-parallel`, the locked app test gate
+  (18 tests), all compatibility gates, schema/codec/retention tests, and the
+  actual-app semantic/UI E2E pass. The E2E rebuilt the app, ran Codex 0.149.1,
+  restored the same terminal job and `AccessGate.swift:3-3` finding after a clean
+  restart, verified MCP-session isolation, and captured accessibility text plus a
+  screenshot.
+- The repo-standard app command without flags is blocked before compilation by
+  local Xcode macro trust. CI/release/E2E use the committed workspace lock with
+  automatic resolution disabled and `-skipMacroValidation`; the same app tests
+  pass through that non-interactive path.
+- A pre-existing live-runtime cleanup timeout can retire a long-lived MCP SSE
+  session after the review has already committed. The E2E accepts curl status 18
+  only when the same server remains running and the exact completed semantic row
+  is present, then still verifies the database and restarted UI. Upstream Codex
+  confirms review completion itself does not terminate app-server; this transport
+  lifecycle is separate from durable-history ownership.
