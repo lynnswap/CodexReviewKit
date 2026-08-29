@@ -15,7 +15,6 @@ func configureReviewMonitorWindowBase(_ window: NSWindow) {
 
 public final class ReviewMonitorWindowController: NSWindowController {
     private static let defaultContentSize = NSSize(width: 600, height: 400)
-    private static let minimumContentSize = NSSize(width: 360, height: 360)
     private static let frameAutosaveName = NSWindow.FrameAutosaveName("ReviewMonitor.MainWindow")
     private let rootViewController: ReviewMonitorRootViewController
 
@@ -79,14 +78,6 @@ public final class ReviewMonitorWindowController: NSWindowController {
         )
         configureReviewMonitorWindowBase(window)
         window.contentViewController = rootViewController
-        NSLayoutConstraint.activate([
-            rootViewController.view.widthAnchor.constraint(
-                greaterThanOrEqualToConstant: Self.minimumContentSize.width
-            ),
-            rootViewController.view.heightAnchor.constraint(
-                greaterThanOrEqualToConstant: Self.minimumContentSize.height
-            ),
-        ])
         window.setContentSize(Self.defaultContentSize)
 
         self.rootViewController = rootViewController
