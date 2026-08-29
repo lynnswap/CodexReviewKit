@@ -29,6 +29,7 @@ let package = Package(
         .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", exact: "0.12.1"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.97.1"),
         .package(url: "https://github.com/lynnswap/ObservationBridge.git", .upToNextMinor(from: "0.12.0")),
+        .package(url: "https://github.com/pointfreeco/sqlite-data.git", exact: "1.11.2"),
     ],
     targets: [
         .target(
@@ -44,6 +45,16 @@ let package = Package(
             name: "CodexReviewAppServer",
             dependencies: [
                 "CodexReview",
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .target(
+            name: "CodexReviewPersistence",
+            dependencies: [
+                "CodexReview",
+                .product(name: "SQLiteData", package: "sqlite-data"),
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
@@ -103,6 +114,17 @@ let package = Package(
         .testTarget(
             name: "CodexReviewTests",
             dependencies: ["CodexReview", "CodexReviewTesting"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .testTarget(
+            name: "CodexReviewPersistenceTests",
+            dependencies: [
+                "CodexReview",
+                "CodexReviewPersistence",
+                .product(name: "SQLiteData", package: "sqlite-data"),
+            ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]
