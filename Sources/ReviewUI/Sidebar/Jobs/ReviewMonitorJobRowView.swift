@@ -21,6 +21,7 @@ struct ReviewMonitorJobRowView: View {
                     Text(job.displayTitle)
                         .truncationMode(.tail)
                         .accessibilityLabel(Text(verbatim: titleAccessibilityLabel))
+                    Spacer(minLength: 0)
                     if isWorktree {
                         Image(systemName: Self.worktreeSymbolName)
                             .imageScale(.small)
@@ -30,7 +31,6 @@ struct ReviewMonitorJobRowView: View {
                             .help("Worktree")
                             .accessibilityHidden(true)
                     }
-                    Spacer(minLength: 0)
                     TimerLabelView(job: job)
                         .foregroundStyle(.secondary)
                         .layoutPriority(1)
