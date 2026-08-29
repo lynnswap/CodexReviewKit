@@ -44,6 +44,7 @@ final class AddAccountToolbarItemView: NSView {
 
     private func configureHierarchy() {
         addButton.bezelStyle = .toolbar
+        addButton.controlSize = .extraLarge
         addButton.image = NSImage(
             systemSymbolName: "person.badge.plus",
             accessibilityDescription: "Add Account"
@@ -182,6 +183,10 @@ final class AddAccountToolbarItemView: NSView {
 extension AddAccountToolbarItemView {
     var displayedModeForTesting: Mode {
         displayedMode
+    }
+
+    var addButtonControlSizeForTesting: NSControl.ControlSize {
+        addButton.controlSize
     }
 
     func waitForStableModeForTesting(_ mode: Mode) async {
