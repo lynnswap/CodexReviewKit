@@ -19,6 +19,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private enum Identifier {
         static let tableColumn = NSUserInterfaceItemIdentifier("ReviewMonitorJobs.Column")
         static let jobCell = NSUserInterfaceItemIdentifier("ReviewMonitorJobs.JobCell")
+        static let showMoreCell = NSUserInterfaceItemIdentifier("ReviewMonitorJobs.ShowMoreCell")
         static let workspaceCell = NSUserInterfaceItemIdentifier("ReviewMonitorJobs.WorkspaceCell")
     }
 
@@ -103,12 +104,28 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         let childIndex: Int
     }
 
+    private enum SidebarJobPresentation {
+        static let collapsedLimit = 5
+    }
+
+    private final class SidebarShowMoreItem {
+        let sectionID: String
+        var hiddenJobCount: Int
+
+        init(sectionID: String, hiddenJobCount: Int) {
+            self.sectionID = sectionID
+            self.hiddenJobCount = hiddenJobCount
+        }
+    }
+
     private final class SidebarWorkspaceSection: Hashable {
         let id: String
+        let showMoreItem: SidebarShowMoreItem
         var title: String
         var workspaces: [CodexReviewWorkspace]
         var jobs: [CodexReviewJob]
         var isExpanded: Bool
+        var showsAllJobs: Bool
 
         init(
             id: String,
@@ -117,10 +134,46 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             jobs: [CodexReviewJob]
         ) {
             self.id = id
+            self.showMoreItem = SidebarShowMoreItem(
+                sectionID: id,
+                hiddenJobCount: max(0, jobs.count - SidebarJobPresentation.collapsedLimit)
+            )
             self.title = title
             self.workspaces = workspaces
             self.jobs = jobs
             self.isExpanded = true
+            self.showsAllJobs = false
+        }
+
+        var presentedJobCount: Int {
+            showsAllJobs ? jobs.count : min(jobs.count, SidebarJobPresentation.collapsedLimit)
+        }
+
+        var presentedJobs: [CodexReviewJob] {
+            Array(jobs.prefix(presentedJobCount))
+        }
+
+        var hiddenJobCount: Int {
+            jobs.count - presentedJobCount
+        }
+
+        var presentedChildCount: Int {
+            presentedJobCount + (hiddenJobCount > 0 ? 1 : 0)
+        }
+
+        var presentedChildren: [AnyObject] {
+            var children = presentedJobs.map { $0 as AnyObject }
+            if hiddenJobCount > 0 {
+                children.append(showMoreItem)
+            }
+            return children
+        }
+
+        func presentedChild(at index: Int) -> AnyObject {
+            if index < presentedJobCount {
+                return jobs[index]
+            }
+            return showMoreItem
         }
 
         var selection: ReviewMonitorWorkspaceSectionSelection {
@@ -143,7 +196,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private struct SidebarRootTopology {
         let item: AnyObject
         let workspaces: [CodexReviewWorkspace]
-        let jobs: [CodexReviewJob]
     }
 
     private enum SidebarMutationAnimation {
@@ -425,7 +477,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             }
 
             renderedSectionIDs.insert(identity.id)
-            let sectionJobs = Self.visibleJobs(
+            let sectionJobs = Self.filteredJobs(
                 in: topologies.flatMap(\.jobs),
                 filter: filter
             )
@@ -436,8 +488,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             )
             return SidebarRootTopology(
                 item: section,
-                workspaces: section.workspaces,
-                jobs: section.jobs
+                workspaces: section.workspaces
             )
         }
         workspaceSectionsByID = workspaceSectionsByID.filter { renderedSectionIDs.contains($0.key) }
@@ -485,7 +536,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             rootTopologies.map(\.item),
             animated: shouldAnimate
         )
-        applyJobMembershipChange(rootTopologies, animated: shouldAnimate)
+        applyChildMembershipChange(rootTopologies, animated: shouldAnimate)
         scheduleOutlineSelectionReconciliation()
     }
 
@@ -507,31 +558,51 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         applyStoredExpansionState(for: insertedRootItems)
     }
 
-    private func applyJobMembershipChange(
+    private func applyChildMembershipChange(
         _ rootTopologies: [SidebarRootTopology],
         animated: Bool
     ) {
         let rootItems = rootTopologies.map(\.item)
         for rootItem in displayedRootItems() {
-            guard let topology = rootTopologies.first(where: { $0.item === rootItem }) else {
+            guard rootTopologies.contains(where: { $0.item === rootItem }),
+                  let section = workspaceSection(from: rootItem)
+            else {
                 continue
             }
-            let displayedJobs = displayedJobs(inRootItem: rootItem)
-            let targetJobs = topology.jobs
-            guard hasSameIdentityOrder(displayedJobs, targetJobs) == false else {
-                continue
+            let displayedChildren = displayedChildItems(inRootItem: rootItem)
+            let targetChildren = section.presentedChildren
+            let showMoreContentChanged = section.showMoreItem.hiddenJobCount != section.hiddenJobCount
+            section.showMoreItem.hiddenJobCount = section.hiddenJobCount
+            if hasSameIdentityOrder(displayedChildren, targetChildren) == false {
+                if outlineView.isItemExpanded(rootItem) {
+                    applyMembershipChange(
+                        currentItems: displayedChildren,
+                        targetItems: targetChildren,
+                        parent: rootItem,
+                        animated: animated
+                    )
+                } else {
+                    reloadRootItem(rootItem, allRootItems: rootItems)
+                }
             }
-            if outlineView.isItemExpanded(rootItem) {
-                applyMembershipChange(
-                    currentItems: displayedJobs,
-                    targetItems: targetJobs,
-                    parent: rootItem,
-                    animated: animated
-                )
-                continue
+            if showMoreContentChanged {
+                reconfigureVisibleShowMoreCell(for: section)
             }
-            reloadRootItem(rootItem, allRootItems: rootItems)
         }
+    }
+
+    private func reconfigureVisibleShowMoreCell(for section: SidebarWorkspaceSection) {
+        let row = outlineView.row(forItem: section.showMoreItem)
+        guard row != -1,
+              let cellView = outlineView.view(
+                atColumn: 0,
+                row: row,
+                makeIfNecessary: false
+              ) as? ReviewMonitorShowMoreCellView
+        else {
+            return
+        }
+        configureShowMoreCell(cellView, item: section.showMoreItem)
     }
 
     private func reloadOutline(rootItems: [AnyObject]) {
@@ -732,6 +803,41 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return
         }
         setRootItem(rootItem, expanded: outlineView.isItemExpanded(rootItem) == false)
+    }
+
+    private func showAllJobs(inSectionID sectionID: String) {
+        guard let section = workspaceSection(id: sectionID),
+              section.showsAllJobs == false,
+              section.hiddenJobCount > 0
+        else {
+            return
+        }
+
+        let displayedChildren = displayedChildItems(inRootItem: section)
+        section.showsAllJobs = true
+        if outlineView.isItemExpanded(section) {
+            applyMembershipChange(
+                currentItems: displayedChildren,
+                targetItems: section.presentedChildren,
+                parent: section,
+                animated: shouldAnimateSidebarMutations
+            )
+        } else {
+            reloadRootItem(section, allRootItems: currentRootTopologies.map(\.item))
+        }
+        reconcileSelectionAfterOutlineMutation()
+    }
+
+    private func configureShowMoreCell(
+        _ cellView: ReviewMonitorShowMoreCellView,
+        item: SidebarShowMoreItem
+    ) {
+        cellView.configure(
+            item: item,
+            hiddenJobCount: item.hiddenJobCount
+        ) { [weak self] in
+            self?.showAllJobs(inSectionID: item.sectionID)
+        }
     }
 
     private func restoreSelectedJobRowAfterExpansion(of section: SidebarWorkspaceSection) {
@@ -1011,26 +1117,36 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func displayedJobs(inRootItem rootItem: AnyObject) -> [CodexReviewJob] {
+        displayedChildItems(inRootItem: rootItem).compactMap(job(from:))
+    }
+
+    private func displayedChildItems(inRootItem rootItem: AnyObject) -> [AnyObject] {
         (0..<outlineView.numberOfRows).compactMap { row in
-            let item = outlineView.item(atRow: row)
-            guard let job = job(from: item),
+            guard let item = outlineView.item(atRow: row),
                   let parentItem = outlineView.parent(forItem: item) as? AnyObject,
                   parentItem === rootItem
             else {
                 return nil
             }
-            return job
+            return item as AnyObject
         }
     }
 
-    private func visibleJobs(in workspace: CodexReviewWorkspace) -> [CodexReviewJob] {
+    private func filteredJobs(in workspace: CodexReviewWorkspace) -> [CodexReviewJob] {
         guard let section = workspaceSection(containing: workspace) else {
             return []
         }
         return section.jobs.filter { $0.cwd == workspace.cwd }
     }
 
-    private static func visibleJobs(
+    private func presentedJobs(in workspace: CodexReviewWorkspace) -> [CodexReviewJob] {
+        guard let section = workspaceSection(containing: workspace) else {
+            return []
+        }
+        return section.presentedJobs.filter { $0.cwd == workspace.cwd }
+    }
+
+    private static func filteredJobs(
         in jobs: [CodexReviewJob],
         filter: SidebarJobFilter
     ) -> [CodexReviewJob] {
@@ -1077,6 +1193,10 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         item as? CodexReviewJob
     }
 
+    private func showMoreItem(from item: Any?) -> SidebarShowMoreItem? {
+        item as? SidebarShowMoreItem
+    }
+
     private func shouldAllowSelection(of item: Any?) -> Bool {
         workspaceSection(from: item) != nil || job(from: item) != nil
     }
@@ -1086,7 +1206,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func filteredJobCount(in workspace: CodexReviewWorkspace) -> Int {
-        visibleJobs(in: workspace).count
+        filteredJobs(in: workspace).count
     }
 
     private func job(atRow row: Int) -> CodexReviewJob? {
@@ -1423,13 +1543,16 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         var sectionRect = outlineView.rect(ofRow: rootRow)
         let isExpanded = workspaceSection(from: rootItem)?.isExpanded ?? false
         guard isExpanded,
-              let lastJob = displayedJobs(inRootItem: rootItem).last,
-              let lastJobRow = row(forJobID: lastJob.id)
+              let lastChild = displayedChildItems(inRootItem: rootItem).last
         else {
             return sectionRect
         }
 
-        sectionRect = sectionRect.union(outlineView.rect(ofRow: lastJobRow))
+        let lastChildRow = outlineView.row(forItem: lastChild)
+        guard lastChildRow != -1 else {
+            return sectionRect
+        }
+        sectionRect = sectionRect.union(outlineView.rect(ofRow: lastChildRow))
         return sectionRect
     }
 
@@ -1455,7 +1578,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
 
         let orderedJobs = store.orderedJobs(in: destination.workspace)
-        let destinationVisibleJobs = visibleJobs(in: destination.workspace)
+        let destinationVisibleJobs = presentedJobs(in: destination.workspace)
         guard let sourceIndex = orderedJobs.firstIndex(where: { $0.id == id }) else {
             return nil
         }
@@ -1552,8 +1675,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         guard let draggingLocation,
               let targetWorkspace = workspace(containing: targetJob),
               let targetSection = workspaceSection(containing: targetWorkspace),
-              let targetWorkspaceRootStartIndex = targetSection.jobs.firstIndex(where: { $0.cwd == targetWorkspace.cwd }),
-              let targetJobIndex = visibleJobs(in: targetWorkspace).firstIndex(where: { $0.id == targetJob.id }),
+              let targetWorkspaceRootStartIndex = targetSection.presentedJobs.firstIndex(where: { $0.cwd == targetWorkspace.cwd }),
+              let targetJobIndex = presentedJobs(in: targetWorkspace).firstIndex(where: { $0.id == targetJob.id }),
               let targetRow = row(forJobID: targetJob.id)
         else {
             return nil
@@ -1575,15 +1698,17 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         sourceCWD: String,
         proposedRootChildIndex index: Int
     ) -> SidebarJobDropDestination? {
-        guard let workspace = section.workspaces.first(where: { $0.cwd == sourceCWD }),
-              let workspaceRootStartIndex = section.jobs.firstIndex(where: { $0.cwd == sourceCWD })
+        guard index >= 0,
+              index <= section.presentedJobCount,
+              let workspace = section.workspaces.first(where: { $0.cwd == sourceCWD }),
+              let workspaceRootStartIndex = section.presentedJobs.firstIndex(where: { $0.cwd == sourceCWD })
         else {
             return nil
         }
 
-        let workspaceJobCount = visibleJobs(in: workspace).count
+        let workspaceJobCount = presentedJobs(in: workspace).count
         let workspaceRootEndIndex = workspaceRootStartIndex + workspaceJobCount
-        let rootInsertionIndex = max(0, min(index, section.jobs.count))
+        let rootInsertionIndex = min(index, section.presentedJobCount)
         guard rootInsertionIndex >= workspaceRootStartIndex,
               rootInsertionIndex <= workspaceRootEndIndex
         else {
@@ -1602,13 +1727,13 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     ) -> (item: Any?, childIndex: Int) {
         guard let rootItem = rootItem(containing: workspace),
               let section = workspaceSection(from: rootItem),
-              let workspaceRootStartIndex = section.jobs.firstIndex(where: { $0.cwd == workspace.cwd })
+              let workspaceRootStartIndex = section.presentedJobs.firstIndex(where: { $0.cwd == workspace.cwd })
         else {
             return (workspace, childIndex)
         }
 
         let rootChildIndex = workspaceRootStartIndex + childIndex
-        return (section, max(0, min(rootChildIndex, section.jobs.count)))
+        return (section, max(0, min(rootChildIndex, section.presentedJobCount)))
     }
 
     @discardableResult
@@ -1650,7 +1775,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return currentRootTopologies.count
         }
         if let section = workspaceSection(from: item) {
-            return section.jobs.count
+            return section.presentedChildCount
         }
         return 0
     }
@@ -1660,7 +1785,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return currentRootTopologies[index].item
         }
         if let section = workspaceSection(from: item) {
-            return section.jobs[index]
+            return section.presentedChild(at: index)
         }
         fatalError("Unsupported sidebar item.")
     }
@@ -1678,6 +1803,9 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return rowHeights.workspace
         }
         if job(from: item) != nil {
+            return rowHeights.job
+        }
+        if showMoreItem(from: item) != nil {
             return rowHeights.job
         }
         return rowHeights.job
@@ -1782,6 +1910,9 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         if job(from: item) != nil {
             return ReviewMonitorJobTableRowView()
         }
+        if showMoreItem(from: item) != nil {
+            return ReviewMonitorJobTableRowView()
+        }
         return nil
     }
 
@@ -1806,12 +1937,24 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             view.configure(with: job)
             return view
         }
+        if let showMoreItem = showMoreItem(from: item) {
+            let view = (outlineView.makeView(withIdentifier: Identifier.showMoreCell, owner: self) as? ReviewMonitorShowMoreCellView)
+                ?? ReviewMonitorShowMoreCellView()
+            view.identifier = Identifier.showMoreCell
+            configureShowMoreCell(view, item: showMoreItem)
+            return view
+        }
         return nil
     }
 
 }
 
 #if DEBUG
+enum ReviewMonitorSidebarChildForTesting: Equatable {
+    case job(id: String)
+    case showMore(hiddenJobCount: Int)
+}
+
 @MainActor
 extension ReviewMonitorSidebarViewController {
     var sidebarKindObservationForTesting: PortableObservationTracking.Token? {
@@ -1845,6 +1988,78 @@ extension ReviewMonitorSidebarViewController {
             }
         }
         return titles
+    }
+
+    func displayedSectionChildrenForTesting(
+        containing workspace: CodexReviewWorkspace
+    ) -> [ReviewMonitorSidebarChildForTesting] {
+        guard let section = workspaceSection(containing: workspace) else {
+            return []
+        }
+        return displayedChildItems(inRootItem: section).compactMap { item in
+            if let job = job(from: item) {
+                return .job(id: job.id)
+            }
+            if showMoreItem(from: item) != nil {
+                return .showMore(hiddenJobCount: section.hiddenJobCount)
+            }
+            return nil
+        }
+    }
+
+    func clickShowMoreForTesting(containing workspace: CodexReviewWorkspace) {
+        guard let cellView = showMoreCellForTesting(containing: workspace) else {
+            preconditionFailure("Show more row is not visible.")
+        }
+        cellView.performClickForTesting()
+    }
+
+    func showMoreButtonAccessibilityLabelForTesting(
+        containing workspace: CodexReviewWorkspace
+    ) -> String? {
+        showMoreCellForTesting(containing: workspace)?.buttonAccessibilityLabelForTesting
+    }
+
+    func showMoreButtonAccessibilityRoleForTesting(
+        containing workspace: CodexReviewWorkspace
+    ) -> NSAccessibility.Role? {
+        showMoreCellForTesting(containing: workspace)?.buttonAccessibilityRoleForTesting
+    }
+
+    func showMoreRowCanStartDragForTesting(
+        containing workspace: CodexReviewWorkspace
+    ) -> Bool {
+        guard let section = workspaceSection(containing: workspace) else {
+            return false
+        }
+        return dragPayload(for: section.showMoreItem) != nil
+    }
+
+    func showMoreRowIsSelectableForTesting(
+        containing workspace: CodexReviewWorkspace
+    ) -> Bool {
+        guard let section = workspaceSection(containing: workspace) else {
+            return false
+        }
+        return shouldAllowSelection(of: section.showMoreItem)
+    }
+
+    private func showMoreCellForTesting(
+        containing workspace: CodexReviewWorkspace
+    ) -> ReviewMonitorShowMoreCellView? {
+        guard let section = workspaceSection(containing: workspace) else {
+            return nil
+        }
+        let row = outlineView.row(forItem: section.showMoreItem)
+        guard row != -1 else {
+            return nil
+        }
+        view.layoutSubtreeIfNeeded()
+        return outlineView.view(
+            atColumn: 0,
+            row: row,
+            makeIfNecessary: true
+        ) as? ReviewMonitorShowMoreCellView
     }
 
     var selectedJobForTesting: CodexReviewJob? {
@@ -2567,6 +2782,79 @@ private final class ReviewMonitorJobTableRowView: NSTableRowView {
         get { false }
         set { }
     }
+}
+
+@MainActor
+private final class ReviewMonitorShowMoreCellView: NSTableCellView {
+    private let button = NSButton(title: "Show more", target: nil, action: nil)
+    private var action: (() -> Void)?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        configureHierarchy()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    func configure(
+        item: AnyObject,
+        hiddenJobCount: Int,
+        action: @escaping () -> Void
+    ) {
+        objectValue = item
+        self.action = action
+        let reviewLabel = hiddenJobCount == 1 ? "review" : "reviews"
+        button.setAccessibilityLabel("Show \(hiddenJobCount) more \(reviewLabel)")
+    }
+
+    private func configureHierarchy() {
+        translatesAutoresizingMaskIntoConstraints = false
+
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.target = self
+        button.action = #selector(handleShowMore(_:))
+        button.isBordered = false
+        button.alignment = .left
+        button.font = .preferredFont(forTextStyle: .body)
+        button.contentTintColor = .secondaryLabelColor
+        button.setAccessibilityElement(true)
+        button.setAccessibilityRole(.button)
+        button.setAccessibilityIdentifier("review-monitor.show-more-button")
+        addSubview(button)
+
+        NSLayoutConstraint.activate([
+            button.leadingAnchor.constraint(
+                equalTo: leadingAnchor,
+                constant: SidebarLayout.disclosureGutterWidth * 2
+            ),
+            button.trailingAnchor.constraint(equalTo: trailingAnchor),
+            button.topAnchor.constraint(greaterThanOrEqualTo: topAnchor),
+            button.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor),
+            button.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+
+    @objc
+    private func handleShowMore(_ sender: NSButton) {
+        action?()
+    }
+
+#if DEBUG
+    var buttonAccessibilityLabelForTesting: String? {
+        button.accessibilityLabel()
+    }
+
+    var buttonAccessibilityRoleForTesting: NSAccessibility.Role? {
+        button.accessibilityRole()
+    }
+
+    func performClickForTesting() {
+        button.performClick(nil)
+    }
+#endif
 }
 
 @MainActor
