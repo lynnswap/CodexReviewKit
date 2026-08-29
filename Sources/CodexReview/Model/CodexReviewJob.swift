@@ -3,7 +3,7 @@ import Observation
 
 package enum CodexReviewJobOrigin: Sendable, Hashable {
     case live(sessionID: String)
-    case restored
+    case restoredHistory
 }
 
 @MainActor
@@ -533,7 +533,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
         self.lastLogMutation = .reload
     }
 
-    package func belongsToLiveSession(_ sessionID: String) -> Bool {
+    package func belongs(toLiveSession sessionID: String) -> Bool {
         guard case .live(let ownedSessionID) = origin else {
             return false
         }

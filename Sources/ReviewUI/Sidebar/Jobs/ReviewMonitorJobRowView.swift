@@ -77,7 +77,9 @@ struct TimerLabelView: View {
     var job: CodexReviewJob
 
     var body: some View {
-        if let startedAt = job.core.lifecycle.startedAt {
+        if displaysTimer,
+           let startedAt = job.core.lifecycle.startedAt
+        {
             Text(
                 timerInterval: startedAt...(job.core.lifecycle.endedAt ?? .distantFuture),
                 pauseTime: job.core.lifecycle.endedAt,
@@ -87,6 +89,14 @@ struct TimerLabelView: View {
             .monospacedDigit()
         }
     }
+
+    var displaysTimer: Bool {
+        guard job.core.lifecycle.startedAt != nil else {
+            return false
+        }
+        return job.isTerminal == false || job.core.lifecycle.endedAt != nil
+    }
+
     private func elapsedTimeText(startedAt: Date, referenceDate: Date) -> some View {
         let elapsedSeconds = max(0, referenceDate.timeIntervalSince(startedAt).rounded(.down))
         return Text(
