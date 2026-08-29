@@ -265,7 +265,7 @@ mcp_decode_response() {
       }
     }
   ' "$response_body" >"$sse_payload_path"
-  /usr/bin/jq -e 'type == "object"' "$sse_payload_path" >"$decoded_path" \
+  /usr/bin/jq -e 'select(type == "object")' "$sse_payload_path" >"$decoded_path" \
     || die "MCP response did not contain a valid JSON or SSE JSON object: $response_body"
 }
 
