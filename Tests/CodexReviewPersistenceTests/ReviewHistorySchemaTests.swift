@@ -6,10 +6,10 @@ import Testing
 
 @Suite("Review history schema")
 struct ReviewHistorySchemaTests {
-    @Test("creates strict tables with foreign-key enforcement")
+    @Test("creates strict phase tables with foreign-key enforcement")
     func schemaConstraints() async throws {
         let (database, writer) = try ReviewHistoryTestSupport.database()
-        _ = try await database.load()
+        _ = try await database.load(retentionPolicy: .default)
 
         let strictTableCount = try await writer.read { db in
             try #sql(
@@ -26,8 +26,29 @@ struct ReviewHistorySchemaTests {
         let foreignKeysEnabled = try await writer.read { db in
             try #sql("PRAGMA foreign_keys", as: Int.self).fetchOne(db)
         }
+        let recordColumns = try await writer.read { db in
+            try #sql(
+                "SELECT name FROM pragma_table_info('review_records')",
+                as: String.self
+            )
+            .fetchAll(db)
+        }
         #expect(strictTableCount == 3)
         #expect(foreignKeysEnabled == 1)
+        #expect(recordColumns.contains("terminalCommittedAt"))
+        #expect(
+            Set(recordColumns).isDisjoint(with: [
+                "sessionID",
+                "reviewThreadID",
+                "threadID",
+                "turnID",
+                "exitCode",
+                "errorMessage",
+                "hasFinalReview",
+                "rawText",
+                "logEntries",
+            ])
+        )
 
         await #expect(throws: (any Error).self) {
             try await writer.write { db in
@@ -74,7 +95,8 @@ struct ReviewHistorySchemaTests {
             source: .parsedFinalReviewText
         )
         _ = try await ReviewHistoryTestSupport.record(
-            ReviewHistoryTestSupport.completed(
+            started: ReviewHistoryTestSupport.started(id: "cascade"),
+            terminal: ReviewHistoryTestSupport.completed(
                 id: "cascade",
                 finalReview: "Review result.",
                 parsedResult: parsedResult
@@ -83,7 +105,7 @@ struct ReviewHistorySchemaTests {
         )
 
         let before = try findingCount(writer)
-        try await database.deleteReview(id: "cascade")
+        _ = try await database.deleteTerminalReview(id: "cascade")
         let after = try findingCount(writer)
         #expect(before == 1)
         #expect(after == 0)
@@ -107,7 +129,8 @@ struct ReviewHistorySchemaTests {
             source: .parsedFinalReviewText
         )
         _ = try await ReviewHistoryTestSupport.record(
-            ReviewHistoryTestSupport.completed(
+            started: ReviewHistoryTestSupport.started(id: "corrupt"),
+            terminal: ReviewHistoryTestSupport.completed(
                 id: "corrupt",
                 finalReview: "Review result.",
                 parsedResult: parsedResult
@@ -126,7 +149,7 @@ struct ReviewHistorySchemaTests {
         }
 
         await #expect(throws: ReviewHistoryDatabaseError.self) {
-            _ = try await database.load()
+            _ = try await database.load(retentionPolicy: .default)
         }
         #expect(try findingCount(writer) == 1)
         let reviewCount = try await writer.read { db in
@@ -135,24 +158,28 @@ struct ReviewHistorySchemaTests {
         #expect(reviewCount == 1)
     }
 
-    @Test("reopens a temporary file database")
+    @Test("reopens a temporary file database through the lazy URL owner")
     func temporaryFileRoundTrip() async throws {
         let directory = FileManager.default.temporaryDirectory
-            .appending(path: "CodexReviewHistoryTests-\(UUID().uuidString)", directoryHint: .isDirectory)
+            .appending(
+                path: "CodexReviewHistoryTests-\(UUID().uuidString)",
+                directoryHint: .isDirectory
+            )
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appending(path: "review-history.sqlite")
 
         let first = ReviewHistoryDatabase(databaseURL: url)
         _ = try await ReviewHistoryTestSupport.record(
-            ReviewHistoryTestSupport.completed(id: "file-backed"),
+            started: ReviewHistoryTestSupport.started(id: "file-backed"),
+            terminal: ReviewHistoryTestSupport.completed(id: "file-backed"),
             in: first
         )
         try await first.close()
 
         let second = ReviewHistoryDatabase(databaseURL: url)
-        let restored = try await second.load()
-        #expect(restored.map(\.id) == ["file-backed"])
+        let restored = try await second.load(retentionPolicy: .default)
+        #expect(restored.map(\.started.id) == ["file-backed"])
         try await second.close()
     }
 

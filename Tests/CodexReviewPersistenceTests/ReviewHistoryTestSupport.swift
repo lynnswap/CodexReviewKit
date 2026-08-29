@@ -5,9 +5,18 @@ import SQLiteData
 
 enum ReviewHistoryTestSupport {
     static let startedAt = Date(timeIntervalSinceReferenceDate: 800_000_000)
+    static let committedAt = Date(timeIntervalSinceReferenceDate: 800_001_000)
 
-    static func database() throws -> (ReviewHistoryDatabase, DatabaseQueue) {
+    static func database(
+        now: Date? = nil
+    ) throws -> (ReviewHistoryDatabase, DatabaseQueue) {
         let writer = try DatabaseQueue()
+        if let now {
+            return (
+                ReviewHistoryDatabase(databaseWriter: writer, now: { now }),
+                writer
+            )
+        }
         return (ReviewHistoryDatabase(databaseWriter: writer), writer)
     }
 
@@ -17,120 +26,70 @@ enum ReviewHistoryTestSupport {
         workspaceSortOrder: Double = 0,
         sortOrder: Double = 0,
         target: CodexReviewAPI.Target = .uncommittedChanges,
+        model: String? = "gpt-5.6-sol",
         startedAt: Date = startedAt
-    ) -> ReviewHistoryRecord {
-        ReviewHistoryRecord(
+    ) throws -> StartedReviewRecord {
+        try StartedReviewRecord(
             id: id,
             cwd: cwd,
             workspaceSortOrder: workspaceSortOrder,
             sortOrder: sortOrder,
             target: target,
-            core: ReviewJobCore(
-                lifecycle: .init(status: .running, startedAt: startedAt),
-                output: .init(summary: "Review started.")
-            )
+            model: model,
+            startedAt: startedAt
         )
     }
 
     static func completed(
         id: String,
-        cwd: String = "/tmp/workspace",
-        workspaceSortOrder: Double = 0,
-        sortOrder: Double = 0,
-        target: CodexReviewAPI.Target = .uncommittedChanges,
-        startedAt: Date = startedAt,
+        model: String? = "gpt-5.6-sol",
         endedAt: Date? = nil,
         finalReview: String = "No findings.",
         parsedResult: ParsedReviewResult? = nil
-    ) -> ReviewHistoryRecord {
-        let end = endedAt ?? startedAt.addingTimeInterval(30)
-        return ReviewHistoryRecord(
+    ) throws -> TerminalReviewRecord {
+        try TerminalReviewRecord(
             id: id,
-            cwd: cwd,
-            workspaceSortOrder: workspaceSortOrder,
-            sortOrder: sortOrder,
-            target: target,
-            core: ReviewJobCore(
-                run: .init(
-                    reviewThreadID: "review-thread-\(id)",
-                    threadID: "thread-\(id)",
-                    turnID: "turn-\(id)",
-                    model: "gpt-5.6-sol"
-                ),
-                lifecycle: .init(
-                    status: .succeeded,
-                    exitCode: 0,
-                    startedAt: startedAt,
-                    endedAt: end,
-                    terminal: .completed
-                ),
-                output: .init(
-                    summary: "Review completed.",
-                    hasFinalReview: true,
-                    lastAgentMessage: finalReview,
-                    reviewResult: parsedResult ?? .parse(finalReviewText: finalReview)
-                )
+            model: model,
+            terminal: .completed,
+            endedAt: endedAt ?? startedAt.addingTimeInterval(30),
+            summary: "Review completed.",
+            canonicalReview: finalReview,
+            parsedResult: PersistedParsedReviewResult(
+                parsedResult ?? .parse(finalReviewText: finalReview)
             )
         )
     }
 
-    static func failed(
+    static func nonCompleted(
         id: String,
-        cwd: String = "/tmp/workspace",
-        workspaceSortOrder: Double = 0,
-        sortOrder: Double = 0,
-        target: CodexReviewAPI.Target = .uncommittedChanges,
-        startedAt: Date = startedAt,
-        endedAt: Date? = nil,
+        model: String? = "gpt-5.6-sol",
         terminal: ReviewTerminalRecord = .failed(message: "Backend failed."),
-        errorMessage: String? = "Backend failed.",
-        summary: String = "Review failed.",
-        cancellation: ReviewCancellation? = nil,
-        lastAgentMessage: String? = nil,
-        reviewResult: ParsedReviewResult? = nil
-    ) -> ReviewHistoryRecord {
-        let status: ReviewJobState = if case .interrupted(.requested) = terminal {
-            .cancelled
+        endedAt: Date? = nil,
+        summary: String = "Review failed."
+    ) throws -> TerminalReviewRecord {
+        let resolvedEnd: Date? = if case .interrupted(.previousProcessExit) = terminal {
+            nil
         } else {
-            .failed
+            endedAt ?? startedAt.addingTimeInterval(15)
         }
-        return ReviewHistoryRecord(
+        return try TerminalReviewRecord(
             id: id,
-            cwd: cwd,
-            workspaceSortOrder: workspaceSortOrder,
-            sortOrder: sortOrder,
-            target: target,
-            core: ReviewJobCore(
-                lifecycle: .init(
-                    status: status,
-                    startedAt: startedAt,
-                    endedAt: endedAt ?? startedAt.addingTimeInterval(15),
-                    cancellation: cancellation,
-                    errorMessage: errorMessage,
-                    terminal: terminal
-                ),
-                output: .init(
-                    summary: summary,
-                    lastAgentMessage: lastAgentMessage,
-                    reviewResult: reviewResult
-                )
-            )
+            model: model,
+            terminal: terminal,
+            endedAt: resolvedEnd,
+            summary: summary,
+            canonicalReview: nil,
+            parsedResult: nil
         )
     }
 
     static func record(
-        _ terminal: ReviewHistoryRecord,
+        started: StartedReviewRecord,
+        terminal: TerminalReviewRecord,
         in database: ReviewHistoryDatabase,
         retentionPolicy: ReviewHistoryRetentionPolicy = .default
     ) async throws -> ReviewHistoryMutationResult {
-        try await database.recordStarted(started(
-            id: terminal.id,
-            cwd: terminal.cwd,
-            workspaceSortOrder: terminal.workspaceSortOrder,
-            sortOrder: terminal.sortOrder,
-            target: terminal.target,
-            startedAt: terminal.core.lifecycle.startedAt ?? startedAt
-        ))
+        try await database.recordStarted(started)
         return try await database.recordTerminal(
             terminal,
             retentionPolicy: retentionPolicy

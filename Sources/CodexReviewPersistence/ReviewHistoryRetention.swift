@@ -5,27 +5,38 @@ import SQLiteData
 enum ReviewHistoryRetention {
     static func prune(
         in db: Database,
-        policy: ReviewHistoryRetentionPolicy
+        policy: ReviewHistoryRetentionPolicy,
+        protecting protectedReviewID: String?
     ) throws -> Set<String> {
-        let terminalRows = try ReviewRecordRow.fetchAll(db).filter(\.isTerminal)
-        var removedIDs = Set<String>()
+        let terminalRows = try ReviewRecordRow.fetchAll(db).filter {
+            $0.phase == "terminal"
+        }
+        for row in terminalRows where row.terminalCommittedAt == nil {
+            throw ReviewHistoryDatabaseError.invalidRecord(
+                id: row.id,
+                reason: "terminal row is missing its retention timestamp"
+            )
+        }
 
+        var removedIDs = Set<String>()
         let rowsByWorkspace = Dictionary(grouping: terminalRows, by: \.cwd)
         for cwd in rowsByWorkspace.keys.sorted() {
-            guard let rows = rowsByWorkspace[cwd],
-                  rows.count > policy.maximumReviewsPerWorkspace
-            else {
+            guard let rows = rowsByWorkspace[cwd] else {
                 continue
             }
-            let excess = rows.count - policy.maximumReviewsPerWorkspace
-            removedIDs.formUnion(rows.sortedByOldest.prefix(excess).map(\.id))
+            removedIDs.formUnion(removals(
+                from: rows,
+                maximumCount: policy.maximumReviewsPerWorkspace,
+                protecting: protectedReviewID
+            ))
         }
 
         let globallyRemaining = terminalRows.filter { removedIDs.contains($0.id) == false }
-        if globallyRemaining.count > policy.maximumReviews {
-            let excess = globallyRemaining.count - policy.maximumReviews
-            removedIDs.formUnion(globallyRemaining.sortedByOldest.prefix(excess).map(\.id))
-        }
+        removedIDs.formUnion(removals(
+            from: globallyRemaining,
+            maximumCount: policy.maximumReviews,
+            protecting: protectedReviewID
+        ))
 
         for id in removedIDs.sorted() {
             try ReviewRecordRow.find(id).delete().execute(db)
@@ -43,31 +54,36 @@ enum ReviewHistoryRetention {
             try ReviewWorkspaceRow.find(workspace.cwd).delete().execute(db)
         }
     }
-}
 
-private extension ReviewRecordRow {
-    var isTerminal: Bool {
-        switch status {
-        case ReviewJobState.queued.rawValue, ReviewJobState.running.rawValue:
-            false
-        default:
-            true
+    private static func removals(
+        from rows: [ReviewRecordRow],
+        maximumCount: Int,
+        protecting protectedReviewID: String?
+    ) -> Set<String> {
+        let excess = max(0, rows.count - maximumCount)
+        guard excess > 0 else {
+            return []
         }
-    }
-
-    var retentionDate: Date {
-        endedAt ?? startedAt
+        return Set(
+            rows.sortedByOldest
+                .lazy
+                .filter { $0.id != protectedReviewID }
+                .prefix(excess)
+                .map(\.id)
+        )
     }
 }
 
 private extension Array where Element == ReviewRecordRow {
     var sortedByOldest: [ReviewRecordRow] {
         sorted { lhs, rhs in
-            if lhs.retentionDate != rhs.retentionDate {
-                return lhs.retentionDate < rhs.retentionDate
+            guard let lhsCommittedAt = lhs.terminalCommittedAt,
+                  let rhsCommittedAt = rhs.terminalCommittedAt
+            else {
+                return lhs.id < rhs.id
             }
-            if lhs.createdAt != rhs.createdAt {
-                return lhs.createdAt < rhs.createdAt
+            if lhsCommittedAt != rhsCommittedAt {
+                return lhsCommittedAt < rhsCommittedAt
             }
             return lhs.id < rhs.id
         }

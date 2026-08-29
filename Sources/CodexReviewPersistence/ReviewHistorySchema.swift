@@ -21,29 +21,24 @@ struct ReviewRecordRow: Equatable, Sendable {
     var targetCommitTitle: String?
     var targetInstructions: String?
 
-    var reviewThreadID: String?
-    var threadID: String?
-    var turnID: String?
-    var model: String?
-
-    var status: String
-    var exitCode: Int?
+    var startedModel: String?
     var startedAt: Date
-    var endedAt: Date?
-    var cancellationSource: String?
-    var cancellationMessage: String?
+
+    var phase: String
+    var terminalModel: String?
     var terminalKind: String?
     var interruptionKind: String?
+    var cancellationSource: String?
+    var cancellationMessage: String?
     var terminalMessage: String?
-    var errorMessage: String?
-
-    var summary: String
-    var hasFinalReview: Bool
-    var canonicalFinalReview: String?
+    var endedAt: Date?
+    var summary: String?
+    var canonicalReview: String?
     var parsedState: String?
     var parsedFindingCount: Int?
     var parsedSource: String?
     var parserVersion: Int?
+    var terminalCommittedAt: Date?
 
     var createdAt: Date
     var updatedAt: Date
@@ -90,29 +85,24 @@ enum ReviewHistorySchema {
                   "targetCommitTitle" TEXT,
                   "targetInstructions" TEXT,
 
-                  "reviewThreadID" TEXT,
-                  "threadID" TEXT,
-                  "turnID" TEXT,
-                  "model" TEXT,
-
-                  "status" TEXT NOT NULL,
-                  "exitCode" INTEGER,
+                  "startedModel" TEXT,
                   "startedAt" TEXT NOT NULL,
-                  "endedAt" TEXT,
-                  "cancellationSource" TEXT,
-                  "cancellationMessage" TEXT,
+
+                  "phase" TEXT NOT NULL,
+                  "terminalModel" TEXT,
                   "terminalKind" TEXT,
                   "interruptionKind" TEXT,
+                  "cancellationSource" TEXT,
+                  "cancellationMessage" TEXT,
                   "terminalMessage" TEXT,
-                  "errorMessage" TEXT,
-
-                  "summary" TEXT NOT NULL,
-                  "hasFinalReview" INTEGER NOT NULL,
-                  "canonicalFinalReview" TEXT,
+                  "endedAt" TEXT,
+                  "summary" TEXT,
+                  "canonicalReview" TEXT,
                   "parsedState" TEXT,
                   "parsedFindingCount" INTEGER,
                   "parsedSource" TEXT,
                   "parserVersion" INTEGER,
+                  "terminalCommittedAt" TEXT,
 
                   "createdAt" TEXT NOT NULL,
                   "updatedAt" TEXT NOT NULL,
@@ -138,79 +128,99 @@ enum ReviewHistorySchema {
                       AND "targetCommitTitle" IS NULL
                       AND length(trim("targetInstructions")) > 0)
                   ),
-                  CHECK ("hasFinalReview" IN (0, 1)),
                   CHECK (
-                    ("status" IN ('queued', 'running')
-                      AND "endedAt" IS NULL
-                      AND "cancellationSource" IS NULL
-                      AND "cancellationMessage" IS NULL
+                    ("phase" = 'active'
+                      AND "terminalModel" IS NULL
                       AND "terminalKind" IS NULL
                       AND "interruptionKind" IS NULL
-                      AND "terminalMessage" IS NULL
-                      AND "hasFinalReview" = 0
-                      AND "canonicalFinalReview" IS NULL
-                      AND "parsedState" IS NULL
-                      AND "parsedFindingCount" IS NULL
-                      AND "parsedSource" IS NULL
-                      AND "parserVersion" IS NULL)
-                    OR ("status" = 'succeeded'
-                      AND "endedAt" IS NOT NULL
                       AND "cancellationSource" IS NULL
                       AND "cancellationMessage" IS NULL
-                      AND "terminalKind" = 'completed'
-                      AND "interruptionKind" IS NULL
                       AND "terminalMessage" IS NULL
-                      AND "hasFinalReview" = 1
-                      AND length(trim("canonicalFinalReview")) > 0
-                      AND "parserVersion" > 0
-                      AND (
-                        ("parsedState" = 'hasFindings'
-                          AND "parsedFindingCount" > 0
-                          AND "parsedSource" = 'parsedFinalReviewText')
-                        OR ("parsedState" = 'noFindings'
-                          AND "parsedFindingCount" = 0
-                          AND "parsedSource" = 'parsedFinalReviewText')
-                        OR ("parsedState" = 'unknown'
-                          AND "parsedFindingCount" IS NULL
-                          AND "parsedSource" IN ('unrecognizedFindingBlock', 'notAvailable'))
-                      ))
-                    OR ("status" = 'cancelled'
-                      AND "endedAt" IS NOT NULL
-                      AND "cancellationSource" IN ('userInterface', 'mcpClient', 'sessionClosed', 'system')
-                      AND length(trim("cancellationMessage")) > 0
-                      AND "terminalKind" = 'interrupted'
-                      AND "interruptionKind" = 'requested'
-                      AND "terminalMessage" IS NULL
-                      AND "hasFinalReview" = 0
-                      AND "canonicalFinalReview" IS NULL
-                      AND "parsedState" IS NULL
-                      AND "parsedFindingCount" IS NULL
-                      AND "parsedSource" IS NULL
-                      AND "parserVersion" IS NULL)
-                    OR ("status" = 'failed'
-                      AND "cancellationSource" IS NULL
-                      AND "cancellationMessage" IS NULL
-                      AND "hasFinalReview" = 0
-                      AND "canonicalFinalReview" IS NULL
+                      AND "endedAt" IS NULL
+                      AND "summary" IS NULL
+                      AND "canonicalReview" IS NULL
                       AND "parsedState" IS NULL
                       AND "parsedFindingCount" IS NULL
                       AND "parsedSource" IS NULL
                       AND "parserVersion" IS NULL
+                      AND "terminalCommittedAt" IS NULL)
+                    OR ("phase" = 'terminal'
+                      AND "summary" IS NOT NULL
+                      AND "terminalCommittedAt" IS NOT NULL
                       AND (
-                        ("terminalKind" = 'failed'
+                        ("terminalKind" = 'completed'
                           AND "endedAt" IS NOT NULL
-                          AND "interruptionKind" IS NULL)
+                          AND "interruptionKind" IS NULL
+                          AND "cancellationSource" IS NULL
+                          AND "cancellationMessage" IS NULL
+                          AND "terminalMessage" IS NULL
+                          AND length(trim("canonicalReview")) > 0
+                          AND "parserVersion" > 0
+                          AND (
+                            ("parsedState" = 'hasFindings'
+                              AND "parsedFindingCount" > 0
+                              AND "parsedSource" = 'parsedFinalReviewText')
+                            OR ("parsedState" = 'noFindings'
+                              AND "parsedFindingCount" = 0
+                              AND "parsedSource" = 'parsedFinalReviewText')
+                            OR ("parsedState" = 'unknown'
+                              AND "parsedFindingCount" IS NULL
+                              AND "parsedSource" IN ('unrecognizedFindingBlock', 'notAvailable'))
+                          ))
                         OR ("terminalKind" = 'interrupted'
+                          AND "interruptionKind" = 'requested'
                           AND "endedAt" IS NOT NULL
-                          AND "interruptionKind" = 'server')
+                          AND "cancellationSource" IN
+                            ('userInterface', 'mcpClient', 'sessionClosed', 'system')
+                          AND "cancellationMessage" IS NOT NULL
+                          AND "terminalMessage" IS NULL
+                          AND "canonicalReview" IS NULL
+                          AND "parsedState" IS NULL
+                          AND "parsedFindingCount" IS NULL
+                          AND "parsedSource" IS NULL
+                          AND "parserVersion" IS NULL)
                         OR ("terminalKind" = 'interrupted'
+                          AND "interruptionKind" = 'server'
                           AND "endedAt" IS NOT NULL
+                          AND "cancellationSource" IS NULL
+                          AND "cancellationMessage" IS NULL
+                          AND "canonicalReview" IS NULL
+                          AND "parsedState" IS NULL
+                          AND "parsedFindingCount" IS NULL
+                          AND "parsedSource" IS NULL
+                          AND "parserVersion" IS NULL)
+                        OR ("terminalKind" = 'interrupted'
                           AND "interruptionKind" = 'transport'
-                          AND length(trim("terminalMessage")) > 0)
+                          AND "endedAt" IS NOT NULL
+                          AND "cancellationSource" IS NULL
+                          AND "cancellationMessage" IS NULL
+                          AND "terminalMessage" IS NOT NULL
+                          AND "canonicalReview" IS NULL
+                          AND "parsedState" IS NULL
+                          AND "parsedFindingCount" IS NULL
+                          AND "parsedSource" IS NULL
+                          AND "parserVersion" IS NULL)
                         OR ("terminalKind" = 'interrupted'
-                          AND "endedAt" IS NULL
                           AND "interruptionKind" = 'previousProcessExit'
-                          AND "terminalMessage" IS NULL)
+                          AND "endedAt" IS NULL
+                          AND "cancellationSource" IS NULL
+                          AND "cancellationMessage" IS NULL
+                          AND "terminalMessage" IS NULL
+                          AND "canonicalReview" IS NULL
+                          AND "parsedState" IS NULL
+                          AND "parsedFindingCount" IS NULL
+                          AND "parsedSource" IS NULL
+                          AND "parserVersion" IS NULL)
+                        OR ("terminalKind" = 'failed'
+                          AND "endedAt" IS NOT NULL
+                          AND "interruptionKind" IS NULL
+                          AND "cancellationSource" IS NULL
+                          AND "cancellationMessage" IS NULL
+                          AND "canonicalReview" IS NULL
+                          AND "parsedState" IS NULL
+                          AND "parsedFindingCount" IS NULL
+                          AND "parsedSource" IS NULL
+                          AND "parserVersion" IS NULL)
                       ))
                   )
                 ) STRICT
@@ -252,7 +262,7 @@ enum ReviewHistorySchema {
             try #sql(
                 """
                 CREATE INDEX "review_records_retention"
-                ON "review_records" ("status", "endedAt", "createdAt", "id")
+                ON "review_records" ("phase", "terminalCommittedAt", "id")
                 """
             )
             .execute(db)

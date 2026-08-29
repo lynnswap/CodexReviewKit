@@ -5,7 +5,7 @@ package enum ReviewHistoryDatabaseError: LocalizedError, Equatable, Sendable {
     case foreignKeysDisabled
     case duplicateReview(String)
     case reviewNotFound(String)
-    case activeReviewCannotBeDeleted(String)
+    case closeFailed(String)
     case invalidRecord(id: String, reason: String)
 
     package var errorDescription: String? {
@@ -18,8 +18,8 @@ package enum ReviewHistoryDatabaseError: LocalizedError, Equatable, Sendable {
             "Review history already contains review \(id)."
         case .reviewNotFound(let id):
             "Review history does not contain review \(id)."
-        case .activeReviewCannotBeDeleted(let id):
-            "Active review \(id) cannot be deleted from review history."
+        case .closeFailed(let message):
+            "Review history database close failed: \(message)"
         case .invalidRecord(let id, let reason):
             "Review history record \(id) is invalid: \(reason)"
         }
