@@ -24,6 +24,7 @@ final class ReviewMonitorSidebarJobFilterToolbarItem: NSToolbarItem {
         )
         super.init(itemIdentifier: itemIdentifier)
 
+        visibilityPriority = .high
         label = "Filter"
         paletteLabel = "Filter"
         toolTip = "Filter"
