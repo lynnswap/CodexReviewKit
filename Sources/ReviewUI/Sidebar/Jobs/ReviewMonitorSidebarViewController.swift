@@ -110,9 +110,11 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
     private final class SidebarShowMoreItem {
         let sectionID: String
+        var hiddenJobCount: Int
 
-        init(sectionID: String) {
+        init(sectionID: String, hiddenJobCount: Int) {
             self.sectionID = sectionID
+            self.hiddenJobCount = hiddenJobCount
         }
     }
 
@@ -132,7 +134,10 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             jobs: [CodexReviewJob]
         ) {
             self.id = id
-            self.showMoreItem = SidebarShowMoreItem(sectionID: id)
+            self.showMoreItem = SidebarShowMoreItem(
+                sectionID: id,
+                hiddenJobCount: max(0, jobs.count - SidebarJobPresentation.collapsedLimit)
+            )
             self.title = title
             self.workspaces = workspaces
             self.jobs = jobs
@@ -566,20 +571,38 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             }
             let displayedChildren = displayedChildItems(inRootItem: rootItem)
             let targetChildren = section.presentedChildren
-            guard hasSameIdentityOrder(displayedChildren, targetChildren) == false else {
-                continue
+            let showMoreContentChanged = section.showMoreItem.hiddenJobCount != section.hiddenJobCount
+            section.showMoreItem.hiddenJobCount = section.hiddenJobCount
+            if hasSameIdentityOrder(displayedChildren, targetChildren) == false {
+                if outlineView.isItemExpanded(rootItem) {
+                    applyMembershipChange(
+                        currentItems: displayedChildren,
+                        targetItems: targetChildren,
+                        parent: rootItem,
+                        animated: animated
+                    )
+                } else {
+                    reloadRootItem(rootItem, allRootItems: rootItems)
+                }
             }
-            if outlineView.isItemExpanded(rootItem) {
-                applyMembershipChange(
-                    currentItems: displayedChildren,
-                    targetItems: targetChildren,
-                    parent: rootItem,
-                    animated: animated
-                )
-                continue
+            if showMoreContentChanged {
+                reconfigureVisibleShowMoreCell(for: section)
             }
-            reloadRootItem(rootItem, allRootItems: rootItems)
         }
+    }
+
+    private func reconfigureVisibleShowMoreCell(for section: SidebarWorkspaceSection) {
+        let row = outlineView.row(forItem: section.showMoreItem)
+        guard row != -1,
+              let cellView = outlineView.view(
+                atColumn: 0,
+                row: row,
+                makeIfNecessary: false
+              ) as? ReviewMonitorShowMoreCellView
+        else {
+            return
+        }
+        configureShowMoreCell(cellView, item: section.showMoreItem)
     }
 
     private func reloadOutline(rootItems: [AnyObject]) {
@@ -803,6 +826,18 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             reloadRootItem(section, allRootItems: currentRootTopologies.map(\.item))
         }
         reconcileSelectionAfterOutlineMutation()
+    }
+
+    private func configureShowMoreCell(
+        _ cellView: ReviewMonitorShowMoreCellView,
+        item: SidebarShowMoreItem
+    ) {
+        cellView.configure(
+            item: item,
+            hiddenJobCount: item.hiddenJobCount
+        ) { [weak self] in
+            self?.showAllJobs(inSectionID: item.sectionID)
+        }
     }
 
     private func restoreSelectedJobRowAfterExpansion(of section: SidebarWorkspaceSection) {
@@ -1902,18 +1937,11 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             view.configure(with: job)
             return view
         }
-        if let showMoreItem = showMoreItem(from: item),
-           let section = workspaceSection(id: showMoreItem.sectionID)
-        {
+        if let showMoreItem = showMoreItem(from: item) {
             let view = (outlineView.makeView(withIdentifier: Identifier.showMoreCell, owner: self) as? ReviewMonitorShowMoreCellView)
                 ?? ReviewMonitorShowMoreCellView()
             view.identifier = Identifier.showMoreCell
-            view.configure(
-                item: showMoreItem,
-                hiddenJobCount: section.hiddenJobCount
-            ) { [weak self] in
-                self?.showAllJobs(inSectionID: showMoreItem.sectionID)
-            }
+            configureShowMoreCell(view, item: showMoreItem)
             return view
         }
         return nil

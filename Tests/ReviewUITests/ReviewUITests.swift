@@ -1569,6 +1569,57 @@ struct ReviewUITests {
         #expect(store.orderedJobs(in: workspace).map(\.id) == orderedJobs.map(\.id))
     }
 
+    @Test func showMoreButtonRefreshesWhenOnlyHiddenMembershipChanges() async throws {
+        let jobs = (0..<7).map { index in
+            makeJob(
+                id: "job-hidden-count-\(index)",
+                cwd: "/tmp/workspace-alpha",
+                status: .running,
+                targetSummary: "Review \(index)"
+            )
+        }
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            content: makeSidebarContent(from: jobs)
+        )
+        let workspace = try #require(store.workspaces.first)
+        let orderedJobs = store.orderedJobs(in: workspace)
+        let viewController = ReviewMonitorSplitViewController(
+            store: store,
+            uiState: ReviewMonitorUIState(auth: store.auth)
+        )
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 360, height: 520))
+        viewController.loadViewIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        #expect(sidebar.showMoreButtonAccessibilityLabelForTesting(containing: workspace) == "Show 2 more reviews")
+        let membershipChangeCount = sidebar.sidebarIncrementalMembershipChangeCountForTesting
+        let labels = try await observedValues(
+            from: sidebar.sidebarTopologyObservationForTesting
+        ) {
+            sidebar.showMoreButtonAccessibilityLabelForTesting(containing: workspace)
+        }
+        defer { labels.cancel() }
+
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [workspace],
+            jobs: Array(orderedJobs.dropLast())
+        )
+
+        #expect(await labels.waitUntilValue("Show 1 more review"))
+        #expect(sidebar.sidebarIncrementalMembershipChangeCountForTesting == membershipChangeCount)
+        #expect(
+            sidebar.displayedSectionChildrenForTesting(containing: workspace)
+                == orderedJobs.prefix(5).map { .job(id: $0.id) }
+                    + [.showMore(hiddenJobCount: 1)]
+        )
+    }
+
     @Test func collapsedSidebarJobDropMapsOnlyPresentedRows() async throws {
         let jobs = (0..<7).map { index in
             makeJob(
