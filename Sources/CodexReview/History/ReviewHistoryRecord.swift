@@ -24,28 +24,69 @@ package struct ReviewHistoryRecord: Sendable, Hashable {
         self.core = core
     }
 
+    @MainActor
+    package init(
+        job: CodexReviewJob,
+        workspaceSortOrder: Double
+    ) {
+        self.init(
+            id: job.id,
+            cwd: job.cwd,
+            workspaceSortOrder: workspaceSortOrder,
+            sortOrder: job.sortOrder,
+            target: job.target,
+            core: Self.persistenceCore(from: job.core)
+        )
+    }
+
     package var isTerminal: Bool {
         core.isTerminal
     }
 
     @MainActor
-    package func makeRestoredJob() -> CodexReviewJob {
-        CodexReviewJob(
+    package func makeRestoredJob() throws -> CodexReviewJob {
+        guard let timestamp = core.lifecycle.endedAt ?? core.lifecycle.startedAt else {
+            throw ReviewHistoryOperationFailure(
+                message: "Loaded review \(id) does not have its required start timestamp."
+            )
+        }
+        return CodexReviewJob(
             id: id,
             sessionID: "history:\(id)",
             cwd: cwd,
             sortOrder: sortOrder,
             targetSummary: target.displaySummary,
+            target: target,
+            origin: .restored,
             core: core,
-            logEntries: compactLogEntries
+            logEntries: compactLogEntries(timestamp: timestamp)
         )
     }
 
-    private var compactLogEntries: [ReviewLogEntry] {
-        let timestamp = core.lifecycle.endedAt
-            ?? core.lifecycle.startedAt
-            ?? .distantPast
+    private static func persistenceCore(from core: ReviewJobCore) -> ReviewJobCore {
+        let output: ReviewJobCore.Output
+        if core.lifecycle.status == .succeeded,
+           core.lifecycle.terminal == .completed,
+           core.output.hasFinalReview,
+           let finalReview = core.output.lastAgentMessage?.nilIfEmpty
+        {
+            output = .init(
+                summary: core.output.summary,
+                hasFinalReview: true,
+                lastAgentMessage: finalReview,
+                reviewResult: core.output.reviewResult
+            )
+        } else {
+            output = .init(summary: core.output.summary)
+        }
+        return ReviewJobCore(
+            run: core.run,
+            lifecycle: core.lifecycle,
+            output: output
+        )
+    }
 
+    private func compactLogEntries(timestamp: Date) -> [ReviewLogEntry] {
         if core.output.hasFinalReview,
            let finalReview = core.output.lastAgentMessage?.nilIfEmpty
         {
@@ -83,7 +124,7 @@ package struct ReviewHistoryRecord: Sendable, Hashable {
         case .interrupted(.transport(let message)):
             message
         case .interrupted(.previousProcessExit):
-            "The previous ReviewMonitor process exited before this review completed."
+            "The previous review process exited before completion."
         case .failed(let message):
             message
         case nil:

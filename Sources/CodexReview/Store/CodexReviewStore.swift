@@ -94,6 +94,18 @@ public final class CodexReviewStore {
     public package(set) var serverURL: URL?
     public package(set) var workspaces: Set<CodexReviewWorkspace> = []
     public package(set) var jobs: Set<CodexReviewJob> = []
+    package private(set) var historyAvailability: ReviewHistoryAvailability = .loading
+    package var historyFailureMessage: String? {
+        guard case .failed(let message) = historyAvailability else {
+            return nil
+        }
+        return message
+    }
+    package func transitionHistoryAvailability(
+        to availability: ReviewHistoryAvailability
+    ) {
+        historyAvailability = availability
+    }
     package var shouldAutoStartEmbeddedServer: Bool {
         backend.seed.shouldAutoStartEmbeddedServer
     }
@@ -115,6 +127,16 @@ public final class CodexReviewStore {
     @ObservationIgnored package var previewSupportRetainer: AnyObject?
     @ObservationIgnored package let clock: CodexReviewClock
     @ObservationIgnored package let idGenerator: CodexReviewIDGenerator
+    @ObservationIgnored package let historyPersistence: any ReviewHistoryPersistence
+    @ObservationIgnored package let historyRetentionPolicy: ReviewHistoryRetentionPolicy
+    @ObservationIgnored package var historyLoadTask: Task<Result<[ReviewHistoryRecord], ReviewHistoryOperationFailure>, Never>?
+    @ObservationIgnored package var historyLoadWasApplied = false
+    @ObservationIgnored package var historyLoadSucceeded = false
+    @ObservationIgnored package var persistedStartedReviewIDs: Set<String> = []
+    @ObservationIgnored package var persistedTerminalReviewIDs: Set<String> = []
+    @ObservationIgnored package var historyMutationRevision: UInt64 = 0
+    @ObservationIgnored package var applicationShutdownRequested = false
+    @ObservationIgnored package var applicationShutdownTask: Task<Void, Never>?
     @ObservationIgnored package var reviewAttemptOwnerships: [String: StoreReviewAttemptOwnership] = [:]
     @ObservationIgnored package var reviewWorkerTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored package var runtimeStopDetachedReviewWorkerTasks: [String: Task<Void, Never>] = [:]
@@ -135,7 +157,9 @@ public final class CodexReviewStore {
         clock: CodexReviewClock = .init(),
         idGenerator: CodexReviewIDGenerator = .init(),
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
-        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default
+        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
+        historyPersistence: any ReviewHistoryPersistence = DisabledReviewHistoryPersistence(),
+        historyRetentionPolicy: ReviewHistoryRetentionPolicy = .default
     ) {
         self.backend = backend
         self.networkMonitor = networkMonitor
@@ -143,6 +167,8 @@ public final class CodexReviewStore {
         self.diagnosticsURL = diagnosticsURL
         self.clock = clock
         self.idGenerator = idGenerator
+        self.historyPersistence = historyPersistence
+        self.historyRetentionPolicy = historyRetentionPolicy
         self.auth = CodexReviewAuthModel()
         self.settings = SettingsStore(snapshot: backend.seed.initialSettingsSnapshot)
         self.settingsService = settingsService ?? CodexReviewSettingsService(
@@ -168,6 +194,8 @@ public final class CodexReviewStore {
 
     isolated deinit {
         accountRateLimitAutoRefreshDriver?.cancel()
+        historyLoadTask?.cancel()
+        applicationShutdownTask?.cancel()
         storeWorkRegistry.cancelWithoutWaiting()
         switch runtimeState {
         case .acquiring(_, _, let task),
@@ -212,7 +240,9 @@ public final class CodexReviewStore {
         clock: CodexReviewClock = .init(),
         idGenerator: CodexReviewIDGenerator = .init(),
         networkMonitor: any CodexReviewNetworkMonitoring = StaticCodexReviewNetworkMonitor(),
-        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default
+        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
+        historyPersistence: any ReviewHistoryPersistence = DisabledReviewHistoryPersistence(),
+        historyRetentionPolicy: ReviewHistoryRetentionPolicy = .default
     ) -> CodexReviewStore {
         CodexReviewStore(
             backend: backend,
@@ -220,11 +250,19 @@ public final class CodexReviewStore {
             clock: clock,
             idGenerator: idGenerator,
             networkMonitor: networkMonitor,
-            networkRecoveryPolicy: networkRecoveryPolicy
+            networkRecoveryPolicy: networkRecoveryPolicy,
+            historyPersistence: historyPersistence,
+            historyRetentionPolicy: historyRetentionPolicy
         )
     }
 
     public func start(forceRestartIfNeeded: Bool = false) async {
+        await loadReviewHistoryIfNeeded()
+        guard Task.isCancelled == false,
+              applicationShutdownRequested == false
+        else {
+            return
+        }
         guard let operation = admitRuntimeStart(
             forceRestartIfNeeded: forceRestartIfNeeded
         ) else {
@@ -757,7 +795,7 @@ public final class CodexReviewStore {
                 case .skip:
                     return
                 case .runFinalizer(let finalizer):
-                    finalizer(self)
+                    await finalizer(self)
                     return
                 }
             }
