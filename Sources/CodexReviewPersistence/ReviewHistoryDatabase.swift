@@ -284,14 +284,16 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
 
     private static func decodeAllRestored(in db: Database) throws -> [RestoredReviewRecord] {
         let decoded = try decodeAll(in: db)
-        let records = try decoded.map { value in
-            guard case .terminal(let record) = value else {
+        let records = try decoded.map { value -> RestoredReviewRecord in
+            switch value {
+            case .terminal(let record):
+                return record
+            case .active(let started):
                 throw ReviewHistoryDatabaseError.invalidRecord(
-                    id: "active",
+                    id: started.id,
                     reason: "startup orphan finalization left an active row"
                 )
             }
-            return record
         }
         return records.sorted { lhs, rhs in
             if lhs.started.workspaceSortOrder != rhs.started.workspaceSortOrder {
