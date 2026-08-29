@@ -1009,6 +1009,12 @@ struct ReviewUITests {
         #expect(sidebar.sidebarIncrementalMoveCountForTesting == incrementalMoveCountBeforeChange)
     }
 
+    @Test func addAccountToolbarButtonUsesExtraLargeControlSize() {
+        let toolbarItemView = AddAccountToolbarItemView()
+
+        #expect(toolbarItemView.addButtonControlSizeForTesting == .extraLarge)
+    }
+
     @Test func addAccountToolbarItemShowsProgressPresentation() async throws {
         let store = CodexReviewStore.makePreviewStore()
         let activeAccount = CodexAccount(email: "first@example.com", planType: "pro")
