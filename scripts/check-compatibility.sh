@@ -47,6 +47,7 @@ run_mcp() {
   swift test \
     --package-path "$repo_root" \
     --build-system swiftbuild \
+    --disable-automatic-resolution \
     --no-parallel \
     --filter toolsListMatchesPublishedV062Golden
 }

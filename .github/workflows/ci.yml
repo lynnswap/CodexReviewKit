@@ -18,13 +18,13 @@ permissions:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   package-tests:
-    name: Package Tests (macOS)
+    name: Swift Package Tests (macOS)
     runs-on: macos-26
-    timeout-minutes: 20
+    timeout-minutes: 15
     env:
       XCODE_MAJOR: '26'
     steps:
@@ -66,8 +66,163 @@ jobs:
           xcodebuild -version
           xcodebuild -showsdks
 
-      - name: Run Swift package tests
-        run: swift test --build-system swiftbuild --no-parallel
+      - name: Build Swift package tests
+        timeout-minutes: 8
+        run: >-
+          swift build
+          --build-tests
+          --build-system swiftbuild
+          --disable-automatic-resolution
+
+      - name: Verify Swift package test inventory
+        timeout-minutes: 2
+        run: |
+          test_list="$RUNNER_TEMP/codex-review-package-tests.txt"
+          swift test \
+            --build-system swiftbuild \
+            --disable-automatic-resolution \
+            list \
+            --skip-build \
+            > "$test_list"
+
+          expected_targets="$(printf '%s\n' \
+            ArchitectureFenceTests \
+            CodexReviewAppServerTests \
+            CodexReviewHostTests \
+            CodexReviewMCPServerTests \
+            CodexReviewPersistenceTests \
+            CodexReviewTests \
+            ReviewUITests \
+            TextTransitionsTests)"
+          actual_targets="$(
+            sed -nE 's/^([A-Za-z_][A-Za-z0-9_]*)[.].*$/\1/p' "$test_list" \
+              | LC_ALL=C sort -u
+          )"
+          if [[ "$actual_targets" != "$expected_targets" ]]; then
+            echo "Swift package test target inventory changed." >&2
+            echo "Expected:" >&2
+            printf '%s\n' "$expected_targets" >&2
+            echo "Actual:" >&2
+            printf '%s\n' "$actual_targets" >&2
+            exit 1
+          fi
+
+      - name: Run review model tests
+        timeout-minutes: 3
+        run: |
+          test_filter='^CodexReviewTests\.'
+          grep -Eq "$test_filter" "$RUNNER_TEMP/codex-review-package-tests.txt"
+          swift test \
+            --build-system swiftbuild \
+            --disable-automatic-resolution \
+            --skip-build \
+            --no-parallel \
+            --filter "$test_filter"
+
+      - name: Run app-server tests
+        timeout-minutes: 3
+        run: |
+          test_filter='^CodexReviewAppServerTests\.'
+          grep -Eq "$test_filter" "$RUNNER_TEMP/codex-review-package-tests.txt"
+          swift test \
+            --build-system swiftbuild \
+            --disable-automatic-resolution \
+            --skip-build \
+            --no-parallel \
+            --filter "$test_filter"
+
+      - name: Run host tests
+        timeout-minutes: 3
+        run: |
+          test_filter='^CodexReviewHostTests\.'
+          grep -Eq "$test_filter" "$RUNNER_TEMP/codex-review-package-tests.txt"
+          swift test \
+            --build-system swiftbuild \
+            --disable-automatic-resolution \
+            --skip-build \
+            --no-parallel \
+            --filter "$test_filter"
+
+      - name: Run MCP server tests
+        timeout-minutes: 3
+        run: |
+          test_filter='^CodexReviewMCPServerTests\.'
+          grep -Eq "$test_filter" "$RUNNER_TEMP/codex-review-package-tests.txt"
+          swift test \
+            --build-system swiftbuild \
+            --disable-automatic-resolution \
+            --skip-build \
+            --no-parallel \
+            --filter "$test_filter"
+
+      - name: Run review UI tests
+        timeout-minutes: 5
+        run: |
+          test_filter='^ReviewUITests\.'
+          grep -Eq "$test_filter" "$RUNNER_TEMP/codex-review-package-tests.txt"
+          swift test \
+            --build-system swiftbuild \
+            --disable-automatic-resolution \
+            --skip-build \
+            --no-parallel \
+            --filter "$test_filter"
+
+      - name: Run persistence, transition, and architecture tests
+        timeout-minutes: 3
+        run: |
+          test_filter='^(CodexReviewPersistenceTests|TextTransitionsTests|ArchitectureFenceTests)\.'
+          grep -Eq "$test_filter" "$RUNNER_TEMP/codex-review-package-tests.txt"
+          swift test \
+            --build-system swiftbuild \
+            --disable-automatic-resolution \
+            --skip-build \
+            --no-parallel \
+            --filter "$test_filter"
+
+  monitor-tests:
+    name: ReviewMonitor Tests (macOS)
+    runs-on: macos-26
+    timeout-minutes: 10
+    env:
+      XCODE_MAJOR: '26'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve latest stable Xcode
+        run: |
+          xcode_app="$(ruby <<'RUBY'
+          xcode_major = ENV.fetch("XCODE_MAJOR")
+          candidates = Dir["/Applications/Xcode_#{xcode_major}*.app"].select { |path| File.directory?(path) }
+
+          def pre_release_xcode_path?(path)
+            labels = [path, File.realpath(path)].map { |candidate| File.basename(candidate).downcase }
+            labels.any? do |label|
+              label.match?(/beta|release[ _-]?candidate|(?:^|[_. -])rc(?:$|[_. -])/)
+            end
+          end
+
+          candidates = candidates.reject do |path|
+            pre_release_xcode_path?(path)
+          end
+
+          def version_components(path)
+            version = File.basename(path)[/Xcode_(\d+(?:\.\d+)*)/, 1]
+            version.to_s.split(".").map(&:to_i)
+          end
+
+          selected = candidates.max_by { |path| version_components(path) }
+          abort("No stable Xcode #{xcode_major} installation found") unless selected
+          puts selected
+          RUBY
+          )"
+          echo "DEVELOPER_DIR=${xcode_app}/Contents/Developer" >> "$GITHUB_ENV"
+          echo "Resolved Xcode: ${xcode_app}"
+
+      - name: Show Xcode environment
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks
 
       - name: Run monitor app tests
         run: |
@@ -82,10 +237,20 @@ jobs:
             CODE_SIGNING_REQUIRED=NO
 
   published-compatibility:
-    name: Published Compatibility (Xcode 27)
+    name: Published Compatibility (${{ matrix.label }}, Xcode 27)
     # GitHub-hosted preview image: actions/runner-images#14404.
     runs-on: xcode-27
-    timeout-minutes: 15
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - gate: consumer
+            label: Consumer
+          - gate: api
+            label: Public API
+          - gate: mcp
+            label: MCP
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -95,5 +260,5 @@ jobs:
           xcodebuild -version
           xcodebuild -showsdks
 
-      - name: Run published compatibility gates
-        run: scripts/check-compatibility.sh
+      - name: Run published compatibility gate
+        run: scripts/check-compatibility.sh '${{ matrix.gate }}'
