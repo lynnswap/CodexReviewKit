@@ -6,22 +6,22 @@ import CodexReviewHost
 
 @Suite("directory capability")
 struct DirectoryCapabilityTests {
-    @Test func entryNamesRejectTraversalAndSeparators() {
-        for value in ["", ".", "..", "a/b", "a\0b"] {
-            expectDirectoryError(.invalidRequest) {
-                _ = try DirectoryCapability.Name(value)
-            }
+    @Test(arguments: ["", ".", "..", "a/b", "a\0b"])
+    func entryNamesRejectTraversalAndSeparators(value: String) {
+        expectDirectoryError(.invalidRequest) {
+            _ = try DirectoryCapability.Name(value)
         }
+    }
+
+    @Test func validEntryNameIsAccepted() {
         #expect((try? DirectoryCapability.Name("valid-name")) != nil)
+    }
+
+    @Test(arguments: ["relative", "http://:80/path"])
+    func rootCapabilityRequiresAnAbsoluteFileURL(value: String) {
         expectDirectoryError(.invalidRequest) {
             _ = try DirectoryCapability.openExisting(
-                at: URL(string: "relative")!,
-                requirements: .trustedAnchor(ownerUserID: geteuid())
-            )
-        }
-        expectDirectoryError(.invalidRequest) {
-            _ = try DirectoryCapability.openExisting(
-                at: URL(string: "http://:80/path")!,
+                at: URL(string: value)!,
                 requirements: .trustedAnchor(ownerUserID: geteuid())
             )
         }
