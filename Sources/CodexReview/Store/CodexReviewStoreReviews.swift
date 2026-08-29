@@ -11,9 +11,14 @@ private let networkRecoveryRestoredMessage = "Network restored; restarting revie
 
 extension CodexReviewStore {
     package func activeJobIDs(for sessionID: String) -> [String] {
-        orderedJobs
-            .filter { $0.belongsToLiveSession(sessionID) && $0.isTerminal == false }
+        let activeJobs = orderedJobs
+            .filter { $0.belongs(toLiveSession: sessionID) && $0.isTerminal == false }
             .map(\.id)
+        let pendingStarts = historyStartReceipts.values
+            .filter { $0.sessionID == sessionID }
+            .sorted { $0.ordinal < $1.ordinal }
+            .map { $0.started.id }
+        return activeJobs + pendingStarts
     }
 
     @discardableResult
@@ -21,7 +26,9 @@ extension CodexReviewStore {
         sessionID: String,
         request: CodexReviewAPI.Start.Request
     ) async throws -> CodexReviewAPI.Read.Result {
-        try await performThrowingRegisteredStoreWork(
+        await loadReviewHistoryIfNeeded()
+        try requireReviewHistoryAvailable()
+        return try await performThrowingRegisteredStoreWork(
             kind: .reviewMutation("start")
         ) { @MainActor store, workAdmission in
             try await store.performStartReview(
@@ -39,7 +46,9 @@ extension CodexReviewStore {
         request: CodexReviewAPI.Start.Request,
         waitTimeout: Duration
     ) async throws -> CodexReviewAPI.Read.Result {
-        try await performThrowingRegisteredStoreWork(
+        await loadReviewHistoryIfNeeded()
+        try requireReviewHistoryAvailable()
+        return try await performThrowingRegisteredStoreWork(
             kind: .reviewMutation("start")
         ) { @MainActor store, workAdmission in
             try await store.performStartReview(
@@ -92,7 +101,7 @@ extension CodexReviewStore {
         timeout: Duration? = nil
     ) async throws -> CodexReviewAPI.Read.Result {
         let job = try job(jobID: jobID)
-        if let sessionID, job.belongsToLiveSession(sessionID) == false {
+        if let sessionID, job.belongs(toLiveSession: sessionID) == false {
             throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
         }
         if isReviewResultFinalized(jobID: jobID) == false {
@@ -112,49 +121,64 @@ extension CodexReviewStore {
         }
 
         let validatedRequest = try request.validated()
-        let jobID = idGenerator.next()
-        let createdAt = clock.now()
-        let effectiveModel = settings.effectiveModel
-        let workspaceSortOrder = workspace(cwd: validatedRequest.cwd)?.sortOrder
-            ?? nextWorkspaceSortOrder()
+        let receipt = try makeHistoryStartReceipt(
+            sessionID: sessionID,
+            request: validatedRequest,
+            workAdmission: workAdmission
+        )
+        defer {
+            finishHistoryStartReceipt(receipt)
+        }
+        switch await persistHistoryStart(receipt) {
+        case .success:
+            break
+        case .failure(let failure):
+            throw CodexReviewAPI.Error.io(
+                "Review history start could not be saved: \(failure.localizedDescription)"
+            )
+        }
+        if let cancellation = historyStartCancellationIfStale(receipt) {
+            await terminalizeStaleHistoryStart(
+                receipt,
+                cancellation: cancellation
+            )
+            throw CodexReviewAPI.Error.io(cancellation.message)
+        }
+
+        let started = receipt.started
+        let jobID = started.id
         let job = CodexReviewJob(
             id: jobID,
             sessionID: sessionID,
-            cwd: validatedRequest.cwd,
-            sortOrder: nextJobSortOrder(inWorkspace: validatedRequest.cwd),
-            targetSummary: validatedRequest.target.displaySummary,
-            target: validatedRequest.target,
+            cwd: started.cwd,
+            sortOrder: started.sortOrder,
+            targetSummary: started.target.displaySummary,
+            target: started.target,
             core: .init(
-                run: .init(model: effectiveModel),
-                lifecycle: .init(status: .running, startedAt: createdAt),
+                run: .init(model: started.model),
+                lifecycle: .init(status: .running, startedAt: started.startedAt),
                 output: .init(summary: "Review started.")
             ),
             logEntries: []
         )
-        try await persistStartedReview(ReviewHistoryRecord(
-            job: job,
-            workspaceSortOrder: workspaceSortOrder
-        ))
-        guard Task.isCancelled == false,
-              applicationShutdownRequested == false,
-              storeWorkRegistry.accepts(workAdmission)
-        else {
-            await discardPersistedStartedReview(id: jobID)
-            throw CancellationError()
-        }
-
         let admission = ReviewStartAdmission()
         guard let workerTask = makeReviewWorker(
             jobID: jobID,
             sessionID: sessionID,
             request: validatedRequest,
-            effectiveModel: effectiveModel,
+            effectiveModel: started.model,
             admission: admission
         ) else {
-            await discardPersistedStartedReview(id: jobID)
+            let cancellation = ReviewCancellation.system(
+                message: "Review start was cancelled before backend dispatch."
+            )
+            await terminalizeStaleHistoryStart(
+                receipt,
+                cancellation: cancellation
+            )
             throw CodexReviewAPI.Error.io("Review Store work admission is closed.")
         }
-        insertReviewJob(job, workspaceSortOrder: workspaceSortOrder)
+        insertReviewJob(job, workspaceSortOrder: started.workspaceSortOrder)
         reviewAttemptOwnerships[jobID] = .starting(admission)
         reviewWorkerTasks[jobID]?.cancel()
         reviewWorkerTasks[jobID] = workerTask
@@ -195,6 +219,7 @@ extension CodexReviewStore {
             for: jobID,
             ifOwnedBy: admission
         ) else {
+            await waitForHistoryTerminalCommitIfNeeded(jobID: jobID)
             return
         }
         if let job = job(id: jobID), job.isTerminal == false {
@@ -204,9 +229,7 @@ extension CodexReviewStore {
                 cancellation: job.pendingCancellationRequest?.cancellation ?? .system()
             )
         }
-        if let job = job(id: jobID) {
-            await persistTerminalReviewIfNeeded(job)
-        }
+        await waitForHistoryTerminalCommitIfNeeded(jobID: jobID)
         reviewWorkerTasks.removeValue(forKey: jobID)
         resumeReviewWaiters(for: jobID)
     }
@@ -317,7 +340,7 @@ extension CodexReviewStore {
         }
         await inputs?.cancelAndWait()
         removeStartingReviewOwnership(for: jobID, ifOwnedBy: admission)
-        await persistTerminalReviewIfNeeded(job)
+        await waitForHistoryTerminalCommitIfNeeded(jobID: jobID)
         reviewWorkerTasks.removeValue(forKey: jobID)
         runtimeStopDetachedReviewWorkerTasks.removeValue(forKey: jobID)
         if job.isTerminal {
@@ -843,7 +866,7 @@ extension CodexReviewStore {
         logPage: CodexReviewAPI.Log.PageRequest = .default
     ) throws -> CodexReviewAPI.Read.Result {
         let job = try job(jobID: jobID)
-        if let sessionID, job.belongsToLiveSession(sessionID) == false {
+        if let sessionID, job.belongs(toLiveSession: sessionID) == false {
             throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
         }
         let pageRequest = try logPage.validated()
@@ -878,7 +901,7 @@ extension CodexReviewStore {
     ) -> CodexReviewAPI.List.Result {
         let statusSet = statuses.map(Set.init)
         let filtered = orderedJobs.filter { job in
-            if let sessionID, job.belongsToLiveSession(sessionID) == false {
+            if let sessionID, job.belongs(toLiveSession: sessionID) == false {
                 return false
             }
             if let cwd, job.cwd != cwd {
@@ -900,7 +923,7 @@ extension CodexReviewStore {
     package func resolveJob(sessionID: String?, selector: CodexReviewAPI.Job.Selector) throws -> CodexReviewJob {
         let statusSet = selector.statuses.map(Set.init)
         let matches = orderedJobs.filter { job in
-            if let sessionID, job.belongsToLiveSession(sessionID) == false {
+            if let sessionID, job.belongs(toLiveSession: sessionID) == false {
                 return false
             }
             if let cwd = selector.cwd, job.cwd != cwd {
@@ -931,7 +954,7 @@ extension CodexReviewStore {
         try await performThrowingRegisteredStoreWork(
             kind: .reviewMutation("cancel")
         ) { @MainActor store, workAdmission in
-            guard let job = store.job(id: jobID), job.belongsToLiveSession(sessionID) else {
+            guard let job = store.job(id: jobID), job.belongs(toLiveSession: sessionID) else {
                 throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
             }
             return try await store.performCancelReview(
@@ -965,7 +988,8 @@ extension CodexReviewStore {
         workAdmission: ReviewStoreWorkRegistry.Admission? = nil
     ) async throws -> CodexReviewAPI.Cancel.Outcome {
         let job = try job(jobID: jobID)
-        guard job.isTerminal == false else {
+        if job.isTerminal {
+            await waitForHistoryTerminalCommitIfNeeded(jobID: job.id)
             return .init(jobID: job.id, cancelled: false, core: job.core)
         }
         guard let ownership = reviewAttemptOwnerships[jobID] else {
@@ -984,6 +1008,7 @@ extension CodexReviewStore {
             workAdmission: workAdmission,
             for: job
         ) else {
+            await waitForHistoryTerminalCommitIfNeeded(jobID: job.id)
             return .init(jobID: job.id, cancelled: false, core: job.core)
         }
         return try await performCancelReview(
@@ -998,7 +1023,8 @@ extension CodexReviewStore {
         cancellationRequest: ReviewCancellationRequestReceipt
     ) async throws -> CodexReviewAPI.Cancel.Outcome {
         let job = try job(jobID: jobID)
-        guard job.isTerminal == false else {
+        if job.isTerminal {
+            await waitForHistoryTerminalCommitIfNeeded(jobID: job.id)
             return .init(jobID: job.id, cancelled: false, core: job.core)
         }
         guard let ownership = reviewAttemptOwnerships[jobID] else {
@@ -1038,7 +1064,8 @@ extension CodexReviewStore {
                    case .outcomeUnknown = requestFailure.outcome {
                     throw requestFailure
                 }
-                guard job.isTerminal == false else {
+                if job.isTerminal {
+                    await waitForHistoryTerminalCommitIfNeeded(jobID: job.id)
                     return .init(
                         jobID: job.id,
                         cancelled: job.core.lifecycle.status == .cancelled,
@@ -1064,6 +1091,7 @@ extension CodexReviewStore {
             )
             reviewWorkerTasks[jobID]?.cancel()
         }
+        await waitForHistoryTerminalCommitIfNeeded(jobID: job.id)
         return .init(
             jobID: job.id,
             cancelled: job.core.lifecycle.status == .cancelled,
@@ -1096,6 +1124,10 @@ extension CodexReviewStore {
 
         let operationID = UUID()
         let cancellationPublication = ReviewStoreSessionCloseCancellationPublication()
+        let pendingHistoryStarts = requestHistoryStartCancellations(
+            sessionID: sessionID,
+            cancellation: reason
+        )
         let jobIDs = activeJobIDs(for: sessionID)
         let workerTasks = jobIDs.reduce(into: [String: Task<Void, Never>]()) { result, jobID in
             result[jobID] = reviewWorkerTasks[jobID]
@@ -1136,7 +1168,8 @@ extension CodexReviewStore {
             await self.performCloseSession(
                 jobIDs: jobIDs,
                 cancellationRequests: cancellationRequests,
-                workerTasks: workerTasks
+                workerTasks: workerTasks,
+                pendingHistoryStarts: pendingHistoryStarts
             )
         }
         let receipt = ReviewStoreSessionCloseReceipt(
@@ -1187,7 +1220,8 @@ extension CodexReviewStore {
     private func performCloseSession(
         jobIDs: [String],
         cancellationRequests: [String: ReviewCancellationRequestReceipt],
-        workerTasks: [String: Task<Void, Never>]
+        workerTasks: [String: Task<Void, Never>],
+        pendingHistoryStarts: [HistoryStartReceipt]
     ) async {
         for jobID in jobIDs {
             guard let request = cancellationRequests[jobID] else {
@@ -1208,6 +1242,7 @@ extension CodexReviewStore {
             workerTask.cancel()
             await workerTask.value
         }
+        await waitForHistoryStarts(pendingHistoryStarts)
     }
 
     private func retireSessionCloseReceipt(
@@ -1224,6 +1259,9 @@ extension CodexReviewStore {
         _ = try? await performThrowingRegisteredStoreWork(
             kind: .reviewMutation("close-active-sessions")
         ) { @MainActor store, workAdmission in
+            let pendingStarts = store.requestHistoryStartCancellations(
+                cancellation: reason
+            )
             let jobIDs = store.orderedJobs
                 .filter { $0.isTerminal == false }
                 .map(\.id)
@@ -1234,6 +1272,7 @@ extension CodexReviewStore {
                     workAdmission: workAdmission
                 )
             }
+            await store.waitForHistoryStarts(pendingStarts)
         }
     }
 
@@ -1295,7 +1334,6 @@ extension CodexReviewStore {
             workspaces.insert(workspace)
         }
         jobs.insert(job)
-        noteHistoryMembershipOrOrderingMutation()
         writeDiagnosticsIfNeeded()
     }
 
@@ -1318,6 +1356,7 @@ extension CodexReviewStore {
         job.core.output.summary = displayMessage
         job.appendLogEntry(.init(kind: .error, text: displayMessage, timestamp: endedAt))
         job.applyReviewLogLimit()
+        beginHistoryTerminalCommitIfNeeded(for: job)
         writeDiagnosticsIfNeeded()
         resumeReviewWaiters(for: job.id)
     }
@@ -1957,6 +1996,7 @@ extension CodexReviewStore {
             ))
         }
         job.applyReviewLogLimit()
+        beginHistoryTerminalCommitIfNeeded(for: job)
         writeDiagnosticsIfNeeded()
         resumeReviewWaiters(for: job.id)
     }
@@ -2023,6 +2063,7 @@ extension CodexReviewStore {
         // result owner until cleanup and any secondary diagnostic are finalized. Runtime-stop
         // detachment is the explicit boundary that transfers only lifecycle cleanup ownership.
         return reviewWorkerTasks[jobID] == nil
+            && historyTerminalCommitIsResolved(jobID: jobID)
     }
 
     private func resumeReviewWaiter(jobID: String, waiterID: UUID) {
@@ -2041,13 +2082,6 @@ extension CodexReviewStore {
         waiter.continuation.resume()
     }
 
-    private func nextJobSortOrder(inWorkspace cwd: String) -> Double {
-        (jobs(inWorkspace: cwd).map(\.sortOrder).max() ?? -1) + 1
-    }
-
-    private func nextWorkspaceSortOrder() -> Double {
-        (workspaces.map(\.sortOrder).max() ?? -1) + 1
-    }
 }
 
 package func latestCleanupCancellationRequest(_ captured: ReviewCancellationRequestReceipt?, _ current: ReviewCancellationRequestReceipt?) -> ReviewCancellationRequestReceipt? {

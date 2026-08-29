@@ -4,7 +4,7 @@ package struct ReviewHistoryOperationFailure: LocalizedError, Sendable, Equatabl
     package let message: String
 
     package init(_ error: any Error) {
-        self.message = error.localizedDescription
+        message = error.localizedDescription
     }
 
     package init(message: String) {
@@ -16,22 +16,31 @@ package struct ReviewHistoryOperationFailure: LocalizedError, Sendable, Equatabl
     }
 }
 
+private enum DeleteReviewHistoryPlan: Sendable {
+    case none
+    case review(String)
+    case allTerminal
+}
+
 extension CodexReviewStore {
     package func loadReviewHistoryIfNeeded() async {
         if historyLoadWasApplied {
             return
         }
 
-        let loadTask: Task<Result<[ReviewHistoryRecord], ReviewHistoryOperationFailure>, Never>
+        let loadTask: Task<Result<[RestoredReviewRecord], ReviewHistoryOperationFailure>, Never>
         if let existing = historyLoadTask {
             loadTask = existing
         } else {
             let persistence = historyPersistence
-            let task = Task<Result<[ReviewHistoryRecord], ReviewHistoryOperationFailure>, Never> {
+            let retentionPolicy = historyRetentionPolicy
+            let task = Task<Result<[RestoredReviewRecord], ReviewHistoryOperationFailure>, Never> {
                 do {
-                    return .success(try await persistence.load())
+                    return .success(try await persistence.load(
+                        retentionPolicy: retentionPolicy
+                    ))
                 } catch {
-                    return .failure(ReviewHistoryOperationFailure(error))
+                    return .failure(.init(error))
                 }
             }
             historyLoadTask = task
@@ -57,28 +66,329 @@ extension CodexReviewStore {
         }
     }
 
-    package func deleteReviewHistory(id: String) async {
-        await loadReviewHistoryIfNeeded()
-        guard historyAvailability == .available,
-              applicationShutdownRequested == false,
-              let job = job(id: id),
-              job.isTerminal,
-              persistedTerminalReviewIDs.contains(id)
-        else {
-            return
+    package func makeHistoryStartReceipt(
+        sessionID: String,
+        request: CodexReviewAPI.Start.Request,
+        workAdmission: ReviewStoreWorkRegistry.Admission
+    ) throws -> HistoryStartReceipt {
+        guard nextHistoryStartOrdinal < UInt64.max else {
+            preconditionFailure("Review history start receipt ordinal exhausted.")
         }
+        nextHistoryStartOrdinal += 1
+        let id = idGenerator.next()
+        let model = settings.effectiveModel
+        let workspaceSortOrder = historyWorkspaceSortOrder(cwd: request.cwd)
+            ?? nextHistoryWorkspaceSortOrder()
+        let record = try StartedReviewRecord(
+            id: id,
+            cwd: request.cwd,
+            workspaceSortOrder: workspaceSortOrder,
+            sortOrder: nextHistoryJobSortOrder(cwd: request.cwd),
+            target: request.target,
+            model: model,
+            startedAt: clock.now()
+        )
+        let receipt = HistoryStartReceipt(
+            ordinal: nextHistoryStartOrdinal,
+            sessionID: sessionID,
+            started: record,
+            workAdmission: workAdmission,
+            orderingRevision: historyMutationRevision
+        )
+        historyStartReceipts[id] = receipt
+        return receipt
+    }
 
+    package func persistHistoryStart(
+        _ receipt: HistoryStartReceipt
+    ) async -> Result<Void, ReviewHistoryOperationFailure> {
+        let persistence = historyPersistence
+        guard let mutation = historyMutationCoordinator.enqueue(
+            intent: receipt.started,
+            prepare: { $0 },
+            operation: { record in
+                try await persistence.recordStarted(record)
+            },
+            apply: { [weak self] record, result in
+                guard let self else {
+                    return
+                }
+                switch result {
+                case .success:
+                    persistedStartedReviewIDs.insert(record.id)
+                case .failure(let failure):
+                    publishReviewHistoryFailure(failure)
+                }
+            }
+        ) else {
+            let failure = ReviewHistoryOperationFailure(
+                message: "Review history mutation admission is closed."
+            )
+            publishReviewHistoryFailure(failure)
+            return .failure(failure)
+        }
+        return await mutation.wait()
+    }
+
+    package func historyStartCancellationIfStale(
+        _ receipt: HistoryStartReceipt
+    ) -> ReviewCancellation? {
+        if let cancellation = receipt.cancellation {
+            return cancellation
+        }
+        if applicationShutdownRequested {
+            return .system(message: "The review application is shutting down.")
+        }
+        if Task.isCancelled || storeWorkRegistry.accepts(receipt.workAdmission) == false {
+            return .system(message: "Review start was cancelled before backend dispatch.")
+        }
+        if closedSessions.contains(receipt.sessionID) {
+            return .sessionClosed()
+        }
+        guard settings.effectiveModel == receipt.started.model,
+              receipt.orderingRevision == historyMutationRevision,
+              historyStartOrderingIsCurrent(receipt)
+        else {
+            return .system(message: "Review start inputs changed before backend dispatch.")
+        }
+        return nil
+    }
+
+    package func terminalizeStaleHistoryStart(
+        _ receipt: HistoryStartReceipt,
+        cancellation: ReviewCancellation
+    ) async {
+        let terminal: TerminalReviewRecord
+        let restored: RestoredReviewRecord
         do {
-            try await historyPersistence.deleteReview(id: id)
+            terminal = try TerminalReviewRecord(
+                id: receipt.started.id,
+                model: receipt.started.model,
+                terminal: .interrupted(.requested(cancellation)),
+                endedAt: clock.now(),
+                summary: cancellation.message,
+                canonicalReview: nil,
+                parsedResult: nil
+            )
+            restored = try RestoredReviewRecord(
+                started: receipt.started,
+                terminal: terminal
+            )
         } catch {
             publishReviewHistoryFailure(error)
             return
         }
 
-        guard let current = self.job(id: id), current === job, current.isTerminal else {
+        let persistence = historyPersistence
+        let retentionPolicy = historyRetentionPolicy
+        guard let mutation = historyMutationCoordinator.enqueue(
+            intent: restored,
+            prepare: { $0 },
+            operation: { restored in
+                try await persistence.recordTerminal(
+                    restored.terminal,
+                    retentionPolicy: retentionPolicy
+                )
+            },
+            apply: { [weak self] restored, result in
+                guard let self else {
+                    return
+                }
+                switch result {
+                case .success(let mutation):
+                    persistedStartedReviewIDs.remove(restored.started.id)
+                    persistedTerminalReviewIDs.insert(restored.started.id)
+                    insertRestoredHistoryJob(restored)
+                    reconcileHistoryMutation(mutation)
+                case .failure(let failure):
+                    publishReviewHistoryFailure(failure)
+                }
+            }
+        ) else {
+            publishReviewHistoryFailure(ReviewHistoryOperationFailure(
+                message: "Review history mutation admission is closed."
+            ))
             return
         }
-        removeHistoryJobs(ids: [id])
+        _ = await mutation.wait()
+    }
+
+    package func finishHistoryStartReceipt(_ receipt: HistoryStartReceipt) {
+        if historyStartReceipts[receipt.started.id] === receipt {
+            historyStartReceipts.removeValue(forKey: receipt.started.id)
+        }
+        receipt.finish()
+    }
+
+    package func requestHistoryStartCancellations(
+        sessionID: String? = nil,
+        cancellation: ReviewCancellation
+    ) -> [HistoryStartReceipt] {
+        let receipts = historyStartReceipts.values
+            .filter { sessionID == nil || $0.sessionID == sessionID }
+            .sorted { $0.ordinal < $1.ordinal }
+        for receipt in receipts {
+            receipt.requestCancellation(cancellation)
+        }
+        return receipts
+    }
+
+    package func waitForHistoryStarts(_ receipts: [HistoryStartReceipt]) async {
+        for receipt in receipts {
+            await receipt.waitUntilFinished()
+        }
+    }
+
+    package func waitForAllHistoryStarts() async {
+        while historyStartReceipts.isEmpty == false {
+            let receipts = historyStartReceipts.values.sorted { $0.ordinal < $1.ordinal }
+            await waitForHistoryStarts(receipts)
+        }
+    }
+
+    package func beginHistoryTerminalCommitIfNeeded(for job: CodexReviewJob) {
+        guard job.isTerminal,
+              persistedStartedReviewIDs.contains(job.id),
+              persistedTerminalReviewIDs.contains(job.id) == false,
+              historyTerminalReceipts[job.id] == nil
+        else {
+            return
+        }
+
+        let terminal: TerminalReviewRecord
+        do {
+            terminal = try makeTerminalReviewRecord(job)
+        } catch {
+            let failure = ReviewHistoryOperationFailure(error)
+            publishReviewHistoryFailure(failure)
+            let mutation = ReviewHistoryMutationReceipt<ReviewHistoryMutationResult>(
+                ordinal: 0,
+                result: .failure(failure)
+            )
+            historyTerminalReceipts[job.id] = HistoryTerminalReceipt(
+                jobID: job.id,
+                mutation: mutation
+            )
+            return
+        }
+
+        let persistence = historyPersistence
+        let retentionPolicy = historyRetentionPolicy
+        guard let mutation = historyMutationCoordinator.enqueue(
+            intent: terminal,
+            prepare: { $0 },
+            operation: { terminal in
+                try await persistence.recordTerminal(
+                    terminal,
+                    retentionPolicy: retentionPolicy
+                )
+            },
+            apply: { [weak self] terminal, result in
+                guard let self else {
+                    return
+                }
+                switch result {
+                case .success(let mutation):
+                    persistedStartedReviewIDs.remove(terminal.id)
+                    persistedTerminalReviewIDs.insert(terminal.id)
+                    reconcileHistoryMutation(mutation)
+                case .failure(let failure):
+                    publishReviewHistoryFailure(failure)
+                }
+                resumeReviewWaiters(for: terminal.id)
+            }
+        ) else {
+            let failure = ReviewHistoryOperationFailure(
+                message: "Review history mutation admission is closed."
+            )
+            publishReviewHistoryFailure(failure)
+            let mutation = ReviewHistoryMutationReceipt<ReviewHistoryMutationResult>(
+                ordinal: 0,
+                result: .failure(failure)
+            )
+            historyTerminalReceipts[job.id] = HistoryTerminalReceipt(
+                jobID: job.id,
+                mutation: mutation
+            )
+            return
+        }
+        historyTerminalReceipts[job.id] = HistoryTerminalReceipt(
+            jobID: job.id,
+            mutation: mutation
+        )
+    }
+
+    package func waitForHistoryTerminalCommitIfNeeded(jobID: String) async {
+        if let job = job(id: jobID), job.isTerminal {
+            beginHistoryTerminalCommitIfNeeded(for: job)
+        }
+        await historyTerminalReceipts[jobID]?.waitUntilResolved()
+    }
+
+    package func historyTerminalCommitIsResolved(jobID: String) -> Bool {
+        if persistedTerminalReviewIDs.contains(jobID) {
+            return true
+        }
+        guard persistedStartedReviewIDs.contains(jobID) else {
+            return true
+        }
+        return historyTerminalReceipts[jobID]?.isResolved == true
+    }
+
+    package func waitForAllHistoryTerminalCommits() async {
+        for job in orderedJobs where job.isTerminal {
+            beginHistoryTerminalCommitIfNeeded(for: job)
+        }
+        let receipts = historyTerminalReceipts.values.sorted { $0.jobID < $1.jobID }
+        for receipt in receipts {
+            await receipt.waitUntilResolved()
+        }
+    }
+
+    package func deleteReviewHistory(id: String) async {
+        await loadReviewHistoryIfNeeded()
+        guard historyAvailability == .available,
+              applicationShutdownRequested == false
+        else {
+            return
+        }
+        let persistence = historyPersistence
+        guard let receipt = historyMutationCoordinator.enqueue(
+            intent: id,
+            prepare: { [weak self] id -> DeleteReviewHistoryPlan in
+                guard let self,
+                      historyAvailability == .available,
+                      let job = job(id: id),
+                      job.isTerminal,
+                      persistedTerminalReviewIDs.contains(id)
+                else {
+                    return .none
+                }
+                return .review(id)
+            },
+            operation: { (plan: DeleteReviewHistoryPlan) async throws -> ReviewHistoryMutationResult in
+                switch plan {
+                case .none, .allTerminal:
+                    return ReviewHistoryMutationResult()
+                case .review(let id):
+                    return try await persistence.deleteTerminalReview(id: id)
+                }
+            },
+            apply: { [weak self] _, result in
+                guard let self else {
+                    return
+                }
+                switch result {
+                case .success(let mutation):
+                    reconcileHistoryMutation(mutation)
+                case .failure(let failure):
+                    publishReviewHistoryFailure(failure)
+                }
+            }
+        ) else {
+            return
+        }
+        _ = await receipt.wait()
     }
 
     package func deleteAllReviewHistory() async {
@@ -88,70 +398,91 @@ extension CodexReviewStore {
         else {
             return
         }
-
-        let terminalIDs = Set(jobs.lazy.filter(\.isTerminal).map(\.id))
-        guard terminalIDs.isEmpty == false else {
+        let persistence = historyPersistence
+        guard let receipt = historyMutationCoordinator.enqueue(
+            intent: (),
+            prepare: { [weak self] _ -> DeleteReviewHistoryPlan in
+                guard let self,
+                      historyAvailability == .available,
+                      persistedTerminalReviewIDs.isEmpty == false
+                else {
+                    return .none
+                }
+                return .allTerminal
+            },
+            operation: { (plan: DeleteReviewHistoryPlan) async throws -> ReviewHistoryMutationResult in
+                switch plan {
+                case .none, .review:
+                    return ReviewHistoryMutationResult()
+                case .allTerminal:
+                    return try await persistence.deleteAllTerminalReviews()
+                }
+            },
+            apply: { [weak self] _, result in
+                guard let self else {
+                    return
+                }
+                switch result {
+                case .success(let mutation):
+                    reconcileHistoryMutation(mutation)
+                case .failure(let failure):
+                    publishReviewHistoryFailure(failure)
+                }
+            }
+        ) else {
             return
         }
-        do {
-            try await historyPersistence.deleteAll()
-        } catch {
-            publishReviewHistoryFailure(error)
-            return
-        }
-        removeHistoryJobs(ids: terminalIDs)
+        _ = await receipt.wait()
     }
 
-    package func shutdown() async {
+    public func shutdown() async {
         if let task = applicationShutdownTask {
             await task.value
             return
         }
         applicationShutdownRequested = true
+        _ = requestHistoryStartCancellations(
+            cancellation: .system(message: "The review application is shutting down.")
+        )
         let task = Task<Void, Never> { @MainActor [weak self] in
             guard let self else {
                 return
             }
-            await self.performApplicationShutdown()
+            await performApplicationShutdown()
         }
         applicationShutdownTask = task
         await task.value
-    }
-
-    package func persistReviewHistoryOrdering(
-        _ ordering: ReviewHistoryOrdering
-    ) async -> Bool {
-        await loadReviewHistoryIfNeeded()
-        guard historyAvailability == .available,
-              applicationShutdownRequested == false
-        else {
-            return false
-        }
-        do {
-            try await historyPersistence.saveOrdering(ordering)
-            return true
-        } catch {
-            publishReviewHistoryFailure(error)
-            return false
-        }
     }
 
     package func currentReviewHistoryOrdering(
         workspaceSortOrders: [String: Double] = [:],
         reviewSortOrders: [String: Double] = [:]
     ) -> ReviewHistoryOrdering {
-        ReviewHistoryOrdering(
-            workspaces: workspaces.map { workspace in
-                .init(
-                    cwd: workspace.cwd,
-                    sortOrder: workspaceSortOrders[workspace.cwd] ?? workspace.sortOrder
-                )
+        var resolvedWorkspaceSortOrders = Dictionary(uniqueKeysWithValues:
+            workspaces.map { ($0.cwd, workspaceSortOrders[$0.cwd] ?? $0.sortOrder) }
+        )
+        var resolvedReviewSortOrders = Dictionary(uniqueKeysWithValues:
+            jobs.map { ($0.id, reviewSortOrders[$0.id] ?? $0.sortOrder) }
+        )
+        for receipt in historyStartReceipts.values
+        where persistedStartedReviewIDs.contains(receipt.started.id) {
+            if resolvedWorkspaceSortOrders[receipt.started.cwd] == nil {
+                resolvedWorkspaceSortOrders[receipt.started.cwd] =
+                    workspaceSortOrders[receipt.started.cwd]
+                    ?? receipt.started.workspaceSortOrder
+            }
+            if resolvedReviewSortOrders[receipt.started.id] == nil {
+                resolvedReviewSortOrders[receipt.started.id] =
+                    reviewSortOrders[receipt.started.id]
+                    ?? receipt.started.sortOrder
+            }
+        }
+        return ReviewHistoryOrdering(
+            workspaces: resolvedWorkspaceSortOrders.map {
+                .init(cwd: $0.key, sortOrder: $0.value)
             },
-            reviews: jobs.map { job in
-                .init(
-                    id: job.id,
-                    sortOrder: reviewSortOrders[job.id] ?? job.sortOrder
-                )
+            reviews: resolvedReviewSortOrders.map {
+                .init(id: $0.key, sortOrder: $0.value)
             }
         )
     }
@@ -163,55 +494,28 @@ extension CodexReviewStore {
         historyMutationRevision += 1
     }
 
-    package func persistTerminalReviewIfNeeded(_ job: CodexReviewJob) async {
-        guard job.isTerminal,
-              persistedTerminalReviewIDs.contains(job.id) == false,
-              persistedStartedReviewIDs.contains(job.id),
-              let workspace = workspace(cwd: job.cwd)
-        else {
+    package func publishReviewHistoryFailure(_ error: any Error) {
+        guard historyAvailability != .closed else {
             return
         }
-        let record = ReviewHistoryRecord(
-            job: job,
-            workspaceSortOrder: workspace.sortOrder
-        )
-        do {
-            let result = try await historyPersistence.recordTerminal(
-                record,
-                retentionPolicy: historyRetentionPolicy
-            )
-            persistedStartedReviewIDs.remove(job.id)
-            persistedTerminalReviewIDs.insert(job.id)
-            reconcileHistoryRetention(result)
-        } catch {
-            publishReviewHistoryFailure(error)
-        }
+        transitionHistoryAvailability(to: .failed(error.localizedDescription))
     }
 
-    package func persistStartedReview(_ record: ReviewHistoryRecord) async throws {
-        await loadReviewHistoryIfNeeded()
-        try requireReviewHistoryAvailable()
-        do {
-            try await historyPersistence.recordStarted(record)
-            persistedStartedReviewIDs.insert(record.id)
-        } catch {
-            publishReviewHistoryFailure(error)
-            throw CodexReviewAPI.Error.io(
-                "Review history start could not be saved: \(error.localizedDescription)"
-            )
-        }
-    }
-
-    package func discardPersistedStartedReview(id: String) async {
-        guard persistedStartedReviewIDs.contains(id) else {
+    package func reconcileHistoryMutation(_ result: ReviewHistoryMutationResult) {
+        let removedIDs = result.removedReviewIDs
+        guard removedIDs.isEmpty == false else {
             return
         }
-        do {
-            try await historyPersistence.deleteReview(id: id)
-            persistedStartedReviewIDs.remove(id)
-        } catch {
-            publishReviewHistoryFailure(error)
+        let removedActiveIDs = Set(jobs.compactMap { job in
+            removedIDs.contains(job.id) && job.isTerminal == false ? job.id : nil
+        }).union(removedIDs.intersection(persistedStartedReviewIDs))
+        guard removedActiveIDs.isEmpty else {
+            publishReviewHistoryFailure(ReviewHistoryOperationFailure(
+                message: "Review history mutation removed active review IDs: \(removedActiveIDs.sorted())."
+            ))
+            return
         }
+        removeHistoryJobs(ids: removedIDs)
     }
 
     private func performApplicationShutdown() async {
@@ -223,20 +527,13 @@ extension CodexReviewStore {
         _ = await closeRegisteredStoreWork(
             reason: .system(message: "The review application is shutting down.")
         )
+        await waitForAllHistoryStarts()
+        await waitForAllHistoryTerminalCommits()
 
         if historyLoadSucceeded {
-            let terminalJobs = orderedJobs.filter {
-                $0.isTerminal && persistedTerminalReviewIDs.contains($0.id) == false
-            }
-            for job in terminalJobs {
-                await persistTerminalReviewIfNeeded(job)
-            }
-            do {
-                try await historyPersistence.saveOrdering(currentReviewHistoryOrdering())
-            } catch {
-                publishReviewHistoryFailure(error)
-            }
+            await persistCurrentHistoryOrderingForShutdown()
         }
+        await historyMutationCoordinator.closeAdmissionAndWait()
 
         do {
             try await historyPersistence.close()
@@ -246,7 +543,29 @@ extension CodexReviewStore {
         }
     }
 
-    private func restoreReviewHistory(_ records: [ReviewHistoryRecord]) throws {
+    private func persistCurrentHistoryOrderingForShutdown() async {
+        let persistence = historyPersistence
+        guard let receipt = historyMutationCoordinator.enqueue(
+            intent: (),
+            prepare: { [weak self] _ in
+                self?.currentReviewHistoryOrdering()
+                    ?? ReviewHistoryOrdering(workspaces: [], reviews: [])
+            },
+            operation: { ordering in
+                try await persistence.saveOrdering(ordering)
+            },
+            apply: { [weak self] _, result in
+                if case .failure(let failure) = result {
+                    self?.publishReviewHistoryFailure(failure)
+                }
+            }
+        ) else {
+            return
+        }
+        _ = await receipt.wait()
+    }
+
+    private func restoreReviewHistory(_ records: [RestoredReviewRecord]) throws {
         guard records.isEmpty == false else {
             historyLoadSucceeded = true
             return
@@ -263,25 +582,20 @@ extension CodexReviewStore {
         restoredJobs.reserveCapacity(records.count)
 
         for record in records {
-            guard record.isTerminal else {
+            guard seenReviewIDs.insert(record.started.id).inserted else {
                 throw ReviewHistoryOperationFailure(
-                    message: "Loaded review \(record.id) was not finalized for process restoration."
+                    message: "Loaded review history contains duplicate ID \(record.started.id)."
                 )
             }
-            guard seenReviewIDs.insert(record.id).inserted else {
-                throw ReviewHistoryOperationFailure(
-                    message: "Loaded review history contains duplicate ID \(record.id)."
-                )
-            }
-            if let existing = workspaceSortOrders[record.cwd],
-               existing != record.workspaceSortOrder
+            if let existing = workspaceSortOrders[record.started.cwd],
+               existing != record.started.workspaceSortOrder
             {
                 throw ReviewHistoryOperationFailure(
-                    message: "Loaded workspace \(record.cwd) has conflicting order values."
+                    message: "Loaded workspace \(record.started.cwd) has conflicting order values."
                 )
             }
-            workspaceSortOrders[record.cwd] = record.workspaceSortOrder
-            restoredJobs.append(try record.makeRestoredJob())
+            workspaceSortOrders[record.started.cwd] = record.started.workspaceSortOrder
+            restoredJobs.append(record.makeRestoredJob())
         }
 
         workspaces = Set(workspaceSortOrders.map { cwd, sortOrder in
@@ -290,11 +604,119 @@ extension CodexReviewStore {
         jobs = Set(restoredJobs)
         persistedTerminalReviewIDs = seenReviewIDs
         historyLoadSucceeded = true
+        writeDiagnosticsIfNeeded()
+    }
+
+    private func makeTerminalReviewRecord(
+        _ job: CodexReviewJob
+    ) throws -> TerminalReviewRecord {
+        guard let terminal = job.core.lifecycle.terminal else {
+            throw ReviewHistoryRecordError(
+                "A terminal job requires its typed terminal before persistence."
+            )
+        }
+        let canonicalReview: String?
+        let parsedResult: PersistedParsedReviewResult?
+        if terminal == .completed {
+            canonicalReview = job.core.output.lastAgentMessage
+            parsedResult = job.core.output.reviewResult.map(PersistedParsedReviewResult.init)
+        } else {
+            canonicalReview = nil
+            parsedResult = nil
+        }
+        return try TerminalReviewRecord(
+            id: job.id,
+            model: job.core.run.model,
+            terminal: terminal,
+            endedAt: job.core.lifecycle.endedAt,
+            summary: job.core.output.summary,
+            canonicalReview: canonicalReview,
+            parsedResult: parsedResult
+        )
+    }
+
+    private func insertRestoredHistoryJob(_ restored: RestoredReviewRecord) {
+        let job = restored.makeRestoredJob()
+        if workspace(cwd: job.cwd) == nil {
+            workspaces.insert(CodexReviewWorkspace(
+                cwd: job.cwd,
+                sortOrder: restored.started.workspaceSortOrder
+            ))
+        }
+        jobs.insert(job)
+        writeDiagnosticsIfNeeded()
+    }
+
+    private func historyWorkspaceSortOrder(cwd: String) -> Double? {
+        if let workspace = workspace(cwd: cwd) {
+            return workspace.sortOrder
+        }
+        return historyStartReceipts.values
+            .first(where: { $0.started.cwd == cwd })?
+            .started.workspaceSortOrder
+    }
+
+    private func nextHistoryJobSortOrder(cwd: String) -> Double {
+        let liveOrders = jobs(inWorkspace: cwd).map(\.sortOrder)
+        let pendingOrders = historyStartReceipts.values
+            .filter { $0.started.cwd == cwd }
+            .map { $0.started.sortOrder }
+        return ((liveOrders + pendingOrders).max() ?? -1) + 1
+    }
+
+    private func nextHistoryWorkspaceSortOrder() -> Double {
+        let liveOrders = workspaces.map(\.sortOrder)
+        let pendingOrders = historyStartReceipts.values.map {
+            $0.started.workspaceSortOrder
+        }
+        return ((liveOrders + pendingOrders).max() ?? -1) + 1
+    }
+
+    private func historyStartOrderingIsCurrent(_ receipt: HistoryStartReceipt) -> Bool {
+        if let workspace = workspace(cwd: receipt.started.cwd),
+           workspace.sortOrder != receipt.started.workspaceSortOrder {
+            return false
+        }
+        if jobs(inWorkspace: receipt.started.cwd).contains(where: {
+            $0.id != receipt.started.id && $0.sortOrder == receipt.started.sortOrder
+        }) {
+            return false
+        }
+        for other in historyStartReceipts.values where other !== receipt {
+            if other.started.cwd == receipt.started.cwd,
+               other.started.workspaceSortOrder != receipt.started.workspaceSortOrder {
+                return false
+            }
+            if other.started.cwd == receipt.started.cwd,
+               other.started.sortOrder == receipt.started.sortOrder {
+                return false
+            }
+            if other.started.cwd != receipt.started.cwd,
+               other.started.workspaceSortOrder == receipt.started.workspaceSortOrder {
+                return false
+            }
+        }
+        return true
+    }
+
+    private func removeHistoryJobs(ids: Set<String>) {
+        guard ids.isEmpty == false else {
+            return
+        }
+        jobs = Set(jobs.filter { ids.contains($0.id) == false })
+        persistedStartedReviewIDs.subtract(ids)
+        persistedTerminalReviewIDs.subtract(ids)
+        for id in ids {
+            historyTerminalReceipts.removeValue(forKey: id)
+        }
+        let retainedCWDs = Set(jobs.map(\.cwd))
+            .union(historyStartReceipts.values.map { $0.started.cwd })
+        workspaces = Set(workspaces.filter { retainedCWDs.contains($0.cwd) })
         noteHistoryMembershipOrOrderingMutation()
         writeDiagnosticsIfNeeded()
     }
 
-    private func requireReviewHistoryAvailable() throws {
+    package func requireReviewHistoryAvailable() throws {
         guard applicationShutdownRequested == false else {
             throw CodexReviewAPI.Error.io("Review history is closing.")
         }
@@ -308,42 +730,5 @@ extension CodexReviewStore {
         case .closed:
             throw CodexReviewAPI.Error.io("Review history is closed.")
         }
-    }
-
-    private func reconcileHistoryRetention(_ result: ReviewHistoryMutationResult) {
-        let removedIDs = result.removedReviewIDs
-        guard removedIDs.isEmpty == false else {
-            return
-        }
-        let removedNonterminal = jobs.filter {
-            removedIDs.contains($0.id) && $0.isTerminal == false
-        }
-        guard removedNonterminal.isEmpty else {
-            publishReviewHistoryFailure(ReviewHistoryOperationFailure(
-                message: "Review history retention removed an active review."
-            ))
-            return
-        }
-        removeHistoryJobs(ids: removedIDs)
-    }
-
-    private func removeHistoryJobs(ids: Set<String>) {
-        guard ids.isEmpty == false else {
-            return
-        }
-        jobs = Set(jobs.filter { ids.contains($0.id) == false })
-        persistedStartedReviewIDs.subtract(ids)
-        persistedTerminalReviewIDs.subtract(ids)
-        let retainedCWDs = Set(jobs.map(\.cwd))
-        workspaces = Set(workspaces.filter { retainedCWDs.contains($0.cwd) })
-        noteHistoryMembershipOrOrderingMutation()
-        writeDiagnosticsIfNeeded()
-    }
-
-    private func publishReviewHistoryFailure(_ error: any Error) {
-        guard historyAvailability != .closed else {
-            return
-        }
-        transitionHistoryAvailability(to: .failed(error.localizedDescription))
     }
 }

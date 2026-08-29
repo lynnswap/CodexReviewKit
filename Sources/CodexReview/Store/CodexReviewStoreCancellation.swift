@@ -107,6 +107,7 @@ extension CodexReviewStore {
             ?? job.core.lifecycle.errorMessage
         job.core.lifecycle.endedAt = endedAt
         job.applyReviewLogLimit()
+        beginHistoryTerminalCommitIfNeeded(for: job)
         noteJobMutation()
         resumeReviewWaiters(for: job.id)
     }
@@ -245,6 +246,7 @@ extension CodexReviewStore {
             if case .recovering(let receipt) = reviewAttemptOwnerships[jobID] {
                 await receipt.cancelOwnedOperation(reason)
             }
+            await waitForHistoryTerminalCommitIfNeeded(jobID: jobID)
             if let task = reviewWorkerTasks.removeValue(forKey: jobID) {
                 task.cancel()
                 runtimeStopDetachedReviewWorkerTasks[jobID] = task
@@ -317,6 +319,7 @@ extension CodexReviewStore {
                 ?? job.core.lifecycle.errorMessage
             job.core.lifecycle.endedAt = clock.now()
             job.applyReviewLogLimit()
+            beginHistoryTerminalCommitIfNeeded(for: job)
             terminatedJobIDs.append(job.id)
         }
         noteJobMutation()

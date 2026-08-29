@@ -1,164 +1,162 @@
+private struct ReviewHistoryReorderIntent: Sendable {
+    enum Kind: Sendable {
+        case workspaces(cwds: [String], toIndex: Int)
+        case job(id: String, cwd: String, toIndex: Int)
+    }
+
+    var kind: Kind
+}
+
+private struct ReviewHistoryReorderPlan: Sendable {
+    var ordering: ReviewHistoryOrdering?
+    var workspaceSortOrders: [String: Double]
+    var reviewSortOrders: [String: Double]
+
+    static let none = ReviewHistoryReorderPlan(
+        ordering: nil,
+        workspaceSortOrders: [:],
+        reviewSortOrders: [:]
+    )
+}
+
 extension CodexReviewStore {
-    package func reorderWorkspaces(cwds: [String], toIndex: Int) {
-        let cwdSet = Set(cwds)
-        let ordered = orderedWorkspaces
-        let moving = ordered.filter { cwdSet.contains($0.cwd) }
-        guard moving.isEmpty == false else {
-            return
-        }
-
-        let remaining = ordered.filter { cwdSet.contains($0.cwd) == false }
-        let destinationIndex = max(0, min(toIndex, remaining.count))
-        var reordered = remaining
-        reordered.insert(contentsOf: moving, at: destinationIndex)
-        guard reordered.count == ordered.count,
-              zip(reordered, ordered).contains(where: { pair in pair.0 !== pair.1 })
-        else {
-            return
-        }
-
-        for (index, workspace) in reordered.enumerated() {
-            workspace.sortOrder = Double(reordered.count - index - 1)
-        }
-        noteHistoryMembershipOrOrderingMutation()
-        writeDiagnosticsIfNeeded()
+    package func reorderWorkspaces(cwds: [String], toIndex: Int) async {
+        await performHistoryReorder(.init(
+            kind: .workspaces(cwds: cwds, toIndex: toIndex)
+        ))
     }
 
     package func reorderJob(
         id: String,
         inWorkspace cwd: String,
         toIndex: Int
-    ) {
-        guard workspace(cwd: cwd) != nil else {
-            return
-        }
+    ) async {
+        await performHistoryReorder(.init(
+            kind: .job(id: id, cwd: cwd, toIndex: toIndex)
+        ))
+    }
 
-        let ordered = orderedJobs(inWorkspace: cwd)
-        guard let job = ordered.first(where: { $0.id == id }),
-              let sourceIndex = ordered.firstIndex(where: { $0 === job })
+    private func performHistoryReorder(_ intent: ReviewHistoryReorderIntent) async {
+        await loadReviewHistoryIfNeeded()
+        guard historyAvailability == .available,
+              applicationShutdownRequested == false
         else {
             return
         }
-
-        let destinationIndex = max(0, min(toIndex, ordered.count - 1))
-        guard sourceIndex != destinationIndex else {
+        let persistence = historyPersistence
+        guard let receipt = historyMutationCoordinator.enqueue(
+            intent: intent,
+            prepare: { [weak self] intent in
+                self?.makeHistoryReorderPlan(intent) ?? .none
+            },
+            operation: { plan in
+                guard let ordering = plan.ordering else {
+                    return false
+                }
+                try await persistence.saveOrdering(ordering)
+                return true
+            },
+            apply: { [weak self] plan, result in
+                guard let self else {
+                    return
+                }
+                switch result {
+                case .success(true):
+                    applyHistoryReorderPlan(plan)
+                case .success(false):
+                    break
+                case .failure(let failure):
+                    publishReviewHistoryFailure(failure)
+                }
+            }
+        ) else {
             return
         }
-
-        var sortOrder = reorderedSortOrder(
-            moving: job,
-            toIndex: destinationIndex,
-            in: ordered,
-            sortOrder: \.sortOrder
-        )
-        if sortOrder == nil {
-            normalizeJobSortOrders(inWorkspace: cwd)
-            sortOrder = reorderedSortOrder(
-                moving: job,
-                toIndex: destinationIndex,
-                in: orderedJobs(inWorkspace: cwd),
-                sortOrder: \.sortOrder
-            )
-        }
-        guard let sortOrder else {
-            return
-        }
-        job.sortOrder = sortOrder
-        noteHistoryMembershipOrOrderingMutation()
-        writeDiagnosticsIfNeeded()
+        _ = await receipt.wait()
     }
 
-    package func reorderReviewHistoryWorkspaces(cwds: [String], toIndex: Int) async {
-        while true {
+    private func makeHistoryReorderPlan(
+        _ intent: ReviewHistoryReorderIntent
+    ) -> ReviewHistoryReorderPlan {
+        guard historyAvailability == .available,
+              applicationShutdownRequested == false
+        else {
+            return .none
+        }
+        switch intent.kind {
+        case .workspaces(let cwds, let toIndex):
             let cwdSet = Set(cwds)
             let ordered = orderedWorkspaces
             let moving = ordered.filter { cwdSet.contains($0.cwd) }
             guard moving.isEmpty == false else {
-                return
+                return .none
             }
-
             let remaining = ordered.filter { cwdSet.contains($0.cwd) == false }
             let destinationIndex = max(0, min(toIndex, remaining.count))
             var reordered = remaining
             reordered.insert(contentsOf: moving, at: destinationIndex)
             guard reordered.count == ordered.count,
-                  zip(reordered, ordered).contains(where: { pair in pair.0 !== pair.1 })
+                  zip(reordered, ordered).contains(where: { $0.0 !== $0.1 })
             else {
-                return
+                return .none
             }
-
-            let revision = historyMutationRevision
-            let plannedSortOrders = Dictionary(uniqueKeysWithValues:
+            let sortOrders = Dictionary(uniqueKeysWithValues:
                 reordered.enumerated().map { index, workspace in
                     (workspace.cwd, Double(reordered.count - index - 1))
                 }
             )
-            let ordering = currentReviewHistoryOrdering(
-                workspaceSortOrders: plannedSortOrders
+            return ReviewHistoryReorderPlan(
+                ordering: currentReviewHistoryOrdering(
+                    workspaceSortOrders: sortOrders
+                ),
+                workspaceSortOrders: sortOrders,
+                reviewSortOrders: [:]
             )
-            guard await persistReviewHistoryOrdering(ordering) else {
-                return
-            }
-            guard revision == historyMutationRevision else {
-                continue
-            }
 
-            for (index, workspace) in reordered.enumerated() {
-                workspace.sortOrder = Double(reordered.count - index - 1)
-            }
-            noteHistoryMembershipOrOrderingMutation()
-            writeDiagnosticsIfNeeded()
-            return
-        }
-    }
-
-    package func reorderReviewHistoryJob(
-        id: String,
-        inWorkspace cwd: String,
-        toIndex: Int
-    ) async {
-        while true {
+        case .job(let id, let cwd, let toIndex):
             guard workspace(cwd: cwd) != nil else {
-                return
+                return .none
             }
-
             let ordered = orderedJobs(inWorkspace: cwd)
             guard let job = ordered.first(where: { $0.id == id }),
                   let sourceIndex = ordered.firstIndex(where: { $0 === job })
             else {
-                return
+                return .none
             }
-
             let destinationIndex = max(0, min(toIndex, ordered.count - 1))
             guard sourceIndex != destinationIndex else {
-                return
+                return .none
             }
-
             var reordered = ordered
             reordered.remove(at: sourceIndex)
             reordered.insert(job, at: destinationIndex)
-            let revision = historyMutationRevision
-            let plannedSortOrders = Dictionary(uniqueKeysWithValues:
+            let sortOrders = Dictionary(uniqueKeysWithValues:
                 reordered.enumerated().map { index, job in
                     (job.id, Double(reordered.count - index - 1))
                 }
             )
-            let ordering = currentReviewHistoryOrdering(
-                reviewSortOrders: plannedSortOrders
+            return ReviewHistoryReorderPlan(
+                ordering: currentReviewHistoryOrdering(
+                    reviewSortOrders: sortOrders
+                ),
+                workspaceSortOrders: [:],
+                reviewSortOrders: sortOrders
             )
-            guard await persistReviewHistoryOrdering(ordering) else {
-                return
-            }
-            guard revision == historyMutationRevision else {
-                continue
-            }
-
-            for (index, job) in reordered.enumerated() {
-                job.sortOrder = Double(reordered.count - index - 1)
-            }
-            noteHistoryMembershipOrOrderingMutation()
-            writeDiagnosticsIfNeeded()
-            return
         }
+    }
+
+    private func applyHistoryReorderPlan(_ plan: ReviewHistoryReorderPlan) {
+        for workspace in workspaces {
+            if let sortOrder = plan.workspaceSortOrders[workspace.cwd] {
+                workspace.sortOrder = sortOrder
+            }
+        }
+        for job in jobs {
+            if let sortOrder = plan.reviewSortOrders[job.id] {
+                job.sortOrder = sortOrder
+            }
+        }
+        noteHistoryMembershipOrOrderingMutation()
+        writeDiagnosticsIfNeeded()
     }
 }

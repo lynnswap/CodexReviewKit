@@ -104,12 +104,12 @@ struct CodexReviewMCPServerTests {
             cwd: "/tmp/project",
             targetSummary: "Uncommitted changes",
             target: .uncommittedChanges,
-            origin: .restored,
+            origin: .restoredHistory,
             core: .init(
-                lifecycle: .init(status: .failed, errorMessage: "failed"),
-                output: .init(summary: "failed")
+                lifecycle: .init(status: .running),
+                output: .init(summary: "running")
             ),
-            logEntries: [.init(kind: .error, text: "failed")]
+            logEntries: []
         )
         store.loadForTesting(
             serverState: .running,
@@ -129,12 +129,27 @@ struct CodexReviewMCPServerTests {
             return
         }
         #expect(result.items.isEmpty)
+        #expect(server.hasActiveReviews(in: "session-1") == false)
         await #expect(throws: CodexReviewAPI.Error.self) {
             try await server.handle(.reviewRead(
                 sessionID: "session-1",
                 jobID: restored.id,
                 logFilter: .defaultSetting,
                 logPage: .default
+            ))
+        }
+        await #expect(throws: CodexReviewAPI.Error.self) {
+            try await server.handle(.reviewAwait(
+                sessionID: "session-1",
+                jobID: restored.id,
+                waitTimeout: .zero
+            ))
+        }
+        await #expect(throws: CodexReviewAPI.Error.self) {
+            try await server.handle(.reviewCancel(
+                sessionID: "session-1",
+                selector: .init(jobID: restored.id),
+                reason: .mcpClient(message: "Stop")
             ))
         }
     }

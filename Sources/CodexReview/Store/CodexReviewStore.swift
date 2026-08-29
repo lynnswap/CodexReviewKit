@@ -129,9 +129,13 @@ public final class CodexReviewStore {
     @ObservationIgnored package let idGenerator: CodexReviewIDGenerator
     @ObservationIgnored package let historyPersistence: any ReviewHistoryPersistence
     @ObservationIgnored package let historyRetentionPolicy: ReviewHistoryRetentionPolicy
-    @ObservationIgnored package var historyLoadTask: Task<Result<[ReviewHistoryRecord], ReviewHistoryOperationFailure>, Never>?
+    @ObservationIgnored package var historyLoadTask: Task<Result<[RestoredReviewRecord], ReviewHistoryOperationFailure>, Never>?
     @ObservationIgnored package var historyLoadWasApplied = false
     @ObservationIgnored package var historyLoadSucceeded = false
+    @ObservationIgnored package let historyMutationCoordinator = ReviewHistoryMutationCoordinator()
+    @ObservationIgnored package var historyStartReceipts: [String: HistoryStartReceipt] = [:]
+    @ObservationIgnored package var historyTerminalReceipts: [String: HistoryTerminalReceipt] = [:]
+    @ObservationIgnored package var nextHistoryStartOrdinal: UInt64 = 0
     @ObservationIgnored package var persistedStartedReviewIDs: Set<String> = []
     @ObservationIgnored package var persistedTerminalReviewIDs: Set<String> = []
     @ObservationIgnored package var historyMutationRevision: UInt64 = 0
@@ -546,6 +550,9 @@ public final class CodexReviewStore {
             ?? makeFailureIncident(for: previousState)
         closePublishedRuntimeAdmission(in: previousState)
         storeWorkRegistry.closeReviewAdmission()
+        let pendingHistoryStarts = requestHistoryStartCancellations(
+            cancellation: intent.reviewCancellation
+        )
         let generation = previousState.generation.successor()
         if case .replacing(let replacement, _) = previousState {
             replacement.finish(.superseded(runtimeTransitionPurpose(for: intent)))
@@ -557,6 +564,7 @@ public final class CodexReviewStore {
             guard let self else {
                 return
             }
+            await self.waitForHistoryStarts(pendingHistoryStarts)
             await self.performRuntimeTeardown(
                 previousState: previousState,
                 generation: generation,
@@ -696,12 +704,18 @@ public final class CodexReviewStore {
         }
 
         storeWorkRegistry.closeReviewAdmission()
+        let pendingHistoryStarts = requestHistoryStartCancellations(
+            cancellation: .system(message: "Review runtime restarted.")
+        )
         _ = context.failureIncident?.admitSuccessor(generation: generation)
 
         serverState = .starting
         serverURL = nil
         writeDiagnosticsIfNeeded()
         let task = Task<Void, Never> { @MainActor [weak self] in
+            if let self {
+                await self.waitForHistoryStarts(pendingHistoryStarts)
+            }
             if let predecessor {
                 await predecessor.value
             }
@@ -1055,6 +1069,9 @@ public final class CodexReviewStore {
         retainedMCP: RetainedMCPServer
     ) -> RuntimeStartOperation {
         storeWorkRegistry.closeReviewAdmission()
+        let pendingHistoryStarts = requestHistoryStartCancellations(
+            cancellation: .system(message: "Review runtime restarted.")
+        )
         let replacement = ReviewRuntimeRecoveryReplacement(
             sourceGeneration: sourceGeneration,
             retiringRuntime: retiringRuntime,
@@ -1067,6 +1084,7 @@ public final class CodexReviewStore {
             guard let self else {
                 return
             }
+            await self.waitForHistoryStarts(pendingHistoryStarts)
             await self.performRuntimeReplacement(replacement)
         }
         runtimeState = .replacing(
