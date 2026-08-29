@@ -492,7 +492,7 @@ Budget: 5 hours; at most 8 production and 4 test files.
 ### Slice D — integration and delivery
 
 - [x] Run all repository gates.
-- [ ] Run branch-wide local Codex review to clean.
+- [x] Run branch-wide local Codex review to clean.
 - [x] Commit final fixes and verify clean worktree.
 - [ ] Push branch and create Ready PR to `main`.
 
@@ -536,6 +536,7 @@ Completion remeasurement before publication:
   restored the same terminal job and `AccessGate.swift:3-3` finding after a clean
   restart, verified MCP-session isolation, and captured accessibility text plus a
   screenshot.
+- Branch-wide local Codex review against `main` completed with zero findings.
 - The repo-standard app command without flags is blocked before compilation by
   local Xcode macro trust. CI/release/E2E use the committed workspace lock with
   automatic resolution disabled and `-skipMacroValidation`; the same app tests
