@@ -64,20 +64,11 @@ extension CodexReviewStore {
         }
 
         self.workspaces = Set(resolvedWorkspaces)
-        var jobsByCWD: [String: [CodexReviewJob]] = [:]
         let resolvedJobs = jobs.filter { job in
             resolvedWorkspaces.contains(where: { $0.cwd == job.cwd })
         }
-        for job in resolvedJobs {
-            jobsByCWD[job.cwd, default: []].append(job)
-        }
-        for job in resolvedJobs {
-            guard let workspaceJobs = jobsByCWD[job.cwd],
-                  let index = workspaceJobs.firstIndex(where: { $0 === job })
-            else {
-                continue
-            }
-            job.sortOrder = Double(workspaceJobs.count - index - 1)
+        for (index, job) in resolvedJobs.enumerated() {
+            job.sortOrder = Double(resolvedJobs.count - index - 1)
         }
         self.jobs = Set(resolvedJobs)
         reviewAttemptOwnerships.removeAll(keepingCapacity: false)

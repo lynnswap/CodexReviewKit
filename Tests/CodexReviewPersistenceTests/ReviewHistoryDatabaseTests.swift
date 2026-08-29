@@ -95,9 +95,12 @@ struct ReviewHistoryDatabaseTests {
             ),
         ]
 
-        for terminal in terminals {
+        for (index, terminal) in terminals.enumerated() {
             _ = try await ReviewHistoryTestSupport.record(
-                started: ReviewHistoryTestSupport.started(id: terminal.id),
+                started: ReviewHistoryTestSupport.started(
+                    id: terminal.id,
+                    sortOrder: Double(index)
+                ),
                 terminal: terminal,
                 in: database
             )
@@ -135,6 +138,58 @@ struct ReviewHistoryDatabaseTests {
         #expect(orphan.started.startedAt == ReviewHistoryTestSupport.startedAt)
     }
 
+    @Test("rejects duplicate application-wide order on start insertion")
+    func duplicateStartOrder() async throws {
+        let (database, writer) = try ReviewHistoryTestSupport.database()
+        try await database.recordStarted(ReviewHistoryTestSupport.started(
+            id: "first",
+            cwd: "/tmp/first",
+            sortOrder: 0
+        ))
+
+        await #expect(throws: ReviewHistoryDatabaseError.self) {
+            try await database.recordStarted(ReviewHistoryTestSupport.started(
+                id: "duplicate",
+                cwd: "/tmp/duplicate",
+                sortOrder: 0
+            ))
+        }
+
+        let reviewIDs = try await writer.read { db in
+            try #sql("SELECT id FROM review_records", as: String.self).fetchAll(db)
+        }
+        #expect(reviewIDs == ["first"])
+    }
+
+    @Test("partial ordering collision rolls back every review update")
+    func partialOrderingCollision() async throws {
+        let (database, _) = try ReviewHistoryTestSupport.database()
+        for (id, sortOrder) in [("first", 1.0), ("second", 0.0)] {
+            _ = try await ReviewHistoryTestSupport.record(
+                started: ReviewHistoryTestSupport.started(
+                    id: id,
+                    cwd: "/tmp/\(id)",
+                    sortOrder: sortOrder
+                ),
+                terminal: ReviewHistoryTestSupport.completed(id: id),
+                in: database
+            )
+        }
+
+        await #expect(throws: ReviewHistoryDatabaseError.self) {
+            try await database.saveOrdering(.init(
+                workspaces: [],
+                reviews: [.init(id: "first", sortOrder: 0)]
+            ))
+        }
+
+        let restored = try await database.load(retentionPolicy: .default)
+        let sortOrders = Dictionary(uniqueKeysWithValues:
+            restored.map { ($0.started.id, $0.started.sortOrder) }
+        )
+        #expect(sortOrders == ["first": 1, "second": 0])
+    }
+
     @Test("applies workspace and global retention and returns exact removed IDs")
     func retention() async throws {
         let (database, _) = try ReviewHistoryTestSupport.database(
@@ -148,7 +203,11 @@ struct ReviewHistoryDatabaseTests {
         for index in 0..<3 {
             let id = "a-\(index)"
             let result = try await ReviewHistoryTestSupport.record(
-                started: ReviewHistoryTestSupport.started(id: id, cwd: "/tmp/a"),
+                started: ReviewHistoryTestSupport.started(
+                    id: id,
+                    cwd: "/tmp/a",
+                    sortOrder: Double(index)
+                ),
                 terminal: ReviewHistoryTestSupport.completed(id: id),
                 in: database,
                 retentionPolicy: policy
@@ -159,7 +218,11 @@ struct ReviewHistoryDatabaseTests {
         for index in 0..<2 {
             let id = "b-\(index)"
             let result = try await ReviewHistoryTestSupport.record(
-                started: ReviewHistoryTestSupport.started(id: id, cwd: "/tmp/b"),
+                started: ReviewHistoryTestSupport.started(
+                    id: id,
+                    cwd: "/tmp/b",
+                    sortOrder: Double(index + 3)
+                ),
                 terminal: ReviewHistoryTestSupport.completed(id: id),
                 in: database,
                 retentionPolicy: policy
@@ -181,13 +244,13 @@ struct ReviewHistoryDatabaseTests {
             maximumReviews: 1
         )
         _ = try await ReviewHistoryTestSupport.record(
-            started: ReviewHistoryTestSupport.started(id: "z-existing"),
+            started: ReviewHistoryTestSupport.started(id: "z-existing", sortOrder: 0),
             terminal: ReviewHistoryTestSupport.completed(id: "z-existing"),
             in: database,
             retentionPolicy: policy
         )
         let result = try await ReviewHistoryTestSupport.record(
-            started: ReviewHistoryTestSupport.started(id: "a-current"),
+            started: ReviewHistoryTestSupport.started(id: "a-current", sortOrder: 1),
             terminal: ReviewHistoryTestSupport.completed(id: "a-current"),
             in: database,
             retentionPolicy: policy
@@ -207,9 +270,9 @@ struct ReviewHistoryDatabaseTests {
             maximumReviewsPerWorkspace: 10,
             maximumReviews: 10
         )
-        for id in ["c", "a", "b"] {
+        for (index, id) in ["c", "a", "b"].enumerated() {
             _ = try await ReviewHistoryTestSupport.record(
-                started: ReviewHistoryTestSupport.started(id: id),
+                started: ReviewHistoryTestSupport.started(id: id, sortOrder: Double(index)),
                 terminal: ReviewHistoryTestSupport.completed(id: id),
                 in: database,
                 retentionPolicy: widePolicy
@@ -444,12 +507,14 @@ struct ReviewHistoryDatabaseTests {
         let (database, writer) = try ReviewHistoryTestSupport.database()
         try await database.recordStarted(ReviewHistoryTestSupport.started(
             id: "active",
-            cwd: "/tmp/active"
+            cwd: "/tmp/active",
+            sortOrder: 0
         ))
         _ = try await ReviewHistoryTestSupport.record(
             started: ReviewHistoryTestSupport.started(
                 id: "terminal",
-                cwd: "/tmp/terminal"
+                cwd: "/tmp/terminal",
+                sortOrder: 1
             ),
             terminal: ReviewHistoryTestSupport.completed(id: "terminal"),
             in: database
@@ -479,10 +544,17 @@ struct ReviewHistoryDatabaseTests {
     @Test("delete-all removes only terminal rows and reports every removed ID")
     func deleteAllTerminalReviews() async throws {
         let (database, writer) = try ReviewHistoryTestSupport.database()
-        try await database.recordStarted(ReviewHistoryTestSupport.started(id: "active"))
-        for id in ["terminal-1", "terminal-2"] {
+        try await database.recordStarted(ReviewHistoryTestSupport.started(
+            id: "active",
+            sortOrder: 0
+        ))
+        for (index, id) in ["terminal-1", "terminal-2"].enumerated() {
             _ = try await ReviewHistoryTestSupport.record(
-                started: ReviewHistoryTestSupport.started(id: id, cwd: "/tmp/terminal"),
+                started: ReviewHistoryTestSupport.started(
+                    id: id,
+                    cwd: "/tmp/terminal",
+                    sortOrder: Double(index + 1)
+                ),
                 terminal: ReviewHistoryTestSupport.completed(id: id),
                 in: database
             )

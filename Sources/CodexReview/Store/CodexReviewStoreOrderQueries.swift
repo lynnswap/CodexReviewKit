@@ -9,7 +9,7 @@ extension CodexReviewStore {
     }
 
     package var orderedJobs: [CodexReviewJob] {
-        orderedWorkspaces.flatMap { orderedJobs(in: $0) }
+        jobs.sorted(by: jobPrecedes)
     }
 
     package var hasReviewJobs: Bool {
@@ -37,12 +37,13 @@ extension CodexReviewStore {
     }
 
     package func orderedJobs(inWorkspace cwd: String) -> [CodexReviewJob] {
-        jobs(inWorkspace: cwd).sorted {
-            if $0.sortOrder == $1.sortOrder {
-                return $0.id < $1.id
-            }
-            return $0.sortOrder > $1.sortOrder
-        }
+        jobs(inWorkspace: cwd).sorted(by: jobPrecedes)
+    }
+
+    package func orderedJobs(inWorkspaces cwds: Set<String>) -> [CodexReviewJob] {
+        jobs
+            .filter { cwds.contains($0.cwd) }
+            .sorted(by: jobPrecedes)
     }
 
     package func jobCount(in workspace: CodexReviewWorkspace) -> Int {
@@ -53,4 +54,10 @@ extension CodexReviewStore {
         jobs.count
     }
 
+    private func jobPrecedes(_ lhs: CodexReviewJob, _ rhs: CodexReviewJob) -> Bool {
+        if lhs.sortOrder == rhs.sortOrder {
+            return lhs.id < rhs.id
+        }
+        return lhs.sortOrder > rhs.sortOrder
+    }
 }

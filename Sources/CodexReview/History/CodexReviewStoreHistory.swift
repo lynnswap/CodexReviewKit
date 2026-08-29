@@ -84,7 +84,7 @@ extension CodexReviewStore {
             cwd: request.cwd,
             workspaceMetadata: ReviewWorkspaceMetadata.resolve(cwd: request.cwd),
             workspaceSortOrder: workspaceSortOrder,
-            sortOrder: nextHistoryJobSortOrder(cwd: request.cwd),
+            sortOrder: try nextHistoryJobSortOrder(),
             target: request.target,
             model: model,
             startedAt: clock.now()
@@ -631,6 +631,7 @@ extension CodexReviewStore {
         }
 
         var seenReviewIDs: Set<String> = []
+        var seenReviewSortOrders: Set<Double> = []
         var workspaceSortOrders: [String: Double] = [:]
         var workspaceMetadataByCWD: [String: ReviewWorkspaceMetadata] = [:]
         var restoredJobs: [CodexReviewJob] = []
@@ -640,6 +641,12 @@ extension CodexReviewStore {
             guard seenReviewIDs.insert(record.started.id).inserted else {
                 throw ReviewHistoryOperationFailure(
                     message: "Loaded review history contains duplicate ID \(record.started.id)."
+                )
+            }
+            guard seenReviewSortOrders.insert(record.started.sortOrder).inserted else {
+                throw ReviewHistoryOperationFailure(
+                    message: "Loaded review history contains duplicate application-wide order "
+                        + "\(record.started.sortOrder)."
                 )
             }
             if let existing = workspaceSortOrders[record.started.cwd],
@@ -732,12 +739,23 @@ extension CodexReviewStore {
             .started.workspaceSortOrder
     }
 
-    private func nextHistoryJobSortOrder(cwd: String) -> Double {
-        let liveOrders = jobs(inWorkspace: cwd).map(\.sortOrder)
-        let pendingOrders = historyStartReceipts.values
-            .filter { $0.started.cwd == cwd }
-            .map { $0.started.sortOrder }
-        return ((liveOrders + pendingOrders).max() ?? -1) + 1
+    private func nextHistoryJobSortOrder() throws -> Double {
+        let liveOrders = jobs.map(\.sortOrder)
+        let pendingOrders = historyStartReceipts.values.map { $0.started.sortOrder }
+        guard let maximumOrder = (liveOrders + pendingOrders).max() else {
+            return 0
+        }
+        let incrementedOrder = maximumOrder + 1
+        if incrementedOrder.isFinite, incrementedOrder > maximumOrder {
+            return incrementedOrder
+        }
+        let adjacentOrder = maximumOrder.nextUp
+        guard adjacentOrder.isFinite, adjacentOrder > maximumOrder else {
+            throw ReviewHistoryRecordError(
+                "Review history cannot reserve another application-wide order value."
+            )
+        }
+        return adjacentOrder
     }
 
     private func nextHistoryWorkspaceSortOrder() -> Double {

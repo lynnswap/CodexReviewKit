@@ -307,6 +307,47 @@ enum ReviewHistorySchema {
             .execute(db)
         }
 
+        migrator.registerMigration("v3_share_review_order_across_workspaces") { db in
+            let workspaceSortOrders = Dictionary(uniqueKeysWithValues:
+                try ReviewWorkspaceRow.fetchAll(db).map { ($0.cwd, $0.sortOrder) }
+            )
+            let orderedReviews = try ReviewRecordRow.fetchAll(db).map { review in
+                guard let workspaceSortOrder = workspaceSortOrders[review.cwd] else {
+                    throw ReviewHistoryDatabaseError.invalidRecord(
+                        id: review.id,
+                        reason: "workspace row is missing during review-order migration"
+                    )
+                }
+                return (review: review, workspaceSortOrder: workspaceSortOrder)
+            }.sorted { lhs, rhs in
+                if lhs.workspaceSortOrder != rhs.workspaceSortOrder {
+                    return lhs.workspaceSortOrder > rhs.workspaceSortOrder
+                }
+                if lhs.review.cwd != rhs.review.cwd {
+                    return lhs.review.cwd < rhs.review.cwd
+                }
+                if lhs.review.sortOrder != rhs.review.sortOrder {
+                    return lhs.review.sortOrder > rhs.review.sortOrder
+                }
+                return lhs.review.id < rhs.review.id
+            }
+            for (index, value) in orderedReviews.enumerated() {
+                let sortOrder = Double(orderedReviews.count - index - 1)
+                try ReviewRecordRow.find(value.review.id)
+                    .update { $0.sortOrder = #bind(sortOrder) }
+                    .execute(db)
+            }
+
+            try #sql("DROP INDEX \"review_records_workspace_order\"").execute(db)
+            try #sql(
+                """
+                CREATE INDEX "review_records_order"
+                ON "review_records" ("sortOrder", "id")
+                """
+            )
+            .execute(db)
+        }
+
         try migrator.migrate(database)
         let foreignKeysEnabled = try database.read { db in
             try #sql("PRAGMA foreign_keys", as: Int.self).fetchOne(db)

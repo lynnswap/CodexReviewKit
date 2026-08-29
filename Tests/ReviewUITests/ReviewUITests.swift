@@ -3148,12 +3148,6 @@ struct ReviewUITests {
             firstRunningJob,
             proposedWorkspaceSectionContaining: secondWorkspace,
             childIndex: 3
-        ) == false)
-
-        #expect(sidebar.performJobDropForTesting(
-            firstRunningJob,
-            proposedWorkspaceSectionContaining: firstWorkspace,
-            childIndex: 2
         ))
         await sidebar.waitForHistoryActionsForTesting()
 
@@ -3165,10 +3159,14 @@ struct ReviewUITests {
             "job-second-worktree-queued",
             "job-second-worktree-latest-finished",
         ])
-        #expect(store.orderedJobs(in: firstWorkspace).map(\.id) == [
+        #expect(store.orderedJobs(
+            inWorkspaces: [firstWorkspace.cwd, secondWorkspace.cwd]
+        ).map(\.id) == [
             "job-first-worktree-hidden-finished",
             "job-first-worktree-queued-b",
+            "job-second-worktree-queued",
             "job-first-worktree-running-a",
+            "job-second-worktree-latest-finished",
         ])
     }
 
@@ -3380,7 +3378,7 @@ struct ReviewUITests {
         #expect(sidebar.sidebarIncrementalMoveCountForTesting == incrementalMoveCountBeforeDrop + 1)
     }
 
-    @Test func workspaceSectionJobDropUsesRootChildIndexesForLaterWorkspaceJobs() async throws {
+    @Test func workspaceSectionJobDropReordersAcrossWorkspaceBoundaries() async throws {
         let fixture = try makeLinkedWorktreeFixtureForTesting(repositoryName: "CodexReviewKit")
         defer {
             try? FileManager.default.removeItem(at: fixture.rootURL)
@@ -3415,35 +3413,46 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         let sidebar = viewController.sidebarViewControllerForTesting
         #expect(sidebar.displayedSectionTitlesForTesting == ["CodexReviewKit"])
-        #expect(sidebar.displayedJobIDsForTesting(in: secondWorkspace) == [
-            "job-second-workspace-first",
-            "job-second-workspace-second",
+        sidebar.selectJobForTesting(firstWorkspaceJob)
+        let incrementalMoveCountBeforeDrop = sidebar.sidebarIncrementalMoveCountForTesting
+        #expect(sidebar.performJobDropForTesting(
+            firstWorkspaceJob,
+            proposedJob: secondWorkspaceFirstJob,
+            hoveringBelowMidpoint: true
+        ))
+        await sidebar.waitForHistoryActionsForTesting()
+
+        #expect(sidebar.displayedSectionChildrenForTesting(containing: firstWorkspace) == [
+            .job(id: "job-second-workspace-first"),
+            .job(id: "job-first-workspace"),
+            .job(id: "job-second-workspace-second"),
         ])
 
         #expect(sidebar.performJobDropForTesting(
-            secondWorkspaceFirstJob,
-            proposedWorkspaceSectionContaining: secondWorkspace,
-            childIndex: 0
-        ) == false)
-
-        #expect(sidebar.performJobDropForTesting(
-            secondWorkspaceFirstJob,
-            proposedJob: firstWorkspaceJob,
-            hoveringBelowMidpoint: true
-        ) == false)
-
-        #expect(sidebar.performJobDropForTesting(
-            secondWorkspaceFirstJob,
+            firstWorkspaceJob,
             proposedJob: secondWorkspaceSecondJob,
             hoveringBelowMidpoint: true
         ))
         await sidebar.waitForHistoryActionsForTesting()
 
-        #expect(sidebar.displayedJobIDsForTesting(in: firstWorkspace) == ["job-first-workspace"])
-        #expect(sidebar.displayedJobIDsForTesting(in: secondWorkspace) == [
-            "job-second-workspace-second",
-            "job-second-workspace-first",
+        #expect(sidebar.displayedSectionChildrenForTesting(containing: firstWorkspace) == [
+            .job(id: "job-second-workspace-first"),
+            .job(id: "job-second-workspace-second"),
+            .job(id: "job-first-workspace"),
         ])
+        #expect(store.orderedJobs(
+            inWorkspaces: [firstWorkspace.cwd, secondWorkspace.cwd]
+        ).map(\.id) == [
+            "job-second-workspace-first",
+            "job-second-workspace-second",
+            "job-first-workspace",
+        ])
+        #expect(firstWorkspaceJob.cwd == firstWorkspace.cwd)
+        #expect(secondWorkspaceFirstJob.cwd == secondWorkspace.cwd)
+        #expect(secondWorkspaceSecondJob.cwd == secondWorkspace.cwd)
+        #expect(store.job(id: firstWorkspaceJob.id) === firstWorkspaceJob)
+        #expect(sidebar.selectedJobForTesting === firstWorkspaceJob)
+        #expect(sidebar.sidebarIncrementalMoveCountForTesting == incrementalMoveCountBeforeDrop + 2)
     }
 
     @Test func workspaceFindingsTextWrapsWithinDetailWidth() async throws {

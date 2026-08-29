@@ -1,7 +1,7 @@
 private struct ReviewHistoryReorderIntent: Sendable {
     enum Kind: Sendable {
         case workspaces(cwds: [String], toIndex: Int)
-        case job(id: String, cwd: String, toIndex: Int)
+        case job(id: String, cwds: Set<String>, beforeJobID: String?)
     }
 
     var kind: Kind
@@ -28,11 +28,11 @@ extension CodexReviewStore {
 
     package func reorderJob(
         id: String,
-        inWorkspace cwd: String,
-        toIndex: Int
+        inWorkspaces cwds: Set<String>,
+        before nextJobID: String?
     ) async -> Bool {
         await performHistoryReorder(.init(
-            kind: .job(id: id, cwd: cwd, toIndex: toIndex)
+            kind: .job(id: id, cwds: cwds, beforeJobID: nextJobID)
         ))
     }
 
@@ -118,26 +118,37 @@ extension CodexReviewStore {
                 reviewSortOrders: [:]
             )
 
-        case .job(let id, let cwd, let toIndex):
-            guard workspace(cwd: cwd) != nil else {
-                return .none
-            }
-            let ordered = orderedJobs(inWorkspace: cwd)
-            guard let job = ordered.first(where: { $0.id == id }),
-                  let sourceIndex = ordered.firstIndex(where: { $0 === job })
+        case .job(let id, let cwds, let beforeJobID):
+            guard cwds.isEmpty == false,
+                  cwds.allSatisfy({ workspace(cwd: $0) != nil }),
+                  beforeJobID != id
             else {
                 return .none
             }
-            let destinationIndex = max(0, min(toIndex, ordered.count - 1))
-            guard sourceIndex != destinationIndex else {
+            let ordered = orderedJobs(inWorkspaces: cwds)
+            guard let job = ordered.first(where: { $0.id == id }) else {
                 return .none
             }
-            var reordered = ordered
-            reordered.remove(at: sourceIndex)
+            let remaining = ordered.filter { $0 !== job }
+            let destinationIndex: Int
+            if let beforeJobID {
+                guard let beforeIndex = remaining.firstIndex(where: { $0.id == beforeJobID }) else {
+                    return .none
+                }
+                destinationIndex = beforeIndex
+            } else {
+                destinationIndex = remaining.count
+            }
+            var reordered = remaining
             reordered.insert(job, at: destinationIndex)
+            guard reordered.count == ordered.count,
+                  zip(reordered, ordered).contains(where: { $0.0 !== $0.1 })
+            else {
+                return .none
+            }
             let sortOrders = Dictionary(uniqueKeysWithValues:
-                reordered.enumerated().map { index, job in
-                    (job.id, Double(reordered.count - index - 1))
+                zip(reordered, ordered.map(\.sortOrder)).map { job, sortOrder in
+                    (job.id, sortOrder)
                 }
             )
             return ReviewHistoryReorderPlan(
