@@ -63,6 +63,7 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
             }
             try Self.insertWorkspaceIfMissing(encoded.workspace, in: db)
             try ReviewRecordRow.insert { encoded.review }.execute(db)
+            try Self.validateUniqueReviewSortOrders(in: db)
         }
     }
 
@@ -152,6 +153,7 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
                     }
                     .execute(db)
             }
+            try Self.validateUniqueReviewSortOrders(in: db)
         }
     }
 
@@ -303,11 +305,13 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
     private static func decodeAll(in db: Database) throws -> [DecodedReviewHistoryRow] {
         let workspaces = try ReviewWorkspaceRow.fetchAll(db)
         let workspacesByCWD = Dictionary(uniqueKeysWithValues: workspaces.map { ($0.cwd, $0) })
+        let reviews = try ReviewRecordRow.fetchAll(db)
+        try validateUniqueReviewSortOrders(reviews)
         let findingsByReviewID = Dictionary(
             grouping: try ReviewFindingRow.fetchAll(db),
             by: \.reviewID
         )
-        return try ReviewRecordRow.fetchAll(db).map { row in
+        return try reviews.map { row in
             guard let workspace = workspacesByCWD[row.cwd] else {
                 throw ReviewHistoryDatabaseError.invalidRecord(
                     id: row.id,
@@ -464,6 +468,29 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
                     reason: "review ordering is empty, non-finite, or duplicated"
                 )
             }
+        }
+    }
+
+    private static func validateUniqueReviewSortOrders(in db: Database) throws {
+        try validateUniqueReviewSortOrders(ReviewRecordRow.fetchAll(db))
+    }
+
+    private static func validateUniqueReviewSortOrders(_ reviews: [ReviewRecordRow]) throws {
+        var reviewIDsBySortOrder: [Double: String] = [:]
+        for review in reviews {
+            guard review.sortOrder.isFinite else {
+                throw ReviewHistoryDatabaseError.invalidRecord(
+                    id: review.id,
+                    reason: "review ordering is non-finite"
+                )
+            }
+            if let existingID = reviewIDsBySortOrder[review.sortOrder] {
+                throw ReviewHistoryDatabaseError.invalidRecord(
+                    id: review.id,
+                    reason: "review order duplicates \(existingID)"
+                )
+            }
+            reviewIDsBySortOrder[review.sortOrder] = review.id
         }
     }
 }

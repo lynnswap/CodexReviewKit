@@ -142,6 +142,99 @@ struct ReviewHistorySchemaTests {
         }
     }
 
+    @Test("normalizes workspace-local review order into one application-wide lane")
+    func globalReviewOrderMigration() async throws {
+        let (database, writer) = try ReviewHistoryTestSupport.database()
+        _ = try await database.load(retentionPolicy: .default)
+
+        let legacyRows: [(id: String, cwd: String, workspaceSortOrder: Double, sortOrder: Double)] = [
+            ("primary-first", "/tmp/primary", 1.0, 1.0),
+            ("primary-second", "/tmp/primary", 1.0, 0.0),
+            ("worktree-first", "/tmp/worktree", 0.0, 1.0),
+            ("worktree-second", "/tmp/worktree", 0.0, 0.0),
+        ]
+        for (index, row) in legacyRows.enumerated() {
+            _ = try await ReviewHistoryTestSupport.record(
+                started: ReviewHistoryTestSupport.started(
+                    id: row.id,
+                    cwd: row.cwd,
+                    workspaceSortOrder: row.workspaceSortOrder,
+                    sortOrder: Double(legacyRows.count - index - 1)
+                ),
+                terminal: ReviewHistoryTestSupport.completed(id: row.id),
+                in: database
+            )
+        }
+
+        try await writer.write { db in
+            try #sql("DROP INDEX \"review_records_order\"").execute(db)
+            try #sql(
+                """
+                CREATE INDEX "review_records_workspace_order"
+                ON "review_records" ("cwd", "sortOrder", "id")
+                """
+            )
+            .execute(db)
+            try #sql(
+                """
+                DELETE FROM "grdb_migrations"
+                WHERE "identifier" = 'v3_share_review_order_across_workspaces'
+                """
+            )
+            .execute(db)
+            try #sql(
+                """
+                UPDATE "review_records"
+                SET "sortOrder" = CASE "id"
+                  WHEN 'primary-first' THEN 1
+                  WHEN 'primary-second' THEN 0
+                  WHEN 'worktree-first' THEN 1
+                  WHEN 'worktree-second' THEN 0
+                END
+                """
+            )
+            .execute(db)
+        }
+
+        try ReviewHistorySchema.migrate(writer)
+        try ReviewHistorySchema.migrate(writer)
+
+        let orderedIDs = try await writer.read { db in
+            try #sql(
+                """
+                SELECT "id"
+                FROM "review_records"
+                ORDER BY "sortOrder" DESC, "id"
+                """,
+                as: String.self
+            )
+            .fetchAll(db)
+        }
+        #expect(orderedIDs == [
+            "primary-first",
+            "primary-second",
+            "worktree-first",
+            "worktree-second",
+        ])
+
+        let indexNames = try await writer.read { db in
+            try #sql(
+                """
+                SELECT name
+                FROM pragma_index_list('review_records')
+                WHERE name LIKE 'review_records_%'
+                ORDER BY name
+                """,
+                as: String.self
+            )
+            .fetchAll(db)
+        }
+        #expect(indexNames == [
+            "review_records_order",
+            "review_records_retention",
+        ])
+    }
+
     @Test("rejects NULL required variant fields instead of accepting UNKNOWN checks")
     func nullableRequiredVariantConstraints() async throws {
         let (database, writer) = try ReviewHistoryTestSupport.database()
@@ -152,8 +245,11 @@ struct ReviewHistorySchemaTests {
             "missing-interruption-kind",
             "missing-cancellation-source",
         ]
-        for id in validActiveIDs {
-            try await database.recordStarted(ReviewHistoryTestSupport.started(id: id))
+        for (index, id) in validActiveIDs.enumerated() {
+            try await database.recordStarted(ReviewHistoryTestSupport.started(
+                id: id,
+                sortOrder: Double(index)
+            ))
         }
 
         for (id, targetKind) in [
@@ -417,16 +513,42 @@ struct ReviewHistorySchemaTests {
         let url = directory.appending(path: "review-history.sqlite")
 
         let first = ReviewHistoryDatabase(databaseURL: url)
-        _ = try await ReviewHistoryTestSupport.record(
-            started: ReviewHistoryTestSupport.started(id: "file-backed"),
-            terminal: ReviewHistoryTestSupport.completed(id: "file-backed"),
-            in: first
-        )
+        for (id, cwd, workspaceSortOrder, sortOrder) in [
+            ("file-primary", "/tmp/file-primary", 1.0, 1.0),
+            ("file-worktree", "/tmp/file-worktree", 0.0, 0.0),
+        ] {
+            _ = try await ReviewHistoryTestSupport.record(
+                started: ReviewHistoryTestSupport.started(
+                    id: id,
+                    cwd: cwd,
+                    workspaceSortOrder: workspaceSortOrder,
+                    sortOrder: sortOrder
+                ),
+                terminal: ReviewHistoryTestSupport.completed(id: id),
+                in: first
+            )
+        }
+        try await first.saveOrdering(.init(
+            workspaces: [],
+            reviews: [
+                .init(id: "file-primary", sortOrder: 0),
+                .init(id: "file-worktree", sortOrder: 1),
+            ]
+        ))
         try await first.close()
 
         let second = ReviewHistoryDatabase(databaseURL: url)
         let restored = try await second.load(retentionPolicy: .default)
-        #expect(restored.map(\.started.id) == ["file-backed"])
+        #expect(restored.sorted {
+            $0.started.sortOrder > $1.started.sortOrder
+        }.map(\.started.id) == [
+            "file-worktree",
+            "file-primary",
+        ])
+        #expect(restored.first(where: { $0.started.id == "file-primary" })?.started.cwd
+            == "/tmp/file-primary")
+        #expect(restored.first(where: { $0.started.id == "file-worktree" })?.started.cwd
+            == "/tmp/file-worktree")
         try await second.close()
     }
 
