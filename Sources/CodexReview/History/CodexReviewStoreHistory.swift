@@ -92,8 +92,7 @@ extension CodexReviewStore {
             ordinal: nextHistoryStartOrdinal,
             sessionID: sessionID,
             started: record,
-            workAdmission: workAdmission,
-            orderingRevision: historyMutationRevision
+            workAdmission: workAdmission
         )
         historyStartReceipts[id] = receipt
         return receipt
@@ -144,12 +143,6 @@ extension CodexReviewStore {
         }
         if closedSessions.contains(receipt.sessionID) {
             return .sessionClosed()
-        }
-        guard settings.effectiveModel == receipt.started.model,
-              receipt.orderingRevision == historyMutationRevision,
-              historyStartOrderingIsCurrent(receipt)
-        else {
-            return .system(message: "Review start inputs changed before backend dispatch.")
         }
         return nil
     }
@@ -345,6 +338,37 @@ extension CodexReviewStore {
         }
     }
 
+    package func acquireHistoryResultLease(jobID: String) -> HistoryResultLease {
+        let lease = HistoryResultLease(jobID: jobID)
+        historyResultLeaseIDs[jobID, default: []].insert(lease.id)
+        return lease
+    }
+
+    package func releaseHistoryResultLease(_ lease: HistoryResultLease) {
+        guard var leaseIDs = historyResultLeaseIDs[lease.jobID],
+              leaseIDs.remove(lease.id) != nil
+        else {
+            return
+        }
+        if leaseIDs.isEmpty {
+            historyResultLeaseIDs.removeValue(forKey: lease.jobID)
+        } else {
+            historyResultLeaseIDs[lease.jobID] = leaseIDs
+        }
+        applyDeferredHistoryRemovalIfFinalized(jobID: lease.jobID)
+    }
+
+    package func applyDeferredHistoryRemovalIfFinalized(jobID: String) {
+        guard deferredHistoryRemovalIDs.contains(jobID),
+              reviewWorkerTasks[jobID] == nil,
+              runtimeStopDetachedReviewWorkerTasks[jobID] == nil,
+              historyResultLeaseIDs[jobID]?.isEmpty != false
+        else {
+            return
+        }
+        removeHistoryJobs(ids: [jobID])
+    }
+
     package func deleteReviewHistory(id: String) async {
         await loadReviewHistoryIfNeeded()
         guard historyAvailability == .available,
@@ -458,11 +482,22 @@ extension CodexReviewStore {
         workspaceSortOrders: [String: Double] = [:],
         reviewSortOrders: [String: Double] = [:]
     ) -> ReviewHistoryOrdering {
+        let durableJobs = jobs.filter {
+            deferredHistoryRemovalIDs.contains($0.id) == false
+        }
+        let pendingStartedCWDs = Set(historyStartReceipts.values.compactMap { receipt in
+            persistedStartedReviewIDs.contains(receipt.started.id)
+                ? receipt.started.cwd
+                : nil
+        })
+        let durableCWDs = Set(durableJobs.map(\.cwd)).union(pendingStartedCWDs)
         var resolvedWorkspaceSortOrders = Dictionary(uniqueKeysWithValues:
-            workspaces.map { ($0.cwd, workspaceSortOrders[$0.cwd] ?? $0.sortOrder) }
+            workspaces.lazy
+                .filter { durableCWDs.contains($0.cwd) }
+                .map { ($0.cwd, workspaceSortOrders[$0.cwd] ?? $0.sortOrder) }
         )
         var resolvedReviewSortOrders = Dictionary(uniqueKeysWithValues:
-            jobs.map { ($0.id, reviewSortOrders[$0.id] ?? $0.sortOrder) }
+            durableJobs.map { ($0.id, reviewSortOrders[$0.id] ?? $0.sortOrder) }
         )
         for receipt in historyStartReceipts.values
         where persistedStartedReviewIDs.contains(receipt.started.id) {
@@ -487,13 +522,6 @@ extension CodexReviewStore {
         )
     }
 
-    package func noteHistoryMembershipOrOrderingMutation() {
-        guard historyMutationRevision < UInt64.max else {
-            preconditionFailure("CodexReviewStore history mutation revision exhausted.")
-        }
-        historyMutationRevision += 1
-    }
-
     package func publishReviewHistoryFailure(_ error: any Error) {
         guard historyAvailability != .closed else {
             return
@@ -515,7 +543,23 @@ extension CodexReviewStore {
             ))
             return
         }
-        removeHistoryJobs(ids: removedIDs)
+        let deferredIDs = Set(jobs.compactMap { job -> String? in
+            guard removedIDs.contains(job.id), job.isTerminal else {
+                return nil
+            }
+            guard case .live = job.origin else {
+                return nil
+            }
+            let hasWorker = reviewWorkerTasks[job.id] != nil
+                || runtimeStopDetachedReviewWorkerTasks[job.id] != nil
+            let hasResultLease = historyResultLeaseIDs[job.id]?.isEmpty == false
+            return hasWorker || hasResultLease ? job.id : nil
+        })
+        if deferredIDs.isEmpty == false {
+            persistedTerminalReviewIDs.subtract(deferredIDs)
+            deferredHistoryRemovalIDs.formUnion(deferredIDs)
+        }
+        removeHistoryJobs(ids: removedIDs.subtracting(deferredIDs))
     }
 
     private func performApplicationShutdown() async {
@@ -672,33 +716,6 @@ extension CodexReviewStore {
         return ((liveOrders + pendingOrders).max() ?? -1) + 1
     }
 
-    private func historyStartOrderingIsCurrent(_ receipt: HistoryStartReceipt) -> Bool {
-        if let workspace = workspace(cwd: receipt.started.cwd),
-           workspace.sortOrder != receipt.started.workspaceSortOrder {
-            return false
-        }
-        if jobs(inWorkspace: receipt.started.cwd).contains(where: {
-            $0.id != receipt.started.id && $0.sortOrder == receipt.started.sortOrder
-        }) {
-            return false
-        }
-        for other in historyStartReceipts.values where other !== receipt {
-            if other.started.cwd == receipt.started.cwd,
-               other.started.workspaceSortOrder != receipt.started.workspaceSortOrder {
-                return false
-            }
-            if other.started.cwd == receipt.started.cwd,
-               other.started.sortOrder == receipt.started.sortOrder {
-                return false
-            }
-            if other.started.cwd != receipt.started.cwd,
-               other.started.workspaceSortOrder == receipt.started.workspaceSortOrder {
-                return false
-            }
-        }
-        return true
-    }
-
     private func removeHistoryJobs(ids: Set<String>) {
         guard ids.isEmpty == false else {
             return
@@ -706,13 +723,14 @@ extension CodexReviewStore {
         jobs = Set(jobs.filter { ids.contains($0.id) == false })
         persistedStartedReviewIDs.subtract(ids)
         persistedTerminalReviewIDs.subtract(ids)
+        deferredHistoryRemovalIDs.subtract(ids)
         for id in ids {
             historyTerminalReceipts.removeValue(forKey: id)
+            historyResultLeaseIDs.removeValue(forKey: id)
         }
         let retainedCWDs = Set(jobs.map(\.cwd))
             .union(historyStartReceipts.values.map { $0.started.cwd })
         workspaces = Set(workspaces.filter { retainedCWDs.contains($0.cwd) })
-        noteHistoryMembershipOrOrderingMutation()
         writeDiagnosticsIfNeeded()
     }
 

@@ -4,7 +4,6 @@ package final class HistoryStartReceipt {
     package let sessionID: String
     package let started: StartedReviewRecord
     package let workAdmission: ReviewStoreWorkRegistry.Admission
-    package let orderingRevision: UInt64
 
     private(set) var cancellation: ReviewCancellation?
     private var isFinished = false
@@ -14,14 +13,12 @@ package final class HistoryStartReceipt {
         ordinal: UInt64,
         sessionID: String,
         started: StartedReviewRecord,
-        workAdmission: ReviewStoreWorkRegistry.Admission,
-        orderingRevision: UInt64
+        workAdmission: ReviewStoreWorkRegistry.Admission
     ) {
         self.ordinal = ordinal
         self.sessionID = sessionID
         self.started = started
         self.workAdmission = workAdmission
-        self.orderingRevision = orderingRevision
     }
 
     package func requestCancellation(_ cancellation: ReviewCancellation) {

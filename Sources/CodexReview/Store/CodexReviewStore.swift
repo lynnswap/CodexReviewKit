@@ -136,10 +136,11 @@ public final class CodexReviewStore {
     @ObservationIgnored package let historyMutationCoordinator = ReviewHistoryMutationCoordinator()
     @ObservationIgnored package var historyStartReceipts: [String: HistoryStartReceipt] = [:]
     @ObservationIgnored package var historyTerminalReceipts: [String: HistoryTerminalReceipt] = [:]
+    @ObservationIgnored package var historyResultLeaseIDs: [String: Set<UUID>] = [:]
+    @ObservationIgnored package var deferredHistoryRemovalIDs: Set<String> = []
     @ObservationIgnored package var nextHistoryStartOrdinal: UInt64 = 0
     @ObservationIgnored package var persistedStartedReviewIDs: Set<String> = []
     @ObservationIgnored package var persistedTerminalReviewIDs: Set<String> = []
-    @ObservationIgnored package var historyMutationRevision: UInt64 = 0
     @ObservationIgnored package var applicationShutdownRequested = false
     @ObservationIgnored package var applicationShutdownTask: Task<Void, Never>?
     @ObservationIgnored package var reviewAttemptOwnerships: [String: StoreReviewAttemptOwnership] = [:]
@@ -262,6 +263,9 @@ public final class CodexReviewStore {
     }
 
     public func start(forceRestartIfNeeded: Bool = false) async {
+        guard applicationShutdownRequested == false else {
+            return
+        }
         await loadReviewHistoryIfNeeded()
         guard Task.isCancelled == false,
               applicationShutdownRequested == false

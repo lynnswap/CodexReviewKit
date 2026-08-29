@@ -237,7 +237,7 @@ struct CodexReviewStoreHistoryTests {
         #expect(await history.terminalRecords().count == 1)
     }
 
-    @Test func modelChangeDuringStartWriteRejectsCapturedStart() async throws {
+    @Test func modelChangeDuringStartWriteDispatchesCapturedModel() async throws {
         let entered = AsyncGate()
         let release = AsyncGate()
         let history = ReviewHistoryPersistenceProbe(
@@ -251,24 +251,33 @@ struct CodexReviewStoreHistoryTests {
             idGenerator: .init(next: { "job-1" })
         )
         let start = Task { @MainActor in
-            try? await store.startReview(
+            try await store.startReview(
                 sessionID: "session-1",
-                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .zero
             )
         }
         await entered.wait()
+        let startReceipt = try #require(store.historyStartReceipts["job-1"])
+        let capturedModel = startReceipt.started.model
         await store.updateSettingsModel("changed-model")
         await release.open()
-        _ = await start.value
+        let running = try await start.value
+        await backend.waitForStartReview()
 
-        #expect(await backend.recordedCommands().contains {
-            if case .startReview = $0 { true } else { false }
-        } == false)
-        let terminal = try #require(await history.terminalRecords().first)
-        guard case .interrupted(.requested) = terminal.terminal else {
-            Issue.record("Expected requested interruption")
-            return
+        let dispatchedRequests = await backend.recordedCommands().compactMap { command in
+            if case .startReview(let request) = command {
+                return request
+            }
+            return nil
         }
+        #expect(dispatchedRequests.map(\.model) == [capturedModel])
+
+        await backend.yield(.completed(summary: "Done", result: "No findings."))
+        _ = try await store.awaitReview(
+            sessionID: "session-1",
+            jobID: running.jobID
+        )
     }
 
     @Test func startWriteFailureRejectsWithoutPublishingOrDispatching() async {
@@ -297,6 +306,76 @@ struct CodexReviewStoreHistoryTests {
             )
         }
         #expect(await history.startedRecords().count == 0)
+    }
+
+    @Test func unrelatedReorderAndDeleteDuringStartWriteDoNotCancelDispatch() async throws {
+        let first = try historyRecord(
+            id: "old-1",
+            cwd: "/tmp/old-1",
+            workspaceSortOrder: 0,
+            lifecycle: .init(
+                status: .failed,
+                startedAt: Date(timeIntervalSince1970: 1),
+                endedAt: Date(timeIntervalSince1970: 2),
+                terminal: .failed(message: "old")
+            ),
+            output: .init(summary: "old")
+        )
+        let second = try historyRecord(
+            id: "old-2",
+            cwd: "/tmp/old-2",
+            workspaceSortOrder: 1,
+            lifecycle: .init(
+                status: .failed,
+                startedAt: Date(timeIntervalSince1970: 1),
+                endedAt: Date(timeIntervalSince1970: 2),
+                terminal: .failed(message: "old")
+            ),
+            output: .init(summary: "old")
+        )
+        let entered = AsyncGate()
+        let release = AsyncGate()
+        let history = ReviewHistoryPersistenceProbe(
+            records: [first, second],
+            startedWriteEntered: entered,
+            startedWriteRelease: release
+        )
+        let backend = FakeCodexReviewBackend()
+        let store = makeStore(
+            history: history,
+            backend: backend,
+            idGenerator: .init(next: { "job-1" })
+        )
+        await store.loadReviewHistoryIfNeeded()
+        let start = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/new", target: .uncommittedChanges),
+                waitTimeout: .zero
+            )
+        }
+        await entered.wait()
+        let reorder = Task { @MainActor in
+            await store.reorderWorkspaces(cwds: [first.cwd], toIndex: 0)
+        }
+        let deletion = Task { @MainActor in
+            await store.deleteReviewHistory(id: second.id)
+        }
+
+        await release.open()
+        let running = try await start.value
+        await reorder.value
+        await deletion.value
+        await backend.waitForStartReview()
+        #expect(await backend.recordedCommands().contains {
+            if case .startReview = $0 { true } else { false }
+        })
+
+        await backend.yield(.completed(summary: "Done", result: "No findings."))
+        _ = try await store.awaitReview(
+            sessionID: "session-1",
+            jobID: running.jobID
+        )
     }
 
     @Test func terminalWriteSanitizesPartialOutputAndBlocksWorkerFinalization() async throws {
@@ -522,6 +601,86 @@ struct CodexReviewStoreHistoryTests {
         #expect(store.job(id: old.id) == nil)
         #expect(store.job(id: "new-review") != nil)
         #expect(store.jobs.count == 1)
+    }
+
+    @Test func retentionDefersLiveTerminalRemovalUntilWorkerAndAwaitResponseFinish() async throws {
+        let cleanupRelease = AsyncGate()
+        let history = ReviewHistoryPersistenceProbe(
+            terminalMutations: [
+                .init(),
+                .init(removedReviewIDs: ["job-1"]),
+            ]
+        )
+        let backend = FakeCodexReviewBackend()
+        await backend.holdCleanupReview(with: cleanupRelease)
+        let ids = SequentialHistoryTestIDs(["job-1", "job-2"])
+        let store = makeStore(
+            history: history,
+            backend: backend,
+            idGenerator: .init(next: { ids.next() })
+        )
+
+        let first = try await store.startReview(
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/first", target: .uncommittedChanges),
+            waitTimeout: .zero
+        )
+        await backend.waitForStartReview()
+        let firstRun = try #require(store.reviewAttemptOwnerships[first.jobID]?.run)
+        await backend.yield(
+            .completed(summary: "First", result: "First result"),
+            for: firstRun
+        )
+        try #require(await waitForHistoryTestCondition {
+            store.persistedTerminalReviewIDs.contains(first.jobID)
+        })
+
+        let firstAwaitCompletion = HistoryTestCompletion()
+        let firstAwait = Task { @MainActor in
+            let result = try await store.awaitReview(
+                sessionID: "session-1",
+                jobID: first.jobID
+            )
+            await firstAwaitCompletion.complete()
+            return result
+        }
+
+        let secondRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-2",
+            threadID: "thread-2",
+            turnID: "turn-2",
+            reviewThreadID: "review-thread-2"
+        )
+        await backend.setNextRun(secondRun)
+        let second = try await store.startReview(
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/second", target: .uncommittedChanges),
+            waitTimeout: .zero
+        )
+        try #require(await waitForHistoryTestCondition {
+            store.reviewAttemptOwnerships[second.jobID]?.run == secondRun
+        })
+        await backend.yield(
+            .completed(summary: "Second", result: "Second result"),
+            for: secondRun
+        )
+        try #require(await waitForHistoryTestCondition {
+            store.deferredHistoryRemovalIDs.contains(first.jobID)
+        })
+
+        #expect(try store.readReview(jobID: first.jobID).core.reviewText == "First result")
+        #expect(store.job(id: first.jobID) != nil)
+        #expect(await firstAwaitCompletion.isComplete() == false)
+
+        await cleanupRelease.open()
+        #expect(try await firstAwait.value.core.reviewText == "First result")
+        try #require(await waitForHistoryTestCondition {
+            store.job(id: first.jobID) == nil
+        })
+        _ = try await store.awaitReview(
+            sessionID: "session-1",
+            jobID: second.jobID
+        )
     }
 
     @Test func deleteAllRemovesTerminalHistoryButPreservesActiveLiveReview() async throws {
@@ -791,6 +950,50 @@ struct CodexReviewStoreHistoryTests {
         #expect(await history.closeCallCount() == 1)
     }
 
+    @Test func startAfterShutdownDoesNotLoadClosedPersistence() async {
+        let history = ReviewHistoryPersistenceProbe()
+        let store = makeStore(history: history)
+
+        await store.shutdown()
+        await store.start(forceRestartIfNeeded: true)
+
+        #expect(await history.loadCallCount() == 0)
+        #expect(await history.closeCallCount() == 1)
+        #expect(store.serverState == .stopped)
+    }
+
+    @Test func suspendedMutationDoesNotRetainCoordinatorAndDeinitCancelsTask() async throws {
+        let entered = AsyncGate()
+        let release = AsyncGate()
+        let cancellation = HistoryTestCompletion()
+        var coordinator: ReviewHistoryMutationCoordinator? = .init()
+        weak let weakCoordinator = coordinator
+        guard let receipt = coordinator?.enqueue(
+            intent: (),
+            prepare: { $0 },
+            operation: { _ in
+                await entered.open()
+                await release.wait()
+                if Task.isCancelled {
+                    await cancellation.complete()
+                }
+            },
+            apply: { _, _ in }
+        ) else {
+            Issue.record("Expected mutation receipt")
+            return
+        }
+        await entered.wait()
+
+        coordinator = nil
+
+        #expect(weakCoordinator == nil)
+        try #require(await waitForHistoryTestCondition {
+            await cancellation.isComplete()
+        })
+        _ = await receipt.wait()
+    }
+
     private func makeStore(
         history: ReviewHistoryPersistenceProbe,
         backend: FakeCodexReviewBackend = FakeCodexReviewBackend(),
@@ -910,7 +1113,7 @@ private actor ReviewHistoryPersistenceProbe: ReviewHistoryPersistence {
     private let startedWriteFailure: String?
     private let terminalWriteFailure: String?
     private let orderingWriteFailure: String?
-    private let terminalMutation: ReviewHistoryMutationResult
+    private var terminalMutations: [ReviewHistoryMutationResult]
     private var loadCalls = 0
     private var started: [StartedReviewRecord] = []
     private var terminals: [TerminalReviewRecord] = []
@@ -933,7 +1136,8 @@ private actor ReviewHistoryPersistenceProbe: ReviewHistoryPersistence {
         startedWriteFailure: String? = nil,
         terminalWriteFailure: String? = nil,
         orderingWriteFailure: String? = nil,
-        terminalMutation: ReviewHistoryMutationResult = .init()
+        terminalMutation: ReviewHistoryMutationResult = .init(),
+        terminalMutations: [ReviewHistoryMutationResult]? = nil
     ) {
         self.records = records
         self.loadEntered = loadEntered
@@ -948,7 +1152,7 @@ private actor ReviewHistoryPersistenceProbe: ReviewHistoryPersistence {
         self.startedWriteFailure = startedWriteFailure
         self.terminalWriteFailure = terminalWriteFailure
         self.orderingWriteFailure = orderingWriteFailure
-        self.terminalMutation = terminalMutation
+        self.terminalMutations = terminalMutations ?? [terminalMutation]
     }
 
     func load(
@@ -984,11 +1188,14 @@ private actor ReviewHistoryPersistenceProbe: ReviewHistoryPersistence {
         if let terminalWriteFailure {
             throw ReviewHistoryPersistenceProbeError(message: terminalWriteFailure)
         }
-        records.removeAll { terminalMutation.removedReviewIDs.contains($0.started.id) }
+        let mutation = terminalMutations.isEmpty
+            ? ReviewHistoryMutationResult()
+            : terminalMutations.removeFirst()
+        records.removeAll { mutation.removedReviewIDs.contains($0.started.id) }
         terminals.removeAll {
-            terminalMutation.removedReviewIDs.contains($0.id) && $0.id != record.id
+            mutation.removedReviewIDs.contains($0.id) && $0.id != record.id
         }
-        return terminalMutation
+        return mutation
     }
 
     func saveOrdering(_ ordering: ReviewHistoryOrdering) async throws {

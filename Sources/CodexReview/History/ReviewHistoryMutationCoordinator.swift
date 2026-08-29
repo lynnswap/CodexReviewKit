@@ -26,7 +26,7 @@ package final class ReviewHistoryMutationCoordinator {
         let predecessor = tail
         let task = Task<Void, Never> { @MainActor [weak self] in
             await predecessor?.value
-            guard let self else {
+            guard self != nil else {
                 receipt.resolve(.failure(.init(
                     message: "Review history mutation owner was released."
                 )))
@@ -41,7 +41,7 @@ package final class ReviewHistoryMutationCoordinator {
             }
             receipt.resolve(result)
             apply(input, result)
-            finish(ordinal: ordinal)
+            self?.finish(ordinal: ordinal)
         }
         tasks[ordinal] = task
         tail = task

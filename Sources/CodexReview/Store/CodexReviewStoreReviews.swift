@@ -71,6 +71,10 @@ extension CodexReviewStore {
             request: request,
             workAdmission: workAdmission
         )
+        let historyResultLease = acquireHistoryResultLease(jobID: jobID)
+        defer {
+            releaseHistoryResultLease(historyResultLease)
+        }
         guard let waitTimeout else {
             _ = try await awaitReview(sessionID: sessionID, jobID: jobID)
             if Task.isCancelled, storeWorkRegistry.accepts(workAdmission) {
@@ -103,6 +107,10 @@ extension CodexReviewStore {
         let job = try job(jobID: jobID)
         if let sessionID, job.belongs(toLiveSession: sessionID) == false {
             throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
+        }
+        let historyResultLease = acquireHistoryResultLease(jobID: jobID)
+        defer {
+            releaseHistoryResultLease(historyResultLease)
         }
         if isReviewResultFinalized(jobID: jobID) == false {
             await waitForReviewTerminal(jobID: jobID, timeout: timeout)
@@ -231,6 +239,7 @@ extension CodexReviewStore {
         }
         await waitForHistoryTerminalCommitIfNeeded(jobID: jobID)
         reviewWorkerTasks.removeValue(forKey: jobID)
+        applyDeferredHistoryRemovalIfFinalized(jobID: jobID)
         resumeReviewWaiters(for: jobID)
     }
 
@@ -343,6 +352,7 @@ extension CodexReviewStore {
         await waitForHistoryTerminalCommitIfNeeded(jobID: jobID)
         reviewWorkerTasks.removeValue(forKey: jobID)
         runtimeStopDetachedReviewWorkerTasks.removeValue(forKey: jobID)
+        applyDeferredHistoryRemovalIfFinalized(jobID: jobID)
         if job.isTerminal {
             resumeReviewWaiters(for: jobID)
         }
@@ -1045,6 +1055,10 @@ extension CodexReviewStore {
         cancellationRequest requestReceipt: ReviewCancellationRequestReceipt
     ) async throws -> CodexReviewAPI.Cancel.Outcome {
         let jobID = job.id
+        let historyResultLease = acquireHistoryResultLease(jobID: jobID)
+        defer {
+            releaseHistoryResultLease(historyResultLease)
+        }
         let admittedCancellation = requestReceipt.cancellation
         switch ownership {
         case .recovering(let receipt):
