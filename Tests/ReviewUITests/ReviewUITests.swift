@@ -1700,18 +1700,22 @@ struct ReviewUITests {
         #expect(sidebar.jobRowUsesReviewMonitorJobRowViewForTesting(job))
     }
 
-    @Test func sidebarUsesMeasuredRowHeightsForWorkspaceAndJobRows() throws {
-        let job = makeJob(
-            cwd: "/tmp/workspace-alpha",
-            status: .running,
-            targetSummary: "Uncommitted changes"
-        )
+    @Test func sidebarUsesMeasuredRowHeightsForWorkspaceJobAndShowMoreRows() throws {
+        let jobs = (0..<6).map { index in
+            makeJob(
+                id: "job-row-height-\(index)",
+                cwd: "/tmp/workspace-alpha",
+                status: .running,
+                targetSummary: "Review \(index)"
+            )
+        }
+        let job = try #require(jobs.first)
         let workspace = CodexReviewWorkspace(cwd: job.cwd)
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
             workspaces: [workspace],
-            jobs: [job]
+            jobs: jobs
         )
         let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
@@ -1723,9 +1727,12 @@ struct ReviewUITests {
         let sidebar = viewController.sidebarViewControllerForTesting
         let workspaceRowHeight = try #require(sidebar.workspaceRowHeightForTesting(workspace))
         let jobRowHeight = try #require(sidebar.jobRowHeightForTesting(job))
+        let showMoreRowHeight = try #require(sidebar.showMoreRowHeightForTesting(containing: workspace))
         #expect(workspaceRowHeight == sidebar.expectedWorkspaceRowRectHeightForTesting)
         #expect(jobRowHeight == sidebar.expectedJobRowRectHeightForTesting)
+        #expect(showMoreRowHeight == sidebar.expectedShowMoreRowRectHeightForTesting)
         #expect(workspaceRowHeight < jobRowHeight)
+        #expect(showMoreRowHeight < jobRowHeight)
     }
 
     @Test func jobRowsUseLabelIconSlotInsteadOfOutlineChildIndent() throws {
