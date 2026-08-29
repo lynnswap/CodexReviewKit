@@ -426,7 +426,7 @@ assert_database_contract() {
   ]' "$finding_columns_path" >/dev/null || die "finding schema inventory changed"
 
   /usr/bin/sqlite3 -json "$history_path" \
-    "SELECT id, cwd, targetKind, startedModel, phase, terminalModel, terminalKind, summary, canonicalReview, parsedState, parsedFindingCount, parsedSource, parserVersion FROM review_records" \
+    "SELECT id, cwd, targetKind, startedModel, startedAt, phase, terminalModel, terminalKind, endedAt, summary, canonicalReview, parsedState, parsedFindingCount, parsedSource, parserVersion FROM review_records" \
     >"$semantic_record_path"
   /usr/bin/sqlite3 -json "$history_path" \
     "SELECT reviewID, ordinal, priority, title, body, path, startLine, endLine FROM review_findings ORDER BY ordinal" \
@@ -437,8 +437,10 @@ assert_database_contract() {
     and .[0].id == $job_id
     and .[0].cwd == $cwd
     and .[0].targetKind == "uncommittedChanges"
+    and (.[0].startedAt | type == "number")
     and .[0].phase == "terminal"
     and .[0].terminalKind == "completed"
+    and (.[0].endedAt | type == "number")
     and ((.[0].terminalModel // .[0].startedModel) | type == "string" and length > 0)
     and (.[0].summary | type == "string" and length > 0)
     and (.[0].canonicalReview | type == "string" and length > 0)
@@ -455,6 +457,11 @@ assert_database_contract() {
       and (.ordinal | type == "number")
       and (.title | type == "string" and length > 0)
       and (.body | type == "string")
+    )
+    and any(.[];
+      ((.path // "") | endswith("AccessGate.swift"))
+      and ((.startLine // 0) > 0)
+      and ((.endLine // 0) >= .startLine)
     )
     and ([.[].ordinal] == [range(0; length)])
   ' "$findings_path" >/dev/null || die "database findings are incomplete or unordered"
@@ -494,6 +501,7 @@ echo "Building $app_name into dedicated DerivedData..."
     -derivedDataPath "$derived_data_path" \
     -disableAutomaticPackageResolution \
     -onlyUsePackageVersionsFromResolvedFile \
+    -skipMacroValidation \
     CODE_SIGNING_ALLOWED=NO \
     CODE_SIGNING_REQUIRED=NO
 ) >"$build_log_path" 2>&1
@@ -654,12 +662,19 @@ assert_no_diagnostic_transcript_fields "$live_diagnostics_path"
   and .jobs[0].origin == "live"
   and .jobs[0].status == "succeeded"
   and .jobs[0].terminal.kind == "completed"
+  and (.jobs[0].startedAt | type == "number")
+  and (.jobs[0].endedAt | type == "number")
   and (.jobs[0].model | type == "string" and length > 0)
   and (.jobs[0].summary | type == "string" and length > 0)
   and (.jobs[0].canonicalReview | type == "string" and length > 0)
   and .jobs[0].parsedResult.state == "hasFindings"
   and (.jobs[0].parsedResult.findingCount | type == "number" and . > 0)
   and (.jobs[0].parsedResult.findings | length > 0)
+  and any(.jobs[0].parsedResult.findings[];
+    ((.location.path // "") | endswith("AccessGate.swift"))
+    and ((.location.startLine // 0) > 0)
+    and ((.location.endLine // 0) >= .location.startLine)
+  )
 ' "$live_diagnostics_path" >/dev/null || die "live diagnostics semantic row is incomplete"
 /usr/bin/jq -S --arg job_id "$job_id" '
   .jobs[] | select(.id == $job_id) | del(.origin)
@@ -754,6 +769,14 @@ mcp_post \
 
 request_id=11
 for denied_tool in review_read review_await review_cancel; do
+  case "$denied_tool" in
+    review_read|review_await)
+      expected_denial="Job $job_id was not found."
+      ;;
+    review_cancel)
+      expected_denial="No review job matched the selector."
+      ;;
+  esac
   request_id=$((request_id + 1))
   /usr/bin/jq -n \
     --argjson id "$request_id" \
@@ -771,7 +794,12 @@ for denied_tool in review_read review_await review_cancel; do
     "$artifacts_dir/restored-$denied_tool.request.json" \
     "$artifacts_dir/restored-$denied_tool.response" \
     30
-  /usr/bin/jq -e '.result.isError == true and (.result.structuredContent.jobId? == null)' \
+  /usr/bin/jq -e --arg expected_denial "$expected_denial" '
+    .result.isError == true
+    and (.result.structuredContent.jobId? == null)
+    and (.result.content | type == "array" and length == 1)
+    and .result.content[0].text == $expected_denial
+  ' \
     "$artifacts_dir/restored-$denied_tool.response.json" >/dev/null \
     || die "new MCP session accessed restored history through $denied_tool"
 done
@@ -793,7 +821,9 @@ done
     fixture: $fixture,
     endpoint: $endpoint,
     jobID: $jobID,
-    restoredAppPID: ($pid | tonumber)
+    restoredAppPID: ($pid | tonumber),
+    semanticGatePassed: true,
+    uiEvidenceStatus: "pending"
   }
 ' >"$artifacts_dir/e2e-summary.json"
 
@@ -806,6 +836,7 @@ if [[ "$keep_restored_app_running" == true ]]; then
     + "\n  database: " + .historyDatabase
     + "\n  job: " + .jobID
   ' "$artifacts_dir/e2e-summary.json"
+  echo "Semantic gate passed; visible UI/accessibility verification and a screenshot are still required."
   disown "$current_app_pid" 2>/dev/null || true
   current_app_pid=""
 else
@@ -813,4 +844,8 @@ else
 fi
 
 e2e_succeeded=true
-echo "Review history E2E passed for job $job_id."
+if [[ "$keep_restored_app_running" == true ]]; then
+  echo "Review history semantic E2E passed for job $job_id; UI evidence is pending."
+else
+  echo "Review history semantic E2E passed for job $job_id (visible UI was not inspected)."
+fi

@@ -1,10 +1,12 @@
 # Review history application E2E
 
-`run.sh` is the isolated macOS gate for durable ReviewMonitor history. It builds
+`run.sh` is the isolated macOS semantic gate for durable ReviewMonitor history. It builds
 the app into a dedicated DerivedData directory, runs an actual review through
 `/opt/homebrew/bin/codex`, gracefully quits the exact app PID, relaunches against
-the same SQLite database, and checks both restored UI diagnostics and MCP session
-isolation.
+the same SQLite database, and checks restored Store diagnostics plus MCP session
+isolation. Complete app acceptance also requires the visible UI/accessibility
+inspection and screenshot described below; diagnostics do not prove that the
+sidebar or detail renderer is correct.
 
 The application composition root must implement all four explicit test inputs:
 
@@ -32,12 +34,17 @@ failure prints that directory and gracefully terminates only the exact app PID i
 started; a verified process that ignores graceful termination is checked again by
 executable path before an exact signal fallback.
 
-For the final visible UI inspection, leave the verified second instance running:
+For the required final visible UI inspection, leave the verified second instance running:
 
 ```bash
 scripts/review-history-e2e/run.sh --keep-restored-app-running
 ```
 
 The output and `e2e-summary.json` identify the restored app PID, rebuilt binary,
-diagnostics, database, fixture, and job. After capturing the UI, run the exact
-termination command printed by the script.
+diagnostics, database, fixture, and job. Inspect the rebuilt process through the
+macOS accessibility tree, select the restored row, and verify its target,
+terminal state, duration, canonical review, and `AccessGate.swift` finding. Save
+a screenshot as `ui-restored.png` in the artifact directory, record the inspected
+accessibility state beside it, and change `uiEvidenceStatus` from `pending` only
+after both checks pass. Finally, run the exact termination command printed by the
+script.
