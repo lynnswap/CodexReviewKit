@@ -47,4 +47,6 @@ terminal state, duration, canonical review, and `AccessGate.swift` finding. Save
 a screenshot as `ui-restored.png` in the artifact directory, record the inspected
 accessibility state beside it, and change `uiEvidenceStatus` from `pending` only
 after both checks pass. Finally, run the exact termination command printed by the
-script.
+script. The script intentionally remains attached until that exact app process
+terminates, so a non-interactive runner can inspect the UI without the child being
+re-launched outside the isolated environment.

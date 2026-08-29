@@ -866,8 +866,12 @@ if [[ "$keep_restored_app_running" == true ]]; then
     + "\n  job: " + .jobID
   ' "$artifacts_dir/e2e-summary.json"
   echo "Semantic gate passed; visible UI/accessibility verification and a screenshot are still required."
-  disown "$current_app_pid" 2>/dev/null || true
+  echo "The gate remains attached until that exact app process is terminated."
+  restored_app_wait_status=0
+  wait "$current_app_pid" || restored_app_wait_status=$?
   current_app_pid=""
+  [[ "$restored_app_wait_status" -eq 0 ]] \
+    || die "restored app exited with status $restored_app_wait_status during UI inspection"
 else
   terminate_current_app
 fi
