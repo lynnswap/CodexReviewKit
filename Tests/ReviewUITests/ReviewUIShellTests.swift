@@ -337,6 +337,10 @@ extension ReviewUITests {
         #expect(viewController.toolbarIdentifiersForTesting.contains(viewController.sidebarJobFilterToolbarItemIdentifierForTesting))
         #expect(viewController.toolbarIdentifiersForTesting.contains(.toggleSidebar) == false)
         #expect(viewController.toolbarIdentifiersForTesting.contains(.sidebarTrackingSeparator))
+        let filterToolbarItem = try #require(window.toolbar?.items.first {
+            $0.itemIdentifier == viewController.sidebarJobFilterToolbarItemIdentifierForTesting
+        })
+        #expect(filterToolbarItem.visibilityPriority == .high)
         #expect(
             viewController.sidebarPickerToolbarSegmentAccessibilityDescriptionsForTesting ==
                 ["Workspace", "Account"]
@@ -525,6 +529,42 @@ extension ReviewUITests {
         try await waitForCondition {
             viewController.sidebarJobFilterToolbarItemIsHiddenForTesting == false
         }
+    }
+
+    @Test func sidebarPickerDoesNotRewriteNativeSelectionAfterClick() throws {
+        let store = CodexReviewStore.makePreviewStore()
+        let harness = makeWindowHarness(store: store)
+        let viewController = harness.viewController
+        let window = harness.window
+        defer { window.close() }
+        let toolbar = try #require(window.toolbar)
+        let pickerIdentifier = viewController.sidebarPickerToolbarItemIdentifierForTesting
+        let pickerItem = try #require(toolbar.items.first(where: {
+            $0.itemIdentifier == pickerIdentifier
+        }))
+        let segmentedControl = try #require(pickerItem.view as? NSSegmentedControl)
+        let initialSegment = segmentedControl.selectedSegment
+        let transitions = Mutex<[(oldValue: Int, newValue: Int)]>([])
+        let observation = segmentedControl.observe(\.selectedSegment, options: [.old, .new]) { _, change in
+            guard let oldValue = change.oldValue,
+                  let newValue = change.newValue
+            else {
+                return
+            }
+            transitions.withLock {
+                $0.append((oldValue: oldValue, newValue: newValue))
+            }
+        }
+        defer { observation.invalidate() }
+
+        viewController.selectSidebarPickerToolbarSegmentForTesting(.account)
+
+        let updatedSegment = segmentedControl.selectedSegment
+        let recordedTransitions = transitions.withLock { $0 }
+        #expect(updatedSegment != initialSegment)
+        #expect(recordedTransitions.count == 1)
+        #expect(recordedTransitions.first?.oldValue == initialSegment)
+        #expect(recordedTransitions.first?.newValue == updatedSegment)
     }
 
     @Test func sidebarPickerAppliesContextualToolbarItemsAsOneDiff() async throws {

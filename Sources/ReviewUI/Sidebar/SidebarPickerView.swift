@@ -93,7 +93,10 @@ final class ReviewMonitorSidebarPickerToolbarItem: NSToolbarItem {
     }
 
     private func updateSelection(_ selection: SidebarPickerSelection) {
-        segmentedControl.selectedSegment = Self.segmentIndex(for: selection)
+        let selectedSegment = Self.segmentIndex(for: selection)
+        if segmentedControl.selectedSegment != selectedSegment {
+            segmentedControl.selectedSegment = selectedSegment
+        }
         for (candidate, item) in overflowSelectionMenuItems {
             item.state = candidate == selection ? .on : .off
         }
