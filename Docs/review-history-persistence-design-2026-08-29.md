@@ -1,0 +1,436 @@
+# Review history persistence design (2026-08-29)
+
+Status: Approved direction; implementation in progress
+
+| Item | Value |
+| --- | --- |
+| Integration branch | `codex/persist-review-history` |
+| Baseline | `22b1e975015b0bf24b45dad669a91c8b52fd8d2c` |
+| Target base | `main` |
+| Database framework | SQLiteData 1.11.2 |
+| Package baseline | Swift tools 6.3 / Swift language mode 6 |
+| Local validation toolchain | Xcode 27.0 / Swift 6.4 |
+| CI compatibility toolchain | Latest stable Xcode 26 runner selected by `.github/workflows/ci.yml` |
+
+This document is the design contract and progress ledger for durable ReviewMonitor
+history. If implementation requires another owner, schema, lifecycle, failure
+semantic, or MCP authorization policy, update this document before changing code.
+
+## 1. Scope contract
+
+### Outcome
+
+ReviewMonitor restores application-wide review history after relaunch without
+persisting the live transcript. A restored row preserves its review identity,
+workspace and manual order, target, effective model, lifecycle, canonical result,
+and structured findings. Selecting a restored review renders a compact detail from
+those semantic fields.
+
+The feature is complete when:
+
+1. A succeeded, failed, or cancelled review remains one sidebar row after a clean
+   app restart.
+2. The row retains its target, model, exact known duration, terminal cause, final
+   review, and findings.
+3. A process-abandoned queued/running record is restored as
+   `.interrupted(.previousProcessExit)` and never appears live or cancellable.
+   Its unknown end time is not guessed.
+4. History remains readable while the MCP runtime is starting, stopped, or failed.
+5. A new MCP session cannot list, read, await, or cancel records restored from a
+   previous process.
+6. Database open, migration, decode, or write failure is visible at the Store
+   boundary and blocks new review admission instead of silently using empty or
+   non-durable history.
+
+### Compatibility
+
+- Keep the four existing library products and their public source surface.
+- Keep the five MCP tool names, schemas, response fields, and session-local
+  authorization behavior.
+- No migration of a previously shipped review-history database is required; there
+  is no current durable history owner.
+- Current account/settings/runtime persistence remains unchanged.
+- Local commits, push, and the requested Ready PR are authorized for this task.
+
+### Non-goals
+
+- Full transcript or app-server event replay.
+- Cross-process review resumption from thread/turn identifiers.
+- Reproducible source archives, working-tree snapshots, or diff storage.
+- CloudKit synchronization.
+- Persisting credentials, account secrets, raw JSON-RPC, reasoning, command output,
+  tool results, developer diagnostics, or streaming deltas.
+- Making previous-process history readable through a newly initialized MCP session.
+
+## 2. Phase 1 findings at the baseline
+
+### Measurements
+
+- `CodexReview`: 225 `public`, 872 `package`, 8 `open` tokens.
+- `CodexReviewHost`: 45 `public`, 99 `package`, 10 `open` tokens.
+- `ReviewUI`: 9 `public`, 2 `package`, 2 `open` tokens.
+- No `#if canImport` / `#if os` source gates.
+- Relevant largest files before migration:
+  - `LiveCodexReviewStoreBackend.swift`: 3,701 lines.
+  - `CodexReviewStoreReviews.swift`: 2,685 lines.
+  - `ReviewMonitorSidebarViewController.swift`: 2,672 lines.
+  - `CodexReviewStore.swift`: 1,709 lines.
+  - `CodexReviewJob.swift`: 1,004 lines.
+
+### Numbered findings
+
+#### F1 — Durable review membership has no owner (confirmed)
+
+`CodexReviewStore` owns process-local workspaces/jobs and its seed contains only
+account/settings state. Relaunch constructs a new Store with no review records.
+
+#### F2 — The current aggregate mixes semantic state with transient projection (confirmed)
+
+`CodexReviewJob` contains canonical lifecycle/output alongside raw log entries,
+incremental message assembly, rendered text projections, log revisions, and mutation
+hints. Encoding the class would persist duplicate and runtime-only state.
+
+#### F3 — Exact review target is discarded after admission (confirmed)
+
+The validated `Start.Request.target` reaches the worker, while the job retains only
+`targetSummary`. History must record the typed validated target at admission; it
+must not parse the display string later.
+
+#### F4 — The current 256 KiB limit is not a durable log bound (confirmed)
+
+The cap excludes multiple log kinds and metadata payloads. Persisting
+`ReviewLogEntry` is not a bounded-history design.
+
+#### F5 — The detail UI needs an explicit compact-history projection (confirmed)
+
+The selected detail renders `job.logEntries`, while workspace findings render
+`core.output.reviewResult`. Restored history must build a canonical final/error/
+cancellation entry from semantic history rather than store rendered projections.
+
+#### F6 — Runtime availability currently hides otherwise valid history (confirmed)
+
+The sidebar selects its unavailable state before considering existing jobs when the
+server is starting, stopped, or failed. Durable history must remain visible and use
+the status accessory for runtime/history health.
+
+#### F7 — MCP authorization and application history have different lifetimes (confirmed)
+
+MCP read/list/cancel filter by the current transport session. Persisted history is
+application-wide UI data and must restore with a non-live session identity.
+
+#### F8 — The existing history URL helper is not an independent live seam (confirmed)
+
+`PreparedRecoveryEnvironment.withHistoryDatabaseURL` belongs to an unused capability
+graph that also owns a replacement Codex home, login staging, and saved accounts.
+Activating the graph only for history would expand this change into runtime-home
+migration. The history database therefore gets a dedicated Application Support
+location owner, and the unused helper is removed so there is one live path owner.
+
+## 3. Target graph and owner map
+
+### Considered structures
+
+1. **Internal `CodexReviewPersistence` target (selected).**
+   It owns SQLiteData schema, migrations, queries, transactions, retention, and DB
+   close. `CodexReview` owns the semantic port/records; `CodexReviewHost` owns the
+   production URL and composition. This keeps SQLiteData out of domain and UI source.
+2. Put SQLiteData inside `CodexReviewHost`.
+   This avoids one target but adds schema/query ownership to the existing 3,701-line
+   runtime adapter and cannot enforce the storage boundary.
+3. Put SQLiteData inside `CodexReview`.
+   This makes the semantic target own a concrete I/O framework and lets persistence
+   types spread into the Store. It also makes preview/testing selection less explicit.
+
+The selected same-package internal target is justified by a real outbound-adapter
+dependency boundary. It is not a new product or separately versioned package.
+
+```text
+ReviewUI ───────────────────────────────▶ CodexReview
+CodexReviewMCPServer ───────────────────▶ CodexReview
+CodexReviewPersistence ─▶ CodexReview + SQLiteData
+CodexReviewHost ─────────┬──────────────▶ CodexReview
+                        └──────────────▶ CodexReviewPersistence
+ReviewMonitor.app ─────────────────────▶ CodexReviewHost + ReviewUI
+```
+
+Responsibilities:
+
+- `CodexReview`: owns live review semantics and the history persistence contract.
+- `CodexReviewPersistence`: stores and restores semantic review records in SQLite.
+- `CodexReviewHost`: supplies the owner-only production database location and concrete adapter.
+- `ReviewUI`: renders Store state and forwards history deletion/reorder intent.
+- `CodexReviewMCPServer`: keeps current-session authorization over Store commands.
+
+### Resource lifecycle
+
+```text
+ReviewMonitor composition
+  -> prepare owner-only Application Support directory
+  -> create/migrate ReviewHistoryDatabase
+  -> inject persistence port into CodexReviewStore
+  -> Store loads/orphan-finalizes history once
+  -> runtime starts
+  -> review admission persists a running header before backend dispatch
+  -> worker finalization commits terminal result + findings + retention
+  -> application shutdown drains review workers
+  -> Store synchronizes terminal snapshots and ordering
+  -> history database closes
+  -> application termination replies
+```
+
+Runtime restart/account switch does not close history. Application shutdown is a
+separate Store operation from runtime `stop()`.
+
+## 4. Semantic surface
+
+All new declarations are `package` unless an existing public API requires otherwise.
+No SQLiteData or GRDB type appears outside `CodexReviewPersistence`.
+
+```swift
+package protocol ReviewHistoryPersistence: Sendable {
+    func load() async throws -> ReviewHistoryLoadResult
+    func recordStarted(_ record: StartedReviewRecord) async throws
+    func recordTerminal(_ record: TerminalReviewRecord) async throws
+      -> ReviewHistoryMutationResult
+    func saveOrdering(_ ordering: ReviewHistoryOrdering) async throws
+    func deleteReview(id: String) async throws
+    func deleteAll() async throws
+    func close() async throws
+}
+
+package enum ReviewHistoryAvailability: Sendable, Equatable {
+    case loading
+    case available
+    case failed(String)
+    case closed
+}
+
+@MainActor
+extension CodexReviewStore {
+    package func deleteReviewHistory(id: String) async
+    package func deleteAllReviewHistory() async
+    package func shutdown() async
+}
+```
+
+The live SQLite implementation is an actor. It owns the database writer and close
+state. `CodexReviewStore` remains `@MainActor`; only immutable Sendable records cross
+the boundary. No fire-and-forget database task is permitted. Every start/terminal/
+delete operation is awaited by an existing Store-owned operation, and shutdown
+awaits final synchronization before close.
+
+### Consumer path
+
+Before:
+
+```swift
+let store = CodexReviewStore.makeLiveStore(...)
+ReviewMonitorWindowController(store: store, ...)
+```
+
+After: unchanged at the app/UI call site. `CodexReviewHost` composes the database
+behind `makeLiveStore`, and `ReviewUI` continues to observe the Store.
+
+## 5. Schema and invariants
+
+SQLiteData `@Table` records are storage models, not the domain aggregate.
+
+### `review_workspaces`
+
+- `cwd` primary key
+- `sortOrder`
+
+### `review_records`
+
+- stable review ID primary key
+- `cwd` foreign key to workspace
+- manual `sortOrder`
+- typed target discriminator and variant payload
+- effective/requested model and optional review/thread/turn provenance
+- lifecycle phase and typed terminal/cancellation/interruption fields
+- `startedAt`, nullable `endedAt`, summary, canonical final review
+- parsed-result state and parser version
+- created/updated timestamps for migration and diagnostics
+
+### `review_findings`
+
+- stable finding ID primary key
+- review ID foreign key with `ON DELETE CASCADE`
+- ordinal, priority, title, body, path, start/end line
+- unique `(reviewID, ordinal)`
+
+Schema rules:
+
+- `STRICT` tables, foreign keys, explicit indices, and versioned migrations.
+- Published migrations are append-only; production never erases history on schema change.
+- Active rows have no terminal payload. Terminal rows have one compatible typed terminal.
+- Succeeded rows require non-empty canonical final review text no larger than the
+  existing 256 KiB domain limit.
+- Findings and parsed-result metadata are one transaction with terminal commit.
+- Restored rows derive display title, elapsed time, final flag, compact log entries,
+  and other projections; those values are not columns.
+
+### Retention
+
+- Keep at most 50 terminal reviews per workspace and 500 terminal reviews globally.
+- Prune oldest terminal reviews after terminal commit and at startup.
+- Never prune the current nonterminal rows.
+- Return pruned IDs from the transaction so Store membership matches durable membership.
+- No time-based expiry in v1.
+
+## 6. Failure semantics
+
+- Open/migration/load/decode failure: publish history `.failed`, retain the database,
+  do not present empty history, continue runtime/auth/settings startup, reject new
+  review admission with an explicit I/O error.
+- Start-header write failure: do not dispatch a backend review or publish a live row.
+- Terminal write failure: retain the current in-memory result, publish history
+  `.failed`, let the already completed review return its real outcome, and reject
+  subsequent starts until the next successful app launch.
+- Delete/order failure: keep current durable membership/order, publish history
+  `.failed`, and do not silently claim success.
+- Close failure: publish/log the failure and complete application termination only
+  after the close attempt returns.
+- A queued/running row found at startup becomes
+  `.interrupted(.previousProcessExit)` with unknown `endedAt`; UI must not show a
+  running timer or invent an exact duration.
+
+## 7. Variation points
+
+| Axis | Absorption point | Variant test |
+| --- | --- | --- |
+| live / preview / test persistence | composition injects `ReviewHistoryPersistence` | add one adapter and one factory registration |
+| storage implementation | the history port | replace SQLite adapter without editing Store/UI |
+| target kind | typed target codec in persistence | add one target case and one codec/schema migration |
+| terminal cause | existing `ReviewTerminalRecord` mapping | add one typed cause mapping and round-trip test |
+| runtime availability | sidebar/status presentation | history membership remains independent of server state |
+
+## 8. Deletions and avoided shapes
+
+### Deletions
+
+- Remove the unused `PreparedRecoveryEnvironment.withHistoryDatabaseURL` helper and
+  its isolated test; the live history location has one dedicated owner.
+- Remove no Store/MCP public behavior. Restored rows use semantic reconstruction,
+  not a parallel UI-only history model.
+
+### Avoided shapes
+
+- Do not serialize `CodexReviewJob` or `ReviewLogEntry` wholesale.
+- Do not call SQLiteData `@FetchAll` from `ReviewUI` leaf views.
+- Do not add history operations to `CodexReviewStoreBackend`; runtime transport and
+  durable history are independent variation axes.
+- Do not reuse `writeDiagnosticsIfNeeded` as persistence. It is optional test
+  diagnostics, catches write errors, and stores rendered/raw projections.
+- Do not persist MCP session identity as future authorization.
+- Do not use thread IDs as cross-process recovery tokens.
+- Do not create an unowned database Task or rely on deinit for async close.
+- Do not fall back to a second database path or recreate a corrupt database.
+
+## 9. Test contract
+
+### Persistence adapter
+
+- fresh migration and schema constraints
+- started/terminal round trip for every target and terminal variant
+- findings transaction and cascade deletion
+- startup orphan conversion with unknown end time
+- per-workspace/global retention and returned pruned IDs
+- invalid/incompatible row fails load without erasing data
+- close rejects subsequent operations
+- temporary-file and in-memory database configurations
+
+### Store
+
+- history loads once before accepting review starts
+- start header is durable before backend dispatch
+- start failure prevents dispatch and row publication
+- terminal persistence completes before worker result finalization
+- persistence failure is visible and blocks later starts without changing the real terminal outcome
+- restored rows remain inaccessible to a new MCP session
+- clean shutdown synchronizes terminal rows/order and closes history after workers
+- delete updates database, Store membership, workspace membership, and selection source
+
+### ReviewUI / app
+
+- history remains visible for starting/stopped/failed server states
+- restored success/failure/cancellation detail is non-empty
+- terminal row with unknown end does not render a running timer
+- history failure appears in the status presentation
+- terminal context menu deletes; active context menu cancels
+- composition uses the production history path while preview/tests use injected stores
+- application termination awaits `shutdown()`
+
+### Required gates
+
+```bash
+swift test --build-system swiftbuild --no-parallel
+xcodebuild test -project Tools/ReviewMonitor/CodexReviewMonitor.xcodeproj \
+  -scheme CodexReviewMonitor \
+  -destination 'platform=macOS,arch=arm64' \
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+scripts/check-compatibility.sh
+git diff --check
+```
+
+Then run branch-wide local Codex review against `main` until it reports no findings.
+
+## 10. Finding coverage
+
+| Finding | Design response |
+| --- | --- |
+| F1 | One history port + SQLite owner + Store hydration |
+| F2 | Storage records exclude job projection/runtime state |
+| F3 | Started record stores the typed validated target |
+| F4 | No generic log table; canonical result retains the existing hard bound |
+| F5 | Restored compact semantic log projection |
+| F6 | Sidebar membership independent of server availability |
+| F7 | Restored non-live session identity and unchanged MCP filters |
+| F8 | Dedicated Application Support owner; remove unused whole-environment helper |
+
+## 11. Migration slices and progress
+
+### Slice A — schema and adapter
+
+Budget: 6 hours; at most 10 production and 4 test files.
+
+- [ ] Add SQLiteData dependency and internal target.
+- [ ] Add schema, migrations, codec, retention, close owner.
+- [ ] Pass focused persistence tests.
+
+### Slice B — Store cutover
+
+Budget: 8 hours; at most 12 production and 5 test files.
+
+- [ ] Add semantic port/records and injected disabled/test implementations.
+- [ ] Load history, persist start/terminal, synchronize ordering, and delete.
+- [ ] Add application shutdown separate from runtime stop.
+- [ ] Pass focused Store/MCP tests.
+
+### Slice C — ReviewMonitor/UI composition
+
+Budget: 5 hours; at most 8 production and 4 test files.
+
+- [ ] Compose production path/database.
+- [ ] Keep history visible during runtime failure.
+- [ ] Render history health and deletion semantics.
+- [ ] Pass focused ReviewUI/app tests.
+
+### Slice D — integration and delivery
+
+- [ ] Run all repository gates.
+- [ ] Run branch-wide local Codex review to clean.
+- [ ] Commit final fixes and verify clean worktree.
+- [ ] Push branch and create Ready PR to `main`.
+
+## 12. Acceptance remeasurement
+
+At completion, record:
+
+- final product/target graph from `swift package dump-package`;
+- public/package/open distribution and any new public declarations;
+- largest relevant files and `CodexReviewStore` stored-property change;
+- remaining platform gates;
+- the concrete path owner and DB close proof;
+- old path/helper and alternate persistence routes removed;
+- exact test/review results.
