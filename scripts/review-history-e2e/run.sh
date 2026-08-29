@@ -294,7 +294,11 @@ mcp_post() {
   if [[ -n "$session_identifier" ]]; then
     curl_arguments+=(--header "MCP-Session-Id: $session_identifier")
   fi
-  /usr/bin/curl "${curl_arguments[@]}" "$endpoint"
+  local curl_status=0
+  /usr/bin/curl "${curl_arguments[@]}" "$endpoint" || curl_status=$?
+  if [[ "$curl_status" -ne 0 ]]; then
+    return "$curl_status"
+  fi
   mcp_decode_response "$body_path" "$json_path"
 }
 
@@ -589,54 +593,92 @@ live_session_id="$(/usr/bin/awk '
     arguments: {cwd: $cwd, target: {type: "uncommittedChanges"}}
   }
 }' >"$artifacts_dir/review-start.request.json"
+review_start_transport_status=0
 mcp_post \
   "$endpoint" \
   "$live_session_id" \
   "$artifacts_dir/review-start.request.json" \
   "$artifacts_dir/review-start.response" \
-  "$review_timeout_seconds"
-/usr/bin/jq -e '.result.isError == false' \
-  "$artifacts_dir/review-start.response.json" >/dev/null \
-  || die "real review_start returned an error"
-job_id="$(/usr/bin/jq -r '.result.structuredContent.jobId // empty' \
-  "$artifacts_dir/review-start.response.json")"
-[[ -n "$job_id" ]] || die "review_start response omitted jobId"
+  "$review_timeout_seconds" \
+  || review_start_transport_status=$?
+printf '%s\n' "$review_start_transport_status" \
+  >"$artifacts_dir/review-start.transport-status"
 
-review_request_id=3
-review_status=""
-while true; do
-  /usr/bin/jq -n --argjson id "$review_request_id" --arg job_id "$job_id" '{
+final_review_response=""
+if [[ "$review_start_transport_status" -eq 0 ]]; then
+  /usr/bin/jq -e '.result.isError == false' \
+    "$artifacts_dir/review-start.response.json" >/dev/null \
+    || die "real review_start returned an error"
+  job_id="$(/usr/bin/jq -r '.result.structuredContent.jobId // empty' \
+    "$artifacts_dir/review-start.response.json")"
+  [[ -n "$job_id" ]] || die "review_start response omitted jobId"
+
+  review_request_id=3
+  review_status=""
+  while true; do
+    /usr/bin/jq -n --argjson id "$review_request_id" --arg job_id "$job_id" '{
+      jsonrpc: "2.0",
+      id: $id,
+      method: "tools/call",
+      params: {name: "review_await", arguments: {jobId: $job_id}}
+    }' >"$artifacts_dir/review-await-$review_request_id.request.json"
+    mcp_post \
+      "$endpoint" \
+      "$live_session_id" \
+      "$artifacts_dir/review-await-$review_request_id.request.json" \
+      "$artifacts_dir/review-await-$review_request_id.response" \
+      "$review_timeout_seconds"
+    /usr/bin/jq -e '.result.isError == false' \
+      "$artifacts_dir/review-await-$review_request_id.response.json" >/dev/null \
+      || die "real review_await returned an error"
+    review_status="$(/usr/bin/jq -r '.result.structuredContent.lifecycle.status // empty' \
+      "$artifacts_dir/review-await-$review_request_id.response.json")"
+    case "$review_status" in
+      succeeded)
+        final_review_response="$artifacts_dir/review-await-$review_request_id.response.json"
+        break
+        ;;
+      queued|running)
+        review_request_id=$((review_request_id + 1))
+        [[ "$review_request_id" -le 5 ]] \
+          || die "real review remained active after three review_await calls"
+        ;;
+      *)
+        die "real review reached unexpected terminal status: ${review_status:-missing}"
+        ;;
+    esac
+  done
+# A completed long-running review can close its chunked SSE transfer before curl
+# observes the terminal event. Do not accept that transport failure by itself:
+# recovery requires the same live server, the terminal semantic row, and a fresh
+# session-scoped review_read request for the exact job.
+elif [[ "$review_start_transport_status" -eq 18 ]]; then
+  wait_for_diagnostics \
+    "$live_diagnostics_path" \
+    '.historyAvailability == "available" and .serverState == "Running" and (.jobs | length == 1) and .jobs[0].status == "succeeded" and .jobs[0].terminal.kind == "completed"' \
+    30 \
+    'a successful review after the long SSE response closed'
+  job_id="$(/usr/bin/jq -r '.jobs[0].id // empty' "$live_diagnostics_path")"
+  [[ -n "$job_id" ]] || die "terminal diagnostics omitted the review job ID"
+  /usr/bin/jq -n --arg job_id "$job_id" '{
     jsonrpc: "2.0",
-    id: $id,
+    id: 3,
     method: "tools/call",
-    params: {name: "review_await", arguments: {jobId: $job_id}}
-  }' >"$artifacts_dir/review-await-$review_request_id.request.json"
+    params: {name: "review_read", arguments: {jobId: $job_id}}
+  }' >"$artifacts_dir/review-read-after-stream-close.request.json"
   mcp_post \
     "$endpoint" \
     "$live_session_id" \
-    "$artifacts_dir/review-await-$review_request_id.request.json" \
-    "$artifacts_dir/review-await-$review_request_id.response" \
-    "$review_timeout_seconds"
+    "$artifacts_dir/review-read-after-stream-close.request.json" \
+    "$artifacts_dir/review-read-after-stream-close.response" \
+    30
   /usr/bin/jq -e '.result.isError == false' \
-    "$artifacts_dir/review-await-$review_request_id.response.json" >/dev/null \
-    || die "real review_await returned an error"
-  review_status="$(/usr/bin/jq -r '.result.structuredContent.lifecycle.status // empty' \
-    "$artifacts_dir/review-await-$review_request_id.response.json")"
-  case "$review_status" in
-    succeeded)
-      final_review_response="$artifacts_dir/review-await-$review_request_id.response.json"
-      break
-      ;;
-    queued|running)
-      review_request_id=$((review_request_id + 1))
-      [[ "$review_request_id" -le 5 ]] \
-        || die "real review remained active after three review_await calls"
-      ;;
-    *)
-      die "real review reached unexpected terminal status: ${review_status:-missing}"
-      ;;
-  esac
-done
+    "$artifacts_dir/review-read-after-stream-close.response.json" >/dev/null \
+    || die "review_read failed after the long SSE response closed"
+  final_review_response="$artifacts_dir/review-read-after-stream-close.response.json"
+else
+  die "real review_start transport failed with curl status $review_start_transport_status"
+fi
 
 /usr/bin/jq -e '
   .result.structuredContent.lifecycle.terminal.kind == "completed"
