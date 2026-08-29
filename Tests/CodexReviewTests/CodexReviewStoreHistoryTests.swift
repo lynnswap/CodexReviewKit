@@ -72,6 +72,43 @@ struct CodexReviewStoreHistoryTests {
         #expect(store.workspace(cwd: "/removed/worktrees/73d5/CodexReviewKit")?.metadata == metadata)
     }
 
+    @Test func loadRejectsDuplicateApplicationWideReviewOrder() async throws {
+        let records = try [
+            historyRecord(
+                id: "first",
+                cwd: "/tmp/first",
+                sortOrder: 0,
+                lifecycle: .init(
+                    status: .failed,
+                    startedAt: Date(timeIntervalSince1970: 1),
+                    terminal: .interrupted(.previousProcessExit)
+                ),
+                output: .init(summary: "first")
+            ),
+            historyRecord(
+                id: "duplicate",
+                cwd: "/tmp/duplicate",
+                sortOrder: 0,
+                lifecycle: .init(
+                    status: .failed,
+                    startedAt: Date(timeIntervalSince1970: 1),
+                    terminal: .interrupted(.previousProcessExit)
+                ),
+                output: .init(summary: "duplicate")
+            ),
+        ]
+        let history = ReviewHistoryPersistenceProbe(records: records)
+        let store = makeStore(history: history)
+
+        await store.loadReviewHistoryIfNeeded()
+
+        #expect(store.historyAvailability == .failed(
+            "Loaded review history contains duplicate application-wide order 0.0."
+        ))
+        #expect(store.jobs.isEmpty)
+        #expect(store.workspaces.isEmpty)
+    }
+
     @Test func startHeaderCompletesBeforeBackendDispatch() async throws {
         let entered = AsyncGate()
         let release = AsyncGate()
@@ -240,7 +277,7 @@ struct CodexReviewStoreHistoryTests {
         let second = Task { @MainActor in
             try await store.startReview(
                 sessionID: "session-1",
-                request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
+                request: .init(cwd: "/tmp/project-worktree", target: .baseBranch("main")),
                 waitTimeout: .zero
             )
         }
@@ -252,13 +289,44 @@ struct CodexReviewStoreHistoryTests {
             .sorted { $0.sortOrder < $1.sortOrder }
         #expect(reserved.map(\.id) == ["job-1", "job-2"])
         #expect(reserved.map(\.sortOrder) == [0, 1])
-        #expect(Set(reserved.map(\.workspaceSortOrder)) == Set([0.0]))
+        #expect(Set(reserved.map(\.workspaceSortOrder)) == Set([0.0, 1.0]))
 
         let close = Task { @MainActor in await store.closeSession("session-1") }
         await historyRelease.open()
         await close.value
         _ = await first.result
         _ = await second.result
+        #expect(await backend.recordedCommands().contains {
+            if case .startReview = $0 { true } else { false }
+        } == false)
+    }
+
+    @Test func startRejectsExhaustedApplicationWideReviewOrder() async throws {
+        let existing = try historyRecord(
+            id: "maximum-order",
+            cwd: "/tmp/existing",
+            sortOrder: .greatestFiniteMagnitude,
+            lifecycle: .init(
+                status: .failed,
+                startedAt: Date(timeIntervalSince1970: 1),
+                terminal: .interrupted(.previousProcessExit)
+            ),
+            output: .init(summary: "existing")
+        )
+        let history = ReviewHistoryPersistenceProbe(records: [existing])
+        let backend = FakeCodexReviewBackend()
+        let store = makeStore(history: history, backend: backend)
+        await store.loadReviewHistoryIfNeeded()
+
+        await #expect(throws: ReviewHistoryRecordError.self) {
+            try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/new", target: .uncommittedChanges),
+                waitTimeout: .zero
+            )
+        }
+
+        #expect(await history.startedRecords().isEmpty)
         #expect(await backend.recordedCommands().contains {
             if case .startReview = $0 { true } else { false }
         } == false)
@@ -1141,12 +1209,138 @@ struct CodexReviewStoreHistoryTests {
 
         #expect(await store.reorderJob(
             id: first.id,
-            inWorkspace: first.cwd,
-            toIndex: 0
+            inWorkspaces: [first.cwd],
+            before: second.id
         ) == false)
 
         #expect(store.orderedJobs(inWorkspace: first.cwd).map(\.id) == [second.id, first.id])
         #expect(store.historyAvailability == .failed("ordering failed"))
+    }
+
+    @Test func jobReorderAcrossWorkspacesPersistsBeforeApplyingMemoryOrder() async throws {
+        let firstCWD = "/tmp/project-primary"
+        let secondCWD = "/tmp/project-worktree"
+        let unrelatedCWD = "/tmp/unrelated-project"
+        let records = try [
+            historyRecord(
+                id: "primary-first",
+                cwd: firstCWD,
+                workspaceSortOrder: 1,
+                sortOrder: 5,
+                lifecycle: .init(
+                    status: .failed,
+                    startedAt: Date(timeIntervalSince1970: 1),
+                    terminal: .interrupted(.previousProcessExit)
+                ),
+                output: .init(summary: "primary first")
+            ),
+            historyRecord(
+                id: "primary-second",
+                cwd: firstCWD,
+                workspaceSortOrder: 1,
+                sortOrder: 3,
+                lifecycle: .init(
+                    status: .failed,
+                    startedAt: Date(timeIntervalSince1970: 1),
+                    terminal: .interrupted(.previousProcessExit)
+                ),
+                output: .init(summary: "primary second")
+            ),
+            historyRecord(
+                id: "worktree-first",
+                cwd: secondCWD,
+                workspaceSortOrder: 0,
+                sortOrder: 2,
+                lifecycle: .init(
+                    status: .failed,
+                    startedAt: Date(timeIntervalSince1970: 1),
+                    terminal: .interrupted(.previousProcessExit)
+                ),
+                output: .init(summary: "worktree first")
+            ),
+            historyRecord(
+                id: "worktree-second",
+                cwd: secondCWD,
+                workspaceSortOrder: 0,
+                sortOrder: 0,
+                lifecycle: .init(
+                    status: .failed,
+                    startedAt: Date(timeIntervalSince1970: 1),
+                    terminal: .interrupted(.previousProcessExit)
+                ),
+                output: .init(summary: "worktree second")
+            ),
+            historyRecord(
+                id: "unrelated-first",
+                cwd: unrelatedCWD,
+                workspaceSortOrder: -1,
+                sortOrder: 4,
+                lifecycle: .init(
+                    status: .failed,
+                    startedAt: Date(timeIntervalSince1970: 1),
+                    terminal: .interrupted(.previousProcessExit)
+                ),
+                output: .init(summary: "unrelated first")
+            ),
+            historyRecord(
+                id: "unrelated-second",
+                cwd: unrelatedCWD,
+                workspaceSortOrder: -1,
+                sortOrder: 1,
+                lifecycle: .init(
+                    status: .failed,
+                    startedAt: Date(timeIntervalSince1970: 1),
+                    terminal: .interrupted(.previousProcessExit)
+                ),
+                output: .init(summary: "unrelated second")
+            ),
+        ]
+        let entered = AsyncGate()
+        let release = AsyncGate()
+        let history = ReviewHistoryPersistenceProbe(
+            records: records,
+            orderingWriteEntered: entered,
+            orderingWriteRelease: release
+        )
+        let store = makeStore(history: history)
+        await store.loadReviewHistoryIfNeeded()
+        let sectionCWDs: Set<String> = [firstCWD, secondCWD]
+
+        let reorder = Task { @MainActor in
+            await store.reorderJob(
+                id: "primary-first",
+                inWorkspaces: sectionCWDs,
+                before: "worktree-second"
+            )
+        }
+        await entered.wait()
+        #expect(store.orderedJobs(inWorkspaces: sectionCWDs).map(\.id) == [
+            "primary-first",
+            "primary-second",
+            "worktree-first",
+            "worktree-second",
+        ])
+
+        await release.open()
+        #expect(await reorder.value)
+        #expect(store.orderedJobs(inWorkspaces: sectionCWDs).map(\.id) == [
+            "primary-second",
+            "worktree-first",
+            "primary-first",
+            "worktree-second",
+        ])
+        #expect(store.job(id: "primary-first")?.cwd == firstCWD)
+
+        let ordering = try #require(await history.orderings().last)
+        let persistedOrder = ordering.reviews.sorted { $0.sortOrder > $1.sortOrder }.map(\.id)
+        #expect(persistedOrder == [
+            "primary-second",
+            "unrelated-first",
+            "worktree-first",
+            "primary-first",
+            "unrelated-second",
+            "worktree-second",
+        ])
     }
 
     @Test func mutationLaneOrdersReorderTerminalPruneAndDeleteApply() async throws {

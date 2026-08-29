@@ -26,6 +26,13 @@ workspace and manual order, target, effective model, lifecycle, canonical result
 and structured findings. Selecting a restored review renders a compact detail from
 those semantic fields.
 
+Review manual order is independent of the workspace that executed the review.
+Repository sections may combine a primary checkout and linked worktrees into one
+visible list, so every review in that section participates in one reorder lane while
+its immutable `cwd` continues to describe execution provenance. Existing databases
+are normalized once from workspace order followed by workspace-local review order,
+which preserves their pre-migration visible order.
+
 The feature is complete when:
 
 1. A succeeded, failed, or cancelled review remains one sidebar row after a clean
@@ -158,10 +165,12 @@ ReviewMonitor.app ────────────────────�
 
 Responsibilities:
 
-- `CodexReview`: owns live review semantics and the history persistence contract.
+- `CodexReview`: owns live review semantics, application-wide manual review order,
+  and the history persistence contract.
 - `CodexReviewPersistence`: stores and restores semantic review records in SQLite.
 - `CodexReviewHost`: supplies the owner-only production database location and concrete adapter.
-- `ReviewUI`: renders Store state and forwards history deletion/reorder intent.
+- `ReviewUI`: renders Store state, defines repository-section membership, and
+  forwards the exact workspace scope of history deletion/reorder intent.
 - `CodexReviewMCPServer`: keeps current-session authorization over Store commands.
 
 ### Resource lifecycle
@@ -231,6 +240,11 @@ package enum ReviewHistoryAvailability: Sendable, Equatable {
 extension CodexReviewStore {
     package func deleteReviewHistory(id: String) async
     package func deleteAllReviewHistory() async
+    package func reorderJob(
+      id: String,
+      inWorkspaces cwds: Set<String>,
+      before nextJobID: String?
+    ) async -> Bool
     public func shutdown() async
 }
 ```
@@ -279,7 +293,8 @@ SQLiteData `@Table` records are storage models, not the domain aggregate.
 
 - stable review ID primary key
 - `cwd` foreign key to workspace
-- manual `sortOrder`
+- application-wide, distinct manual `sortOrder`; repository-section views filter
+  this order without re-grouping rows by `cwd`
 - typed target discriminator and variant payload
 - captured/effective model
 - lifecycle phase and typed terminal/cancellation/interruption fields
@@ -306,6 +321,14 @@ Schema rules:
   finding `rawText`, rendered projections, or raw log entries.
 - Terminal mutation updates only terminal/result fields of an existing active row;
   it cannot overwrite cwd, target, or manual order.
+- A reorder renumbers the complete supplied repository-section scope in one Store
+  mutation. It never changes a review's `cwd` and never stores a second UI-only
+  ordering.
+- New reviews reserve an application-wide order value. The schema migration from
+  workspace-local order first sorts by workspace order and then by the previous
+  review order before assigning unique application-wide values.
+- Database load, start insertion, and ordering save reject duplicate review-order
+  values; a partial ordering update cannot collide with an omitted review.
 - Restored rows derive display title, elapsed time, final flag, compact log entries,
   and other projections; those values are not columns.
 
@@ -402,6 +425,9 @@ Schema rules:
 - shutdown is one-shot and rejects concurrent restart/runtime acquisition
 - delete updates database, Store membership, workspace membership, and selection source
 - overlapping reorder/delete/terminal prune preserves identical DB and Store order/membership
+- reordering across primary-checkout/worktree rows in one repository section keeps
+  each review's cwd, preserves hidden filtered rows, and restores the same order
+  after persistence reload
 
 ### ReviewUI / app
 
@@ -410,6 +436,8 @@ Schema rules:
 - terminal row with unknown end does not render a running timer
 - history failure appears in the status presentation
 - terminal context menu deletes; active context menu cancels
+- every displayed insertion gap in one repository section accepts the same job
+  reorder contract, including gaps across workspace boundaries
 - composition uses the production history path while preview/tests use injected stores
 - application termination awaits `shutdown()`
 

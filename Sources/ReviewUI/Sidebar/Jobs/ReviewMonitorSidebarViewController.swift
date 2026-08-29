@@ -85,7 +85,13 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         enum Operation {
             case none
             case reorderWorkspaceSection(id: String, cwds: [String], storeIndex: Int, displayIndex: Int)
-            case reorderJob(id: String, cwd: String, storeIndex: Int, displayIndex: Int)
+            case reorderJob(
+                id: String,
+                sectionID: String,
+                cwds: [String],
+                beforeJobID: String?,
+                displayIndex: Int
+            )
         }
 
         let operation: Operation
@@ -104,7 +110,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private struct SidebarJobDropDestination {
-        let workspace: CodexReviewWorkspace
+        let section: SidebarWorkspaceSection
         let childIndex: Int
     }
 
@@ -488,7 +494,9 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
             renderedSectionIDs.insert(identity.id)
             let sectionJobs = Self.filteredJobs(
-                in: topologies.flatMap(\.jobs),
+                in: store.orderedJobs(
+                    inWorkspaces: Set(topologies.map(\.workspace.cwd))
+                ),
                 filter: filter
             )
             let section = workspaceSection(
@@ -1052,26 +1060,18 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         moveOutlineItem(from: sourceIndex, to: destinationIndex, parent: nil)
     }
 
-    private func moveJobInOutline(id: String, in workspace: CodexReviewWorkspace, toIndex destinationIndex: Int) {
-        let currentJobs = displayedJobs(in: workspace)
+    private func moveJobInOutline(id: String, inSectionID sectionID: String, toIndex destinationIndex: Int) {
+        guard let section = workspaceSection(id: sectionID) else {
+            return
+        }
+        let currentJobs = displayedJobs(inRootItem: section)
         guard let sourceIndex = currentJobs.firstIndex(where: { $0.id == id }),
-              let parentItem = rootItem(containing: workspace)
+              currentJobs.indices.contains(destinationIndex),
+              sourceIndex != destinationIndex
         else {
             return
         }
-        let rootJobs = displayedJobs(inRootItem: parentItem)
-        guard let sourceRootIndex = rootJobs.firstIndex(where: { $0.id == id }),
-              let workspaceRootStartIndex = rootJobs.firstIndex(where: { $0.cwd == workspace.cwd })
-        else {
-            return
-        }
-        let destinationRootIndex = workspaceRootStartIndex + destinationIndex
-        guard sourceIndex != destinationIndex,
-              sourceRootIndex != destinationRootIndex
-        else {
-            return
-        }
-        moveOutlineItem(from: sourceRootIndex, to: destinationRootIndex, parent: parentItem)
+        moveOutlineItem(from: sourceIndex, to: destinationIndex, parent: section)
     }
 
     private func moveOutlineItem(from sourceIndex: Int, to destinationIndex: Int, parent: Any?) {
@@ -1105,18 +1105,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
     }
 
-    private func displayedJobs(in workspace: CodexReviewWorkspace) -> [CodexReviewJob] {
-        (0..<outlineView.numberOfRows).compactMap { row in
-            let item = outlineView.item(atRow: row)
-            guard let job = job(from: item),
-                  job.cwd == workspace.cwd
-            else {
-                return nil
-            }
-            return job
-        }
-    }
-
     private func displayedJobs(inRootItem rootItem: AnyObject) -> [CodexReviewJob] {
         displayedChildItems(inRootItem: rootItem).compactMap(job(from:))
     }
@@ -1131,20 +1119,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             }
             return item as AnyObject
         }
-    }
-
-    private func filteredJobs(in workspace: CodexReviewWorkspace) -> [CodexReviewJob] {
-        guard let section = workspaceSection(containing: workspace) else {
-            return []
-        }
-        return section.jobs.filter { $0.cwd == workspace.cwd }
-    }
-
-    private func presentedJobs(in workspace: CodexReviewWorkspace) -> [CodexReviewJob] {
-        guard let section = workspaceSection(containing: workspace) else {
-            return []
-        }
-        return section.presentedJobs.filter { $0.cwd == workspace.cwd }
     }
 
     private static func filteredJobs(
@@ -1204,10 +1178,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
     private func workspaces() -> [CodexReviewWorkspace] {
         store.orderedWorkspaces
-    }
-
-    private func filteredJobCount(in workspace: CodexReviewWorkspace) -> Int {
-        filteredJobs(in: workspace).count
     }
 
     private func job(atRow row: Int) -> CodexReviewJob? {
@@ -1567,91 +1537,121 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         guard uiState.sidebarJobFilter.allowsJobReordering else {
             return nil
         }
-        guard let destination = resolvedJobDropDestination(
+        guard let sourceJob = store.job(id: id),
+              sourceJob.cwd == cwd,
+              let sourceWorkspace = workspace(containing: sourceJob),
+              let sourceSection = workspaceSection(containing: sourceWorkspace),
+              let destination = resolvedJobDropDestination(
             draggingLocation: draggingLocation,
             proposedItem: proposedItem,
-            proposedChildIndex: index,
-            sourceCWD: cwd
+            proposedChildIndex: index
         ),
-        destination.workspace.cwd == cwd
+        destination.section === sourceSection
         else {
             return nil
         }
 
-        let orderedJobs = store.orderedJobs(in: destination.workspace)
-        let destinationVisibleJobs = presentedJobs(in: destination.workspace)
-        guard let sourceIndex = orderedJobs.firstIndex(where: { $0.id == id }) else {
-            return nil
-        }
+        let cwds = Set(destination.section.workspaces.map(\.cwd))
+        let orderedJobs = store.orderedJobs(inWorkspaces: cwds)
+        let destinationVisibleJobs = destination.section.presentedJobs
         guard let visibleSourceIndex = destinationVisibleJobs.firstIndex(where: { $0.id == id }) else {
             return nil
         }
 
         let visibleInsertionIndex = max(0, min(destination.childIndex, destinationVisibleJobs.count))
-        let storeInsertionIndex = storeJobInsertionIndex(
+        let beforeJobID = jobBeforeID(
+            movingJobID: id,
             visibleInsertionIndex: visibleInsertionIndex,
             visibleJobs: destinationVisibleJobs,
             orderedJobs: orderedJobs
         )
-        let storeDestinationIndex = storeInsertionIndex > sourceIndex
-            ? storeInsertionIndex - 1
-            : storeInsertionIndex
-        let clampedStoreDestinationIndex = max(0, min(storeDestinationIndex, orderedJobs.count - 1))
         let displayDestinationIndex = visibleInsertionIndex > visibleSourceIndex
             ? visibleInsertionIndex - 1
             : visibleInsertionIndex
         let clampedDisplayDestinationIndex = max(0, min(displayDestinationIndex, destinationVisibleJobs.count - 1))
         guard clampedDisplayDestinationIndex != visibleSourceIndex,
-              clampedStoreDestinationIndex != sourceIndex
+              jobReorderWouldChange(
+                id: id,
+                inWorkspaces: cwds,
+                beforeJobID: beforeJobID
+              )
         else {
             return nil
         }
         let operation: SidebarResolvedDrop.Operation = .reorderJob(
             id: id,
-            cwd: cwd,
-            storeIndex: clampedStoreDestinationIndex,
+            sectionID: destination.section.id,
+            cwds: destination.section.workspaces.map(\.cwd),
+            beforeJobID: beforeJobID,
             displayIndex: clampedDisplayDestinationIndex
-        )
-        let dropPresentation = jobDropPresentation(
-            for: destination.workspace,
-            childIndex: visibleInsertionIndex
         )
         return SidebarResolvedDrop(
             operation: operation,
-            dropItem: dropPresentation.item,
-            dropChildIndex: dropPresentation.childIndex
+            dropItem: destination.section,
+            dropChildIndex: visibleInsertionIndex
         )
     }
 
-    private func storeJobInsertionIndex(
+    private func jobBeforeID(
+        movingJobID: String,
         visibleInsertionIndex: Int,
         visibleJobs: [CodexReviewJob],
         orderedJobs: [CodexReviewJob]
-    ) -> Int {
-        if visibleInsertionIndex < visibleJobs.count,
-           let targetIndex = orderedJobs.firstIndex(where: { $0 === visibleJobs[visibleInsertionIndex] }) {
-            return targetIndex
+    ) -> String? {
+        if visibleInsertionIndex < visibleJobs.count {
+            return visibleJobs[visibleInsertionIndex].id
         }
         guard let lastVisibleJob = visibleJobs.last,
               let lastVisibleIndex = orderedJobs.firstIndex(where: { $0 === lastVisibleJob })
         else {
-            return orderedJobs.count
+            return nil
         }
-        return lastVisibleIndex + 1
+        let nextIndex = lastVisibleIndex + 1
+        guard nextIndex < orderedJobs.count,
+              orderedJobs[nextIndex].id != movingJobID
+        else {
+            return nil
+        }
+        return orderedJobs[nextIndex].id
+    }
+
+    private func jobReorderWouldChange(
+        id: String,
+        inWorkspaces cwds: Set<String>,
+        beforeJobID: String?
+    ) -> Bool {
+        guard beforeJobID != id else {
+            return false
+        }
+        let orderedJobs = store.orderedJobs(inWorkspaces: cwds)
+        guard let movingJob = orderedJobs.first(where: { $0.id == id }) else {
+            return false
+        }
+        let remainingJobs = orderedJobs.filter { $0 !== movingJob }
+        let destinationIndex: Int
+        if let beforeJobID {
+            guard let beforeIndex = remainingJobs.firstIndex(where: { $0.id == beforeJobID }) else {
+                return false
+            }
+            destinationIndex = beforeIndex
+        } else {
+            destinationIndex = remainingJobs.count
+        }
+        var reorderedJobs = remainingJobs
+        reorderedJobs.insert(movingJob, at: destinationIndex)
+        return zip(reorderedJobs, orderedJobs).contains { $0.0 !== $0.1 }
     }
 
     private func resolvedJobDropDestination(
         draggingLocation: NSPoint?,
         proposedItem: Any?,
-        proposedChildIndex index: Int,
-        sourceCWD: String
+        proposedChildIndex index: Int
     ) -> SidebarJobDropDestination? {
         if let section = workspaceSection(from: proposedItem),
            index != NSOutlineViewDropOnItemIndex
         {
             return resolvedJobDropDestination(
                 in: section,
-                sourceCWD: sourceCWD,
                 proposedRootChildIndex: index
             )
         }
@@ -1663,78 +1663,45 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
         return resolvedJobDropDestination(
             around: targetJob,
-            draggingLocation: draggingLocation,
-            sourceCWD: sourceCWD
+            draggingLocation: draggingLocation
         )
     }
 
     private func resolvedJobDropDestination(
         around targetJob: CodexReviewJob,
-        draggingLocation: NSPoint?,
-        sourceCWD: String
+        draggingLocation: NSPoint?
     ) -> SidebarJobDropDestination? {
         guard let draggingLocation,
               let targetWorkspace = workspace(containing: targetJob),
               let targetSection = workspaceSection(containing: targetWorkspace),
-              let targetWorkspaceRootStartIndex = targetSection.presentedJobs.firstIndex(where: { $0.cwd == targetWorkspace.cwd }),
-              let targetJobIndex = presentedJobs(in: targetWorkspace).firstIndex(where: { $0.id == targetJob.id }),
+              let targetJobIndex = targetSection.presentedJobs.firstIndex(where: { $0.id == targetJob.id }),
               let targetRow = row(forJobID: targetJob.id)
         else {
             return nil
         }
 
         let targetRowRect = outlineView.rect(ofRow: targetRow)
-        let rootInsertionIndex = targetWorkspaceRootStartIndex
-            + targetJobIndex
+        let rootInsertionIndex = targetJobIndex
             + (draggingLocation.y < targetRowRect.midY ? 0 : 1)
         return resolvedJobDropDestination(
             in: targetSection,
-            sourceCWD: sourceCWD,
             proposedRootChildIndex: rootInsertionIndex
         )
     }
 
     private func resolvedJobDropDestination(
         in section: SidebarWorkspaceSection,
-        sourceCWD: String,
         proposedRootChildIndex index: Int
     ) -> SidebarJobDropDestination? {
         guard index >= 0,
-              index <= section.presentedJobCount,
-              let workspace = section.workspaces.first(where: { $0.cwd == sourceCWD }),
-              let workspaceRootStartIndex = section.presentedJobs.firstIndex(where: { $0.cwd == sourceCWD })
+              index <= section.presentedJobCount
         else {
             return nil
         }
-
-        let workspaceJobCount = presentedJobs(in: workspace).count
-        let workspaceRootEndIndex = workspaceRootStartIndex + workspaceJobCount
-        let rootInsertionIndex = min(index, section.presentedJobCount)
-        guard rootInsertionIndex >= workspaceRootStartIndex,
-              rootInsertionIndex <= workspaceRootEndIndex
-        else {
-            return nil
-        }
-
         return SidebarJobDropDestination(
-            workspace: workspace,
-            childIndex: rootInsertionIndex - workspaceRootStartIndex
+            section: section,
+            childIndex: index
         )
-    }
-
-    private func jobDropPresentation(
-        for workspace: CodexReviewWorkspace,
-        childIndex: Int
-    ) -> (item: Any?, childIndex: Int) {
-        guard let rootItem = rootItem(containing: workspace),
-              let section = workspaceSection(from: rootItem),
-              let workspaceRootStartIndex = section.presentedJobs.firstIndex(where: { $0.cwd == workspace.cwd })
-        else {
-            return (workspace, childIndex)
-        }
-
-        let rootChildIndex = workspaceRootStartIndex + childIndex
-        return (section, max(0, min(rootChildIndex, section.presentedJobCount)))
     }
 
     @discardableResult
@@ -1753,19 +1720,22 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
                 self.moveWorkspaceSectionInOutline(id: id, toRootIndex: displayIndex)
             }
             return true
-        case .reorderJob(let id, let cwd, let storeIndex, let displayIndex):
+        case .reorderJob(let id, let sectionID, let cwds, let beforeJobID, let displayIndex):
             let store = store
             startHistoryAction { [weak self] in
                 guard await store.reorderJob(
                     id: id,
-                    inWorkspace: cwd,
-                    toIndex: storeIndex
-                ), let self,
-                   let workspace = self.workspace(cwd: cwd)
+                    inWorkspaces: Set(cwds),
+                    before: beforeJobID
+                ), let self
                 else {
                     return
                 }
-                self.moveJobInOutline(id: id, in: workspace, toIndex: displayIndex)
+                self.moveJobInOutline(
+                    id: id,
+                    inSectionID: sectionID,
+                    toIndex: displayIndex
+                )
             }
             return true
         }

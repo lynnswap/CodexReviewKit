@@ -453,6 +453,9 @@ public final class CodexReviewJob: Identifiable, Hashable {
     public let cwd: String
     package let origin: CodexReviewJobOrigin
     package let target: CodexReviewAPI.Target
+    /// A distinct application-wide manual-order position. Higher values sort first.
+    ///
+    /// The value may be renormalized after a reorder; use `id` for stable identity.
     public internal(set) var sortOrder: Double
     public internal(set) var targetSummary: String
     public internal(set) var core: ReviewJobCore
