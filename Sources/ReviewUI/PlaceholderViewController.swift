@@ -58,16 +58,37 @@ struct PlaceholderView: View {
         ScrollView(.vertical) {
             ContentUnavailableView {
                 Text(content.title)
-                    .textScale(.secondary)
+                    .contentUnavailableTextTitleStyle()
                     .accessibilityIdentifier(content.titleAccessibilityIdentifier)
             } description: {
                 Text(content.description)
+                    .contentUnavailableTextDescriptionStyle()
                     .accessibilityIdentifier(content.descriptionAccessibilityIdentifier)
             }
         }
         .scrollBounceBehavior(.basedOnSize)
         .defaultScrollAnchor(.center)
         .ignoresSafeArea(.all,edges: .vertical)
+    }
+}
+private extension View{
+    func contentUnavailableTextTitleStyle() -> some View{
+        return if #available(anyAppleOS 27.0, *){
+            self
+                .textScale(.default)
+        }else{
+            self
+                .textScale(.secondary)
+        }
+    }
+    func contentUnavailableTextDescriptionStyle() -> some View{
+        return if #available(anyAppleOS 27.0, *){
+            self
+                .textScale(.secondary)
+        }else{
+            self
+                .textScale(.default)
+        }
     }
 }
 
