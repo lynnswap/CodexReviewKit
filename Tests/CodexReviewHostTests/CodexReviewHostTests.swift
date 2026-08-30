@@ -1817,6 +1817,433 @@ struct CodexReviewHostTests {
         await login.value
     }
 
+    @Test func liveStoreInvalidatesPrimaryRuntimeWhenCancelledBeforeLoginChallenge() async throws {
+        let homeURL = try temporaryHome()
+        let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let sharedAuthURL = codexHomeURL.appendingPathComponent("auth.json")
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "active@example.com",
+            accounts: ["active@example.com"]
+        )
+        try writeSavedAccountAuth(homeURL: homeURL, accountKey: "active@example.com")
+        let priorAuth = try savedAccountAuth(homeURL: homeURL, accountKey: "active@example.com")
+        try priorAuth.write(to: sharedAuthURL)
+        let transport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(transport, accountEmail: "active@example.com")
+        try await transport.enqueue(
+            AppServerAPI.Account.Login.Response.chatgpt(
+                loginID: "login-outcome-unknown",
+                authURL: "https://auth.invalid/pre-challenge",
+                nativeWebAuthentication: nil
+            ),
+            for: "account/login/start"
+        )
+        try await transport.enqueue(AppServerAPI.Account.Login.Cancel.Response(), for: "account/login/cancel")
+        try await transport.enqueue(
+            AppServerAPI.Account.Read.Response(
+                account: .init(email: "cancelled@example.com", planType: "plus")
+            ),
+            for: "account/read"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
+                limitID: "codex",
+                primary: .init(usedPercent: 20, windowDurationMins: 300)
+            )),
+            for: "account/rateLimits/read"
+        )
+        let requestGate = AsyncGate()
+        await transport.holdNextIgnoringCancellation(
+            method: "account/login/start",
+            gate: requestGate
+        )
+        let externalURLOpener = FakeExternalURLOpener()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            externalURLOpener: externalURLOpener.open,
+            shutdownCleanupTimeout: .milliseconds(20),
+            transport: transport
+        )
+        await store.start(forceRestartIfNeeded: true)
+        let login = Task { @MainActor in await store.signIn() }
+        await transport.waitForActiveRequests(method: "account/login/start")
+
+        await store.cancelAuthentication()
+        let didFailRuntime = await waitUntil(timeout: .seconds(2)) {
+            if case .failed = store.serverState { return true }
+            return false
+        }
+        try Data("{\"tokens\":{\"id_token\":\"cancelled\"}}".utf8).write(to: sharedAuthURL)
+        try await transport.emitServerNotification(
+            method: "account/updated",
+            params: EmptyResponse()
+        )
+        await requestGate.open()
+        await login.value
+        let didCloseRuntime = await waitUntil(timeout: .seconds(2)) {
+            await transport.isClosedForTesting()
+        }
+        let didRestorePriorAuth = await waitUntil(timeout: .seconds(2)) {
+            (try? Data(contentsOf: sharedAuthURL)) == priorAuth
+        }
+
+        #expect(didFailRuntime)
+        #expect(didCloseRuntime)
+        #expect(didRestorePriorAuth)
+        #expect(store.auth.selectedAccount?.accountKey == "active@example.com")
+        #expect(store.auth.persistedActiveAccountKey == "active@example.com")
+        #expect(store.auth.persistedAccounts.map(\.accountKey) == ["active@example.com"])
+        #expect(await transport.recordedRequests().map(\.method).count { $0 == "account/login/start" } == 1)
+        #expect(externalURLOpener.openedURLs.isEmpty)
+    }
+
+    @Test func liveStoreInvalidatesPrimaryRuntimeWhenLoginStartOutcomeIsUnknown() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(transport)
+        await transport.enqueueRawResponse(
+            Data("{\"type\":\"chatgpt\"}".utf8),
+            for: "account/login/start"
+        )
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transport: transport
+        )
+        await store.start(forceRestartIfNeeded: true)
+
+        await store.signIn()
+
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            if case .failed = store.serverState { return true }
+            return false
+        })
+        #expect(store.auth.selectedAccount == nil)
+    }
+
+    @Test func liveStoreOwnsLoginCompletionThatPrecedesChallengeResponse() async throws {
+        let homeURL = try temporaryHome()
+        let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let sharedAuthURL = codexHomeURL.appendingPathComponent("auth.json")
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "active@example.com",
+            accounts: ["active@example.com"]
+        )
+        try writeSavedAccountAuth(homeURL: homeURL, accountKey: "active@example.com")
+        let priorAuth = try savedAccountAuth(homeURL: homeURL, accountKey: "active@example.com")
+        try priorAuth.write(to: sharedAuthURL)
+        let transport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(transport, accountEmail: "active@example.com")
+        try await transport.enqueue(
+            AppServerAPI.Account.Login.Response.chatgpt(
+                loginID: "login-completed-before-challenge",
+                authURL: "https://auth.invalid/completed-before-challenge",
+                nativeWebAuthentication: nil
+            ),
+            for: "account/login/start"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Account.Login.Cancel.Response(status: "notFound"),
+            for: "account/login/cancel"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Account.Read.Response(
+                account: .init(email: "cancelled@example.com", planType: "plus")
+            ),
+            for: "account/read"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
+                limitID: "codex",
+                primary: .init(usedPercent: 20, windowDurationMins: 300)
+            )),
+            for: "account/rateLimits/read"
+        )
+        let requestGate = AsyncGate()
+        await transport.holdNextIgnoringCancellation(
+            method: "account/login/start",
+            gate: requestGate
+        )
+        let externalURLOpener = FakeExternalURLOpener()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            externalURLOpener: externalURLOpener.open,
+            shutdownCleanupTimeout: .milliseconds(20),
+            transport: transport
+        )
+        await store.start(forceRestartIfNeeded: true)
+        let login = Task { @MainActor in await store.signIn() }
+        await transport.waitForActiveRequests(method: "account/login/start")
+        try Data("{\"tokens\":{\"id_token\":\"cancelled\"}}".utf8).write(to: sharedAuthURL)
+        let completionReceipt = try await transport.emitServerNotification(
+            method: "account/login/completed",
+            params: TestLoginCompletedNotification(
+                loginID: "login-completed-before-challenge",
+                success: true
+            )
+        )
+        await store.waitForLiveAuthNotificationCompletionForTesting(completionReceipt)
+
+        await requestGate.open()
+        await login.value
+        await store.cancelAuthentication()
+        let didFailRuntime = await waitUntil(timeout: .seconds(2)) {
+            if case .failed = store.serverState { return true }
+            return false
+        }
+        try await transport.emitServerNotification(
+            method: "account/updated",
+            params: EmptyResponse()
+        )
+        let didCloseRuntime = await waitUntil(timeout: .seconds(2)) {
+            await transport.isClosedForTesting()
+        }
+        let didRestorePriorAuth = await waitUntil(timeout: .seconds(2)) {
+            (try? Data(contentsOf: sharedAuthURL)) == priorAuth
+        }
+
+        #expect(didFailRuntime)
+        #expect(didCloseRuntime)
+        #expect(didRestorePriorAuth)
+        #expect(store.auth.selectedAccount?.accountKey == "active@example.com")
+        #expect(store.auth.persistedActiveAccountKey == "active@example.com")
+        #expect(store.auth.persistedAccounts.map(\.accountKey) == ["active@example.com"])
+        #expect(externalURLOpener.openedURLs.isEmpty)
+    }
+
+    @Test func liveStoreReplaysSuccessfulLoginNotificationsThatPrecedeChallengeResponse() async throws {
+        let homeURL = try temporaryHome()
+        let sharedAuthURL = homeURL
+            .appendingPathComponent(".codex_review", isDirectory: true)
+            .appendingPathComponent("auth.json")
+        let transport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(transport)
+        try await transport.enqueue(
+            AppServerAPI.Account.Login.Response.chatgpt(
+                loginID: "login-completed-before-challenge",
+                authURL: "https://auth.invalid/early-success",
+                nativeWebAuthentication: nil
+            ),
+            for: "account/login/start"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Account.Read.Response(
+                account: .init(email: "new@example.com", planType: "plus")
+            ),
+            for: "account/read"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
+                limitID: "codex",
+                primary: .init(usedPercent: 20, windowDurationMins: 300)
+            )),
+            for: "account/rateLimits/read"
+        )
+        let requestGate = AsyncGate()
+        await transport.holdNextIgnoringCancellation(
+            method: "account/login/start",
+            gate: requestGate
+        )
+        let sessions = FakeWebAuthenticationSessions()
+        let externalURLOpener = FakeExternalURLOpener()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: sessions.makeSession,
+            externalURLOpener: externalURLOpener.open,
+            transport: transport
+        )
+        await store.start(forceRestartIfNeeded: true)
+        let login = Task { @MainActor in await store.signIn() }
+        await transport.waitForActiveRequests(method: "account/login/start")
+        try FileManager.default.createDirectory(
+            at: sharedAuthURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("{\"tokens\":{\"id_token\":\"new\"}}".utf8).write(to: sharedAuthURL)
+        _ = try await transport.emitServerNotification(
+            method: "account/login/completed",
+            params: TestLoginCompletedNotification(
+                loginID: "login-completed-before-challenge",
+                success: true
+            )
+        )
+        let accountUpdateReceipt = try await transport.emitServerNotification(
+            method: "account/updated",
+            params: EmptyResponse()
+        )
+        await store.waitForLiveAuthNotificationCompletionForTesting(accountUpdateReceipt)
+
+        await requestGate.open()
+        await login.value
+
+        #expect(store.serverState == .running)
+        #expect(store.auth.selectedAccount?.accountKey == "new@example.com")
+        #expect(store.auth.persistedActiveAccountKey == "new@example.com")
+        #expect(store.auth.persistedAccounts.map(\.accountKey) == ["new@example.com"])
+        #expect(sessions.createdSessionCount == 0)
+        #expect(externalURLOpener.openedURLs.isEmpty)
+    }
+
+    @Test func liveStoreKeepsRuntimeWhenStagedLoginFailureWinsCancellation() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(transport)
+        try await transport.enqueue(
+            AppServerAPI.Account.Login.Response.chatgpt(
+                loginID: "login-failed-before-challenge",
+                authURL: "https://auth.invalid/early-failure",
+                nativeWebAuthentication: nil
+            ),
+            for: "account/login/start"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Account.Login.Cancel.Response(status: "notFound"),
+            for: "account/login/cancel"
+        )
+        let requestGate = AsyncGate()
+        await transport.holdNextIgnoringCancellation(
+            method: "account/login/start",
+            gate: requestGate
+        )
+        let cancelGate = AsyncGate()
+        await transport.holdNextIgnoringCancellation(
+            method: "account/login/cancel",
+            gate: cancelGate
+        )
+        let externalURLOpener = FakeExternalURLOpener()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            externalURLOpener: externalURLOpener.open,
+            transport: transport
+        )
+        await store.start(forceRestartIfNeeded: true)
+        let login = Task { @MainActor in await store.signIn() }
+        await transport.waitForActiveRequests(method: "account/login/start")
+        let failureReceipt = try await transport.emitServerNotification(
+            method: "account/login/completed",
+            params: TestLoginCompletedNotification(
+                loginID: "login-failed-before-challenge",
+                success: false,
+                error: "Login failed before challenge."
+            )
+        )
+        await store.waitForLiveAuthNotificationCompletionForTesting(failureReceipt)
+
+        let cancellation = Task { @MainActor in await store.cancelAuthentication() }
+        await Task.yield()
+        await requestGate.open()
+        await login.value
+        await transport.waitForActiveRequests(method: "account/login/cancel")
+        await store.cancelAuthentication()
+        #expect(failedMessage(from: store.auth.phase) == "Login failed before challenge.")
+        await cancelGate.open()
+        await cancellation.value
+
+        #expect(store.serverState == .running)
+        #expect(failedMessage(from: store.auth.phase) == "Login failed before challenge.")
+        #expect(await transport.recordedRequests().map(\.method).count {
+            $0 == "account/login/cancel"
+        } == 1)
+        #expect(externalURLOpener.openedURLs.isEmpty)
+    }
+
+    @Test func staleStagedLoginFailureCannotOverwriteReplacementAuthentication() async throws {
+        let firstTransport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(firstTransport)
+        try await firstTransport.enqueue(
+            AppServerAPI.Account.Login.Response.chatgpt(
+                loginID: "stale-login",
+                authURL: "https://auth.invalid/stale",
+                nativeWebAuthentication: nil
+            ),
+            for: "account/login/start"
+        )
+        let staleChallengeGate = AsyncGate()
+        await firstTransport.holdNextIgnoringCancellation(
+            method: "account/login/start",
+            gate: staleChallengeGate
+        )
+        let replacementTransport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(replacementTransport)
+        try await replacementTransport.enqueue(
+            AppServerAPI.Account.Login.Response.chatgpt(
+                loginID: "replacement-login",
+                authURL: "https://auth.invalid/replacement",
+                nativeWebAuthentication: nil
+            ),
+            for: "account/login/start"
+        )
+        try await replacementTransport.enqueue(
+            AppServerAPI.Account.Login.Cancel.Response(),
+            for: "account/login/cancel"
+        )
+        var transports = [firstTransport, replacementTransport]
+        let externalURLOpener = FakeExternalURLOpener()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            externalURLOpener: externalURLOpener.open,
+            shutdownCleanupTimeout: .milliseconds(20),
+            transportFactory: { _ in transports.removeFirst() }
+        )
+        await store.start(forceRestartIfNeeded: true)
+        let staleLogin = Task { @MainActor in await store.signIn() }
+        await firstTransport.waitForActiveRequests(method: "account/login/start")
+        let staleFailureReceipt = try await firstTransport.emitServerNotification(
+            method: "account/login/completed",
+            params: TestLoginCompletedNotification(
+                loginID: "stale-login",
+                success: false,
+                error: "Stale login failed."
+            )
+        )
+        await store.waitForLiveAuthNotificationCompletionForTesting(staleFailureReceipt)
+
+        await store.cancelAuthentication()
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            if case .failed = store.serverState { return true }
+            return false
+        })
+        await store.restart()
+        await store.signIn()
+        #expect(store.auth.isAuthenticating)
+
+        await staleChallengeGate.open()
+        await staleLogin.value
+        await Task.yield()
+
+        #expect(store.serverState == .running)
+        #expect(store.auth.isAuthenticating)
+        #expect(failedMessage(from: store.auth.phase) != "Stale login failed.")
+        #expect(externalURLOpener.openedURLs.map(\.absoluteString) == [
+            "https://auth.invalid/replacement",
+        ])
+        await store.cancelAuthentication()
+    }
+
+    @Test func liveStoreKeepsPrimaryRuntimeForDefinitiveLoginStartRejection() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(transport)
+        await transport.enqueueFailure(
+            .responseError(code: -32603, message: "Login unavailable."),
+            for: "account/login/start"
+        )
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transport: transport
+        )
+        await store.start(forceRestartIfNeeded: true)
+
+        await store.signIn()
+
+        #expect(store.serverState == .running)
+        #expect(failedMessage(from: store.auth.phase) == "Login unavailable.")
+    }
+
     @Test func liveStoreCancelsLoginWhenAuthenticationSessionIsClosed() async throws {
         let transport = FakeJSONRPCTransport()
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")

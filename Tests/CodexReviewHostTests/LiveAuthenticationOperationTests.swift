@@ -1,5 +1,7 @@
+import Foundation
 import Testing
 import CodexReview
+import CodexReviewAppServer
 @testable import CodexReviewHost
 
 @Suite("authentication operation")
@@ -49,5 +51,134 @@ struct LiveAuthenticationOperationTests {
         operation.beginCancellation()
 
         #expect(operation.authorizesSharedStateCommit(from: scope))
+    }
+
+    @Test func cancellationBeforePrimaryLoginRequestDoesNotRequireRuntimeInvalidation() {
+        let operation = LiveAuthenticationOperation(
+            activation: .activateAuthenticatedAccount,
+            method: .chatGPT
+        )
+        operation.installPrimaryNotificationRoute(
+            generation: 1,
+            completedReceipt: .beforeFirst
+        )
+
+        operation.beginCancellation()
+
+        #expect(operation.primaryRuntimeInvalidationReason == nil)
+    }
+
+    @Test func cancellationWhilePrimaryLoginChallengeIsUnknownRequiresRuntimeInvalidation() {
+        let operation = LiveAuthenticationOperation(
+            activation: .activateAuthenticatedAccount,
+            method: .chatGPT
+        )
+        operation.installPrimaryNotificationRoute(
+            generation: 1,
+            completedReceipt: .beforeFirst
+        )
+        operation.beginPrimaryChatGPTLoginStart()
+
+        operation.beginCancellation()
+
+        #expect(operation.primaryRuntimeInvalidationReason == .loginStartOutcomeUnknown)
+    }
+
+    @Test func definitivePrimaryLoginRejectionClearsCancellationInvalidation() {
+        let operation = LiveAuthenticationOperation(
+            activation: .activateAuthenticatedAccount,
+            method: .chatGPT
+        )
+        operation.installPrimaryNotificationRoute(
+            generation: 1,
+            completedReceipt: .beforeFirst
+        )
+        operation.beginPrimaryChatGPTLoginStart()
+        operation.beginCancellation()
+
+        operation.rejectPrimaryChatGPTLoginStart()
+
+        #expect(operation.primaryRuntimeInvalidationReason == nil)
+        #expect(operation.retiresPrimaryNotificationRoute)
+    }
+
+    @Test func primaryLoginNotificationsReceivedBeforeChallengeReplayByLoginID() throws {
+        let operation = LiveAuthenticationOperation(
+            activation: .activateAuthenticatedAccount,
+            method: .chatGPT
+        )
+        operation.installPrimaryNotificationRoute(
+            generation: 1,
+            completedReceipt: .beforeFirst
+        )
+        operation.installPrimaryNotificationRoute(after: .init(sequence: 1))
+        operation.beginPrimaryChatGPTLoginStart()
+        let completion = JSONRPC.Notification(
+            method: "account/login/completed",
+            params: Data("{}".utf8)
+        )
+
+        #expect(operation.stagePrimaryLoginCompletion(
+            completion,
+            loginID: "login-1",
+            success: true,
+            error: nil,
+            receipt: .init(sequence: 2)
+        ))
+        #expect(operation.stagePrimaryAccountUpdate(receipt: .init(sequence: 3)))
+
+        let replay = try #require(
+            operation.receivePrimaryChatGPTLoginChallenge(loginID: "login-1")
+        )
+        #expect(replay.completion == completion)
+        #expect(replay.includesAccountUpdate)
+    }
+
+    @Test func matchingPrimaryLoginFailureClearsPreChallengeCancellationInvalidation() throws {
+        let operation = LiveAuthenticationOperation(
+            activation: .activateAuthenticatedAccount,
+            method: .chatGPT
+        )
+        operation.installPrimaryNotificationRoute(
+            generation: 1,
+            completedReceipt: .beforeFirst
+        )
+        operation.installPrimaryNotificationRoute(after: .init(sequence: 1))
+        operation.beginPrimaryChatGPTLoginStart()
+        #expect(operation.stagePrimaryLoginCompletion(
+            .init(method: "account/login/completed", params: Data("{}".utf8)),
+            loginID: "login-1",
+            success: false,
+            error: "Login failed.",
+            receipt: .init(sequence: 2)
+        ))
+        operation.beginCancellation()
+
+        _ = try #require(
+            operation.receivePrimaryChatGPTLoginChallenge(loginID: "login-1")
+        )
+
+        #expect(operation.primaryRuntimeInvalidationReason == nil)
+        #expect(operation.phase == .terminalFailureObserved)
+        #expect(operation.terminalPublicationOwner == .notification)
+    }
+
+    @Test func cancellationAfterPrimaryLoginChallengeUsesScopedRetirement() {
+        let operation = LiveAuthenticationOperation(
+            activation: .activateAuthenticatedAccount,
+            method: .chatGPT
+        )
+        operation.installPrimaryNotificationRoute(
+            generation: 1,
+            completedReceipt: .beforeFirst
+        )
+        operation.beginPrimaryChatGPTLoginStart()
+        _ = operation.receivePrimaryChatGPTLoginChallenge(loginID: "login-1")
+
+        operation.beginCancellation()
+
+        #expect(operation.primaryRuntimeInvalidationReason == nil)
+        #expect(operation.retiresPrimaryNotificationRoute)
+        #expect(operation.quarantinesLatePrimaryLoginCompletion)
     }
 }

@@ -1363,7 +1363,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         let cleanup = takeLoginRuntimeForCleanup(operation)
         await cleanup.authenticationSession?.cancel()
         guard let loginBackend = cleanup.backend, let loginChallenge = cleanup.challenge else {
-            if isActiveAuthenticationOperation(operation) {
+            if isActiveAuthenticationOperation(operation),
+               operation == nil || operation?.terminalPublicationOwner == .userCancellation
+            {
                 auth.updatePhase(.signedOut)
             }
             await closeIsolatedLoginRuntime(client: cleanup.client, codexHomeURL: cleanup.codexHomeURL)
@@ -1372,11 +1374,17 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         }
         do {
             try await loginBackend.cancelLogin(loginChallenge)
-            if isActiveAuthenticationOperation(operation), operation?.isCurrent(scope) != false {
+            if isActiveAuthenticationOperation(operation),
+               operation?.isCurrent(scope) != false,
+               operation?.terminalPublicationOwner == .userCancellation
+            {
                 auth.updatePhase(.signedOut)
             }
         } catch {
-            if isActiveAuthenticationOperation(operation), operation?.isCurrent(scope) != false {
+            if isActiveAuthenticationOperation(operation),
+               operation?.isCurrent(scope) != false,
+               operation?.terminalPublicationOwner == .userCancellation
+            {
                 auth.updatePhase(.failed(message: error.localizedDescription))
             }
         }
@@ -1633,10 +1641,43 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 return
             }
             logger.info("Starting ChatGPT login")
-            let challenge = try await appServerBackend.startLogin(.init(
-                nativeWebAuthenticationCallbackScheme: nativeAuthenticationConfiguration?.callbackScheme
-            ))
+            if runtime.usesPrimaryRuntime {
+                operation.beginPrimaryChatGPTLoginStart()
+            }
+            let challenge: CodexReviewBackendModel.Login.Challenge
+            do {
+                challenge = try await appServerBackend.startLogin(.init(
+                    nativeWebAuthenticationCallbackScheme: nativeAuthenticationConfiguration?.callbackScheme
+                ))
+            } catch {
+                if runtime.usesPrimaryRuntime {
+                    if Self.loginStartOutcomeMayBeUnknown(error) {
+                        operation.markPrimaryChatGPTLoginStartOutcomeUnknown()
+                    } else {
+                        operation.rejectPrimaryChatGPTLoginStart()
+                    }
+                }
+                throw error
+            }
             pendingResources.challenge = challenge
+            let primaryNotificationReplay = runtime.usesPrimaryRuntime
+                ? operation.receivePrimaryChatGPTLoginChallenge(loginID: challenge.id)
+                : nil
+            if Task.isCancelled,
+               let primaryNotificationReplay,
+               primaryNotificationReplay.success == false,
+               primaryNotificationReplay.terminalPublicationOwner == .notification,
+               activeAuthenticationOperation === operation,
+               let expectedRuntimeHandle,
+               activeRuntimeHandle === expectedRuntimeHandle,
+               acceptsRuntimeRequests
+            {
+                updateAuthenticationFailure(
+                    primaryNotificationReplay.error ?? "Authentication failed.",
+                    auth: auth,
+                    activation: activation
+                )
+            }
             guard activeAuthenticationOperation === operation,
                   Task.isCancelled == false,
                   let expectedRuntimeHandle,
@@ -1669,6 +1710,31 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                     backend: appServerBackend,
                     auth: auth
                 )
+            }
+            if let primaryNotificationReplay {
+                await handleLoginCompletedNotification(
+                    primaryNotificationReplay.completion,
+                    operation: operation,
+                    scope: scope,
+                    backend: appServerBackend,
+                    expectedRuntimeHandle: expectedRuntimeHandle,
+                    auth: auth
+                )
+                if primaryNotificationReplay.includesAccountUpdate,
+                   activeAuthenticationOperation === operation,
+                   operation.authorizesSharedStateCommit(from: scope),
+                   operation.phase == .waitingForAccountUpdate,
+                   scope.isOpen
+                {
+                    await handleAccountUpdatedNotification(
+                        operation: operation,
+                        scope: scope,
+                        backend: appServerBackend,
+                        expectedRuntimeHandle: expectedRuntimeHandle,
+                        auth: auth
+                    )
+                }
+                return
             }
             logger.info("Received ChatGPT login challenge")
             let nativeCallbackScheme = challenge.nativeWebAuthenticationCallbackScheme
@@ -1933,6 +1999,14 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         return snapshot.accounts.contains {
             $0.id == activeAccountID && $0.kind == .apiKey
         }
+    }
+
+    private static func loginStartOutcomeMayBeUnknown(_ error: any Error) -> Bool {
+        guard let jsonRPCError = error as? JSONRPC.Error else { return true }
+        if case .responseError = jsonRPCError {
+            return false
+        }
+        return true
     }
 
     private func isCurrentRuntime(
@@ -2574,6 +2648,18 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 ) {
                     return
                 }
+                if let loginID = payload.loginID,
+                   let operation = activeAuthenticationOperation,
+                   operation.stagePrimaryLoginCompletion(
+                       notification,
+                       loginID: loginID,
+                       success: payload.success,
+                       error: payload.error,
+                       receipt: received.receipt
+                   )
+                {
+                    return
+                }
                 guard let (operation, scope) = currentPrimaryAuthenticationRoute(
                     receipt: received.receipt,
                     backend: backend
@@ -2598,6 +2684,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 receipt: received.receipt,
                 runtime: expectedRuntimeHandle
             ) {
+                return
+            }
+            if let operation = activeAuthenticationOperation,
+               operation.stagePrimaryAccountUpdate(receipt: received.receipt)
+            {
                 return
             }
             if let operation = activeAuthenticationOperation,
@@ -2708,6 +2799,18 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         _ runtime: LiveRuntimeLifecycleHandle,
         rollbackAccountKey: String?
     ) {
+        invalidatePrimaryRuntime(
+            runtime,
+            rollbackAccountKey: rollbackAccountKey,
+            reason: "A cancelled ChatGPT login completed successfully"
+        )
+    }
+
+    private func invalidatePrimaryRuntime(
+        _ runtime: LiveRuntimeLifecycleHandle,
+        rollbackAccountKey: String?,
+        reason: String
+    ) {
         guard activeRuntimeHandle === runtime else { return }
         runtime.requiresAuthenticationRollbackAfterClose = true
         let rollbackFailure = restoreCurrentAuthorizedAuthentication(
@@ -2716,11 +2819,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         activeAuthenticationOperation?.revokeSharedStateCommits()
         primaryAuthenticationLifecycleGeneration += 1
         acceptsRuntimeRequests = false
-        logger.error("Cancelled ChatGPT login completed successfully; invalidating the primary runtime")
+        logger.error("\(reason, privacy: .public); invalidating the primary runtime")
         let cause = if let rollbackFailure {
-            "A cancelled ChatGPT login completed successfully, and prior authentication could not be restored: \(rollbackFailure)"
+            "\(reason), and prior authentication could not be restored: \(rollbackFailure)"
         } else {
-            "A cancelled ChatGPT login completed successfully. Reset the server before continuing."
+            "\(reason). Reset the server before continuing."
         }
         _ = attachedStore?.requestRuntimeFailure(
             handle: runtime,
@@ -3562,18 +3665,28 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         _ operation: LiveAuthenticationOperation
     ) async {
         guard let runtime = activeRuntimeHandle,
-              let scope = operation.resourceScope,
               let completedReceiptAtAdmission = operation.primaryNotificationCompletedReceiptAtAdmission,
-              operation.retiresPrimaryNotificationRoute || operation.usesAPIKey,
-              scope.matchesOriginatingBackend(runtime.backend)
+              operation.retiresPrimaryNotificationRoute || operation.usesAPIKey
         else {
             return
         }
-        if operation.requiresPrimaryRuntimeInvalidation {
-            invalidatePrimaryRuntimeAfterCancelledLoginSuccess(
+        if let invalidationReason = operation.primaryRuntimeInvalidationReason {
+            let reason = switch invalidationReason {
+            case .cancelledAfterLoginSuccess:
+                "A cancelled ChatGPT login completed successfully"
+            case .loginStartOutcomeUnknown:
+                "A ChatGPT login start ended before its server challenge could be recovered"
+            }
+            invalidatePrimaryRuntime(
                 runtime,
-                rollbackAccountKey: operation.rollbackAccountKey
+                rollbackAccountKey: operation.rollbackAccountKey,
+                reason: reason
             )
+            return
+        }
+        guard let scope = operation.resourceScope,
+              scope.matchesOriginatingBackend(runtime.backend)
+        else {
             return
         }
         let throughReceipt = await runtime.backend.notificationHighWatermark()
@@ -3604,7 +3717,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         _ operation: LiveAuthenticationOperation?
     ) -> LiveAuthenticationOperation.ResourceCleanup {
         let cleanup = operation?.resourceScope?.takeForCleanup() ?? .init()
-        if isActiveAuthenticationOperation(operation) {
+        if isActiveAuthenticationOperation(operation),
+           operation?.phase != .terminalFailureObserved
+        {
             operation?.phase = .waitingForCompletion
         }
         cleanup.monitorTask?.cancel()

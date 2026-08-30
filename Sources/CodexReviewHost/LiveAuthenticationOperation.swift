@@ -4,6 +4,39 @@ import CodexReviewAppServer
 
 @MainActor
 final class LiveAuthenticationOperation {
+    struct PrimaryLoginNotificationReplay {
+        let completion: JSONRPC.Notification
+        let includesAccountUpdate: Bool
+        let success: Bool
+        let error: String?
+        let terminalPublicationOwner: TerminalPublicationOwner
+    }
+
+    private struct PrimaryNotificationRoute {
+        struct StagedLoginCompletion {
+            let notification: JSONRPC.Notification
+            let receipt: JSONRPC.NotificationReceipt
+            let success: Bool
+            let error: String?
+            let terminalPublicationOwner: TerminalPublicationOwner
+        }
+
+        enum RequestStage: Equatable {
+            case preparingChatGPT
+            case awaitingChatGPTChallenge
+            case chatGPTStartRejected
+            case chatGPTChallengeReceived
+            case apiKey
+        }
+
+        let generation: UInt64
+        let completedReceiptAtAdmission: JSONRPC.NotificationReceipt
+        var startReceipt: JSONRPC.NotificationReceipt?
+        var requestStage: RequestStage
+        var stagedLoginCompletions: [String: StagedLoginCompletion]
+        var stagedAccountUpdateHighWatermark: JSONRPC.NotificationReceipt?
+    }
+
     struct ResourceCleanup {
         var challenge: CodexReviewBackendModel.Login.Challenge?
         var backend: AppServerCodexReviewBackend?
@@ -98,20 +131,30 @@ final class LiveAuthenticationOperation {
         case hostFailure
     }
 
+    enum PrimaryRuntimeInvalidationReason: Equatable {
+        case cancelledAfterLoginSuccess
+        case loginStartOutcomeUnknown
+    }
+
     let activation: Activation
     let method: CodexReviewAuthenticationMethod
     let rollbackAccountKey: String?
     var usesAPIKey: Bool { if case .apiKey = method { true } else { false } }
     private(set) var resourceScope: ResourceScope?
     private(set) var setupTask: Task<Void, Never>?
-    private(set) var primaryNotificationRouteGeneration: UInt64?
-    private(set) var primaryNotificationCompletedReceiptAtAdmission: JSONRPC.NotificationReceipt?
-    private(set) var primaryNotificationRouteStartReceipt: JSONRPC.NotificationReceipt?
+    private var primaryNotificationRoute: PrimaryNotificationRoute?
+    var primaryNotificationRouteGeneration: UInt64? { primaryNotificationRoute?.generation }
+    var primaryNotificationCompletedReceiptAtAdmission: JSONRPC.NotificationReceipt? {
+        primaryNotificationRoute?.completedReceiptAtAdmission
+    }
+    var primaryNotificationRouteStartReceipt: JSONRPC.NotificationReceipt? {
+        primaryNotificationRoute?.startReceipt
+    }
     private var apiKeyRequestWasAdmitted = false
     private var allowsSharedStateCommits = true
     private(set) var retiresPrimaryNotificationRoute = false
     private(set) var quarantinesLatePrimaryLoginCompletion = false
-    private(set) var requiresPrimaryRuntimeInvalidation = false
+    private(set) var primaryRuntimeInvalidationReason: PrimaryRuntimeInvalidationReason?
     private(set) var terminalPublicationOwner = TerminalPublicationOwner.notification
     var hasAdmittedAPIKeyRequest: Bool { apiKeyRequestWasAdmitted }
     var phase = Phase.waitingForCompletion
@@ -136,28 +179,39 @@ final class LiveAuthenticationOperation {
         if apiKeyRequestWasAdmitted == false {
             allowsSharedStateCommits = false
         }
-        terminalPublicationOwner = .userCancellation
+        if phase != .terminalFailureObserved {
+            terminalPublicationOwner = .userCancellation
+        }
         prepareChatGPTRetirement()
         setupTask?.cancel()
     }
 
     func beginUserCancellation() {
         allowsSharedStateCommits = false
-        terminalPublicationOwner = .userCancellation
+        if phase != .terminalFailureObserved {
+            terminalPublicationOwner = .userCancellation
+        }
         prepareChatGPTRetirement()
     }
 
     func beginTerminalAbort() {
         allowsSharedStateCommits = false
-        terminalPublicationOwner = .hostFailure
+        if phase != .terminalFailureObserved {
+            terminalPublicationOwner = .hostFailure
+        }
         prepareChatGPTRetirement()
     }
 
-    func beginTerminalFailure() {
+    func beginTerminalFailure(
+        publicationOwner: TerminalPublicationOwner? = nil
+    ) {
+        if let publicationOwner {
+            terminalPublicationOwner = publicationOwner
+        }
         allowsSharedStateCommits = false
         retiresPrimaryNotificationRoute = true
         quarantinesLatePrimaryLoginCompletion = false
-        requiresPrimaryRuntimeInvalidation = false
+        primaryRuntimeInvalidationReason = nil
         phase = .terminalFailureObserved
     }
 
@@ -165,15 +219,113 @@ final class LiveAuthenticationOperation {
         allowsSharedStateCommits = false
     }
 
+    func beginPrimaryChatGPTLoginStart() {
+        guard primaryNotificationRoute?.requestStage == .preparingChatGPT else { return }
+        primaryNotificationRoute?.requestStage = .awaitingChatGPTChallenge
+    }
+
+    func stagePrimaryLoginCompletion(
+        _ notification: JSONRPC.Notification,
+        loginID: String,
+        success: Bool,
+        error: String?,
+        receipt: JSONRPC.NotificationReceipt
+    ) -> Bool {
+        guard var route = primaryNotificationRoute,
+              route.requestStage == .awaitingChatGPTChallenge,
+              let startReceipt = route.startReceipt,
+              receipt > startReceipt
+        else {
+            return false
+        }
+        if route.stagedLoginCompletions[loginID] == nil {
+            route.stagedLoginCompletions[loginID] = .init(
+                notification: notification,
+                receipt: receipt,
+                success: success,
+                error: error,
+                terminalPublicationOwner: terminalPublicationOwner
+            )
+        }
+        primaryNotificationRoute = route
+        return true
+    }
+
+    func stagePrimaryAccountUpdate(receipt: JSONRPC.NotificationReceipt) -> Bool {
+        guard var route = primaryNotificationRoute,
+              route.requestStage == .awaitingChatGPTChallenge,
+              let startReceipt = route.startReceipt,
+              receipt > startReceipt
+        else {
+            return false
+        }
+        route.stagedAccountUpdateHighWatermark = max(
+            route.stagedAccountUpdateHighWatermark ?? .beforeFirst,
+            receipt
+        )
+        primaryNotificationRoute = route
+        return true
+    }
+
+    func receivePrimaryChatGPTLoginChallenge(
+        loginID: String
+    ) -> PrimaryLoginNotificationReplay? {
+        guard var route = primaryNotificationRoute,
+              route.requestStage == .awaitingChatGPTChallenge
+        else {
+            return nil
+        }
+        route.requestStage = .chatGPTChallengeReceived
+        let stagedCompletion = route.stagedLoginCompletions[loginID]
+        let includesAccountUpdate = stagedCompletion.map { completion in
+            route.stagedAccountUpdateHighWatermark.map { $0 > completion.receipt } == true
+        } ?? false
+        route.stagedLoginCompletions.removeAll(keepingCapacity: false)
+        route.stagedAccountUpdateHighWatermark = nil
+        primaryNotificationRoute = route
+        if let stagedCompletion, stagedCompletion.success == false {
+            beginTerminalFailure(
+                publicationOwner: stagedCompletion.terminalPublicationOwner
+            )
+        }
+        return stagedCompletion.map {
+            PrimaryLoginNotificationReplay(
+                completion: $0.notification,
+                includesAccountUpdate: includesAccountUpdate,
+                success: $0.success,
+                error: $0.error,
+                terminalPublicationOwner: $0.terminalPublicationOwner
+            )
+        }
+    }
+
+    func rejectPrimaryChatGPTLoginStart() {
+        guard primaryNotificationRoute?.requestStage == .awaitingChatGPTChallenge else { return }
+        primaryNotificationRoute?.requestStage = .chatGPTStartRejected
+        if primaryRuntimeInvalidationReason == .loginStartOutcomeUnknown {
+            primaryRuntimeInvalidationReason = nil
+        }
+    }
+
+    func markPrimaryChatGPTLoginStartOutcomeUnknown() {
+        guard primaryNotificationRoute?.requestStage == .awaitingChatGPTChallenge else { return }
+        retiresPrimaryNotificationRoute = true
+        quarantinesLatePrimaryLoginCompletion = false
+        primaryRuntimeInvalidationReason = .loginStartOutcomeUnknown
+    }
+
     private func prepareChatGPTRetirement() {
         guard case .chatGPT = method else { return }
         retiresPrimaryNotificationRoute = true
+        if primaryNotificationRoute?.requestStage == .awaitingChatGPTChallenge {
+            primaryRuntimeInvalidationReason = .loginStartOutcomeUnknown
+        }
         switch phase {
         case .waitingForCompletion:
             quarantinesLatePrimaryLoginCompletion = true
         case .waitingForAccountUpdate:
             quarantinesLatePrimaryLoginCompletion = false
-            requiresPrimaryRuntimeInvalidation = true
+            primaryRuntimeInvalidationReason = .cancelledAfterLoginSuccess
         case .terminalFailureObserved:
             quarantinesLatePrimaryLoginCompletion = false
         }
@@ -193,7 +345,9 @@ final class LiveAuthenticationOperation {
         guard resourceScope == nil else { return nil }
         let scope = ResourceScope(resources)
         resourceScope = scope
-        phase = .waitingForCompletion
+        if phase != .terminalFailureObserved {
+            phase = .waitingForCompletion
+        }
         return scope
     }
 
@@ -201,14 +355,26 @@ final class LiveAuthenticationOperation {
         generation: UInt64,
         completedReceipt: JSONRPC.NotificationReceipt
     ) {
-        guard primaryNotificationRouteGeneration == nil else { return }
-        primaryNotificationRouteGeneration = generation
-        primaryNotificationCompletedReceiptAtAdmission = completedReceipt
+        guard primaryNotificationRoute == nil else { return }
+        let requestStage: PrimaryNotificationRoute.RequestStage = switch method {
+        case .chatGPT:
+            .preparingChatGPT
+        case .apiKey:
+            .apiKey
+        }
+        primaryNotificationRoute = .init(
+            generation: generation,
+            completedReceiptAtAdmission: completedReceipt,
+            startReceipt: nil,
+            requestStage: requestStage,
+            stagedLoginCompletions: [:],
+            stagedAccountUpdateHighWatermark: nil
+        )
     }
 
     func installPrimaryNotificationRoute(after receipt: JSONRPC.NotificationReceipt) {
-        guard primaryNotificationRouteStartReceipt == nil else { return }
-        primaryNotificationRouteStartReceipt = receipt
+        guard primaryNotificationRoute?.startReceipt == nil else { return }
+        primaryNotificationRoute?.startReceipt = receipt
     }
 
     func isCurrent(_ scope: ResourceScope?) -> Bool { resourceScope === scope }
