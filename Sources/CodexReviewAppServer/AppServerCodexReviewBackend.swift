@@ -429,6 +429,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         )
     }
 
+    package func notificationHighWatermark() async -> JSONRPC.NotificationReceipt {
+        await client.notificationHighWatermark()
+    }
+
     package func completeLogin(_ response: CodexReviewBackendModel.Login.Response) async throws -> CodexReviewBackendModel.Auth.Snapshot {
         if let callbackURL = response.callbackURL {
             _ = try await client.initialize()
@@ -1708,7 +1712,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     private func installNotificationRouter(
-        _ notifications: AsyncThrowingStream<JSONRPC.Notification, Error>,
+        _ notifications: AsyncThrowingStream<JSONRPC.ReceivedNotification, Error>,
         admittedBy operationID: AdmittedReviewOperationID
     ) {
         notificationRouterStartTask = nil
@@ -1725,11 +1729,11 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     private func consumeReviewNotifications(
-        _ notifications: AsyncThrowingStream<JSONRPC.Notification, Error>
+        _ notifications: AsyncThrowingStream<JSONRPC.ReceivedNotification, Error>
     ) async {
         do {
-            for try await notification in notifications {
-                await routeReviewNotification(notification)
+            for try await received in notifications {
+                await routeReviewNotification(received.notification)
             }
             await finishAllReviewEventSessions(throwing: nil)
         } catch {

@@ -18,6 +18,7 @@ final class LiveAuthenticationOperation {
 
     final class ResourceScope {
         private let originatingBackendIdentity: ObjectIdentifier?
+        private let originatingChallengeID: String?
         private var resources: ResourceCleanup?
         var isOpen: Bool { resources != nil }
         var challenge: CodexReviewBackendModel.Login.Challenge? { resources?.challenge }
@@ -26,12 +27,19 @@ final class LiveAuthenticationOperation {
 
         init(_ resources: ResourceCleanup) {
             self.originatingBackendIdentity = resources.backend.map(ObjectIdentifier.init)
+            self.originatingChallengeID = resources.challenge?.id
             self.resources = resources
         }
 
         func matchesOriginatingBackend(_ backend: AppServerCodexReviewBackend) -> Bool {
             originatingBackendIdentity == ObjectIdentifier(backend)
         }
+
+        func matchesOriginatingChallenge(_ loginID: String) -> Bool {
+            originatingChallengeID == loginID
+        }
+
+        var stableChallengeID: String? { originatingChallengeID }
 
         func install(session: any CodexReviewNativeAuthentication.WebSession, monitorTask: Task<Void, Never>) {
             resources?.authenticationSession = session
@@ -81,21 +89,41 @@ final class LiveAuthenticationOperation {
     enum Phase: Equatable {
         case waitingForCompletion
         case waitingForAccountUpdate
+        case terminalFailureObserved
+    }
+
+    enum TerminalPublicationOwner: Equatable {
+        case notification
+        case userCancellation
+        case hostFailure
     }
 
     let activation: Activation
     let method: CodexReviewAuthenticationMethod
+    let rollbackAccountKey: String?
     var usesAPIKey: Bool { if case .apiKey = method { true } else { false } }
     private(set) var resourceScope: ResourceScope?
     private(set) var setupTask: Task<Void, Never>?
+    private(set) var primaryNotificationRouteGeneration: UInt64?
+    private(set) var primaryNotificationCompletedReceiptAtAdmission: JSONRPC.NotificationReceipt?
+    private(set) var primaryNotificationRouteStartReceipt: JSONRPC.NotificationReceipt?
     private var apiKeyRequestWasAdmitted = false
     private var allowsSharedStateCommits = true
+    private(set) var retiresPrimaryNotificationRoute = false
+    private(set) var quarantinesLatePrimaryLoginCompletion = false
+    private(set) var requiresPrimaryRuntimeInvalidation = false
+    private(set) var terminalPublicationOwner = TerminalPublicationOwner.notification
     var hasAdmittedAPIKeyRequest: Bool { apiKeyRequestWasAdmitted }
     var phase = Phase.waitingForCompletion
 
-    init(activation: Activation, method: CodexReviewAuthenticationMethod) {
+    init(
+        activation: Activation,
+        method: CodexReviewAuthenticationMethod,
+        rollbackAccountKey: String? = nil
+    ) {
         self.activation = activation
         self.method = method
+        self.rollbackAccountKey = rollbackAccountKey
     }
 
     func install(setupTask: Task<Void, Never>) {
@@ -108,7 +136,47 @@ final class LiveAuthenticationOperation {
         if apiKeyRequestWasAdmitted == false {
             allowsSharedStateCommits = false
         }
+        terminalPublicationOwner = .userCancellation
+        prepareChatGPTRetirement()
         setupTask?.cancel()
+    }
+
+    func beginUserCancellation() {
+        allowsSharedStateCommits = false
+        terminalPublicationOwner = .userCancellation
+        prepareChatGPTRetirement()
+    }
+
+    func beginTerminalAbort() {
+        allowsSharedStateCommits = false
+        terminalPublicationOwner = .hostFailure
+        prepareChatGPTRetirement()
+    }
+
+    func beginTerminalFailure() {
+        allowsSharedStateCommits = false
+        retiresPrimaryNotificationRoute = true
+        quarantinesLatePrimaryLoginCompletion = false
+        requiresPrimaryRuntimeInvalidation = false
+        phase = .terminalFailureObserved
+    }
+
+    func revokeSharedStateCommits() {
+        allowsSharedStateCommits = false
+    }
+
+    private func prepareChatGPTRetirement() {
+        guard case .chatGPT = method else { return }
+        retiresPrimaryNotificationRoute = true
+        switch phase {
+        case .waitingForCompletion:
+            quarantinesLatePrimaryLoginCompletion = true
+        case .waitingForAccountUpdate:
+            quarantinesLatePrimaryLoginCompletion = false
+            requiresPrimaryRuntimeInvalidation = true
+        case .terminalFailureObserved:
+            quarantinesLatePrimaryLoginCompletion = false
+        }
     }
 
     func waitForSetup() async {
@@ -127,6 +195,20 @@ final class LiveAuthenticationOperation {
         resourceScope = scope
         phase = .waitingForCompletion
         return scope
+    }
+
+    func installPrimaryNotificationRoute(
+        generation: UInt64,
+        completedReceipt: JSONRPC.NotificationReceipt
+    ) {
+        guard primaryNotificationRouteGeneration == nil else { return }
+        primaryNotificationRouteGeneration = generation
+        primaryNotificationCompletedReceiptAtAdmission = completedReceipt
+    }
+
+    func installPrimaryNotificationRoute(after receipt: JSONRPC.NotificationReceipt) {
+        guard primaryNotificationRouteStartReceipt == nil else { return }
+        primaryNotificationRouteStartReceipt = receipt
     }
 
     func isCurrent(_ scope: ResourceScope?) -> Bool { resourceScope === scope }

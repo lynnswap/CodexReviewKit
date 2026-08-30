@@ -23,10 +23,38 @@ package enum JSONRPC {
         }
     }
 
+    package struct NotificationReceipt: Comparable, Hashable, Sendable {
+        package static let beforeFirst = Self(sequence: 0)
+
+        package let sequence: UInt64
+
+        package init(sequence: UInt64) {
+            self.sequence = sequence
+        }
+
+        package static func < (lhs: Self, rhs: Self) -> Bool {
+            lhs.sequence < rhs.sequence
+        }
+    }
+
+    package struct ReceivedNotification: Equatable, Sendable {
+        package let receipt: NotificationReceipt
+        package let notification: Notification
+
+        package var method: String { notification.method }
+        package var params: Data { notification.params }
+
+        package init(receipt: NotificationReceipt, notification: Notification) {
+            self.receipt = receipt
+            self.notification = notification
+        }
+    }
+
     package protocol Transport: Sendable {
         func send(_ request: Request) async throws -> Data
         func notify(_ notification: Notification) async throws
-        func notificationStream() async -> AsyncThrowingStream<Notification, Swift.Error>
+        func notificationStream() async -> AsyncThrowingStream<ReceivedNotification, Swift.Error>
+        func notificationHighWatermark() async -> NotificationReceipt
         func close() async throws
     }
 

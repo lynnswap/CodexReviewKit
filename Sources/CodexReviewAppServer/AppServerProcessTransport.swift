@@ -63,7 +63,8 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
     private let closedRequestAdmissionForTesting: (@Sendable () async -> Void)?
     private var framer = JSONRPC.Framer()
     private var pending: [Int: PendingResponse] = [:]
-    private var notificationContinuations: [UUID: AsyncThrowingStream<JSONRPC.Notification, Error>.Continuation] = [:]
+    private var notificationContinuations: [UUID: AsyncThrowingStream<JSONRPC.ReceivedNotification, Error>.Continuation] = [:]
+    private var lastNotificationReceipt = JSONRPC.NotificationReceipt.beforeFirst
     private var stderrLogFilter = AppServerStderrLogFilter()
     private var stdoutReaderTask: Task<Void, Never>? = nil
     private var stderrReaderTask: Task<Void, Never>? = nil
@@ -149,7 +150,7 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
         try stdin.fileHandleForWriting.write(contentsOf: payload)
     }
 
-    package func notificationStream() async -> AsyncThrowingStream<JSONRPC.Notification, Error> {
+    package func notificationStream() async -> AsyncThrowingStream<JSONRPC.ReceivedNotification, Error> {
         ensureReaderTasksStarted()
         if let closeTask {
             _ = await closeTask.result
@@ -165,6 +166,10 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
                 Task { await self.removeNotificationContinuation(id: id) }
             }
         }
+    }
+
+    package func notificationHighWatermark() -> JSONRPC.NotificationReceipt {
+        lastNotificationReceipt
     }
 
     package func close() async throws {
@@ -408,7 +413,11 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
             withJSONObject: params,
             options: [.fragmentsAllowed]
         )
-        let notification = JSONRPC.Notification(method: method, params: data)
+        lastNotificationReceipt = .init(sequence: lastNotificationReceipt.sequence + 1)
+        let notification = JSONRPC.ReceivedNotification(
+            receipt: lastNotificationReceipt,
+            notification: .init(method: method, params: data)
+        )
         for continuation in notificationContinuations.values {
             continuation.yield(notification)
         }

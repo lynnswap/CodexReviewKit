@@ -1627,7 +1627,8 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
     private var responses: [String: [QueuedResponse]]
     private var requests: [JSONRPC.Request] = []
     private var notifications: [JSONRPC.Notification] = []
-    private var serverNotificationContinuations: [AsyncThrowingStream<JSONRPC.Notification, Error>.Continuation] = []
+    private var serverNotificationContinuations: [AsyncThrowingStream<JSONRPC.ReceivedNotification, Error>.Continuation] = []
+    private var lastServerNotificationReceipt = JSONRPC.NotificationReceipt.beforeFirst
     private var activeByMethod: [String: Int] = [:]
     private var maxActiveByMethod: [String: Int] = [:]
     private var gatesByMethod: [String: RequestGate] = [:]
@@ -1767,11 +1768,15 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
         notifications.append(notification)
     }
 
-    package func notificationStream() -> AsyncThrowingStream<JSONRPC.Notification, Error> {
+    package func notificationStream() -> AsyncThrowingStream<JSONRPC.ReceivedNotification, Error> {
         AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
             serverNotificationContinuations.append(continuation)
             resumeNotificationStreamCountWaiters()
         }
+    }
+
+    package func notificationHighWatermark() -> JSONRPC.NotificationReceipt {
+        lastServerNotificationReceipt
     }
 
     package func close() async {
@@ -1890,17 +1895,24 @@ package actor FakeJSONRPCTransport: JSONRPC.Transport {
         maxActiveByMethod[method] ?? 0
     }
 
+    @discardableResult
     package func emitServerNotification<Params: Encodable & Sendable>(
         method: String,
         params: Params
-    ) throws {
+    ) throws -> JSONRPC.NotificationReceipt {
         let notification = JSONRPC.Notification(
             method: method,
             params: try JSONEncoder().encode(params)
         )
+        lastServerNotificationReceipt = .init(sequence: lastServerNotificationReceipt.sequence + 1)
+        let received = JSONRPC.ReceivedNotification(
+            receipt: lastServerNotificationReceipt,
+            notification: notification
+        )
         for continuation in serverNotificationContinuations {
-            continuation.yield(notification)
+            continuation.yield(received)
         }
+        return lastServerNotificationReceipt
     }
 
     private func resumeRequestCountWaiters() {
