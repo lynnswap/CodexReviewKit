@@ -605,7 +605,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                 completedAt: metadata?.completedAt
             )
         }
-        guard let durationMs else {
+        guard let durationMs, durationMs >= 1_000 else {
             return nil
         }
         return formattedCommandDuration(milliseconds: durationMs)

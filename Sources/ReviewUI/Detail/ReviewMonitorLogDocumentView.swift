@@ -2554,7 +2554,7 @@ extension ReviewMonitorLogDocumentView {
         }
         syncContentSubviewFrames()
         let point = NSPoint(x: bounds.midX, y: bounds.midY)
-        return hitTest(point) === self
+        return hitTest(convert(point, to: superview)) === self
     }
 
     var visibleFragmentViewCountForTesting: Int {
@@ -2783,7 +2783,8 @@ extension ReviewMonitorLogDocumentView {
         else {
             return false
         }
-        return hitTest(NSPoint(x: rect.midX, y: rect.midY)) === self
+        let point = NSPoint(x: rect.midX, y: rect.midY)
+        return hitTest(convert(point, to: superview)) === self
     }
 
     func toggleFirstCommandOutputPanelForTesting() {
@@ -2805,7 +2806,19 @@ extension ReviewMonitorLogDocumentView {
     @discardableResult
     func clickCommandOutputPanelHeaderForTesting(blockID: ReviewMonitorLog.BlockID) -> Bool {
         layoutTextViewport(force: true)
-        guard let button = commandOutputToggleButtonForTesting(blockID: blockID) else {
+        guard let panel = currentCommandOutputPanels.first(where: { $0.blockID == blockID }),
+              let rect = rects(
+                  forCharacterRange: NSRange(location: panel.range.location, length: 1)
+              ).first?.rectValue
+        else {
+            return false
+        }
+
+        let point = NSPoint(x: rect.midX, y: rect.midY)
+        guard let button = hitTest(convert(point, to: superview))
+            as? ReviewMonitorCommandOutputToggleButton,
+              button.blockID == blockID
+        else {
             return false
         }
         button.performClick(nil)
@@ -2827,15 +2840,6 @@ extension ReviewMonitorLogDocumentView {
             .sorted { $0.frame.minY < $1.frame.minY }
             .compactMap(\.firstCommandOutputToggleButtonForTesting)
             .first
-    }
-
-    private func commandOutputToggleButtonForTesting(
-        blockID: ReviewMonitorLog.BlockID
-    ) -> ReviewMonitorCommandOutputToggleButton? {
-        visibleFragmentViews.lazy
-            .flatMap(\.subviews)
-            .compactMap { $0 as? ReviewMonitorCommandOutputToggleButton }
-            .first { $0.blockID == blockID }
     }
 
     private func firstVisibleCommandOutputPanelViewForTesting() -> ReviewMonitorCommandOutputPanelAttachmentView? {

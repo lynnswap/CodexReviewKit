@@ -117,15 +117,15 @@ final class ReviewMonitorLogFragmentView: NSView {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
+        let pointInView = convert(point, from: superview)
         guard isHidden == false,
               alphaValue > 0,
-              bounds.contains(point)
+              bounds.contains(pointInView)
         else {
             return nil
         }
         for subview in subviews.reversed() {
-            let subviewPoint = convert(point, to: subview)
-            if let hitView = subview.hitTest(subviewPoint) {
+            if let hitView = subview.hitTest(pointInView) {
                 return hitView
             }
         }
