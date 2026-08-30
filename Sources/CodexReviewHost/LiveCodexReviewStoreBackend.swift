@@ -1379,6 +1379,14 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         let scope = operation?.resourceScope
         let cleanup = takeLoginRuntimeForCleanup(operation)
         await cleanup.authenticationSession?.cancel()
+        if operation?.phase == .terminalSuccessCommitted {
+            await closeIsolatedLoginRuntime(
+                client: cleanup.client,
+                codexHomeURL: cleanup.codexHomeURL
+            )
+            await removeActiveAuthenticationOperation(operation)
+            return
+        }
         guard let loginBackend = cleanup.backend, let loginChallenge = cleanup.challenge else {
             if isActiveAuthenticationOperation(operation),
                operation == nil || operation?.terminalPublicationOwner == .userCancellation
@@ -1682,18 +1690,24 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 : nil
             if Task.isCancelled,
                let primaryNotificationReplay,
-               primaryNotificationReplay.success == false,
-               primaryNotificationReplay.terminalPublicationOwner == .notification,
-               activeAuthenticationOperation === operation,
-               let expectedRuntimeHandle,
-               activeRuntimeHandle === expectedRuntimeHandle,
-               acceptsRuntimeRequests
+               primaryNotificationReplay.success == false
             {
-                updateAuthenticationFailure(
-                    primaryNotificationReplay.error ?? "Authentication failed.",
-                    auth: auth,
-                    activation: activation
+                let didCommitFailure = operation.beginTerminalFailure(
+                    publicationOwner: primaryNotificationReplay.terminalPublicationOwner
                 )
+                if didCommitFailure,
+                   primaryNotificationReplay.terminalPublicationOwner == .notification,
+                   activeAuthenticationOperation === operation,
+                   let expectedRuntimeHandle,
+                   activeRuntimeHandle === expectedRuntimeHandle,
+                   acceptsRuntimeRequests
+                {
+                    updateAuthenticationFailure(
+                        primaryNotificationReplay.error ?? "Authentication failed.",
+                        auth: auth,
+                        activation: activation
+                    )
+                }
             }
             guard activeAuthenticationOperation === operation,
                   Task.isCancelled == false,
@@ -1858,7 +1872,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                operation.isCurrent(admittedScope),
                Task.isCancelled == false
             {
-                operation.phase = .waitingForCompletion
+                operation.beginResourceCleanup()
             }
             cleanup?.monitorTask?.cancel()
             if let pendingLoginBackend = cleanup?.backend, let pendingLoginChallenge = cleanup?.challenge {
@@ -2062,47 +2076,88 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 return
             }
             let activation = operation.activation
+            let expectedRuntimeHandle = activeRuntimeHandle.flatMap { runtime in
+                scope.matchesOriginatingBackend(runtime.backend) ? runtime : nil
+            }
             let snapshot = try await loginBackend.completeLogin(.init(
                 challengeID: challenge.id,
                 callbackURL: callbackURL.absoluteString
             ))
-            guard let cleanup = scope.takeForCleanup() else { return }
-            cleanup.notificationTask?.cancel()
-            let loginCodexHomeURL = cleanup.codexHomeURL
-            guard activeAuthenticationOperation === operation,
-                  operation.authorizesSharedStateCommit(from: scope)
-            else {
-                await closeIsolatedLoginRuntime(client: cleanup.client, codexHomeURL: loginCodexHomeURL)
+            if let expectedRuntimeHandle,
+               (activeRuntimeHandle !== expectedRuntimeHandle || acceptsRuntimeRequests == false)
+            {
+                await cleanupAuthenticationScope(scope)
                 return
             }
-            operation.phase = .waitingForCompletion
+            guard activeAuthenticationOperation === operation,
+                  operation.authorizesSharedStateCommit(from: scope),
+                  scope.isOpen
+            else {
+                await cleanupAuthenticationScope(scope)
+                return
+            }
+            guard let preparedAccount = Self.monitorActiveAccount(from: snapshot) else {
+                if let expectedRuntimeHandle {
+                    invalidatePrimaryRuntime(
+                        expectedRuntimeHandle,
+                        rollbackAuthority: .captured(
+                            accountKey: operation.rollbackAccountKey
+                        ),
+                        reason: "A ChatGPT login completed without an active account"
+                    )
+                    await cleanupAuthenticationScope(scope)
+                    return
+                }
+                throw CodexReviewAPI.Error.io(
+                    "Authentication completed without an active account."
+                )
+            }
+            guard operation.commitAuthenticationSuccess(
+                from: .callback,
+                from: scope
+            ) else {
+                return
+            }
             let account = applyAuthSnapshot(
                 snapshot,
                 to: auth,
                 activation: activation,
-                authSourceCodexHomeURL: loginCodexHomeURL
+                authSourceCodexHomeURL: scope.codexHomeURL,
+                preparedAccount: preparedAccount
             )
-            await refreshSelectedAccountRateLimits(auth: auth, authenticationScope: scope)
-            if activeAuthenticationOperation === operation,
-               operation.authorizesSharedStateCommit(from: scope),
-               case .preserveActiveAccount = activation,
-               let account
-            {
-                let didRefresh = await refreshRateLimits(
-                    for: account, using: loginBackend,
-                    source: "login-runtime", authenticationScope: scope
+            let loginCodexHomeURL = scope.codexHomeURL
+            switch activation {
+            case .activateAuthenticatedAccount:
+                await refreshSelectedAccountRateLimits(
+                    auth: auth,
+                    expectedRuntimeHandle: expectedRuntimeHandle,
+                    authenticationScope: scope
                 )
-                if didRefresh,
-                   activeAuthenticationOperation === operation,
-                   operation.authorizesSharedStateCommit(from: scope)
-                {
-                    persistRefreshedSharedAuth(
-                        from: loginCodexHomeURL,
-                        for: account
+            case .preserveActiveAccount:
+                if let account {
+                    let didRefresh = await refreshRateLimits(
+                        for: account,
+                        using: loginBackend,
+                        source: "login-runtime",
+                        authenticationScope: scope
                     )
+                    if didRefresh,
+                       activeAuthenticationOperation === operation,
+                       authorizesAuthenticationSharedStateCommit(scope)
+                    {
+                        persistRefreshedSharedAuth(
+                            from: loginCodexHomeURL,
+                            for: account
+                        )
+                    }
                 }
             }
-            await closeIsolatedLoginRuntime(client: cleanup.client, codexHomeURL: loginCodexHomeURL)
+            let cleanup = scope.takeForCleanup()
+            cleanup?.notificationTask?.cancel()
+            await closeIsolatedLoginRuntime(
+                client: cleanup?.client,
+                codexHomeURL: cleanup?.codexHomeURL
+            )
             await removeActiveAuthenticationOperation(operation)
         } catch is CancellationError {
             await handleAuthenticationSessionCancelled(operation: operation, scope: scope, auth: auth)
@@ -2121,7 +2176,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                activeAuthenticationOperation === operation,
                operation.isCurrent(scope)
             {
-                operation.phase = .waitingForCompletion
+                operation.beginResourceCleanup()
             }
             await closeIsolatedLoginRuntime(client: cleanup?.client, codexHomeURL: cleanup?.codexHomeURL)
             guard cleanup != nil,
@@ -2193,7 +2248,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             }
         }
         if activeAuthenticationOperation === operation, operation.isCurrent(scope) {
-            operation.phase = .waitingForCompletion
+            operation.beginResourceCleanup()
         }
         if activeAuthenticationOperation === operation,
            operation.isCurrent(scope) {
@@ -3124,9 +3179,13 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                     await removeActiveAuthenticationOperation(operation)
                     return
                 }
-                operation.phase = .waitingForAccountUpdate
+                guard operation.beginAuthenticationCommitPreparation(from: scope) else {
+                    return
+                }
             } else {
-                operation.beginTerminalFailure()
+                guard operation.beginTerminalFailure() else {
+                    return
+                }
                 switch terminalPublicationOwner {
                 case .notification:
                     updateAuthenticationFailure(
@@ -3200,22 +3259,108 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         guard operation.authorizesSharedStateCommit(from: scope) else {
             return
         }
-        guard operation.phase == .waitingForAccountUpdate else {
+        switch operation.phase {
+        case .waitingForCompletion:
             await refreshAuthAfterAccountNotification(
                 backend: backend,
                 expectedRuntimeHandle: expectedRuntimeHandle,
                 authenticationScope: scope,
                 auth: auth
             )
+        case .waitingForAccountUpdate:
+            await finishCompletedLoginAfterAccountUpdate(
+                operation: operation,
+                scope: scope,
+                backend: backend,
+                expectedRuntimeHandle: expectedRuntimeHandle,
+                auth: auth
+            )
+        case .terminalFailureObserved, .terminalSuccessCommitted:
             return
         }
-        await finishCompletedLoginAfterAccountUpdate(
-            operation: operation,
-            scope: scope,
-            backend: backend,
-            expectedRuntimeHandle: expectedRuntimeHandle,
-            auth: auth
+    }
+
+    private func prepareAndCommitAuthenticationSnapshot(
+        _ snapshot: CodexReviewBackendModel.Auth.Snapshot,
+        operation: LiveAuthenticationOperation,
+        scope: LiveAuthenticationOperation.ResourceScope,
+        backend: AppServerCodexReviewBackend,
+        expectedRuntimeHandle: LiveRuntimeLifecycleHandle? = nil,
+        auth: CodexReviewAuthModel
+    ) async throws -> Bool {
+        if let expectedRuntimeHandle,
+           (activeRuntimeHandle !== expectedRuntimeHandle || acceptsRuntimeRequests == false)
+        {
+            return false
+        }
+        guard activeAuthenticationOperation === operation,
+              operation.authorizesSharedStateCommit(from: scope),
+              operation.phase == .waitingForAccountUpdate,
+              scope.isOpen else {
+            return false
+        }
+        let activation = operation.activation
+        let loginBackend = scope.backend
+        let loginCodexHomeURL = scope.codexHomeURL
+        guard let preparedAccount = Self.monitorActiveAccount(from: snapshot) else {
+            if let expectedRuntimeHandle {
+                invalidatePrimaryRuntime(
+                    expectedRuntimeHandle,
+                    rollbackAuthority: .captured(
+                        accountKey: operation.rollbackAccountKey
+                    ),
+                    reason: "A ChatGPT login completed without an active account"
+                )
+                return false
+            }
+            throw CodexReviewAPI.Error.io(
+                "Authentication completed without an active account."
+            )
+        }
+        switch activation {
+        case .preserveActiveAccount:
+            if let loginBackend {
+                _ = await refreshRateLimits(
+                    for: preparedAccount,
+                    using: loginBackend,
+                    source: "login-runtime",
+                    authenticationScope: scope,
+                    persistsResult: false
+                )
+            }
+        case .activateAuthenticatedAccount:
+            _ = await refreshRateLimits(
+                for: preparedAccount,
+                using: backend,
+                source: "login-runtime",
+                expectedRuntimeHandle: expectedRuntimeHandle,
+                authenticationScope: scope,
+                persistsResult: false
+            )
+        }
+        if let expectedRuntimeHandle,
+           (activeRuntimeHandle !== expectedRuntimeHandle || acceptsRuntimeRequests == false)
+        {
+            return false
+        }
+        guard activeAuthenticationOperation === operation,
+              operation.authorizesSharedStateCommit(from: scope),
+              scope.isOpen,
+              operation.commitAuthenticationSuccess(
+                  from: .notification,
+                  from: scope
+              )
+        else {
+            return false
+        }
+        _ = applyAuthSnapshot(
+            snapshot,
+            to: auth,
+            activation: activation,
+            authSourceCodexHomeURL: loginCodexHomeURL,
+            preparedAccount: preparedAccount
         )
+        return true
     }
 
     private func finishCompletedLoginAfterAccountUpdate(
@@ -3226,8 +3371,6 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         auth: CodexReviewAuthModel
     ) async {
         let activation = operation.activation
-        let loginBackend = scope.backend
-        let loginCodexHomeURL = scope.codexHomeURL
         let presentation = scope.takePresentation()
         do {
             presentation.monitorTask?.cancel()
@@ -3245,95 +3388,57 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 return
             }
             let snapshot = try await backend.readAuth()
-            if let expectedRuntimeHandle,
-               (activeRuntimeHandle !== expectedRuntimeHandle || acceptsRuntimeRequests == false)
-            {
-                await cleanupAuthenticationScope(scope)
-                return
-            }
-            guard activeAuthenticationOperation === operation,
-                  operation.authorizesSharedStateCommit(from: scope),
-                  scope.isOpen else {
-                await cleanupAuthenticationScope(scope)
-                return
-            }
-            let preparedAccount = Self.monitorActiveAccount(from: snapshot)
-            var didRefresh = false
-            if let preparedAccount {
-                switch activation {
-                case .preserveActiveAccount:
-                    if let loginBackend {
-                        didRefresh = await refreshRateLimits(
-                            for: preparedAccount,
-                            using: loginBackend,
-                            source: "login-runtime",
-                            authenticationScope: scope,
-                            persistsResult: false
-                        )
-                    }
-                case .activateAuthenticatedAccount:
-                    didRefresh = await refreshRateLimits(
-                        for: preparedAccount,
-                        using: backend,
-                        source: "login-runtime",
-                        expectedRuntimeHandle: expectedRuntimeHandle,
-                        authenticationScope: scope,
-                        persistsResult: false
-                    )
-                }
-            }
-            if let expectedRuntimeHandle,
-               (activeRuntimeHandle !== expectedRuntimeHandle || acceptsRuntimeRequests == false)
-            {
-                await cleanupAuthenticationScope(scope)
-                return
-            }
-            guard activeAuthenticationOperation === operation,
-                  operation.authorizesSharedStateCommit(from: scope),
-                  scope.isOpen,
-                  operation.commitAuthenticationSuccess(from: scope)
-            else {
-                await cleanupAuthenticationScope(scope)
-                return
-            }
-            let account = applyAuthSnapshot(
+            guard try await prepareAndCommitAuthenticationSnapshot(
                 snapshot,
-                to: auth,
-                activation: activation,
-                authSourceCodexHomeURL: loginCodexHomeURL,
-                preparedAccount: preparedAccount
-            )
-            if case .preserveActiveAccount = activation,
-               didRefresh,
-               let account
-            {
-                persistRefreshedSharedAuth(
-                    from: loginCodexHomeURL,
-                    for: account
-                )
+                operation: operation,
+                scope: scope,
+                backend: backend,
+                expectedRuntimeHandle: expectedRuntimeHandle,
+                auth: auth
+            ) else {
+                if operation.phase != .terminalSuccessCommitted {
+                    await cleanupAuthenticationScope(scope)
+                }
+                return
             }
         } catch {
+            if operation.phase == .terminalSuccessCommitted {
+                return
+            }
             let runtimeIsCurrent = expectedRuntimeHandle.map {
                 activeRuntimeHandle === $0 && acceptsRuntimeRequests
             } ?? true
             if runtimeIsCurrent,
                activeAuthenticationOperation === operation,
                operation.authorizesSharedStateCommit(from: scope),
+               operation.phase == .waitingForAccountUpdate,
                scope.isOpen
             {
-                updateAuthenticationFailure(
-                    error.localizedDescription,
-                    auth: auth,
-                    activation: activation
-                )
+                if let expectedRuntimeHandle {
+                    invalidatePrimaryRuntime(
+                        expectedRuntimeHandle,
+                        rollbackAuthority: .captured(
+                            accountKey: operation.rollbackAccountKey
+                        ),
+                        reason: "A completed ChatGPT login could not read its account state: \(error.localizedDescription)"
+                    )
+                } else {
+                    updateAuthenticationFailure(
+                        error.localizedDescription,
+                        auth: auth,
+                        activation: activation
+                    )
+                }
             }
         }
         let cleanup = scope.takeForCleanup()
         if cleanup != nil,
            activeAuthenticationOperation === operation,
-           operation.isCurrent(scope)
+           operation.isCurrent(scope),
+           operation.phase != .terminalFailureObserved,
+           operation.phase != .terminalSuccessCommitted
         {
-            operation.phase = .waitingForCompletion
+            operation.beginResourceCleanup()
         }
         cleanup?.notificationTask?.cancel()
         await closeIsolatedLoginRuntime(client: cleanup?.client, codexHomeURL: cleanup?.codexHomeURL)
@@ -3359,7 +3464,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             return
         }
         if let authenticationScope,
-           authorizesAuthenticationSharedStateCommit(authenticationScope) == false
+           authorizesGenericAuthenticationRefresh(authenticationScope) == false
         {
             return
         }
@@ -3372,16 +3477,37 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 return
             }
             if let authenticationScope,
-               authorizesAuthenticationSharedStateCommit(authenticationScope) == false
+               authorizesGenericAuthenticationRefresh(authenticationScope) == false
             {
                 return
             }
-            applyAuthSnapshot(snapshot, to: auth)
-            await refreshSelectedAccountRateLimits(
-                auth: auth,
-                expectedRuntimeHandle: expectedRuntimeHandle,
-                expectedAuthenticationGeneration: expectedAuthenticationGeneration,
-                authenticationScope: authenticationScope
+            let preparedAccount = Self.monitorActiveAccount(from: snapshot)
+            if let preparedAccount {
+                _ = await refreshRateLimits(
+                    for: preparedAccount,
+                    using: backend,
+                    source: "account-notification",
+                    expectedRuntimeHandle: expectedRuntimeHandle,
+                    expectedAuthenticationGeneration: expectedAuthenticationGeneration,
+                    authenticationScope: authenticationScope,
+                    persistsResult: false
+                )
+            }
+            guard activeRuntimeHandle === expectedRuntimeHandle,
+                  acceptsRuntimeRequests,
+                  primaryAuthenticationLifecycleGeneration == expectedAuthenticationGeneration
+            else {
+                return
+            }
+            if let authenticationScope,
+               authorizesGenericAuthenticationRefresh(authenticationScope) == false
+            {
+                return
+            }
+            applyAuthSnapshot(
+                snapshot,
+                to: auth,
+                preparedAccount: preparedAccount
             )
         } catch {
             guard activeRuntimeHandle === expectedRuntimeHandle,
@@ -3391,7 +3517,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 return
             }
             if let authenticationScope,
-               authorizesAuthenticationSharedStateCommit(authenticationScope) == false
+               authorizesGenericAuthenticationRefresh(authenticationScope) == false
             {
                 return
             }
@@ -3721,7 +3847,15 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
     private func authorizesAuthenticationSharedStateCommit(
         _ scope: LiveAuthenticationOperation.ResourceScope
     ) -> Bool {
-        activeAuthenticationOperation?.authorizesSharedStateCommit(from: scope) == true
+        scope.isOpen
+            && activeAuthenticationOperation?.authorizesSharedStateCommit(from: scope) == true
+    }
+
+    private func authorizesGenericAuthenticationRefresh(
+        _ scope: LiveAuthenticationOperation.ResourceScope
+    ) -> Bool {
+        authorizesAuthenticationSharedStateCommit(scope)
+            && activeAuthenticationOperation?.phase == .waitingForCompletion
     }
 
     private func isCurrentPrimaryAuthenticationGeneration(_ expected: UInt64?) -> Bool {

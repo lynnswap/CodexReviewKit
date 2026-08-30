@@ -132,6 +132,11 @@ final class LiveAuthenticationOperation {
         case hostFailure
     }
 
+    enum AuthenticationCommitSource: Equatable {
+        case callback
+        case notification
+    }
+
     enum PrimaryRuntimeInvalidationReason: Equatable {
         case cancelledAfterLoginSuccess
         case loginStartOutcomeUnknown
@@ -206,9 +211,15 @@ final class LiveAuthenticationOperation {
         prepareChatGPTRetirement()
     }
 
+    @discardableResult
     func beginTerminalFailure(
         publicationOwner: TerminalPublicationOwner? = nil
-    ) {
+    ) -> Bool {
+        guard phase != .terminalFailureObserved,
+              phase != .terminalSuccessCommitted
+        else {
+            return false
+        }
         if let publicationOwner {
             terminalPublicationOwner = publicationOwner
         }
@@ -217,16 +228,40 @@ final class LiveAuthenticationOperation {
         quarantinesLatePrimaryLoginCompletion = false
         primaryRuntimeInvalidationReason = nil
         phase = .terminalFailureObserved
+        return true
     }
 
     func revokeSharedStateCommits() {
         allowsSharedStateCommits = false
     }
 
-    func commitAuthenticationSuccess(from scope: ResourceScope) -> Bool {
-        guard phase == .waitingForAccountUpdate,
-              authorizesSharedStateCommit(from: scope)
+    func beginAuthenticationCommitPreparation(
+        from scope: ResourceScope
+    ) -> Bool {
+        guard authorizesSharedStateCommit(from: scope),
+              phase == .waitingForCompletion
         else {
+            return false
+        }
+        phase = .waitingForAccountUpdate
+        return true
+    }
+
+    func commitAuthenticationSuccess(
+        from source: AuthenticationCommitSource,
+        from scope: ResourceScope
+    ) -> Bool {
+        guard authorizesSharedStateCommit(from: scope) else {
+            return false
+        }
+        switch (source, phase) {
+        case (.callback, .waitingForCompletion),
+             (.callback, .waitingForAccountUpdate),
+             (.notification, .waitingForAccountUpdate):
+            break
+        case (.notification, .waitingForCompletion),
+             (_, .terminalFailureObserved),
+             (_, .terminalSuccessCommitted):
             return false
         }
         phase = .terminalSuccessCommitted
@@ -234,6 +269,15 @@ final class LiveAuthenticationOperation {
         quarantinesLatePrimaryLoginCompletion = false
         primaryRuntimeInvalidationReason = nil
         return true
+    }
+
+    func beginResourceCleanup() {
+        switch phase {
+        case .waitingForCompletion, .waitingForAccountUpdate:
+            phase = .waitingForCompletion
+        case .terminalFailureObserved, .terminalSuccessCommitted:
+            break
+        }
     }
 
     func beginPrimaryChatGPTLoginStart() {
@@ -300,11 +344,6 @@ final class LiveAuthenticationOperation {
         route.stagedLoginCompletions.removeAll(keepingCapacity: false)
         route.stagedAccountUpdateHighWatermark = nil
         primaryNotificationRoute = route
-        if let stagedCompletion, stagedCompletion.success == false {
-            beginTerminalFailure(
-                publicationOwner: stagedCompletion.terminalPublicationOwner
-            )
-        }
         return stagedCompletion.map {
             PrimaryLoginNotificationReplay(
                 completion: $0.notification,

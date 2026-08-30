@@ -154,9 +154,12 @@ struct LiveAuthenticationOperationTests {
         ))
         operation.beginCancellation()
 
-        _ = try #require(
+        let replay = try #require(
             operation.receivePrimaryChatGPTLoginChallenge(loginID: "login-1")
         )
+        #expect(operation.beginTerminalFailure(
+            publicationOwner: replay.terminalPublicationOwner
+        ))
 
         #expect(operation.primaryRuntimeInvalidationReason == nil)
         #expect(operation.phase == .terminalFailureObserved)
@@ -171,7 +174,10 @@ struct LiveAuthenticationOperationTests {
         let scope = try #require(operation.installResources(.init()))
         operation.phase = .waitingForAccountUpdate
 
-        #expect(operation.commitAuthenticationSuccess(from: scope))
+        #expect(operation.commitAuthenticationSuccess(
+            from: .notification,
+            from: scope
+        ))
         operation.beginCancellation()
 
         #expect(operation.phase == .terminalSuccessCommitted)
@@ -179,6 +185,50 @@ struct LiveAuthenticationOperationTests {
         #expect(operation.authorizesSharedStateCommit(from: scope))
         #expect(operation.primaryRuntimeInvalidationReason == nil)
         #expect(operation.retiresPrimaryNotificationRoute == false)
+    }
+
+    @Test func callbackSuccessCanPreemptNotificationPreparationExactlyOnce() throws {
+        let operation = LiveAuthenticationOperation(
+            activation: .activateAuthenticatedAccount,
+            method: .chatGPT
+        )
+        let scope = try #require(operation.installResources(.init()))
+
+        #expect(operation.beginAuthenticationCommitPreparation(from: scope))
+        #expect(operation.commitAuthenticationSuccess(
+            from: .callback,
+            from: scope
+        ))
+        #expect(operation.commitAuthenticationSuccess(
+            from: .notification,
+            from: scope
+        ) == false)
+        #expect(operation.phase == .terminalSuccessCommitted)
+    }
+
+    @Test func notificationSuccessRequiresPreparationWhileCallbackDoesNot() throws {
+        let notificationOperation = LiveAuthenticationOperation(
+            activation: .activateAuthenticatedAccount,
+            method: .chatGPT
+        )
+        let notificationScope = try #require(notificationOperation.installResources(.init()))
+        #expect(notificationOperation.commitAuthenticationSuccess(
+            from: .notification,
+            from: notificationScope
+        ) == false)
+
+        let callbackOperation = LiveAuthenticationOperation(
+            activation: .activateAuthenticatedAccount,
+            method: .chatGPT
+        )
+        let callbackScope = try #require(callbackOperation.installResources(.init()))
+        #expect(callbackOperation.commitAuthenticationSuccess(
+            from: .callback,
+            from: callbackScope
+        ))
+        callbackOperation.beginCancellation()
+        #expect(callbackOperation.phase == .terminalSuccessCommitted)
+        #expect(callbackOperation.authorizesSharedStateCommit(from: callbackScope))
     }
 
     @Test func cancellationAfterPrimaryLoginChallengeUsesScopedRetirement() {
