@@ -1499,10 +1499,16 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
     }
 
     func refreshAccountRateLimits(auth: CodexReviewAuthModel, accountKey: String) async {
-        guard let account = auth.accounts.first(where: { $0.accountKey == accountKey }) else {
+        guard activeAuthenticationOperation?.primaryNotificationRouteGeneration == nil,
+              let account = auth.accounts.first(where: { $0.accountKey == accountKey })
+        else {
             return
         }
-        await refreshRateLimits(for: account, auth: auth)
+        await refreshRateLimits(
+            for: account,
+            auth: auth,
+            expectedAuthenticationGeneration: primaryAuthenticationLifecycleGeneration
+        )
     }
 
     func requiresCurrentSessionRecovery(auth _: CodexReviewAuthModel, accountKey _: String) -> Bool {
@@ -3412,6 +3418,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         } catch {
             if let expectedRuntimeHandle,
                (activeRuntimeHandle !== expectedRuntimeHandle || acceptsRuntimeRequests == false)
+            {
+                return false
+            }
+            if let expectedAuthenticationGeneration,
+               primaryAuthenticationLifecycleGeneration != expectedAuthenticationGeneration
             {
                 return false
             }

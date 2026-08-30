@@ -2504,6 +2504,56 @@ struct CodexReviewHostTests {
         #expect(store.auth.persistedAccounts.contains { $0.accountKey == "cancelled@example.com" } == false)
     }
 
+    @Test func liveStoreDiscardsRateLimitFailureAfterAuthenticationGenerationAdvances() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(transport, accountEmail: "active@example.com")
+        await transport.enqueueFailure(
+            .responseError(code: -32603, message: "Rate limits unavailable."),
+            for: "account/rateLimits/read"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Account.Login.Response.chatgpt(
+                loginID: "login-current",
+                authURL: "https://example.com/auth",
+                nativeWebAuthentication: .init(callbackURLScheme: "lynnpd.CodexReviewMonitor.auth")
+            ),
+            for: "account/login/start"
+        )
+        try await transport.enqueue(AppServerAPI.Account.Login.Cancel.Response(), for: "account/login/cancel")
+        let sessions = FakeWebAuthenticationSessions()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            nativeAuthenticationConfiguration: .init(
+                callbackScheme: "lynnpd.CodexReviewMonitor.auth",
+                browserSessionPolicy: .ephemeral,
+                presentationAnchorProvider: { NSWindow() }
+            ),
+            webAuthenticationSessionFactory: sessions.makeSession,
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        let rateLimitGate = AsyncGate()
+        await transport.holdNext(method: "account/rateLimits/read", gate: rateLimitGate)
+        let refresh = Task { @MainActor in
+            await store.refreshAccountRateLimits(accountKey: "active@example.com")
+        }
+        await transport.waitForActiveRequests(method: "account/rateLimits/read")
+
+        let login = Task { @MainActor in await store.signIn() }
+        let session = await sessions.waitForSession()
+        await session.waitUntilWaitingForCallback()
+        await rateLimitGate.open()
+        await refresh.value
+
+        #expect(store.auth.selectedAccount?.accountKey == "active@example.com")
+        #expect(store.auth.selectedAccount?.rateLimits.first?.usedPercent == 10)
+        #expect(store.auth.selectedAccount?.lastRateLimitError == nil)
+
+        await store.cancelAuthentication()
+        await login.value
+    }
+
     @Test func liveStoreInvalidatesRuntimeAfterCancelledLoginCompletesSuccessfully() async throws {
         let homeURL = try temporaryHome()
         let sharedAuthURL = homeURL
