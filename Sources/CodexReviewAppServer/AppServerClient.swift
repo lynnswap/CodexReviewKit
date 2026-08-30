@@ -278,8 +278,12 @@ package actor AppServerClient {
         ))
     }
 
-    package func notificationStream() async -> AsyncThrowingStream<JSONRPC.Notification, Error> {
+    package func notificationStream() async -> AsyncThrowingStream<JSONRPC.ReceivedNotification, Error> {
         await transport.notificationStream()
+    }
+
+    package func notificationHighWatermark() async -> JSONRPC.NotificationReceipt {
+        await transport.notificationHighWatermark()
     }
 
     package func close() async throws {

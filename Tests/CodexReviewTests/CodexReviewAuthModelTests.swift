@@ -5,6 +5,42 @@ import Testing
 @Suite("Codex review auth model")
 @MainActor
 struct CodexReviewAuthModelTests {
+    @Test func observedAuthenticationMetadataPreservesSupportedRateLimitState() throws {
+        let fetchedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let persistedAccount = CodexAccount(
+            accountKey: "review@example.com",
+            email: "Old Label",
+            planType: "plus"
+        )
+        persistedAccount.updateRateLimits([
+            (
+                windowDurationMinutes: 300,
+                usedPercent: 40,
+                resetsAt: fetchedAt.addingTimeInterval(300)
+            ),
+        ])
+        persistedAccount.updateRateLimitFetchMetadata(
+            fetchedAt: fetchedAt,
+            error: "Cached rate-limit failure."
+        )
+
+        let preparedAccount = try #require(preparedCodexAccount(
+            from: .init(
+                id: .init("review@example.com"),
+                label: "Updated Label",
+                planType: "pro"
+            ),
+            preservingRateLimitStateFrom: [persistedAccount]
+        ))
+
+        #expect(preparedAccount !== persistedAccount)
+        #expect(preparedAccount.email == "Updated Label")
+        #expect(preparedAccount.planType == "pro")
+        #expect(preparedAccount.rateLimits.first?.usedPercent == 40)
+        #expect(preparedAccount.lastRateLimitFetchAt == fetchedAt)
+        #expect(preparedAccount.lastRateLimitError == "Cached rate-limit failure.")
+    }
+
     @Test func apiKeyKindTransitionClearsAllRateLimitState() {
         let fetchedAt = Date(timeIntervalSince1970: 1_800_000_000)
         let account = CodexAccount(

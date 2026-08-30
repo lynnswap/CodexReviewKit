@@ -319,18 +319,11 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
         _ snapshot: CodexReviewBackendModel.Auth.Snapshot,
         to auth: CodexReviewAuthModel
     ) {
-        let accounts = snapshot.accounts.compactMap { account -> CodexAccount? in
-            let label = account.label.trimmingCharacters(in: .whitespacesAndNewlines)
-            let accountKey = CodexAccount.normalizedEmail(account.id.rawValue)
-            guard label.isEmpty == false, accountKey.isEmpty == false else {
-                return nil
-            }
-            return CodexAccount(
-                accountKey: accountKey,
-                email: label,
-                planType: account.planType,
-                kind: account.kind,
-                capabilities: account.capabilities
+        let persistedAccounts = auth.persistedAccounts
+        let accounts = snapshot.accounts.compactMap { account in
+            preparedCodexAccount(
+                from: account,
+                preservingRateLimitStateFrom: persistedAccounts
             )
         }
         let activeAccountKey = snapshot.activeAccountID

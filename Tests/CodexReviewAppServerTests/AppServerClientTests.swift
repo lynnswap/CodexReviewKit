@@ -214,7 +214,8 @@ private actor DeferredNotificationCloseTransport: JSONRPC.Transport {
     private var notificationStreamGate: AsyncGate?
     private var notificationStreamRequested = false
     private var notificationStreamWaiters: [CheckedContinuation<Void, Never>] = []
-    private var notificationContinuation: AsyncThrowingStream<JSONRPC.Notification, Error>.Continuation?
+    private var notificationContinuation: AsyncThrowingStream<JSONRPC.ReceivedNotification, Error>.Continuation?
+    private var lastNotificationReceipt = JSONRPC.NotificationReceipt.beforeFirst
     private var closeCallCount = 0
     private var closeWaiters: [CheckedContinuation<Void, Never>] = []
     private var sendCallCount = 0
@@ -257,7 +258,7 @@ private actor DeferredNotificationCloseTransport: JSONRPC.Transport {
 
     func notify(_: JSONRPC.Notification) async throws {}
 
-    func notificationStream() async -> AsyncThrowingStream<JSONRPC.Notification, Error> {
+    func notificationStream() async -> AsyncThrowingStream<JSONRPC.ReceivedNotification, Error> {
         notificationStreamRequested = true
         let waiters = notificationStreamWaiters
         notificationStreamWaiters.removeAll(keepingCapacity: false)
@@ -270,6 +271,10 @@ private actor DeferredNotificationCloseTransport: JSONRPC.Transport {
         return AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
             notificationContinuation = continuation
         }
+    }
+
+    func notificationHighWatermark() -> JSONRPC.NotificationReceipt {
+        lastNotificationReceipt
     }
 
     func close() async throws {
@@ -314,9 +319,13 @@ private actor DeferredNotificationCloseTransport: JSONRPC.Transport {
         method: String,
         params: Params
     ) throws {
+        lastNotificationReceipt = .init(sequence: lastNotificationReceipt.sequence + 1)
         notificationContinuation?.yield(.init(
-            method: method,
-            params: try JSONEncoder().encode(params)
+            receipt: lastNotificationReceipt,
+            notification: .init(
+                method: method,
+                params: try JSONEncoder().encode(params)
+            )
         ))
     }
 
@@ -971,8 +980,11 @@ struct AppServerClientTests {
         var iterator = notifications.makeAsyncIterator()
 
         let notification = try #require(try await iterator.next())
+        let highWatermark = await transport.notificationHighWatermark()
         try await transport.close()
 
+        #expect(notification.receipt == .init(sequence: 1))
+        #expect(highWatermark == notification.receipt)
         #expect(notification.method == "item/completed")
         #expect(try JSONSerialization.jsonObject(
             with: notification.params,
