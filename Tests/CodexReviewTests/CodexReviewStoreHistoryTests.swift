@@ -532,7 +532,7 @@ struct CodexReviewStoreHistoryTests {
             await store.reorderWorkspaces(cwds: [first.cwd], toIndex: 0)
         }
         let deletion = Task { @MainActor in
-            await store.deleteReviewHistory(id: second.id)
+            await store.deleteReviewHistory(withIDs: [second.id])
         }
 
         await release.open()
@@ -1011,6 +1011,108 @@ struct CodexReviewStoreHistoryTests {
         )
     }
 
+    @Test func selectedDeleteRemovesExactTerminalSetInOneHistoryMutation() async throws {
+        let selectedFirst = try historyRecord(
+            id: "selected-first",
+            cwd: "/tmp/selected",
+            sortOrder: 0,
+            lifecycle: .init(
+                status: .failed,
+                startedAt: Date(timeIntervalSince1970: 1),
+                endedAt: Date(timeIntervalSince1970: 2),
+                terminal: .failed(message: "failed")
+            ),
+            output: .init(summary: "failed")
+        )
+        let selectedSecond = try historyRecord(
+            id: "selected-second",
+            cwd: "/tmp/selected",
+            sortOrder: 1,
+            lifecycle: .init(
+                status: .failed,
+                startedAt: Date(timeIntervalSince1970: 1),
+                endedAt: Date(timeIntervalSince1970: 2),
+                terminal: .failed(message: "failed")
+            ),
+            output: .init(summary: "failed")
+        )
+        let retained = try historyRecord(
+            id: "retained",
+            cwd: "/tmp/retained",
+            sortOrder: 2,
+            lifecycle: .init(
+                status: .succeeded,
+                startedAt: Date(timeIntervalSince1970: 1),
+                endedAt: Date(timeIntervalSince1970: 2),
+                terminal: .completed
+            ),
+            output: .init(
+                summary: "done",
+                hasFinalReview: true,
+                lastAgentMessage: "No findings.",
+                reviewResult: .parse(finalReviewText: "No findings.")
+            )
+        )
+        let history = ReviewHistoryPersistenceProbe(records: [
+            selectedFirst,
+            selectedSecond,
+            retained,
+        ])
+        let store = makeStore(history: history)
+        await store.loadReviewHistoryIfNeeded()
+        let selectedIDs: Set<String> = [selectedFirst.id, selectedSecond.id]
+
+        #expect(store.canDeleteReviewHistory(withIDs: selectedIDs))
+        #expect(store.canDeleteReviewHistory(withIDs: []) == false)
+
+        await store.deleteReviewHistory(withIDs: selectedIDs)
+
+        #expect(store.job(id: selectedFirst.id) == nil)
+        #expect(store.job(id: selectedSecond.id) == nil)
+        #expect(store.job(id: retained.id) != nil)
+        #expect(await history.mutationOperations() == ["delete"])
+        #expect(await history.durableTerminalIDs() == [retained.id])
+    }
+
+    @Test func selectedDeleteRejectsMixedTerminalAndActiveIDsAsOneNoOp() async throws {
+        let terminal = try historyRecord(
+            id: "terminal",
+            cwd: "/tmp/terminal",
+            lifecycle: .init(
+                status: .failed,
+                startedAt: Date(timeIntervalSince1970: 1),
+                endedAt: Date(timeIntervalSince1970: 2),
+                terminal: .failed(message: "failed")
+            ),
+            output: .init(summary: "failed")
+        )
+        let history = ReviewHistoryPersistenceProbe(records: [terminal])
+        let backend = FakeCodexReviewBackend()
+        let store = makeStore(
+            history: history,
+            backend: backend,
+            idGenerator: .init(next: { "active" })
+        )
+        await store.loadReviewHistoryIfNeeded()
+        let active = try await store.startReview(
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/active", target: .uncommittedChanges),
+            waitTimeout: .zero
+        )
+        await backend.waitForStartReview()
+        let selectedIDs: Set<String> = [terminal.id, active.jobID]
+
+        #expect(store.canDeleteReviewHistory(withIDs: selectedIDs) == false)
+        await store.deleteReviewHistory(withIDs: selectedIDs)
+
+        #expect(store.job(id: terminal.id) != nil)
+        #expect(store.job(id: active.jobID)?.isTerminal == false)
+        #expect(await history.mutationOperations() == ["started"])
+
+        await backend.yield(.completed(summary: "Done", result: "No findings."))
+        _ = try await store.awaitReview(sessionID: "session-1", jobID: active.jobID)
+    }
+
     @Test func deleteAllRemovesTerminalHistoryButPreservesActiveLiveReview() async throws {
         let restored = try historyRecord(
             id: "old-review",
@@ -1394,7 +1496,7 @@ struct CodexReviewStoreHistoryTests {
             store.historyTerminalReceipts[live.jobID] != nil
         })
         let deletion = Task { @MainActor in
-            await store.deleteReviewHistory(id: old.id)
+            await store.deleteReviewHistory(withIDs: [old.id])
         }
 
         await orderingRelease.open()
@@ -1723,16 +1825,16 @@ private actor ReviewHistoryPersistenceProbe: ReviewHistoryPersistence {
         savedOrderings.append(ordering)
     }
 
-    func deleteTerminalReview(
-        id: String
+    func deleteTerminalReviews(
+        withIDs ids: Set<String>
     ) async throws -> ReviewHistoryMutationResult {
         mutationOperationLog.append("delete")
-        let hadRecord = records.contains { $0.started.id == id }
-            || terminals.contains { $0.id == id }
-        records.removeAll { $0.started.id == id }
-        started.removeAll { $0.id == id }
-        terminals.removeAll { $0.id == id }
-        return .init(removedReviewIDs: hadRecord ? [id] : [])
+        let durableIDs = Set(records.map { $0.started.id } + terminals.map(\.id))
+        let removedIDs = ids.intersection(durableIDs)
+        records.removeAll { removedIDs.contains($0.started.id) }
+        started.removeAll { removedIDs.contains($0.id) }
+        terminals.removeAll { removedIDs.contains($0.id) }
+        return .init(removedReviewIDs: removedIDs)
     }
 
     func deleteAllTerminalReviews() async throws -> ReviewHistoryMutationResult {

@@ -135,10 +135,10 @@ package actor OwnedReviewHistoryPersistence: ReviewHistoryPersistence {
         try await database.saveOrdering(ordering)
     }
 
-    package func deleteTerminalReview(
-        id: String
+    package func deleteTerminalReviews(
+        withIDs ids: Set<String>
     ) async throws -> ReviewHistoryMutationResult {
-        try await database.deleteTerminalReview(id: id)
+        try await database.deleteTerminalReviews(withIDs: ids)
     }
 
     package func deleteAllTerminalReviews() async throws -> ReviewHistoryMutationResult {
@@ -209,8 +209,8 @@ package struct UnavailableReviewHistoryPersistence: ReviewHistoryPersistence {
         throw failure
     }
 
-    package func deleteTerminalReview(
-        id _: String
+    package func deleteTerminalReviews(
+        withIDs _: Set<String>
     ) async throws -> ReviewHistoryMutationResult {
         throw failure
     }

@@ -1537,7 +1537,7 @@ struct ReviewUITests {
         )
     }
 
-    @Test func showMoreButtonRevealsAllJobsAndRestoresHiddenSelection() throws {
+    @Test func jobPresentationControlTogglesAllJobsAndPreservesHiddenSelection() throws {
         let jobs = (0..<7).map { index in
             makeJob(
                 id: "job-show-more-\(index)",
@@ -1566,20 +1566,34 @@ struct ReviewUITests {
         let sidebar = viewController.sidebarViewControllerForTesting
         #expect(sidebar.selectedJobForTesting?.id == hiddenSelectedJob.id)
         #expect(sidebar.selectedOutlineJobIDForTesting == nil)
-        #expect(sidebar.showMoreButtonAccessibilityLabelForTesting(containing: workspace) == "Show 2 more reviews")
-        #expect(sidebar.showMoreButtonAccessibilityRoleForTesting(containing: workspace) == .button)
-        #expect(sidebar.showMoreRowCanStartDragForTesting(containing: workspace) == false)
-        #expect(sidebar.showMoreRowIsSelectableForTesting(containing: workspace) == false)
+        #expect(sidebar.jobPresentationButtonTitleForTesting(containing: workspace) == "Show more")
+        #expect(sidebar.jobPresentationButtonAccessibilityLabelForTesting(containing: workspace) == "Show 2 more reviews")
+        #expect(sidebar.jobPresentationButtonAccessibilityRoleForTesting(containing: workspace) == .button)
+        #expect(sidebar.jobPresentationRowCanStartDragForTesting(containing: workspace) == false)
+        #expect(sidebar.jobPresentationRowIsSelectableForTesting(containing: workspace) == false)
 
-        sidebar.clickShowMoreForTesting(containing: workspace)
+        sidebar.clickJobPresentationControlForTesting(containing: workspace)
 
         #expect(
             sidebar.displayedSectionChildrenForTesting(containing: workspace)
-                == orderedJobs.map { .job(id: $0.id) }
+                == orderedJobs.map { .job(id: $0.id) } + [.showLess]
         )
-        #expect(sidebar.showMoreButtonAccessibilityLabelForTesting(containing: workspace) == nil)
+        #expect(sidebar.jobPresentationButtonTitleForTesting(containing: workspace) == "Show less")
+        #expect(sidebar.jobPresentationButtonAccessibilityLabelForTesting(containing: workspace) == "Show less")
         #expect(sidebar.selectedJobForTesting?.id == hiddenSelectedJob.id)
         #expect(sidebar.selectedOutlineJobIDForTesting == hiddenSelectedJob.id)
+
+        sidebar.clickJobPresentationControlForTesting(containing: workspace)
+
+        #expect(
+            sidebar.displayedSectionChildrenForTesting(containing: workspace)
+                == orderedJobs.prefix(5).map { .job(id: $0.id) }
+                    + [.showMore(hiddenJobCount: 2)]
+        )
+        #expect(sidebar.jobPresentationButtonTitleForTesting(containing: workspace) == "Show more")
+        #expect(sidebar.jobPresentationButtonAccessibilityLabelForTesting(containing: workspace) == "Show 2 more reviews")
+        #expect(sidebar.selectedJobForTesting?.id == hiddenSelectedJob.id)
+        #expect(sidebar.selectedOutlineJobIDForTesting == nil)
         #expect(store.orderedJobs(in: workspace).map(\.id) == orderedJobs.map(\.id))
     }
 
@@ -1610,12 +1624,12 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
-        #expect(sidebar.showMoreButtonAccessibilityLabelForTesting(containing: workspace) == "Show 2 more reviews")
+        #expect(sidebar.jobPresentationButtonAccessibilityLabelForTesting(containing: workspace) == "Show 2 more reviews")
         let membershipChangeCount = sidebar.sidebarIncrementalMembershipChangeCountForTesting
         let labels = try await observedValues(
             from: sidebar.sidebarTopologyObservationForTesting
         ) {
-            sidebar.showMoreButtonAccessibilityLabelForTesting(containing: workspace)
+            sidebar.jobPresentationButtonAccessibilityLabelForTesting(containing: workspace)
         }
         defer { labels.cancel() }
 
@@ -1700,7 +1714,7 @@ struct ReviewUITests {
         #expect(sidebar.jobRowUsesReviewMonitorJobRowViewForTesting(job))
     }
 
-    @Test func sidebarUsesMeasuredRowHeightsForWorkspaceJobAndShowMoreRows() throws {
+    @Test func sidebarUsesMeasuredRowHeightsForWorkspaceJobAndPresentationRows() throws {
         let jobs = (0..<6).map { index in
             makeJob(
                 id: "job-row-height-\(index)",
@@ -1727,12 +1741,12 @@ struct ReviewUITests {
         let sidebar = viewController.sidebarViewControllerForTesting
         let workspaceRowHeight = try #require(sidebar.workspaceRowHeightForTesting(workspace))
         let jobRowHeight = try #require(sidebar.jobRowHeightForTesting(job))
-        let showMoreRowHeight = try #require(sidebar.showMoreRowHeightForTesting(containing: workspace))
+        let jobPresentationRowHeight = try #require(sidebar.jobPresentationRowHeightForTesting(containing: workspace))
         #expect(workspaceRowHeight == sidebar.expectedWorkspaceRowRectHeightForTesting)
         #expect(jobRowHeight == sidebar.expectedJobRowRectHeightForTesting)
-        #expect(showMoreRowHeight == sidebar.expectedShowMoreRowRectHeightForTesting)
+        #expect(jobPresentationRowHeight == sidebar.expectedJobPresentationRowRectHeightForTesting)
         #expect(workspaceRowHeight < jobRowHeight)
-        #expect(showMoreRowHeight < jobRowHeight)
+        #expect(jobPresentationRowHeight < jobRowHeight)
     }
 
     @Test func jobRowsUseLabelIconSlotInsteadOfOutlineChildIndent() throws {
@@ -1840,7 +1854,7 @@ struct ReviewUITests {
 
         let workspace = try #require(store.workspaces.first(where: { $0.cwd == "/tmp/workspace-alpha" }))
         let sidebar = viewController.sidebarViewControllerForTesting
-        sidebar.clickShowMoreForTesting(containing: workspace)
+        sidebar.clickJobPresentationControlForTesting(containing: workspace)
         sidebar.scrollSidebarToOffsetForTesting(80)
 
         #expect(sidebar.workspaceRowIsFloatingForTesting(workspace) == false)
@@ -1899,7 +1913,7 @@ struct ReviewUITests {
 
         let workspace = try #require(store.workspaces.first)
         let sidebar = viewController.sidebarViewControllerForTesting
-        sidebar.clickShowMoreForTesting(containing: workspace)
+        sidebar.clickJobPresentationControlForTesting(containing: workspace)
         sidebar.scrollSidebarToOffsetForTesting(0)
 
         #expect(sidebar.sidebarFirstRowRectForTesting.minY >= sidebar.sidebarVisibleRectForTesting.minY - 0.5)
@@ -1931,7 +1945,7 @@ struct ReviewUITests {
 
         let workspace = try #require(store.workspaces.first)
         let sidebar = viewController.sidebarViewControllerForTesting
-        sidebar.clickShowMoreForTesting(containing: workspace)
+        sidebar.clickJobPresentationControlForTesting(containing: workspace)
         sidebar.scrollSidebarToOffsetForTesting(10_000)
 
         #expect(sidebar.sidebarLastRowRectForTesting.maxY <= sidebar.sidebarVisibleRectForTesting.maxY + 0.5)

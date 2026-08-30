@@ -79,8 +79,8 @@ package protocol ReviewHistoryPersistence: Sendable {
 
     func saveOrdering(_ ordering: ReviewHistoryOrdering) async throws
 
-    func deleteTerminalReview(
-        id: String
+    func deleteTerminalReviews(
+        withIDs ids: Set<String>
     ) async throws -> ReviewHistoryMutationResult
 
     func deleteAllTerminalReviews() async throws -> ReviewHistoryMutationResult
@@ -108,8 +108,8 @@ package struct DisabledReviewHistoryPersistence: ReviewHistoryPersistence {
 
     package func saveOrdering(_: ReviewHistoryOrdering) async throws {}
 
-    package func deleteTerminalReview(
-        id _: String
+    package func deleteTerminalReviews(
+        withIDs _: Set<String>
     ) async throws -> ReviewHistoryMutationResult {
         .init()
     }
