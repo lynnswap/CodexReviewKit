@@ -12,16 +12,16 @@ class ReviewMonitorLogTiledContentView: NSView {
     }
 
     fileprivate func hitTestInteractiveSubviews(at point: NSPoint) -> NSView? {
+        let pointInView = convert(point, from: superview)
         guard isHidden == false,
               alphaValue > 0,
-              bounds.contains(point)
+              bounds.contains(pointInView)
         else {
             return nil
         }
 
         for subview in subviews.reversed() {
-            let subviewPoint = convert(point, to: subview)
-            if let hitView = subview.hitTest(subviewPoint) {
+            if let hitView = subview.hitTest(pointInView) {
                 return hitView
             }
         }
@@ -746,14 +746,15 @@ final class ReviewMonitorCommandOutputPanelAttachmentView: NSView {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
+        let pointInView = convert(point, from: superview)
         guard isHidden == false,
               alphaValue > 0,
-              bounds.contains(point),
-              panelView.frame.contains(point)
+              bounds.contains(pointInView),
+              panelView.frame.contains(pointInView)
         else {
             return nil
         }
-        return panelView.hitTest(convert(point, to: panelView))
+        return panelView.hitTest(pointInView)
     }
 
     func rects(
@@ -1079,29 +1080,20 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
+        let pointInView = convert(point, from: superview)
         guard isHidden == false,
               alphaValue > 0,
-              bounds.contains(point)
+              bounds.contains(pointInView)
         else {
             return nil
         }
         if outputScrollView.isHidden == false,
-           outputScrollView.frame.contains(point) {
-            let scrollPoint = convert(point, to: outputScrollView)
-            if let verticalScroller = outputScrollView.verticalScroller,
-               verticalScroller.isHidden == false,
-               verticalScroller.frame.contains(scrollPoint) {
-                return outputScrollView.hitTest(scrollPoint)
-            }
-            let outputPoint = convert(point, to: outputTextView)
-            if outputTextView.bounds.contains(outputPoint) {
-                return outputTextView.hitTest(outputPoint)
-            }
-            return outputScrollView.hitTest(scrollPoint)
+           outputScrollView.frame.contains(pointInView) {
+            return outputScrollView.hitTest(pointInView)
         }
         if commandTextView.isHidden == false,
-           commandTextView.frame.contains(point) {
-            return commandTextView.hitTest(convert(point, to: commandTextView))
+           commandTextView.frame.contains(pointInView) {
+            return commandTextView.hitTest(pointInView)
         }
         return nil
     }
@@ -1575,7 +1567,7 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
             y: min(max(visibleBounds.minY + outputLineHeight / 2, outputTextView.bounds.minY + 1), max(outputTextView.bounds.minY + 1, outputTextView.bounds.maxY - 1))
         )
         let panelPoint = outputTextView.convert(outputPoint, to: self)
-        return hitTest(panelPoint) === outputTextView
+        return hitTest(convert(panelPoint, to: superview)) === outputTextView
     }
 #endif
 }

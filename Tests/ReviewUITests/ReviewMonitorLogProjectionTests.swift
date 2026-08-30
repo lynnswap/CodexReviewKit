@@ -821,6 +821,109 @@ struct ReviewMonitorLogProjectionTests {
         #expect(firstDisplayDocument.commandOutputPanels.first?.isActive == false)
     }
 
+    @Test func completedCommandTitlesOmitZeroAndSubsecondDurations() {
+        let cases: [(metadata: ReviewLogEntry.Metadata, command: String, expectedTitle: String)] = [
+            (
+                .init(
+                    sourceType: "commandExecution",
+                    status: "completed",
+                    itemID: "cmd-zero",
+                    command: "echo zero",
+                    durationMs: 0,
+                    commandStatus: "completed"
+                ),
+                "echo zero",
+                "Ran echo zero"
+            ),
+            (
+                .init(
+                    sourceType: "commandExecution",
+                    status: "completed",
+                    itemID: "cmd-subsecond",
+                    command: "echo subsecond",
+                    durationMs: 999,
+                    commandStatus: "completed"
+                ),
+                "echo subsecond",
+                "Ran echo subsecond"
+            ),
+            (
+                .init(
+                    sourceType: "commandExecution",
+                    status: "completed",
+                    itemID: "cmd-timestamps",
+                    command: "echo timestamps",
+                    startedAt: Date(timeIntervalSince1970: 100),
+                    completedAt: Date(timeIntervalSince1970: 100.5),
+                    commandStatus: "completed"
+                ),
+                "echo timestamps",
+                "Ran echo timestamps"
+            ),
+            (
+                .init(
+                    sourceType: "commandExecution",
+                    status: "completed",
+                    itemID: "cmd-explored",
+                    command: "mixed actions",
+                    durationMs: 999,
+                    commandActions: [
+                        .init(kind: .read, command: "cat file", name: "file", path: "file"),
+                        .init(kind: .search, command: "rg query", path: ".", query: "query"),
+                    ],
+                    commandStatus: "completed"
+                ),
+                "mixed actions",
+                "Explored"
+            ),
+            (
+                .init(
+                    sourceType: "commandExecution",
+                    status: "completed",
+                    itemID: "cmd-one-second",
+                    command: "echo boundary",
+                    durationMs: 1_000,
+                    commandStatus: "completed"
+                ),
+                "echo boundary",
+                "Ran echo boundary for 1s"
+            ),
+        ]
+
+        for testCase in cases {
+            let job = CodexReviewJob.makeForTesting(
+                id: testCase.metadata.itemID ?? UUID().uuidString,
+                cwd: "/tmp/workspace",
+                targetSummary: "Uncommitted changes",
+                status: .running,
+                summary: "Running",
+                logEntries: [
+                    .init(
+                        kind: .command,
+                        groupID: "cmd-1",
+                        text: "$ \(testCase.command)"
+                    ),
+                    .init(
+                        kind: .commandOutput,
+                        groupID: "cmd-1",
+                        text: "ok",
+                        metadata: testCase.metadata
+                    ),
+                ]
+            )
+
+            let displayDocument = ReviewMonitorCommandOutputDisplayDocument.make(
+                from: document(for: job),
+                expandedBlockIDs: []
+            )
+            let displayText = ReviewMonitorCommandOutputDisplayDocument.userVisibleText(
+                from: displayDocument.text
+            )
+
+            #expect(displayText == testCase.expectedTitle)
+        }
+    }
+
     @Test func statusOnlyCompletedCommandWithoutOutputDisplaysRanTitle() {
         let job = CodexReviewJob.makeForTesting(
             id: "job-command-completed-status-only",
