@@ -4927,7 +4927,9 @@ struct CodexReviewHostTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         )
-        await waitUntil { store.jobs.first?.core.run.turnID == "turn-first" }
+        try #require(await StoreSnapshotProbe(store: store).waitUntil { snapshot in
+            snapshot.jobs.first?.activeRun?.turnID == "turn-first"
+        } != nil)
 
         let accountSwitch = Task { @MainActor in
             try await store.switchAccount(CodexAccount(email: "second@example.com"))
@@ -5107,7 +5109,9 @@ struct CodexReviewHostTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         )
-        await waitUntil { store.jobs.first?.core.run.turnID == "turn-active" }
+        try #require(await StoreSnapshotProbe(store: store).waitUntil { snapshot in
+            snapshot.jobs.first?.activeRun?.turnID == "turn-active"
+        } != nil)
 
         let logout = Task { @MainActor in await store.logout() }
         try #require(await waitUntil(timeout: .seconds(2)) {
@@ -5219,7 +5223,9 @@ struct CodexReviewHostTests {
             sessionID: sessionID,
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         )
-        await waitUntil { store.jobs.first?.core.run.turnID == "turn-1" }
+        try #require(await StoreSnapshotProbe(store: store).waitUntil { snapshot in
+            snapshot.jobs.first?.activeRun?.turnID == "turn-1"
+        } != nil)
 
         let stopTask = Task { @MainActor in
             await store.stop()
@@ -5282,7 +5288,9 @@ struct CodexReviewHostTests {
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
         }
-        await waitUntil { store.jobs.first?.core.run.turnID == "turn-1" }
+        try #require(await StoreSnapshotProbe(store: store).waitUntil { snapshot in
+            snapshot.jobs.first?.activeRun?.turnID == "turn-1"
+        } != nil)
 
         let startedAt = Date()
         await store.stop()
