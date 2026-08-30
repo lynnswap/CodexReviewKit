@@ -1714,6 +1714,34 @@ struct ReviewUITests {
         #expect(sidebar.jobRowUsesReviewMonitorJobRowViewForTesting(job))
     }
 
+    @Test func sidebarJobRowUsesCompactModelDisplayName() {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-compact-model-name",
+            cwd: "/tmp/workspace-alpha",
+            targetSummary: "Uncommitted changes",
+            model: "gpt-5.6-sol",
+            status: .succeeded,
+            summary: "Review completed."
+        )
+        let workspace = CodexReviewWorkspace(cwd: job.cwd)
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [workspace],
+            jobs: [job]
+        )
+        let viewController = ReviewMonitorSplitViewController(
+            store: store,
+            uiState: ReviewMonitorUIState(auth: store.auth)
+        )
+        viewController.loadViewIfNeeded()
+
+        #expect(
+            viewController.sidebarViewControllerForTesting
+                .jobRowModelDisplayNameForTesting(job) == "5.6 Sol"
+        )
+    }
+
     @Test func sidebarUsesMeasuredRowHeightsForWorkspaceJobAndPresentationRows() throws {
         let jobs = (0..<6).map { index in
             makeJob(
