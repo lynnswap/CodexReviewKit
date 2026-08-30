@@ -3067,6 +3067,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 return
             }
             let terminalPublicationOwner = operation.terminalPublicationOwner
+            let activation = operation.activation
             if payload.success {
                 guard operation.authorizesSharedStateCommit(from: scope) else {
                     if let expectedRuntimeHandle {
@@ -3082,11 +3083,19 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 operation.phase = .waitingForAccountUpdate
             } else {
                 operation.beginTerminalFailure()
-                if terminalPublicationOwner == .hostFailure {
+                switch terminalPublicationOwner {
+                case .notification:
+                    updateAuthenticationFailure(
+                        payload.error ?? "Authentication failed.",
+                        auth: auth,
+                        activation: activation
+                    )
+                case .userCancellation:
+                    auth.updatePhase(.signedOut)
+                case .hostFailure:
                     return
                 }
             }
-            let activation = operation.activation
             let presentation = scope.takePresentation()
             presentation.monitorTask?.cancel()
             await presentation.session?.cancel()
@@ -3104,18 +3113,6 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             }
             guard payload.success else {
                 let cleanup = scope.takeForCleanup()
-                switch terminalPublicationOwner {
-                case .notification:
-                    updateAuthenticationFailure(
-                        payload.error ?? "Authentication failed.",
-                        auth: auth,
-                        activation: activation
-                    )
-                case .userCancellation:
-                    auth.updatePhase(.signedOut)
-                case .hostFailure:
-                    break
-                }
                 cleanup?.notificationTask?.cancel()
                 await closeIsolatedLoginRuntime(client: cleanup?.client, codexHomeURL: cleanup?.codexHomeURL)
                 await removeActiveAuthenticationOperation(operation)

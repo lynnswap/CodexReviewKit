@@ -3304,6 +3304,53 @@ struct CodexReviewHostTests {
         #expect(store.auth.selectedAccount == nil)
     }
 
+    @Test func liveStorePublishesLoginFailureBeforeSessionCancellationSuspends() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(transport)
+        try await transport.enqueue(
+            AppServerAPI.Account.Login.Response.chatgpt(
+                loginID: "login-failed",
+                authURL: "https://auth.invalid/session-failure",
+                nativeWebAuthentication: .init(callbackURLScheme: "lynnpd.CodexReviewMonitor.auth")
+            ),
+            for: "account/login/start"
+        )
+        let sessions = FakeWebAuthenticationSessions()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            nativeAuthenticationConfiguration: .init(
+                callbackScheme: "lynnpd.CodexReviewMonitor.auth",
+                browserSessionPolicy: .ephemeral,
+                presentationAnchorProvider: { NSWindow() }
+            ),
+            webAuthenticationSessionFactory: sessions.makeSession,
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        await store.addAccount()
+        let session = await sessions.waitForSession()
+        await session.waitUntilWaitingForCallback()
+        let sessionCancellationGate = AsyncGate()
+        session.holdCancellation(on: sessionCancellationGate)
+        let failureReceipt = try await transport.emitServerNotification(
+            method: "account/login/completed",
+            params: TestLoginCompletedNotification(
+                loginID: "login-failed",
+                success: false,
+                error: "Login failed during cleanup."
+            )
+        )
+        await waitUntil { session.isCancelled }
+
+        await store.cancelAuthentication()
+
+        #expect(failedMessage(from: store.auth.phase) == "Login failed during cleanup.")
+        await sessionCancellationGate.open()
+        await store.waitForLiveAuthNotificationCompletionForTesting(failureReceipt)
+        #expect(failedMessage(from: store.auth.phase) == "Login failed during cleanup.")
+    }
+
     @Test func liveStoreInvalidatesRuntimeWhenSuccessArrivesDuringCancellationRequest() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueRuntimeStartResponses(transport)
