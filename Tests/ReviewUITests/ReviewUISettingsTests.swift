@@ -197,6 +197,7 @@ struct ReviewUISettingsTests {
     @Test func modelCatalogItemDisplayNamesNormalizeAndCompactGPTNames() {
         let cases: [(displayName: String, normalized: String, compact: String)] = [
             ("gpt-5.4", "GPT-5.4", "5.4"),
+            ("gpt-5.6-sol", "GPT-5.6-Sol", "5.6 Sol"),
             ("gpt-5.3-codex", "GPT-5.3-Codex", "5.3"),
             ("gpt-5.3-codex-spark", "GPT-5.3-Codex-Spark", "5.3 Spark"),
             ("GPT-5.3 Codex", "GPT-5.3 Codex", "5.3"),

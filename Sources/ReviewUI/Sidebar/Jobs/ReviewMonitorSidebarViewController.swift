@@ -2382,6 +2382,19 @@ extension ReviewMonitorSidebarViewController {
         return cellView.hostedIsWorktreeForTesting
     }
 
+    func jobRowModelDisplayNameForTesting(_ job: CodexReviewJob) -> String? {
+        guard let row = row(forJobID: job.id),
+              let cellView = outlineView.view(
+                atColumn: 0,
+                row: row,
+                makeIfNecessary: true
+              ) as? ReviewMonitorJobCellView
+        else {
+            return nil
+        }
+        return cellView.hostedModelDisplayNameForTesting
+    }
+
     func cancelJobForTesting(_ job: CodexReviewJob) async {
         await performCancellation(for: job)
     }
@@ -3079,6 +3092,10 @@ private final class ReviewMonitorJobCellView: NSTableCellView {
 
     var hostedIsWorktreeForTesting: Bool? {
         hostingView?.rootView.isWorktree
+    }
+
+    var hostedModelDisplayNameForTesting: String? {
+        hostingView?.rootView.modelDisplayName
     }
 
     var hostingViewIdentityForTesting: ObjectIdentifier? {

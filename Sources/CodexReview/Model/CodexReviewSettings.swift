@@ -140,8 +140,35 @@ struct ModelCatalogItem: Codable, Identifiable, Equatable, Sendable {
     }
 
     package var normalizedDisplayName: String {
-        guard displayName.drop(while: \.isWhitespace).lowercased().hasPrefix("gpt") else {
-            return displayName
+        Self.normalizedDisplayName(for: displayName)
+    }
+
+    package var compactDisplayName: String {
+        Self.compactDisplayName(for: displayName)
+    }
+
+    package static func compactDisplayName(for name: String) -> String {
+        let normalizedName = normalizedDisplayName(for: name)
+        let compactTokens = normalizedName
+            .split { character in
+                character == "-" || character.isWhitespace
+            }
+        guard compactTokens.first?.lowercased() == "gpt" else {
+            return normalizedName
+        }
+        let visibleTokens = compactTokens
+            .filter { token in
+                !Self.compactDisplayNameOmittedTokens.contains(token.lowercased())
+            }
+        guard !visibleTokens.isEmpty else {
+            return normalizedName
+        }
+        return visibleTokens.joined(separator: " ")
+    }
+
+    private static func normalizedDisplayName(for name: String) -> String {
+        guard name.drop(while: \.isWhitespace).lowercased().hasPrefix("gpt") else {
+            return name
         }
         var normalized = ""
         var currentRun = ""
@@ -158,7 +185,7 @@ struct ModelCatalogItem: Codable, Identifiable, Equatable, Sendable {
             }
         }
 
-        for character in displayName {
+        for character in name {
             let isWhitespace = character.isWhitespace
             if let currentRunIsWhitespace, currentRunIsWhitespace != isWhitespace {
                 appendRun()
@@ -169,25 +196,6 @@ struct ModelCatalogItem: Codable, Identifiable, Equatable, Sendable {
         }
         appendRun()
         return normalized
-    }
-
-    package var compactDisplayName: String {
-        let normalizedName = normalizedDisplayName
-        let compactTokens = normalizedName
-            .split { character in
-                character == "-" || character.isWhitespace
-            }
-        guard compactTokens.first?.lowercased() == "gpt" else {
-            return normalizedName
-        }
-        let visibleTokens = compactTokens
-            .filter { token in
-                !Self.compactDisplayNameOmittedTokens.contains(token.lowercased())
-            }
-        guard !visibleTokens.isEmpty else {
-            return normalizedName
-        }
-        return visibleTokens.joined(separator: " ")
     }
 
     package init(

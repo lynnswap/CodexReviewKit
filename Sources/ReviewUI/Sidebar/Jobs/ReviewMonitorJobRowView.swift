@@ -37,8 +37,8 @@ struct ReviewMonitorJobRowView: View {
                 }
                 .lineLimit(1)
                 HStack {
-                    if let model = job.core.run.model {
-                        Text(model)
+                    if let modelDisplayName {
+                        Text(modelDisplayName)
                     }
                     if let subtitle = subtitleText {
                         Text(subtitle)
@@ -68,6 +68,12 @@ struct ReviewMonitorJobRowView: View {
 
     var titleAccessibilityLabel: String {
         isWorktree ? "\(job.displayTitle), Worktree" : job.displayTitle
+    }
+
+    var modelDisplayName: String? {
+        job.core.run.model.map {
+            CodexReviewSettings.ModelCatalogItem.compactDisplayName(for: $0)
+        }
     }
 
     private var subtitleText: String? {
