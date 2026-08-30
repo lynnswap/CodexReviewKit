@@ -5538,11 +5538,9 @@ struct CodexReviewHostTests {
         await store.addAccount()
         let finalSession = sessions[3]
         await finalSession.waitUntilWaitingForCallback()
-        let staleRateAccount = try #require(
-            store.auth.persistedAccounts.first { $0.accountKey == "stale-rate@example.com" }
-        )
-        #expect(staleRateAccount.rateLimits.isEmpty)
-        #expect(staleRateAccount.lastRateLimitError == nil)
+        #expect(store.auth.persistedAccounts.contains {
+            $0.accountKey == "stale-rate@example.com"
+        } == false)
         #expect(store.auth.authenticationFailureCount == failureCount)
         #expect(store.auth.isAuthenticating)
 
