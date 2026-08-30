@@ -2512,26 +2512,26 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                operation.usesAPIKey,
                operation.isCurrent(scope),
                scope.isOpen,
-               scope.backend === backend
+               scope.matchesOriginatingBackend(backend)
             {
                 // API-key login is synchronous; its setup task owns the authoritative account/read
                 // and commit. The notification is only an edge, not a second commit owner.
                 return
             }
-            guard let operation = activeAuthenticationOperation,
-                  let scope = operation.resourceScope,
-                  scope.backend === backend,
-                  operation.phase == .waitingForAccountUpdate else {
-                await refreshAuthAfterAccountNotification(
+            if let operation = activeAuthenticationOperation,
+               let scope = operation.resourceScope,
+               scope.matchesOriginatingBackend(backend)
+            {
+                await handleAccountUpdatedNotification(
+                    operation: operation,
+                    scope: scope,
                     backend: backend,
                     expectedRuntimeHandle: expectedRuntimeHandle,
                     auth: auth
                 )
                 return
             }
-            await finishCompletedLoginAfterAccountUpdate(
-                operation: operation,
-                scope: scope,
+            await refreshAuthAfterAccountNotification(
                 backend: backend,
                 expectedRuntimeHandle: expectedRuntimeHandle,
                 auth: auth
@@ -2693,16 +2693,25 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             }
         }
         guard activeAuthenticationOperation === operation,
-              operation.isCurrent(scope),
-              operation.phase == .waitingForAccountUpdate else {
+              operation.isCurrent(scope) else {
             await refreshAuthAfterAccountNotification(
                 backend: backend,
                 expectedRuntimeHandle: expectedRuntimeHandle,
+                authenticationScope: scope,
                 auth: auth
             )
             return
         }
         guard operation.authorizesSharedStateCommit(from: scope) else {
+            return
+        }
+        guard operation.phase == .waitingForAccountUpdate else {
+            await refreshAuthAfterAccountNotification(
+                backend: backend,
+                expectedRuntimeHandle: expectedRuntimeHandle,
+                authenticationScope: scope,
+                auth: auth
+            )
             return
         }
         await finishCompletedLoginAfterAccountUpdate(
@@ -2807,6 +2816,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
     private func refreshAuthAfterAccountNotification(
         backend: AppServerCodexReviewBackend,
         expectedRuntimeHandle requestedRuntimeHandle: LiveRuntimeLifecycleHandle? = nil,
+        authenticationScope: LiveAuthenticationOperation.ResourceScope? = nil,
         auth: CodexReviewAuthModel
     ) async {
         let expectedRuntimeHandle = requestedRuntimeHandle ?? activeRuntimeHandle
@@ -2817,6 +2827,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         else {
             return
         }
+        if let authenticationScope,
+           authorizesAuthenticationSharedStateCommit(authenticationScope) == false
+        {
+            return
+        }
         do {
             let snapshot = try await backend.readAuth()
             guard activeRuntimeHandle === expectedRuntimeHandle,
@@ -2824,12 +2839,26 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             else {
                 return
             }
+            if let authenticationScope,
+               authorizesAuthenticationSharedStateCommit(authenticationScope) == false
+            {
+                return
+            }
             applyAuthSnapshot(snapshot, to: auth)
-            await refreshSelectedAccountRateLimits(auth: auth)
+            await refreshSelectedAccountRateLimits(
+                auth: auth,
+                expectedRuntimeHandle: expectedRuntimeHandle,
+                authenticationScope: authenticationScope
+            )
         } catch {
             guard activeRuntimeHandle === expectedRuntimeHandle,
                   acceptsRuntimeRequests
             else {
+                return
+            }
+            if let authenticationScope,
+               authorizesAuthenticationSharedStateCommit(authenticationScope) == false
+            {
                 return
             }
             auth.updatePhase(.failed(message: error.localizedDescription))

@@ -2003,6 +2003,83 @@ struct CodexReviewHostTests {
         ])
     }
 
+    @Test func liveStorePrimaryCancellationRejectsQueuedAccountUpdate() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(transport)
+        try await transport.enqueue(
+            AppServerAPI.Account.Login.Response.chatgpt(
+                loginID: "login-cancelled",
+                authURL: "https://example.com/auth",
+                nativeWebAuthentication: .init(callbackURLScheme: "lynnpd.CodexReviewMonitor.auth")
+            ),
+            for: "account/login/start"
+        )
+        try await transport.enqueue(AppServerAPI.Account.Login.Cancel.Response(), for: "account/login/cancel")
+        for usedPercent in [10, 20] {
+            try await transport.enqueue(
+                AppServerAPI.Account.Read.Response(
+                    account: .init(email: "cancelled@example.com", planType: "plus")
+                ),
+                for: "account/read"
+            )
+            try await transport.enqueue(
+                AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
+                    limitID: "codex",
+                    primary: .init(usedPercent: usedPercent, windowDurationMins: 300)
+                )),
+                for: "account/rateLimits/read"
+            )
+        }
+        let sessions = FakeWebAuthenticationSessions()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            nativeAuthenticationConfiguration: .init(
+                callbackScheme: "lynnpd.CodexReviewMonitor.auth",
+                browserSessionPolicy: .ephemeral,
+                presentationAnchorProvider: { NSWindow() }
+            ),
+            webAuthenticationSessionFactory: sessions.makeSession,
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        await transport.waitForNotificationStreamCount(1)
+        await store.addAccount()
+        let session = await sessions.waitForSession()
+        await session.waitUntilWaitingForCallback()
+
+        let firstReadGate = AsyncGate()
+        await transport.holdNext(method: "account/read", gate: firstReadGate)
+        try await transport.emitServerNotification(method: "account/updated", params: EmptyResponse())
+        await transport.waitForActiveRequests(method: "account/read")
+        try await transport.emitServerNotification(method: "account/updated", params: EmptyResponse())
+        try await transport.emitServerNotification(
+            method: "account/rateLimits/updated",
+            params: TestRateLimitsUpdatedNotification(rateLimits: .init(
+                limitID: "codex",
+                primary: .init(usedPercent: 42, windowDurationMins: 300)
+            ))
+        )
+
+        let cancelGate = AsyncGate()
+        await transport.holdNext(method: "account/login/cancel", gate: cancelGate)
+        let cancellation = Task { @MainActor in await store.cancelAuthentication() }
+        await transport.waitForActiveRequests(method: "account/login/cancel")
+        let markerAccount = CodexAccount(email: "marker@example.com", planType: "plus")
+        store.auth.updateCurrentAccount(markerAccount)
+        await firstReadGate.open()
+
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            store.auth.selectedAccount?.rateLimits.first?.usedPercent == 42
+        })
+        #expect(store.auth.selectedAccount === markerAccount)
+        #expect(store.auth.persistedAccounts.contains { $0.accountKey == "cancelled@example.com" } == false)
+        #expect(await transport.recordedRequests().map(\.method).count { $0 == "account/read" } == 2)
+
+        await cancelGate.open()
+        await cancellation.value
+    }
+
     @Test func liveStoreAddsAccountWithoutSwitchingExistingActiveAccount() async throws {
         let homeURL = try temporaryHome()
         let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)

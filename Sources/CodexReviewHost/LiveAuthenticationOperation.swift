@@ -17,13 +17,21 @@ final class LiveAuthenticationOperation {
     }
 
     final class ResourceScope {
+        private let originatingBackendIdentity: ObjectIdentifier?
         private var resources: ResourceCleanup?
         var isOpen: Bool { resources != nil }
         var challenge: CodexReviewBackendModel.Login.Challenge? { resources?.challenge }
         var backend: AppServerCodexReviewBackend? { resources?.backend }
         var codexHomeURL: URL? { resources?.codexHomeURL }
 
-        init(_ resources: ResourceCleanup) { self.resources = resources }
+        init(_ resources: ResourceCleanup) {
+            self.originatingBackendIdentity = resources.backend.map(ObjectIdentifier.init)
+            self.resources = resources
+        }
+
+        func matchesOriginatingBackend(_ backend: AppServerCodexReviewBackend) -> Bool {
+            originatingBackendIdentity == ObjectIdentifier(backend)
+        }
 
         func install(session: any CodexReviewNativeAuthentication.WebSession, monitorTask: Task<Void, Never>) {
             resources?.authenticationSession = session
