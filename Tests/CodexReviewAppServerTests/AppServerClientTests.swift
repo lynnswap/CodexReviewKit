@@ -1735,15 +1735,20 @@ struct AppServerClientTests {
         {
           "data": [
             {
-              "id": "gpt-5.5",
-              "model": "gpt-5.5",
-              "displayName": "GPT-5.5",
+              "id": "gpt-5.6-sol",
+              "model": "gpt-5.6-sol",
+              "displayName": "GPT-5.6-Sol",
               "hidden": false,
               "supportedReasoningEfforts": [
+                {"reasoningEffort": "low", "description": "Light"},
                 {"reasoningEffort": "medium", "description": "Balanced"},
-                {"reasoningEffort": "xhigh", "description": "Extra high"}
+                {"reasoningEffort": "high", "description": "High"},
+                {"reasoningEffort": "xhigh", "description": "Extra high"},
+                {"reasoningEffort": "max", "description": "Maximum"},
+                {"reasoningEffort": "ultra", "description": "Automatic delegation"},
+                {"reasoningEffort": "future-effort", "description": "Model-defined"}
               ],
-              "defaultReasoningEffort": "xhigh",
+              "defaultReasoningEffort": "future-effort",
               "serviceTiers": [{"id": "fast"}, {"id": "flex"}],
               "isDefault": true
             }
@@ -1757,8 +1762,8 @@ struct AppServerClientTests {
         try await transport.enqueue(
             AppServerAPI.Config.Read.Response(config: .init(
                 model: "gpt-5",
-                reviewModel: "gpt-5.5",
-                modelReasoningEffort: "medium",
+                reviewModel: "gpt-5.6-sol",
+                modelReasoningEffort: "ultra",
                 serviceTier: "flex"
             )),
             for: "config/read"
@@ -1767,11 +1772,18 @@ struct AppServerClientTests {
 
         let settings = try await backend.readSettings()
 
-        #expect(settings.model == "gpt-5.5")
+        #expect(settings.model == "gpt-5.6-sol")
         #expect(settings.fallbackModel == "gpt-5")
-        #expect(settings.reasoningEffort == "medium")
+        #expect(settings.reasoningEffort == "ultra")
         #expect(settings.serviceTier == "flex")
-        #expect(settings.models.map(\.model) == ["gpt-5.5"])
+        #expect(settings.models.map(\.model) == ["gpt-5.6-sol"])
+        #expect(settings.models.first?.supportedReasoningEfforts.map(\.reasoningEffort.rawValue) == [
+            "low", "medium", "high", "xhigh", "max", "ultra", "future-effort",
+        ])
+        #expect(settings.models.first?.supportedReasoningEfforts.map(\.description) == [
+            "Light", "Balanced", "High", "Extra high", "Maximum", "Automatic delegation", "Model-defined",
+        ])
+        #expect(settings.models.first?.defaultReasoningEffort.rawValue == "future-effort")
         #expect(settings.models.first?.supportedServiceTiers == [.fast, .flex])
         #expect(settings.models.first?.isDefault == true)
     }

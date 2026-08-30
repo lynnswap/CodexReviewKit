@@ -29,6 +29,30 @@ struct ReviewUISettingsTests {
         #expect(store.settings.selectedServiceTier == nil)
     }
 
+    @Test func settingsStorePreservesAdvertisedReasoningOrderAndModelDefinedDefault() throws {
+        let modelDefined = try #require(CodexReviewSettings.ReasoningEffort(rawValue: "future-effort"))
+        let model = CodexReviewSettings.ModelCatalogItem(
+            id: "runtime-model",
+            model: "runtime-model",
+            displayName: "Runtime Model",
+            hidden: false,
+            supportedReasoningEfforts: [.low, .xhigh, .max, modelDefined, .ultra].map {
+                .init(reasoningEffort: $0, description: $0.rawValue)
+            },
+            defaultReasoningEffort: modelDefined,
+            supportedServiceTiers: []
+        )
+        let store = SettingsStore(snapshot: .init(
+            model: "runtime-model",
+            models: [model]
+        ))
+
+        #expect(store.availableReasoningOptions.map(\.reasoningEffort.rawValue) == [
+            "low", "xhigh", "max", "future-effort", "ultra",
+        ])
+        #expect(store.effectiveReasoningEffort == modelDefined)
+    }
+
     @Test func statusViewDisablesSettingsControlsWhenServerIsNotRunning() {
         let settingsSnapshot = makeSettingsSnapshot()
         let store = CodexReviewStore.makePreviewStore(
