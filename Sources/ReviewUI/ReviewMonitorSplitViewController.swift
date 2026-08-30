@@ -68,7 +68,9 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
             uiState: uiState,
             showSettings: showSettings
         )
-        if #available(macOS 26.1, *) {
+        if #available(macOS 27.0, *) {
+            statusAccessoryViewController.preferredScrollEdgeEffectStyle = .hard
+        } else if #available(macOS 26.1, *) {
             statusAccessoryViewController.preferredScrollEdgeEffectStyle = .soft
         }
         let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebarViewController)
