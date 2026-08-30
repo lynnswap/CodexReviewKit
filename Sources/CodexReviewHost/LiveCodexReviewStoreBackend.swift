@@ -433,6 +433,29 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         }
     }
 
+    private enum PreparedAuthenticationAccount {
+        case metadata(CodexAccount)
+        case metadataAndRateLimits(CodexAccount)
+
+        var account: CodexAccount {
+            switch self {
+            case .metadata(let account), .metadataAndRateLimits(let account):
+                account
+            }
+        }
+
+        var includesRateLimitState: Bool {
+            if case .metadataAndRateLimits = self {
+                return true
+            }
+            return false
+        }
+
+        func includingRateLimitState() -> Self {
+            .metadataAndRateLimits(account)
+        }
+    }
+
     private struct RetiredPrimaryAuthenticationRoute {
         let runtime: LiveRuntimeLifecycleHandle
         let afterReceipt: JSONRPC.NotificationReceipt
@@ -2096,7 +2119,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 await cleanupAuthenticationScope(scope)
                 return
             }
-            guard let preparedAccount = Self.monitorActiveAccount(from: snapshot) else {
+            guard let preparedAccount = Self.prepareActiveAccount(
+                from: snapshot,
+                persistedAccounts: auth.persistedAccounts
+            ) else {
                 if let expectedRuntimeHandle {
                     invalidatePrimaryRuntime(
                         expectedRuntimeHandle,
@@ -2581,12 +2607,12 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         to auth: CodexReviewAuthModel,
         activation: LoginActivation = .activateAuthenticatedAccount,
         authSourceCodexHomeURL: URL? = nil,
-        preparedAccount: CodexAccount? = nil
+        preparedAccount: PreparedAuthenticationAccount? = nil
     ) -> CodexAccount? {
-        guard let activeAccountID = snapshot.activeAccountID?.rawValue,
-              let backendAccount = snapshot.accounts.first(where: { $0.id.rawValue == activeAccountID }),
-              let account = preparedAccount ?? Self.monitorAccount(from: backendAccount),
-              account.accountKey == CodexAccount.normalizedEmail(activeAccountID)
+        guard let preparedAccount = preparedAccount ?? Self.prepareActiveAccount(
+            from: snapshot,
+            persistedAccounts: auth.persistedAccounts
+        )
         else {
             if case .activateAuthenticatedAccount = activation {
                 auth.selectPersistedAccount(nil)
@@ -2596,11 +2622,26 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             }
             return nil
         }
+        let account = preparedAccount.account
         var persistedAccounts = auth.persistedAccounts
         let persistedAccount: CodexAccount
         if let index = persistedAccounts.firstIndex(where: { $0.accountKey == account.accountKey }) {
-            persistedAccounts[index].apply(savedAccountPayload(from: account))
-            persistedAccount = persistedAccounts[index]
+            let currentAccount = persistedAccounts[index]
+            currentAccount.updateEmail(account.email)
+            currentAccount.updateKind(
+                account.kind,
+                capabilities: account.capabilities
+            )
+            currentAccount.updatePlanType(account.planType)
+            if preparedAccount.includesRateLimitState {
+                let payload = savedAccountPayload(from: account)
+                currentAccount.updateRateLimits(payload.rateLimits)
+                currentAccount.updateRateLimitFetchMetadata(
+                    fetchedAt: payload.lastRateLimitFetchAt,
+                    error: payload.lastRateLimitError
+                )
+            }
+            persistedAccount = currentAccount
         } else {
             persistedAccounts.insert(account, at: 0)
             persistedAccount = account
@@ -3302,7 +3343,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         let activation = operation.activation
         let loginBackend = scope.backend
         let loginCodexHomeURL = scope.codexHomeURL
-        guard let preparedAccount = Self.monitorActiveAccount(from: snapshot) else {
+        guard let preparedAccount = Self.prepareActiveAccount(
+            from: snapshot,
+            persistedAccounts: auth.persistedAccounts
+        ) else {
             if let expectedRuntimeHandle {
                 invalidatePrimaryRuntime(
                     expectedRuntimeHandle,
@@ -3317,26 +3361,33 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 "Authentication completed without an active account."
             )
         }
+        var accountForCommit = preparedAccount
         switch activation {
         case .preserveActiveAccount:
-            if let loginBackend {
+            if let loginBackend,
+               preparedAccount.account.capabilities.supportsRateLimitRefresh
+            {
                 _ = await refreshRateLimits(
-                    for: preparedAccount,
+                    for: preparedAccount.account,
                     using: loginBackend,
                     source: "login-runtime",
                     authenticationScope: scope,
                     persistsResult: false
                 )
+                accountForCommit = preparedAccount.includingRateLimitState()
             }
         case .activateAuthenticatedAccount:
-            _ = await refreshRateLimits(
-                for: preparedAccount,
-                using: backend,
-                source: "login-runtime",
-                expectedRuntimeHandle: expectedRuntimeHandle,
-                authenticationScope: scope,
-                persistsResult: false
-            )
+            if preparedAccount.account.capabilities.supportsRateLimitRefresh {
+                _ = await refreshRateLimits(
+                    for: preparedAccount.account,
+                    using: backend,
+                    source: "login-runtime",
+                    expectedRuntimeHandle: expectedRuntimeHandle,
+                    authenticationScope: scope,
+                    persistsResult: false
+                )
+                accountForCommit = preparedAccount.includingRateLimitState()
+            }
         }
         if let expectedRuntimeHandle,
            (activeRuntimeHandle !== expectedRuntimeHandle || acceptsRuntimeRequests == false)
@@ -3358,7 +3409,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             to: auth,
             activation: activation,
             authSourceCodexHomeURL: loginCodexHomeURL,
-            preparedAccount: preparedAccount
+            preparedAccount: accountForCommit
         )
         return true
     }
@@ -3481,10 +3532,16 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             {
                 return
             }
-            let preparedAccount = Self.monitorActiveAccount(from: snapshot)
-            if let preparedAccount {
+            let preparedAccount = Self.prepareActiveAccount(
+                from: snapshot,
+                persistedAccounts: auth.persistedAccounts
+            )
+            var accountForCommit = preparedAccount
+            if let preparedAccount,
+               preparedAccount.account.capabilities.supportsRateLimitRefresh
+            {
                 _ = await refreshRateLimits(
-                    for: preparedAccount,
+                    for: preparedAccount.account,
                     using: backend,
                     source: "account-notification",
                     expectedRuntimeHandle: expectedRuntimeHandle,
@@ -3492,6 +3549,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                     authenticationScope: authenticationScope,
                     persistsResult: false
                 )
+                accountForCommit = preparedAccount.includingRateLimitState()
             }
             guard activeRuntimeHandle === expectedRuntimeHandle,
                   acceptsRuntimeRequests,
@@ -3507,7 +3565,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             applyAuthSnapshot(
                 snapshot,
                 to: auth,
-                preparedAccount: preparedAccount
+                preparedAccount: accountForCommit
             )
         } catch {
             guard activeRuntimeHandle === expectedRuntimeHandle,
@@ -3647,7 +3705,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 return
             }
             let runtime = try await appServerRuntimeFactory(temporaryCodexHomeURL)
-            let didRefresh = await refreshRateLimits(for: account, using: runtime.backend, source: "saved-auth-isolated-runtime")
+            let didRefresh = await refreshRateLimits(
+                for: account,
+                using: runtime.backend,
+                source: "saved-auth-isolated-runtime"
+            )
             do {
                 if didRefresh {
                     try CodexReviewAccountRegistry.saveSharedAuth(
@@ -4033,30 +4095,22 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         )
     }
 
-    private static func monitorAccount(from snapshot: CodexReviewBackendModel.Account.Snapshot) -> CodexAccount? {
-        let label = snapshot.label.trimmingCharacters(in: .whitespacesAndNewlines)
-        let accountKey = CodexAccount.normalizedEmail(snapshot.id.rawValue)
-        guard label.isEmpty == false, accountKey.isEmpty == false else {
-            return nil
-        }
-        return CodexAccount(
-            accountKey: accountKey,
-            email: label,
-            planType: snapshot.planType,
-            kind: snapshot.kind,
-            capabilities: snapshot.capabilities
-        )
-    }
-
-    private static func monitorActiveAccount(
-        from snapshot: CodexReviewBackendModel.Auth.Snapshot
-    ) -> CodexAccount? {
+    private static func prepareActiveAccount(
+        from snapshot: CodexReviewBackendModel.Auth.Snapshot,
+        persistedAccounts: [CodexAccount]
+    ) -> PreparedAuthenticationAccount? {
         guard let activeAccountID = snapshot.activeAccountID,
-              let account = snapshot.accounts.first(where: { $0.id == activeAccountID })
+              let accountSnapshot = snapshot.accounts.first(where: {
+                  $0.id == activeAccountID
+              }),
+              let account = preparedCodexAccount(
+                  from: accountSnapshot,
+                  preservingRateLimitStateFrom: persistedAccounts
+              )
         else {
             return nil
         }
-        return monitorAccount(from: account)
+        return .metadata(account)
     }
 
     private static func authenticationURL(from challenge: CodexReviewBackendModel.Login.Challenge) throws -> URL {

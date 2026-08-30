@@ -2509,6 +2509,87 @@ struct CodexReviewHostTests {
         await login.value
     }
 
+    @Test func liveAuthMetadataRefreshPreservesCachedRateLimitState() async throws {
+        let homeURL = try temporaryHome()
+        let transport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(
+            transport,
+            accountEmail: "active@example.com"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Account.Read.Response(
+                account: .init(email: "active@example.com", planType: "team")
+            ),
+            for: "account/read"
+        )
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        let account = try #require(store.auth.selectedAccount)
+        let initialFetchedAt = try #require(account.lastRateLimitFetchAt)
+        #expect(account.rateLimits.first?.usedPercent == 10)
+        #expect(account.lastRateLimitError == nil)
+
+        await store.refreshAuthentication()
+
+        #expect(store.auth.selectedAccount === account)
+        #expect(account.planType == "team")
+        #expect(account.rateLimits.first?.usedPercent == 10)
+        #expect(account.lastRateLimitFetchAt == initialFetchedAt)
+        #expect(account.lastRateLimitError == nil)
+        #expect(await transport.recordedRequests().map(\.method).count {
+            $0 == "account/rateLimits/read"
+        } == 1)
+        let reloadedAfterMetadataRefresh = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transport: FakeJSONRPCTransport()
+        )
+        let persistedAfterMetadataRefresh = try #require(
+            reloadedAfterMetadataRefresh.auth.selectedAccount
+        )
+        #expect(persistedAfterMetadataRefresh.rateLimits.first?.usedPercent == 10)
+        #expect(persistedAfterMetadataRefresh.lastRateLimitFetchAt == initialFetchedAt)
+        #expect(persistedAfterMetadataRefresh.lastRateLimitError == nil)
+
+        try await transport.enqueue(
+            AppServerAPI.Account.Read.Response(
+                account: .init(email: "active@example.com", planType: "team")
+            ),
+            for: "account/read"
+        )
+        await transport.enqueueFailure(
+            .responseError(code: -32603, message: "Rate limits unavailable."),
+            for: "account/rateLimits/read"
+        )
+        let receipt = try await transport.emitServerNotification(
+            method: "account/updated",
+            params: EmptyResponse()
+        )
+        await store.waitForLiveAuthNotificationCompletionForTesting(receipt)
+
+        #expect(account.rateLimits.first?.usedPercent == 10)
+        #expect(account.lastRateLimitFetchAt != nil)
+        #expect(account.lastRateLimitError?.contains("Rate limits unavailable.") == true)
+        let reloadedAfterRateFailure = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transport: FakeJSONRPCTransport()
+        )
+        let persistedAfterRateFailure = try #require(
+            reloadedAfterRateFailure.auth.selectedAccount
+        )
+        #expect(persistedAfterRateFailure.rateLimits.first?.usedPercent == 10)
+        #expect(persistedAfterRateFailure.lastRateLimitFetchAt != nil)
+        #expect(persistedAfterRateFailure.lastRateLimitError?.contains(
+            "Rate limits unavailable."
+        ) == true)
+    }
+
     @Test func liveStoreCancelsLoginWhenAuthenticationSessionSetupFails() async throws {
         let transport = FakeJSONRPCTransport()
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")

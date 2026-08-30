@@ -55,18 +55,11 @@ package func applyRuntimeAuthenticationSnapshot(
     _ snapshot: CodexReviewBackendModel.Auth.Snapshot,
     to auth: CodexReviewAuthModel
 ) {
-    let observedAccounts = snapshot.accounts.compactMap { account -> CodexAccount? in
-        let label = account.label.trimmingCharacters(in: .whitespacesAndNewlines)
-        let accountKey = CodexAccount.normalizedEmail(account.id.rawValue)
-        guard label.isEmpty == false, accountKey.isEmpty == false else {
-            return nil
-        }
-        return CodexAccount(
-            accountKey: accountKey,
-            email: label,
-            planType: account.planType,
-            kind: account.kind,
-            capabilities: account.capabilities
+    let persistedAccounts = auth.persistedAccounts
+    let observedAccounts = snapshot.accounts.compactMap { account in
+        preparedCodexAccount(
+            from: account,
+            preservingRateLimitStateFrom: persistedAccounts
         )
     }
     let activeAccountKey = snapshot.activeAccountID.map {
@@ -77,12 +70,7 @@ package func applyRuntimeAuthenticationSnapshot(
         if let index = accounts.firstIndex(where: {
             $0.accountKey == observedAccount.accountKey
         }) {
-            accounts[index].updateEmail(observedAccount.email)
-            accounts[index].updateKind(
-                observedAccount.kind,
-                capabilities: observedAccount.capabilities
-            )
-            accounts[index].updatePlanType(observedAccount.planType)
+            accounts[index].apply(savedAccountPayload(from: observedAccount))
         } else {
             accounts.insert(observedAccount, at: 0)
         }

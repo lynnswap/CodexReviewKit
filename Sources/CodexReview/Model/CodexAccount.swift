@@ -317,6 +317,39 @@ package func savedAccountPayload(from account: CodexAccount) -> CodexSavedAccoun
     )
 }
 
+@MainActor
+package func preparedCodexAccount(
+    from snapshot: CodexReviewBackendModel.Account.Snapshot,
+    preservingRateLimitStateFrom persistedAccounts: [CodexAccount]
+) -> CodexAccount? {
+    let email = snapshot.label.trimmingCharacters(in: .whitespacesAndNewlines)
+    let accountKey = CodexAccount.normalizedEmail(snapshot.id.rawValue)
+    guard email.isEmpty == false, accountKey.isEmpty == false else {
+        return nil
+    }
+    guard let persistedAccount = persistedAccounts.first(where: {
+        $0.accountKey == accountKey
+    }) else {
+        return CodexAccount(
+            accountKey: accountKey,
+            email: email,
+            planType: snapshot.planType,
+            kind: snapshot.kind,
+            capabilities: snapshot.capabilities
+        )
+    }
+    let preparedAccount = makeCodexAccount(
+        from: savedAccountPayload(from: persistedAccount)
+    )
+    preparedAccount.updateEmail(email)
+    preparedAccount.updateKind(
+        snapshot.kind,
+        capabilities: snapshot.capabilities
+    )
+    preparedAccount.updatePlanType(snapshot.planType)
+    return preparedAccount
+}
+
 private func maskedReviewAccountEmail(_ email: String) -> String {
     let parts = email.split(separator: "@", maxSplits: 1, omittingEmptySubsequences: false)
     guard parts.count == 2,
