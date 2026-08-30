@@ -416,6 +416,23 @@ public extension CodexReviewStore {
 
 @MainActor
 private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPServerLifecycleOwner {
+    private enum AuthenticationRollbackAuthority {
+        case captured(accountKey: String?)
+        case current(fallbackAccountKey: String?)
+
+        @MainActor
+        func resolveAccountKey(auth: CodexReviewAuthModel?) -> String? {
+            switch self {
+            case .captured(let accountKey):
+                accountKey
+            case .current(let fallbackAccountKey):
+                auth?.persistedActiveAccountKey
+                    ?? auth?.selectedAccount?.accountKey
+                    ?? fallbackAccountKey
+            }
+        }
+    }
+
     private struct RetiredPrimaryAuthenticationRoute {
         let runtime: LiveRuntimeLifecycleHandle
         let afterReceipt: JSONRPC.NotificationReceipt
@@ -2790,32 +2807,32 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         if payload.success {
             invalidatePrimaryRuntimeAfterCancelledLoginSuccess(
                 runtime,
-                rollbackAccountKey: retiredPrimaryAuthenticationRoutes[index].rollbackAccountKey
+                rollbackAuthority: .current(
+                    fallbackAccountKey: retiredPrimaryAuthenticationRoutes[index].rollbackAccountKey
+                )
             )
         }
     }
 
     private func invalidatePrimaryRuntimeAfterCancelledLoginSuccess(
         _ runtime: LiveRuntimeLifecycleHandle,
-        rollbackAccountKey: String?
+        rollbackAuthority: AuthenticationRollbackAuthority
     ) {
         invalidatePrimaryRuntime(
             runtime,
-            rollbackAccountKey: rollbackAccountKey,
+            rollbackAuthority: rollbackAuthority,
             reason: "A cancelled ChatGPT login completed successfully"
         )
     }
 
     private func invalidatePrimaryRuntime(
         _ runtime: LiveRuntimeLifecycleHandle,
-        rollbackAccountKey: String?,
+        rollbackAuthority: AuthenticationRollbackAuthority,
         reason: String
     ) {
         guard activeRuntimeHandle === runtime else { return }
         runtime.requiresAuthenticationRollbackAfterClose = true
-        let rollbackFailure = restoreCurrentAuthorizedAuthentication(
-            fallbackAccountKey: rollbackAccountKey
-        )
+        let rollbackFailure = restoreAuthorizedAuthentication(rollbackAuthority)
         activeAuthenticationOperation?.revokeSharedStateCommits()
         primaryAuthenticationLifecycleGeneration += 1
         acceptsRuntimeRequests = false
@@ -2831,13 +2848,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         )
     }
 
-    private func restoreCurrentAuthorizedAuthentication(
-        fallbackAccountKey: String? = nil
+    private func restoreAuthorizedAuthentication(
+        _ authority: AuthenticationRollbackAuthority
     ) -> String? {
         let currentAuth = attachedStore?.auth
-        let resolvedAccountKey = currentAuth?.persistedActiveAccountKey
-            ?? currentAuth?.selectedAccount?.accountKey
-            ?? fallbackAccountKey
+        let resolvedAccountKey = authority.resolveAccountKey(auth: currentAuth)
         if let resolvedAccountKey, let currentAuth {
             do {
                 try CodexReviewAccountRegistry.activateAccount(
@@ -2845,6 +2860,16 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                     accounts: currentAuth.persistedAccounts,
                     codexHomeURL: codexHomeURL
                 )
+                currentAuth.applyPersistedAccountStates(
+                    currentAuth.persistedAccounts.map(savedAccountPayload(from:)),
+                    activeAccountKey: resolvedAccountKey
+                )
+                currentAuth.selectPersistedAccount(
+                    currentAuth.persistedAccounts.first {
+                        $0.accountKey == resolvedAccountKey
+                    }?.id
+                )
+                currentAuth.updatePhase(.signedOut)
                 return nil
             } catch {
                 try? CodexReviewAccountRegistry.removeSharedAuth(codexHomeURL: codexHomeURL)
@@ -2852,7 +2877,20 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             }
         }
         do {
+            if let currentAuth {
+                try CodexReviewAccountRegistry.saveAccounts(
+                    currentAuth.persistedAccounts,
+                    activeAccountKey: nil,
+                    codexHomeURL: codexHomeURL
+                )
+            }
             try CodexReviewAccountRegistry.removeSharedAuth(codexHomeURL: codexHomeURL)
+            currentAuth?.applyPersistedAccountStates(
+                currentAuth?.persistedAccounts.map(savedAccountPayload(from:)) ?? [],
+                activeAccountKey: nil
+            )
+            currentAuth?.selectPersistedAccount(nil)
+            currentAuth?.updatePhase(.signedOut)
             return resolvedAccountKey == nil
                 ? nil
                 : "The authentication store was unavailable."
@@ -2865,7 +2903,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         _ runtime: LiveRuntimeLifecycleHandle
     ) {
         guard runtime.requiresAuthenticationRollbackAfterClose else { return }
-        if let failure = restoreCurrentAuthorizedAuthentication() {
+        if let failure = restoreAuthorizedAuthentication(
+            .current(fallbackAccountKey: nil)
+        ) {
             logger.error(
                 "Failed to restore authentication after revoked login runtime close: \(failure, privacy: .public)"
             )
@@ -3059,7 +3099,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 if payload.success, let expectedRuntimeHandle {
                     invalidatePrimaryRuntimeAfterCancelledLoginSuccess(
                         expectedRuntimeHandle,
-                        rollbackAccountKey: operation.rollbackAccountKey
+                        rollbackAuthority: .captured(
+                            accountKey: operation.rollbackAccountKey
+                        )
                     )
                 } else if payload.success == false {
                     operation.beginTerminalFailure()
@@ -3073,7 +3115,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                     if let expectedRuntimeHandle {
                         invalidatePrimaryRuntimeAfterCancelledLoginSuccess(
                             expectedRuntimeHandle,
-                            rollbackAccountKey: operation.rollbackAccountKey
+                            rollbackAuthority: .captured(
+                                accountKey: operation.rollbackAccountKey
+                            )
                         )
                     }
                     await cleanupAuthenticationScope(scope)
@@ -3676,7 +3720,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             }
             invalidatePrimaryRuntime(
                 runtime,
-                rollbackAccountKey: operation.rollbackAccountKey,
+                rollbackAuthority: .captured(
+                    accountKey: operation.rollbackAccountKey
+                ),
                 reason: reason
             )
             return

@@ -3132,6 +3132,94 @@ struct CodexReviewHostTests {
         #expect(try activeAccountKey(homeURL: homeURL) == "active@example.com")
     }
 
+    @Test func liveStoreRestoresCapturedAccountWhenCancellationFollowsAuthCommit() async throws {
+        let homeURL = try temporaryHome()
+        let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let sharedAuthURL = codexHomeURL.appendingPathComponent("auth.json")
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "active@example.com",
+            accounts: ["active@example.com"]
+        )
+        try writeSavedAccountAuth(homeURL: homeURL, accountKey: "active@example.com")
+        let priorAuth = try savedAccountAuth(homeURL: homeURL, accountKey: "active@example.com")
+        try priorAuth.write(to: sharedAuthURL)
+        let transport = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(transport, accountEmail: "active@example.com")
+        try await transport.enqueue(
+            AppServerAPI.Account.Login.Response.chatgpt(
+                loginID: "login-cancelled-after-commit",
+                authURL: "https://auth.invalid/cancelled-after-commit",
+                nativeWebAuthentication: .init(callbackURLScheme: "lynnpd.CodexReviewMonitor.auth")
+            ),
+            for: "account/login/start"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Account.Read.Response(
+                account: .init(email: "cancelled@example.com", planType: "plus")
+            ),
+            for: "account/read"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
+                limitID: "codex",
+                primary: .init(usedPercent: 20, windowDurationMins: 300)
+            )),
+            for: "account/rateLimits/read"
+        )
+        let sessions = FakeWebAuthenticationSessions()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            nativeAuthenticationConfiguration: .init(
+                callbackScheme: "lynnpd.CodexReviewMonitor.auth",
+                browserSessionPolicy: .ephemeral,
+                presentationAnchorProvider: { NSWindow() }
+            ),
+            webAuthenticationSessionFactory: sessions.makeSession,
+            shutdownCleanupTimeout: .milliseconds(20),
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        await store.signIn()
+        let session = await sessions.waitForSession()
+        await session.waitUntilWaitingForCallback()
+        try Data("{\"tokens\":{\"id_token\":\"cancelled\"}}".utf8).write(to: sharedAuthURL)
+        let completionReceipt = try await transport.emitServerNotification(
+            method: "account/login/completed",
+            params: TestLoginCompletedNotification(
+                loginID: "login-cancelled-after-commit",
+                success: true
+            )
+        )
+        await store.waitForLiveAuthNotificationCompletionForTesting(completionReceipt)
+        let rateLimitGate = AsyncGate()
+        await transport.holdNextIgnoringCancellation(
+            method: "account/rateLimits/read",
+            gate: rateLimitGate
+        )
+        let accountUpdateReceipt = try await transport.emitServerNotification(
+            method: "account/updated",
+            params: EmptyResponse()
+        )
+        await transport.waitForActiveRequests(method: "account/rateLimits/read")
+        #expect(store.auth.selectedAccount?.accountKey == "cancelled@example.com")
+
+        await store.cancelAuthentication()
+
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            if case .failed = store.serverState { return true }
+            return false
+        })
+        #expect(store.auth.selectedAccount?.accountKey == "active@example.com")
+        #expect(store.auth.persistedActiveAccountKey == "active@example.com")
+        #expect(try Data(contentsOf: sharedAuthURL) == priorAuth)
+        await rateLimitGate.open()
+        await store.waitForLiveAuthNotificationCompletionForTesting(accountUpdateReceipt)
+        #expect(store.auth.selectedAccount?.accountKey == "active@example.com")
+        #expect(try Data(contentsOf: sharedAuthURL) == priorAuth)
+    }
+
     @Test func liveStoreLateCancelledLoginSuccessPreservesNewerAuthorizedAccount() async throws {
         let homeURL = try temporaryHome()
         let sharedAuthURL = homeURL
