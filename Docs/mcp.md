@@ -12,6 +12,36 @@ endpoint.
 - One shared internal transport to the backend process
 - Review jobs run concurrently across sessions and within the same session
 
+## Lifecycle Responses
+
+`review_start`, `review_await`, `review_read`, and `review_cancel` return a
+`lifecycle` object. Each `review_list.items` entry contains the same object.
+
+`lifecycle.status` is the broad job state: `queued`, `running`, `succeeded`,
+`failed`, or `cancelled`. `lifecycle.terminal` is the authoritative terminal
+classification and is `null` while the job is queued or running. Terminal
+values have one of these shapes:
+
+- Completed: `{"kind":"completed"}`
+- Failed: `{"kind":"failed","message":<string-or-null>}`
+- Interrupted: `{"kind":"interrupted","cause":<cause>}`
+
+An interruption `cause` has a `kind`, `source`, and `message`:
+
+- `requested`: `source` is `userInterface`, `mcpClient`, `sessionClosed`, or
+  `system`; `message` contains the cancellation reason.
+- `server`: `source` is `null`; `message` may contain a server-provided reason.
+- `transport`: `source` is `null`; `message` describes the transport failure.
+- `previousProcessExit`: `source` and `message` are `null`.
+
+The current contract pairs `completed` with `status: "succeeded"`, a requested
+interruption with `status: "cancelled"`, and the other terminal forms with
+`status: "failed"`.
+
+`lifecycle.cancellation` records cancellation intent and its source.
+`lifecycle.terminal` records the authoritative outcome. Do not infer an
+interrupted terminal from `cancellation` alone.
+
 ## Tools
 
 ### `review_start`
@@ -47,6 +77,8 @@ Returns:
   - `cancellable`
   - `cancellation` when cancellation metadata is available
   - `errorMessage`
+  - `terminal` authoritative terminal classification, or `null` before a
+    terminal result; see [Lifecycle Responses](#lifecycle-responses)
 - `output`
   - `summary`
   - `review`
@@ -94,7 +126,8 @@ Optional paging inputs:
 - `logOffset` 0-based log page offset. If omitted, `review_read` returns the
   latest page.
 - `logLimit` page size, default `100`, max `500`
-- `logFilter` `default` excludes command output; `all` includes it
+- `logFilter` `default` excludes command output and developer-only entries;
+  `all` includes both
 
 Returns:
 
@@ -103,7 +136,9 @@ Returns:
 - `lifecycle`
 - `output`
 - `logs` paged read projection. Grouped replacement/delta entries are folded
-  into their current value before paging.
+  into their current value before paging. Developer-only entries returned by
+  `logFilter: "all"` include `audience: "developer"`; product entries omit
+  `audience`.
 - `logsPage`
   - `total`
   - `offset`
