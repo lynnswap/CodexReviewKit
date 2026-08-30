@@ -2525,11 +2525,13 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         _ snapshot: CodexReviewBackendModel.Auth.Snapshot,
         to auth: CodexReviewAuthModel,
         activation: LoginActivation = .activateAuthenticatedAccount,
-        authSourceCodexHomeURL: URL? = nil
+        authSourceCodexHomeURL: URL? = nil,
+        preparedAccount: CodexAccount? = nil
     ) -> CodexAccount? {
         guard let activeAccountID = snapshot.activeAccountID?.rawValue,
               let backendAccount = snapshot.accounts.first(where: { $0.id.rawValue == activeAccountID }),
-              let account = Self.monitorAccount(from: backendAccount)
+              let account = preparedAccount ?? Self.monitorAccount(from: backendAccount),
+              account.accountKey == CodexAccount.normalizedEmail(activeAccountID)
         else {
             if case .activateAuthenticatedAccount = activation {
                 auth.selectPersistedAccount(nil)
@@ -2542,9 +2544,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         var persistedAccounts = auth.persistedAccounts
         let persistedAccount: CodexAccount
         if let index = persistedAccounts.firstIndex(where: { $0.accountKey == account.accountKey }) {
-            persistedAccounts[index].updateEmail(account.email)
-            persistedAccounts[index].updateKind(account.kind, capabilities: account.capabilities)
-            persistedAccounts[index].updatePlanType(account.planType)
+            persistedAccounts[index].apply(savedAccountPayload(from: account))
             persistedAccount = persistedAccounts[index]
         } else {
             persistedAccounts.insert(account, at: 0)
@@ -3257,28 +3257,60 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 await cleanupAuthenticationScope(scope)
                 return
             }
+            let preparedAccount = Self.monitorActiveAccount(from: snapshot)
+            var didRefresh = false
+            if let preparedAccount {
+                switch activation {
+                case .preserveActiveAccount:
+                    if let loginBackend {
+                        didRefresh = await refreshRateLimits(
+                            for: preparedAccount,
+                            using: loginBackend,
+                            source: "login-runtime",
+                            authenticationScope: scope,
+                            persistsResult: false
+                        )
+                    }
+                case .activateAuthenticatedAccount:
+                    didRefresh = await refreshRateLimits(
+                        for: preparedAccount,
+                        using: backend,
+                        source: "login-runtime",
+                        expectedRuntimeHandle: expectedRuntimeHandle,
+                        authenticationScope: scope,
+                        persistsResult: false
+                    )
+                }
+            }
+            if let expectedRuntimeHandle,
+               (activeRuntimeHandle !== expectedRuntimeHandle || acceptsRuntimeRequests == false)
+            {
+                await cleanupAuthenticationScope(scope)
+                return
+            }
+            guard activeAuthenticationOperation === operation,
+                  operation.authorizesSharedStateCommit(from: scope),
+                  scope.isOpen,
+                  operation.commitAuthenticationSuccess(from: scope)
+            else {
+                await cleanupAuthenticationScope(scope)
+                return
+            }
             let account = applyAuthSnapshot(
                 snapshot,
                 to: auth,
                 activation: activation,
-                authSourceCodexHomeURL: loginCodexHomeURL
+                authSourceCodexHomeURL: loginCodexHomeURL,
+                preparedAccount: preparedAccount
             )
-            if case .preserveActiveAccount = activation, let account, let loginBackend {
-                let didRefresh = await refreshRateLimits(
-                    for: account, using: loginBackend,
-                    source: "login-runtime", authenticationScope: scope
+            if case .preserveActiveAccount = activation,
+               didRefresh,
+               let account
+            {
+                persistRefreshedSharedAuth(
+                    from: loginCodexHomeURL,
+                    for: account
                 )
-                if didRefresh,
-                   activeAuthenticationOperation === operation,
-                   operation.authorizesSharedStateCommit(from: scope)
-                {
-                    persistRefreshedSharedAuth(
-                        from: loginCodexHomeURL,
-                        for: account
-                    )
-                }
-            } else {
-                await refreshSelectedAccountRateLimits(auth: auth, authenticationScope: scope)
             }
         } catch {
             let runtimeIsCurrent = expectedRuntimeHandle.map {
@@ -3519,7 +3551,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         source: String,
         expectedRuntimeHandle: LiveRuntimeLifecycleHandle? = nil,
         expectedAuthenticationGeneration: UInt64? = nil,
-        authenticationScope: LiveAuthenticationOperation.ResourceScope? = nil
+        authenticationScope: LiveAuthenticationOperation.ResourceScope? = nil,
+        persistsResult: Bool = true
     ) async -> Bool {
         do {
             guard let backend else {
@@ -3554,10 +3587,12 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 planType: response.codexPlanType,
                 to: account
             )
-            try? CodexReviewAccountRegistry.updateCachedRateLimits(
-                from: account,
-                codexHomeURL: codexHomeURL
-            )
+            if persistsResult {
+                try? CodexReviewAccountRegistry.updateCachedRateLimits(
+                    from: account,
+                    codexHomeURL: codexHomeURL
+                )
+            }
             return true
         } catch {
             if let expectedRuntimeHandle,
@@ -3576,10 +3611,12 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 return false
             }
             recordRateLimitRefreshFailure(error, account: account)
-            try? CodexReviewAccountRegistry.updateCachedRateLimits(
-                from: account,
-                codexHomeURL: codexHomeURL
-            )
+            if persistsResult {
+                try? CodexReviewAccountRegistry.updateCachedRateLimits(
+                    from: account,
+                    codexHomeURL: codexHomeURL
+                )
+            }
             return false
         }
     }
@@ -3761,7 +3798,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
     ) -> LiveAuthenticationOperation.ResourceCleanup {
         let cleanup = operation?.resourceScope?.takeForCleanup() ?? .init()
         if isActiveAuthenticationOperation(operation),
-           operation?.phase != .terminalFailureObserved
+           operation?.phase != .terminalFailureObserved,
+           operation?.phase != .terminalSuccessCommitted
         {
             operation?.phase = .waitingForCompletion
         }
@@ -3874,6 +3912,17 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             kind: snapshot.kind,
             capabilities: snapshot.capabilities
         )
+    }
+
+    private static func monitorActiveAccount(
+        from snapshot: CodexReviewBackendModel.Auth.Snapshot
+    ) -> CodexAccount? {
+        guard let activeAccountID = snapshot.activeAccountID,
+              let account = snapshot.accounts.first(where: { $0.id == activeAccountID })
+        else {
+            return nil
+        }
+        return monitorAccount(from: account)
     }
 
     private static func authenticationURL(from challenge: CodexReviewBackendModel.Login.Challenge) throws -> URL {

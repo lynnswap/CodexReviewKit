@@ -3132,7 +3132,7 @@ struct CodexReviewHostTests {
         #expect(try activeAccountKey(homeURL: homeURL) == "active@example.com")
     }
 
-    @Test func liveStoreRestoresCapturedAccountWhenCancellationFollowsAuthCommit() async throws {
+    @Test func liveStoreKeepsRegistryUnchangedWhenCancellationInterruptsPreparedAuthCommit() async throws {
         let homeURL = try temporaryHome()
         let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
         let sharedAuthURL = codexHomeURL.appendingPathComponent("auth.json")
@@ -3203,7 +3203,10 @@ struct CodexReviewHostTests {
             params: EmptyResponse()
         )
         await transport.waitForActiveRequests(method: "account/rateLimits/read")
-        #expect(store.auth.selectedAccount?.accountKey == "cancelled@example.com")
+        #expect(store.auth.selectedAccount?.accountKey == "active@example.com")
+        #expect(store.auth.persistedAccounts.contains {
+            $0.accountKey == "cancelled@example.com"
+        } == false)
 
         await store.cancelAuthentication()
 
@@ -3213,6 +3216,9 @@ struct CodexReviewHostTests {
         })
         #expect(store.auth.selectedAccount?.accountKey == "active@example.com")
         #expect(store.auth.persistedActiveAccountKey == "active@example.com")
+        #expect(store.auth.persistedAccounts.contains {
+            $0.accountKey == "cancelled@example.com"
+        } == false)
         #expect(try Data(contentsOf: sharedAuthURL) == priorAuth)
         await rateLimitGate.open()
         await store.waitForLiveAuthNotificationCompletionForTesting(accountUpdateReceipt)

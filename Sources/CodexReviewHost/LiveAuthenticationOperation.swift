@@ -123,6 +123,7 @@ final class LiveAuthenticationOperation {
         case waitingForCompletion
         case waitingForAccountUpdate
         case terminalFailureObserved
+        case terminalSuccessCommitted
     }
 
     enum TerminalPublicationOwner: Equatable {
@@ -174,6 +175,7 @@ final class LiveAuthenticationOperation {
     }
 
     func beginCancellation() {
+        guard phase != .terminalSuccessCommitted else { return }
         // An admitted API-key request must reconcile its outcome exactly once; cancellation
         // waits for that owner or removes the operation after the bounded setup join.
         if apiKeyRequestWasAdmitted == false {
@@ -187,6 +189,7 @@ final class LiveAuthenticationOperation {
     }
 
     func beginUserCancellation() {
+        guard phase != .terminalSuccessCommitted else { return }
         allowsSharedStateCommits = false
         if phase != .terminalFailureObserved {
             terminalPublicationOwner = .userCancellation
@@ -195,6 +198,7 @@ final class LiveAuthenticationOperation {
     }
 
     func beginTerminalAbort() {
+        guard phase != .terminalSuccessCommitted else { return }
         allowsSharedStateCommits = false
         if phase != .terminalFailureObserved {
             terminalPublicationOwner = .hostFailure
@@ -217,6 +221,19 @@ final class LiveAuthenticationOperation {
 
     func revokeSharedStateCommits() {
         allowsSharedStateCommits = false
+    }
+
+    func commitAuthenticationSuccess(from scope: ResourceScope) -> Bool {
+        guard phase == .waitingForAccountUpdate,
+              authorizesSharedStateCommit(from: scope)
+        else {
+            return false
+        }
+        phase = .terminalSuccessCommitted
+        terminalPublicationOwner = .notification
+        quarantinesLatePrimaryLoginCompletion = false
+        primaryRuntimeInvalidationReason = nil
+        return true
     }
 
     func beginPrimaryChatGPTLoginStart() {
@@ -328,6 +345,8 @@ final class LiveAuthenticationOperation {
             primaryRuntimeInvalidationReason = .cancelledAfterLoginSuccess
         case .terminalFailureObserved:
             quarantinesLatePrimaryLoginCompletion = false
+        case .terminalSuccessCommitted:
+            quarantinesLatePrimaryLoginCompletion = false
         }
     }
 
@@ -345,7 +364,9 @@ final class LiveAuthenticationOperation {
         guard resourceScope == nil else { return nil }
         let scope = ResourceScope(resources)
         resourceScope = scope
-        if phase != .terminalFailureObserved {
+        if phase != .terminalFailureObserved,
+           phase != .terminalSuccessCommitted
+        {
             phase = .waitingForCompletion
         }
         return scope

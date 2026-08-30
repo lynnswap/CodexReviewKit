@@ -163,6 +163,24 @@ struct LiveAuthenticationOperationTests {
         #expect(operation.terminalPublicationOwner == .notification)
     }
 
+    @Test func committedAuthenticationSuccessWinsLaterCancellation() throws {
+        let operation = LiveAuthenticationOperation(
+            activation: .activateAuthenticatedAccount,
+            method: .chatGPT
+        )
+        let scope = try #require(operation.installResources(.init()))
+        operation.phase = .waitingForAccountUpdate
+
+        #expect(operation.commitAuthenticationSuccess(from: scope))
+        operation.beginCancellation()
+
+        #expect(operation.phase == .terminalSuccessCommitted)
+        #expect(operation.terminalPublicationOwner == .notification)
+        #expect(operation.authorizesSharedStateCommit(from: scope))
+        #expect(operation.primaryRuntimeInvalidationReason == nil)
+        #expect(operation.retiresPrimaryNotificationRoute == false)
+    }
+
     @Test func cancellationAfterPrimaryLoginChallengeUsesScopedRetirement() {
         let operation = LiveAuthenticationOperation(
             activation: .activateAuthenticatedAccount,
