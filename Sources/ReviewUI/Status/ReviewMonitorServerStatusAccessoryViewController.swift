@@ -218,8 +218,15 @@ struct StatusView: View {
                     // instead of adding an extra "default" menu row that upstream clients lack.
                     Picker("Reasoning", selection: reasoningSelection) {
                         ForEach(settings.availableReasoningOptions) { item in
-                            Text(item.reasoningEffort.displayText)
-                                .tag(Optional(item.reasoningEffort))
+                            LabeledContent {
+                                Image(systemName: "flame.fill")
+                                    .tint(item.reasoningEffort.consumesUsageLimitsFaster ? nil : .clear)
+                                    .accessibilityLabel("Consumes usage limits faster")
+                                    .accessibilityHidden(!item.reasoningEffort.consumesUsageLimitsFaster)
+                            } label: {
+                                Text(item.reasoningEffort.displayText)
+                            }
+                            .tag(Optional(item.reasoningEffort))
                         }
                     }
                     .pickerStyle(.inline)

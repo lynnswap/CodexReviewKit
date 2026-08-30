@@ -42,6 +42,12 @@ struct CodexReviewSettingsTests {
         }
     }
 
+    @Test func highestReasoningEffortsConsumeUsageLimitsFaster() {
+        #expect(CodexReviewSettings.ReasoningEffort.max.consumesUsageLimitsFaster)
+        #expect(CodexReviewSettings.ReasoningEffort.ultra.consumesUsageLimitsFaster)
+        #expect(CodexReviewSettings.ReasoningEffort.xhigh.consumesUsageLimitsFaster == false)
+    }
+
     @Test func modelCatalogUsesFirstAdvertisedEffortWhenDefaultIsMissing() throws {
         let data = Data("""
         {

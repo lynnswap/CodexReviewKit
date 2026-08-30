@@ -47,6 +47,9 @@ struct ReasoningEffort: RawRepresentable, Codable, Hashable, Sendable {
             rawValue
         }
     }
+    package var consumesUsageLimitsFaster: Bool {
+        self == .max || self == .ultra
+    }
 
     package init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
