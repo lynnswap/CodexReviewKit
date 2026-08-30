@@ -2151,33 +2151,15 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 authSourceCodexHomeURL: scope.codexHomeURL,
                 preparedAccount: preparedAccount
             )
-            let loginCodexHomeURL = scope.codexHomeURL
-            switch activation {
-            case .activateAuthenticatedAccount:
-                await refreshSelectedAccountRateLimits(
-                    auth: auth,
-                    expectedRuntimeHandle: expectedRuntimeHandle,
-                    authenticationScope: scope
-                )
-            case .preserveActiveAccount:
-                if let account {
-                    let didRefresh = await refreshRateLimits(
-                        for: account,
-                        using: loginBackend,
-                        source: "login-runtime",
-                        authenticationScope: scope
-                    )
-                    if didRefresh,
-                       activeAuthenticationOperation === operation,
-                       authorizesAuthenticationSharedStateCommit(scope)
-                    {
-                        persistRefreshedSharedAuth(
-                            from: loginCodexHomeURL,
-                            for: account
-                        )
-                    }
-                }
-            }
+            await refreshCommittedAuthenticationRateLimits(
+                account: account,
+                activation: activation,
+                operation: operation,
+                scope: scope,
+                backend: loginBackend,
+                expectedRuntimeHandle: expectedRuntimeHandle,
+                auth: auth
+            )
             let cleanup = scope.takeForCleanup()
             cleanup?.notificationTask?.cancel()
             await closeIsolatedLoginRuntime(
@@ -3321,27 +3303,25 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         }
     }
 
-    private func prepareAndCommitAuthenticationSnapshot(
+    private func commitAuthenticationSnapshot(
         _ snapshot: CodexReviewBackendModel.Auth.Snapshot,
         operation: LiveAuthenticationOperation,
         scope: LiveAuthenticationOperation.ResourceScope,
-        backend: AppServerCodexReviewBackend,
         expectedRuntimeHandle: LiveRuntimeLifecycleHandle? = nil,
         auth: CodexReviewAuthModel
-    ) async throws -> Bool {
+    ) throws -> CodexAccount? {
         if let expectedRuntimeHandle,
            (activeRuntimeHandle !== expectedRuntimeHandle || acceptsRuntimeRequests == false)
         {
-            return false
+            return nil
         }
         guard activeAuthenticationOperation === operation,
               operation.authorizesSharedStateCommit(from: scope),
               operation.phase == .waitingForAccountUpdate,
               scope.isOpen else {
-            return false
+            return nil
         }
         let activation = operation.activation
-        let loginBackend = scope.backend
         let loginCodexHomeURL = scope.codexHomeURL
         guard let preparedAccount = Self.prepareActiveAccount(
             from: snapshot,
@@ -3355,44 +3335,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                     ),
                     reason: "A ChatGPT login completed without an active account"
                 )
-                return false
+                return nil
             }
             throw CodexReviewAPI.Error.io(
                 "Authentication completed without an active account."
             )
-        }
-        var accountForCommit = preparedAccount
-        switch activation {
-        case .preserveActiveAccount:
-            if let loginBackend,
-               preparedAccount.account.capabilities.supportsRateLimitRefresh
-            {
-                _ = await refreshRateLimits(
-                    for: preparedAccount.account,
-                    using: loginBackend,
-                    source: "login-runtime",
-                    authenticationScope: scope,
-                    persistsResult: false
-                )
-                accountForCommit = preparedAccount.includingRateLimitState()
-            }
-        case .activateAuthenticatedAccount:
-            if preparedAccount.account.capabilities.supportsRateLimitRefresh {
-                _ = await refreshRateLimits(
-                    for: preparedAccount.account,
-                    using: backend,
-                    source: "login-runtime",
-                    expectedRuntimeHandle: expectedRuntimeHandle,
-                    authenticationScope: scope,
-                    persistsResult: false
-                )
-                accountForCommit = preparedAccount.includingRateLimitState()
-            }
-        }
-        if let expectedRuntimeHandle,
-           (activeRuntimeHandle !== expectedRuntimeHandle || acceptsRuntimeRequests == false)
-        {
-            return false
         }
         guard activeAuthenticationOperation === operation,
               operation.authorizesSharedStateCommit(from: scope),
@@ -3402,16 +3349,51 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                   from: scope
               )
         else {
-            return false
+            return nil
         }
-        _ = applyAuthSnapshot(
+        return applyAuthSnapshot(
             snapshot,
             to: auth,
             activation: activation,
             authSourceCodexHomeURL: loginCodexHomeURL,
-            preparedAccount: accountForCommit
+            preparedAccount: preparedAccount
         )
-        return true
+    }
+
+    private func refreshCommittedAuthenticationRateLimits(
+        account: CodexAccount?,
+        activation: LoginActivation,
+        operation: LiveAuthenticationOperation,
+        scope: LiveAuthenticationOperation.ResourceScope,
+        backend: AppServerCodexReviewBackend,
+        expectedRuntimeHandle: LiveRuntimeLifecycleHandle? = nil,
+        auth: CodexReviewAuthModel
+    ) async {
+        switch activation {
+        case .activateAuthenticatedAccount:
+            await refreshSelectedAccountRateLimits(
+                auth: auth,
+                expectedRuntimeHandle: expectedRuntimeHandle,
+                authenticationScope: scope
+            )
+        case .preserveActiveAccount:
+            guard let account else { return }
+            let didRefresh = await refreshRateLimits(
+                for: account,
+                using: backend,
+                source: "login-runtime",
+                authenticationScope: scope
+            )
+            if didRefresh,
+               activeAuthenticationOperation === operation,
+               authorizesAuthenticationSharedStateCommit(scope)
+            {
+                persistRefreshedSharedAuth(
+                    from: scope.codexHomeURL,
+                    for: account
+                )
+            }
+        }
     }
 
     private func finishCompletedLoginAfterAccountUpdate(
@@ -3439,11 +3421,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 return
             }
             let snapshot = try await backend.readAuth()
-            guard try await prepareAndCommitAuthenticationSnapshot(
+            guard let account = try commitAuthenticationSnapshot(
                 snapshot,
                 operation: operation,
                 scope: scope,
-                backend: backend,
                 expectedRuntimeHandle: expectedRuntimeHandle,
                 auth: auth
             ) else {
@@ -3452,6 +3433,15 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 }
                 return
             }
+            await refreshCommittedAuthenticationRateLimits(
+                account: account,
+                activation: activation,
+                operation: operation,
+                scope: scope,
+                backend: backend,
+                expectedRuntimeHandle: expectedRuntimeHandle,
+                auth: auth
+            )
         } catch {
             if operation.phase == .terminalSuccessCommitted {
                 return

@@ -3051,7 +3051,7 @@ struct CodexReviewHostTests {
         } == 3)
     }
 
-    @Test func livePrimaryCallbackCommitKeepsScopeFromNotificationLoser() async throws {
+    @Test func livePrimaryNotificationCommitKeepsScopeFromCallbackLoser() async throws {
         let homeURL = try temporaryHome()
         let transport = FakeJSONRPCTransport()
         try await enqueueRuntimeStartResponses(transport)
@@ -3075,18 +3075,13 @@ struct CodexReviewHostTests {
                 for: "account/read"
             )
         }
-        for usedPercent in [10, 30] {
-            try await transport.enqueue(
-                AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
-                    limitID: "codex",
-                    primary: .init(
-                        usedPercent: usedPercent,
-                        windowDurationMins: 300
-                    )
-                )),
-                for: "account/rateLimits/read"
-            )
-        }
+        try await transport.enqueue(
+            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
+                limitID: "codex",
+                primary: .init(usedPercent: 30, windowDurationMins: 300)
+            )),
+            for: "account/rateLimits/read"
+        )
         let sessions = FakeWebAuthenticationSessions()
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
@@ -3113,11 +3108,6 @@ struct CodexReviewHostTests {
             method: "account/rateLimits/read",
             gate: notificationRateLimitGate
         )
-        let callbackRateLimitGate = AsyncGate()
-        await transport.holdNextIgnoringCancellation(
-            method: "account/rateLimits/read",
-            gate: callbackRateLimitGate
-        )
         session.complete(
             with: URL(string: "lynnpd.CodexReviewMonitor.auth://callback?code=current")!
         )
@@ -3132,23 +3122,18 @@ struct CodexReviewHostTests {
             params: EmptyResponse()
         )
         await transport.waitForActiveRequests(method: "account/rateLimits/read")
+        #expect(store.auth.selectedAccount?.accountKey == "new@example.com")
+        #expect(store.auth.selectedAccount?.rateLimits.isEmpty == true)
 
         await callbackReadGate.open()
-        #expect(await waitUntil(timeout: .seconds(2)) {
-            store.auth.selectedAccount?.accountKey == "new@example.com"
-        })
-        await transport.waitForActiveRequests(
-            method: "account/rateLimits/read",
-            count: 2
-        )
+        await Task.yield()
+        #expect(store.serverState == .running)
+        #expect(store.auth.selectedAccount?.accountKey == "new@example.com")
         #expect(store.auth.selectedAccount?.rateLimits.isEmpty == true)
 
         await notificationRateLimitGate.open()
         await store.waitForLiveAuthNotificationCompletionForTesting(accountUpdateReceipt)
         #expect(store.serverState == .running)
-        #expect(store.auth.selectedAccount?.rateLimits.isEmpty == true)
-
-        await callbackRateLimitGate.open()
         #expect(await waitUntil(timeout: .seconds(2)) {
             store.auth.selectedAccount?.rateLimits.first?.usedPercent == 30
         })
@@ -3940,7 +3925,7 @@ struct CodexReviewHostTests {
         #expect(try activeAccountKey(homeURL: homeURL) == "active@example.com")
     }
 
-    @Test func liveStoreKeepsRegistryUnchangedWhenCancellationInterruptsPreparedAuthCommit() async throws {
+    @Test func liveStoreKeepsCommittedLoginWhenCancellationInterruptsRateEnrichment() async throws {
         let homeURL = try temporaryHome()
         let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
         let sharedAuthURL = codexHomeURL.appendingPathComponent("auth.json")
@@ -3950,8 +3935,10 @@ struct CodexReviewHostTests {
             accounts: ["active@example.com"]
         )
         try writeSavedAccountAuth(homeURL: homeURL, accountKey: "active@example.com")
-        let priorAuth = try savedAccountAuth(homeURL: homeURL, accountKey: "active@example.com")
-        try priorAuth.write(to: sharedAuthURL)
+        try savedAccountAuth(
+            homeURL: homeURL,
+            accountKey: "active@example.com"
+        ).write(to: sharedAuthURL)
         let transport = FakeJSONRPCTransport()
         try await enqueueRuntimeStartResponses(transport, accountEmail: "active@example.com")
         try await transport.enqueue(
@@ -3992,7 +3979,10 @@ struct CodexReviewHostTests {
         await store.signIn()
         let session = await sessions.waitForSession()
         await session.waitUntilWaitingForCallback()
-        try Data("{\"tokens\":{\"id_token\":\"cancelled\"}}".utf8).write(to: sharedAuthURL)
+        let committedAuth = Data(
+            "{\"tokens\":{\"id_token\":\"cancelled\"}}".utf8
+        )
+        try committedAuth.write(to: sharedAuthURL)
         let completionReceipt = try await transport.emitServerNotification(
             method: "account/login/completed",
             params: TestLoginCompletedNotification(
@@ -4011,27 +4001,33 @@ struct CodexReviewHostTests {
             params: EmptyResponse()
         )
         await transport.waitForActiveRequests(method: "account/rateLimits/read")
-        #expect(store.auth.selectedAccount?.accountKey == "active@example.com")
+        #expect(store.auth.isAuthenticating == false)
+        #expect(store.auth.selectedAccount?.accountKey == "cancelled@example.com")
+        #expect(store.auth.persistedActiveAccountKey == "cancelled@example.com")
         #expect(store.auth.persistedAccounts.contains {
             $0.accountKey == "cancelled@example.com"
-        } == false)
+        })
+        #expect(store.auth.selectedAccount?.rateLimits.isEmpty == true)
+        #expect(try activeAccountKey(homeURL: homeURL) == "cancelled@example.com")
 
         await store.cancelAuthentication()
 
-        #expect(await waitUntil(timeout: .seconds(2)) {
-            if case .failed = store.serverState { return true }
-            return false
-        })
-        #expect(store.auth.selectedAccount?.accountKey == "active@example.com")
-        #expect(store.auth.persistedActiveAccountKey == "active@example.com")
+        #expect(store.serverState == .running)
+        #expect(store.auth.selectedAccount?.accountKey == "cancelled@example.com")
+        #expect(store.auth.persistedActiveAccountKey == "cancelled@example.com")
         #expect(store.auth.persistedAccounts.contains {
             $0.accountKey == "cancelled@example.com"
-        } == false)
-        #expect(try Data(contentsOf: sharedAuthURL) == priorAuth)
+        })
+        #expect(try Data(contentsOf: sharedAuthURL) == committedAuth)
+        #expect(await transport.recordedRequests().map(\.method).count {
+            $0 == "account/login/cancel"
+        } == 0)
         await rateLimitGate.open()
         await store.waitForLiveAuthNotificationCompletionForTesting(accountUpdateReceipt)
-        #expect(store.auth.selectedAccount?.accountKey == "active@example.com")
-        #expect(try Data(contentsOf: sharedAuthURL) == priorAuth)
+        #expect(store.serverState == .running)
+        #expect(store.auth.selectedAccount?.accountKey == "cancelled@example.com")
+        #expect(store.auth.selectedAccount?.rateLimits.isEmpty == true)
+        #expect(try Data(contentsOf: sharedAuthURL) == committedAuth)
     }
 
     @Test func liveStoreLateCancelledLoginSuccessPreservesNewerAuthorizedAccount() async throws {
@@ -6346,9 +6342,12 @@ struct CodexReviewHostTests {
         await store.addAccount()
         let finalSession = sessions[3]
         await finalSession.waitUntilWaitingForCallback()
-        #expect(store.auth.persistedAccounts.contains {
-            $0.accountKey == "stale-rate@example.com"
-        } == false)
+        let committedBeforeRateEnrichment = try #require(
+            store.auth.persistedAccounts.first {
+                $0.accountKey == "stale-rate@example.com"
+            }
+        )
+        #expect(committedBeforeRateEnrichment.rateLimits.isEmpty)
         #expect(store.auth.authenticationFailureCount == failureCount)
         #expect(store.auth.isAuthenticating)
 
