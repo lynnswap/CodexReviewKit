@@ -81,6 +81,7 @@ final class LiveAuthenticationOperation {
     private(set) var resourceScope: ResourceScope?
     private(set) var setupTask: Task<Void, Never>?
     private var apiKeyRequestWasAdmitted = false
+    private var allowsSharedStateCommits = true
     var hasAdmittedAPIKeyRequest: Bool { apiKeyRequestWasAdmitted }
     var phase = Phase.waitingForCompletion
 
@@ -93,7 +94,12 @@ final class LiveAuthenticationOperation {
         self.setupTask = setupTask
     }
 
-    func cancelSetup() {
+    func beginCancellation() {
+        // An admitted API-key request must reconcile its outcome exactly once; cancellation
+        // waits for that owner or removes the operation after the bounded setup join.
+        if apiKeyRequestWasAdmitted == false {
+            allowsSharedStateCommits = false
+        }
         setupTask?.cancel()
     }
 
@@ -116,4 +122,8 @@ final class LiveAuthenticationOperation {
     }
 
     func isCurrent(_ scope: ResourceScope?) -> Bool { resourceScope === scope }
+
+    func authorizesSharedStateCommit(from scope: ResourceScope) -> Bool {
+        allowsSharedStateCommits && isCurrent(scope)
+    }
 }

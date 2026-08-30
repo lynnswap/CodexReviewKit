@@ -1168,7 +1168,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
     ) async {
         let appServerBackend = appServerBackend
         let operation = activeAuthenticationOperation
-        operation?.cancelSetup()
+        operation?.beginCancellation()
         if await waitForAuthenticationSetup(operation) == false {
             logger.warning("Authentication setup did not stop before runtime teardown continued")
         }
@@ -1303,7 +1303,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
 
     func cancelAuthentication(auth: CodexReviewAuthModel) async {
         let operation = activeAuthenticationOperation
-        operation?.cancelSetup()
+        operation?.beginCancellation()
         let didStopSetup = await waitForAuthenticationSetup(operation)
         if didStopSetup == false,
            operation?.hasAdmittedAPIKeyRequest == true,
@@ -1740,7 +1740,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 codexHomeURL: cleanup?.codexHomeURL
             )
             if activeAuthenticationOperation === operation,
-               operation.isCurrent(scope)
+               operation.authorizesSharedStateCommit(from: scope)
             {
                 auth.updatePhase(.signedOut)
                 removeActiveAuthenticationOperation(operation)
@@ -1789,7 +1789,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             return
         }
         guard activeAuthenticationOperation === operation,
-              operation.isCurrent(scope),
+              operation.authorizesSharedStateCommit(from: scope),
               isCurrentRuntime(expectedRuntimeHandle),
               let cleanup = scope.takeForCleanup()
         else {
@@ -1815,7 +1815,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         )
         guard account?.kind == .apiKey,
               activeAuthenticationOperation === operation,
-              operation.isCurrent(scope)
+              operation.authorizesSharedStateCommit(from: scope)
         else {
             updateAuthenticationFailure(
                 "API key sign-in did not produce an API key account.",
@@ -1840,7 +1840,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             codexHomeURL: cleanup?.codexHomeURL
         )
         guard activeAuthenticationOperation === operation,
-              operation.isCurrent(scope)
+              operation.authorizesSharedStateCommit(from: scope)
         else {
             return
         }
@@ -1883,7 +1883,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         do {
             let callbackURL = try await session.waitForCallbackURL()
             guard activeAuthenticationOperation === operation,
-                  operation.isCurrent(scope),
+                  operation.authorizesSharedStateCommit(from: scope),
                   scope.isOpen
             else {
                 let cleanup = scope.takeForCleanup()
@@ -1907,7 +1907,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             cleanup.notificationTask?.cancel()
             let loginCodexHomeURL = cleanup.codexHomeURL
             guard activeAuthenticationOperation === operation,
-                  operation.isCurrent(scope)
+                  operation.authorizesSharedStateCommit(from: scope)
             else {
                 await closeIsolatedLoginRuntime(client: cleanup.client, codexHomeURL: loginCodexHomeURL)
                 return
@@ -1921,7 +1921,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             )
             await refreshSelectedAccountRateLimits(auth: auth, authenticationScope: scope)
             if activeAuthenticationOperation === operation,
-               operation.isCurrent(scope),
+               operation.authorizesSharedStateCommit(from: scope),
                case .preserveActiveAccount = activation,
                let account
             {
@@ -1931,7 +1931,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 )
                 if didRefresh,
                    activeAuthenticationOperation === operation,
-                   operation.isCurrent(scope)
+                   operation.authorizesSharedStateCommit(from: scope)
                 {
                     persistRefreshedSharedAuth(
                         from: loginCodexHomeURL,
@@ -1962,7 +1962,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             await closeIsolatedLoginRuntime(client: cleanup?.client, codexHomeURL: cleanup?.codexHomeURL)
             guard cleanup != nil,
                   activeAuthenticationOperation === operation,
-                  operation.isCurrent(scope) else { return }
+                  operation.authorizesSharedStateCommit(from: scope) else { return }
             updateAuthenticationFailure(
                 error.localizedDescription,
                 auth: auth,
@@ -2029,6 +2029,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         }
         if activeAuthenticationOperation === operation, operation.isCurrent(scope) {
             operation.phase = .waitingForCompletion
+        }
+        if activeAuthenticationOperation === operation,
+           operation.authorizesSharedStateCommit(from: scope) {
             auth.updatePhase(.signedOut)
         }
         await closeIsolatedLoginRuntime(client: cleanup.client, codexHomeURL: cleanup.codexHomeURL)
@@ -2581,7 +2584,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         auth: CodexReviewAuthModel
     ) async {
         guard activeAuthenticationOperation === operation,
-              operation.isCurrent(scope),
+              operation.authorizesSharedStateCommit(from: scope),
               scope.isOpen,
               scope.backend === backend else { return }
         switch notification.method {
@@ -2650,7 +2653,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 return
             }
             guard activeAuthenticationOperation === operation,
-                  operation.isCurrent(scope),
+                  operation.authorizesSharedStateCommit(from: scope),
                   scope.isOpen else {
                 await cleanupAuthenticationScope(scope)
                 return
@@ -2699,6 +2702,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             )
             return
         }
+        guard operation.authorizesSharedStateCommit(from: scope) else {
+            return
+        }
         await finishCompletedLoginAfterAccountUpdate(
             operation: operation,
             scope: scope,
@@ -2723,7 +2729,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             presentation.monitorTask?.cancel()
             await presentation.session?.cancel()
             guard activeAuthenticationOperation === operation,
-                  operation.isCurrent(scope),
+                  operation.authorizesSharedStateCommit(from: scope),
                   scope.isOpen else {
                 await cleanupAuthenticationScope(scope)
                 return
@@ -2742,7 +2748,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 return
             }
             guard activeAuthenticationOperation === operation,
-                  operation.isCurrent(scope),
+                  operation.authorizesSharedStateCommit(from: scope),
                   scope.isOpen else {
                 await cleanupAuthenticationScope(scope)
                 return
@@ -2760,7 +2766,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 )
                 if didRefresh,
                    activeAuthenticationOperation === operation,
-                   operation.isCurrent(scope)
+                   operation.authorizesSharedStateCommit(from: scope)
                 {
                     persistRefreshedSharedAuth(
                         from: loginCodexHomeURL,
@@ -2776,7 +2782,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             } ?? true
             if runtimeIsCurrent,
                activeAuthenticationOperation === operation,
-               operation.isCurrent(scope),
+               operation.authorizesSharedStateCommit(from: scope),
                scope.isOpen
             {
                 updateAuthenticationFailure(
@@ -2909,7 +2915,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             return
         }
         if let authenticationScope,
-           isActiveAuthenticationScope(authenticationScope) == false
+           authorizesAuthenticationSharedStateCommit(authenticationScope) == false
         {
             return
         }
@@ -2991,7 +2997,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 }
             }
             if let authenticationScope,
-               isActiveAuthenticationScope(authenticationScope) == false
+               authorizesAuthenticationSharedStateCommit(authenticationScope) == false
             {
                 return false
             }
@@ -3012,7 +3018,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 return false
             }
             if let authenticationScope,
-               isActiveAuthenticationScope(authenticationScope) == false
+               authorizesAuthenticationSharedStateCommit(authenticationScope) == false
             {
                 return false
             }
@@ -3122,10 +3128,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         return activeAuthenticationOperation === operation
     }
 
-    private func isActiveAuthenticationScope(
+    private func authorizesAuthenticationSharedStateCommit(
         _ scope: LiveAuthenticationOperation.ResourceScope
     ) -> Bool {
-        activeAuthenticationOperation?.isCurrent(scope) == true
+        activeAuthenticationOperation?.authorizesSharedStateCommit(from: scope) == true
     }
 
     private func removeActiveAuthenticationOperation(_ operation: LiveAuthenticationOperation?) {
