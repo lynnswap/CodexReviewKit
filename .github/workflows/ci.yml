@@ -179,12 +179,11 @@ jobs:
             --no-parallel \
             --filter "$test_filter"
 
-  monitor-tests:
-    name: ReviewMonitor Tests (macOS)
-    runs-on: macos-26
-    timeout-minutes: 15
-    env:
-      XCODE_MAJOR: '26'
+  local-installer-tests:
+    name: Local Installer Tests (Xcode 27)
+    # GitHub-hosted Xcode 27 image: actions/runner-images#14404.
+    runs-on: xcode-27
+    timeout-minutes: 8
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -196,36 +195,6 @@ jobs:
           --start-directory scripts/tests
           --pattern 'test_install_review_monitor.py'
           --verbose
-
-      - name: Resolve latest stable Xcode
-        run: |
-          xcode_app="$(ruby <<'RUBY'
-          xcode_major = ENV.fetch("XCODE_MAJOR")
-          candidates = Dir["/Applications/Xcode_#{xcode_major}*.app"].select { |path| File.directory?(path) }
-
-          def pre_release_xcode_path?(path)
-            labels = [path, File.realpath(path)].map { |candidate| File.basename(candidate).downcase }
-            labels.any? do |label|
-              label.match?(/beta|release[ _-]?candidate|(?:^|[_. -])rc(?:$|[_. -])/)
-            end
-          end
-
-          candidates = candidates.reject do |path|
-            pre_release_xcode_path?(path)
-          end
-
-          def version_components(path)
-            version = File.basename(path)[/Xcode_(\d+(?:\.\d+)*)/, 1]
-            version.to_s.split(".").map(&:to_i)
-          end
-
-          selected = candidates.max_by { |path| version_components(path) }
-          abort("No stable Xcode #{xcode_major} installation found") unless selected
-          puts selected
-          RUBY
-          )"
-          echo "DEVELOPER_DIR=${xcode_app}/Contents/Developer" >> "$GITHUB_ENV"
-          echo "Resolved Xcode: ${xcode_app}"
 
       - name: Show Xcode environment
         run: |
@@ -241,6 +210,20 @@ jobs:
           --start-directory scripts/tests
           --pattern 'test_install_review_monitor.py'
           --verbose
+
+  monitor-tests:
+    name: ReviewMonitor Tests (Xcode 27)
+    # GitHub-hosted Xcode 27 image: actions/runner-images#14404.
+    runs-on: xcode-27
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Show Xcode environment
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks
 
       - name: Run monitor app tests
         run: |
