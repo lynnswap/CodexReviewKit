@@ -488,6 +488,34 @@ class InstallerTestCase(unittest.TestCase):
         self.assertFalse(self.make_installer().configuration.backup_path.exists())
         self.assertEqual(self.staging_paths(), [])
 
+    def test_backup_swap_before_cleanup_is_preserved_and_never_deleted(self) -> None:
+        create_app(self.destination, marker="old")
+        displaced_backup = self.root / "Externally Displaced Backup.app"
+        rename_count = 0
+
+        def swap_before_cleanup(source: Path, destination: Path) -> None:
+            nonlocal rename_count
+            rename_count += 1
+            if rename_count == 3:
+                os.rename(source, displaced_backup)
+                create_app(source, marker="external replacement")
+            os.rename(source, destination)
+
+        with self.assertRaisesRegex(
+            installer.PreservedInstallStateError,
+            "Nothing was deleted",
+        ):
+            self.make_installer(rename=swap_before_cleanup).install()
+
+        self.assertEqual(self.marker(self.destination), "new")
+        self.assertEqual(self.marker(displaced_backup), "old")
+        staging_paths = self.staging_paths()
+        self.assertEqual(len(staging_paths), 1)
+        self.assertEqual(
+            self.marker(staging_paths[0] / f"{installer.APP_NAME}.previous.app"),
+            "external replacement",
+        )
+
     def test_rollback_failure_preserves_backup_and_failed_stage(self) -> None:
         create_app(self.destination, marker="old")
         self.runner.fail_verify_at = 2

@@ -446,6 +446,18 @@ class ReviewMonitorInstaller:
             mode=metadata.st_mode,
         )
 
+    def _require_expected_filesystem_app(
+        self,
+        path: Path,
+        expected_identity: Optional[FilesystemIdentity],
+    ) -> None:
+        actual_identity = self._filesystem_identity_if_exists(path)
+        if expected_identity is None or actual_identity != expected_identity:
+            raise InstallerError(
+                f"Filesystem identity changed for the app at {path}"
+            )
+        self._require_expected_bundle_identifier(path)
+
     def _running_process_ids(self) -> Sequence[str]:
         result = self.runner.run(
             [self.toolchain.pgrep, "-x", APP_NAME],
@@ -714,12 +726,10 @@ class ReviewMonitorInstaller:
                 ) from error
 
             try:
-                backup_identity = self._filesystem_identity_if_exists(backup)
-                if backup_identity != expected_destination_identity:
-                    raise InstallerError(
-                        "The destination changed while it was being moved to backup."
-                    )
-                self._require_expected_bundle_identifier(backup)
+                self._require_expected_filesystem_app(
+                    backup,
+                    expected_destination_identity,
+                )
             except (InstallerError, OSError) as identity_error:
                 try:
                     self.rename(backup, destination)
@@ -777,12 +787,33 @@ class ReviewMonitorInstaller:
 
         if old_app_moved:
             try:
+                self._require_expected_filesystem_app(
+                    backup,
+                    expected_destination_identity,
+                )
+            except InstallerError as identity_error:
+                raise PreservedInstallStateError(
+                    f"The new app is installed and valid, but the backup changed "
+                    f"before cleanup. Recovery state was preserved:\n  backup: {backup}"
+                    f"\n  staging: {stage_root}"
+                ) from identity_error
+            try:
                 self.rename(backup, previous_app)
             except (OSError, KeyboardInterrupt) as error:
                 raise PreservedInstallStateError(
                     f"The new app is installed and valid, but the previous app "
                     f"remains at {backup}. Staging was preserved at {stage_root}."
                 ) from error
+            try:
+                self._require_expected_filesystem_app(
+                    previous_app,
+                    expected_destination_identity,
+                )
+            except InstallerError as identity_error:
+                raise PreservedInstallStateError(
+                    "The backup changed while moving into cleanup staging. Nothing "
+                    f"was deleted; inspect the preserved state at {stage_root}."
+                ) from identity_error
 
     @staticmethod
     def _remove_stage_root(stage_root: Path) -> None:
