@@ -8,7 +8,15 @@ visible.
 
 ## Quick Start
 
-1. Launch `CodexReviewMonitor.app`.
+1. From the repository root, build, install, and launch the app:
+
+   ```bash
+   ./scripts/install_review_monitor.py --launch
+   ```
+
+   The default destination is `~/Applications/CodexReviewMonitor.app`. The
+   installer builds the current checkout, applies an ad-hoc hardened-runtime
+   signature, and validates the app before replacing an existing local copy.
 
 2. Register the local MCP endpoint in the client you use.
 
@@ -31,6 +39,38 @@ visible.
    - `review_list`
    - `review_read`
    - `review_cancel`
+
+## Local Build Requirements
+
+The local installer requires macOS 26 or newer, an Apple silicon Mac, and
+Xcode 26.4 or newer. The first build may download the package versions locked
+by the repository.
+
+Quit CodexReviewMonitor before installing. The installer also refuses to
+create a second standard installation with the same bundle identifier. To
+install for all users, remove any existing
+`/Applications/CodexReviewMonitor.app` manually, then select that destination
+explicitly:
+
+```bash
+./scripts/install_review_monitor.py \
+  --destination /Applications/CodexReviewMonitor.app \
+  --launch
+```
+
+The default ad-hoc signature is for local use and does not make a redistributable
+or notarized app. If the Mac's management policy requires an approved local
+identity, pass it explicitly; the installer never falls back to another
+identity:
+
+```bash
+./scripts/install_review_monitor.py \
+  --signing-identity 'Apple Development: Developer Name (TEAMID)' \
+  --launch
+```
+
+Device-management policy can still prohibit locally signed apps. The installer
+does not disable Gatekeeper or remove quarantine metadata.
 
 ## What Runs Locally
 
