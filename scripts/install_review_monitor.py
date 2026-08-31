@@ -238,12 +238,14 @@ def select_destination(
     requested: Optional[Path],
     *,
     home_directory: Optional[Path] = None,
+    applications_directory: Path = Path("/Applications"),
 ) -> Path:
     home = home_directory or Path.home()
     standard_paths = tuple(
-        _absolute_path(path) for path in standard_installation_paths(home)
+        _absolute_path(path)
+        for path in standard_installation_paths(home, applications_directory)
     )
-    destination = standard_paths[0] if requested is None else _absolute_path(requested)
+    destination = standard_paths[1] if requested is None else _absolute_path(requested)
 
     if destination.name != APP_BUNDLE_NAME:
         raise InstallerError(
@@ -900,7 +902,7 @@ def parse_arguments(arguments: Optional[Sequence[str]] = None) -> argparse.Names
         type=Path,
         help=(
             f"app path to install or update (default: "
-            f"~/Applications/{APP_BUNDLE_NAME})"
+            f"/Applications/{APP_BUNDLE_NAME})"
         ),
     )
     parser.add_argument(
