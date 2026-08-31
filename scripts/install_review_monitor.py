@@ -517,7 +517,7 @@ class ReviewMonitorInstaller:
                 f"Installer backup is not an app directory and was not modified: "
                 f"{backup}"
             )
-        self._validate_app(backup)
+        self._require_expected_bundle_identifier(backup)
         if _path_exists(destination):
             raise PreservedInstallStateError(
                 "A previous installation left both the destination and backup in "

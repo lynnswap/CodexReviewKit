@@ -477,6 +477,20 @@ class InstallerTestCase(unittest.TestCase):
         self.assertEqual(self.marker(backup), "unrelated")
         self.assertFalse(self.destination.exists())
 
+    def test_stale_backup_uses_the_existing_app_acceptance_contract(self) -> None:
+        local_installer = self.make_installer()
+        backup = local_installer.configuration.backup_path
+        create_app(backup, marker="accepted old app")
+        executable = backup / "Contents" / "MacOS" / installer.APP_NAME
+        executable.chmod(0o644)
+
+        local_installer._recover_interrupted_backup()
+
+        self.assertEqual(self.marker(self.destination), "accepted old app")
+        self.assertFalse(backup.exists())
+        self.assertEqual(self.runner.commands_named("codesign"), [])
+        self.assertEqual(self.runner.commands_named("xattr"), [])
+
     def test_new_app_move_failure_restores_previous_app(self) -> None:
         create_app(self.destination, marker="old")
         rename_count = 0
