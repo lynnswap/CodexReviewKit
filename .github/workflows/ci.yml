@@ -189,6 +189,14 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Run local installer tests
+        timeout-minutes: 2
+        run: >-
+          python3 -m unittest discover
+          --start-directory scripts/tests
+          --pattern 'test_install_review_monitor.py'
+          --verbose
+
       - name: Resolve latest stable Xcode
         run: |
           xcode_app="$(ruby <<'RUBY'
