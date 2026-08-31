@@ -253,6 +253,18 @@ class InstallerTestCase(unittest.TestCase):
 
         self.assertEqual(selected, self.destination)
 
+    def test_standard_destination_case_alias_is_canonicalized(self) -> None:
+        selected = installer.select_destination(
+            self.home / "applications" / installer.APP_BUNDLE_NAME,
+            home_directory=self.home,
+        )
+        create_app(self.destination, marker="old")
+
+        self.make_installer(destination=selected).install()
+
+        self.assertEqual(selected, self.destination)
+        self.assertEqual(self.marker(self.destination), "new")
+
     def test_destination_requires_expected_bundle_name(self) -> None:
         with self.assertRaisesRegex(installer.InstallerError, "must end with"):
             installer.select_destination(

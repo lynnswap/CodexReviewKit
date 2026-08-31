@@ -212,6 +212,18 @@ def _absolute_path(path: Path) -> Path:
     return Path(os.path.abspath(str(expanded)))
 
 
+def _path_comparison_key(path: Path) -> tuple[str, ...]:
+    try:
+        resolved = path.resolve(strict=False)
+    except (OSError, RuntimeError) as error:
+        raise InstallerError(
+            f"Could not resolve path for comparison: {path}"
+        ) from error
+    # macOS volumes are commonly case-insensitive even though resolve() keeps
+    # the caller's spelling, so compare path components conservatively.
+    return tuple(part.casefold() for part in resolved.parts)
+
+
 def standard_installation_paths(
     home_directory: Path,
     applications_directory: Path = Path("/Applications"),
@@ -237,6 +249,15 @@ def select_destination(
         raise InstallerError(
             f"The destination must end with {APP_BUNDLE_NAME}: {destination}"
         )
+    destination_key = _path_comparison_key(destination)
+    destination = next(
+        (
+            standard_path
+            for standard_path in standard_paths
+            if _path_comparison_key(standard_path) == destination_key
+        ),
+        destination,
+    )
     return destination
 
 
@@ -438,6 +459,7 @@ class ReviewMonitorInstaller:
     def _ensure_destination_safe(self) -> Optional[FilesystemIdentity]:
         self._ensure_build_workspace_disjoint_from_destination()
         destination = self.configuration.destination
+        destination_key = _path_comparison_key(destination)
         destination_identity = self._filesystem_identity_if_exists(destination)
         if destination.is_symlink():
             raise InstallerError(
@@ -452,7 +474,7 @@ class ReviewMonitorInstaller:
             system_destination = _absolute_path(
                 self.applications_directory / APP_BUNDLE_NAME
             )
-            if destination == system_destination:
+            if destination_key == _path_comparison_key(system_destination):
                 raise InstallerError(
                     f"An app already exists at {system_destination}. Remove it "
                     "manually before installing into /Applications."
@@ -464,7 +486,10 @@ class ReviewMonitorInstaller:
             self.applications_directory,
         ):
             candidate = _absolute_path(standard_path)
-            if candidate == destination or not _path_exists(candidate):
+            if (
+                _path_comparison_key(candidate) == destination_key
+                or not _path_exists(candidate)
+            ):
                 continue
             if candidate.is_symlink() or not candidate.is_dir():
                 raise InstallerError(
@@ -482,18 +507,10 @@ class ReviewMonitorInstaller:
         return destination_identity
 
     def _ensure_build_workspace_disjoint_from_destination(self) -> None:
-        try:
-            destination = self.configuration.destination.resolve(strict=False)
-            derived_data = self.configuration.derived_data_path.resolve(strict=False)
-        except (OSError, RuntimeError) as error:
-            raise InstallerError(
-                "Could not resolve the installation and build workspace paths"
-            ) from error
-
-        # macOS volumes are commonly case-insensitive even though resolve() keeps
-        # the caller's spelling, so compare path components conservatively.
-        destination_parts = tuple(part.casefold() for part in destination.parts)
-        derived_data_parts = tuple(part.casefold() for part in derived_data.parts)
+        destination = self.configuration.destination
+        derived_data = self.configuration.derived_data_path
+        destination_parts = _path_comparison_key(destination)
+        derived_data_parts = _path_comparison_key(derived_data)
         destination_contains_build = (
             destination_parts == derived_data_parts[: len(destination_parts)]
         )
