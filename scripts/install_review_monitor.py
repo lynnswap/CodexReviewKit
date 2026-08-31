@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import errno
 import os
 import platform
 import plistlib
@@ -26,9 +28,22 @@ MINIMUM_MACOS_MAJOR = 26
 MINIMUM_XCODE_VERSION = (26, 4)
 SUPPORTED_ARCHITECTURE = "arm64"
 QUARANTINE_ATTRIBUTE = "com.apple.quarantine"
+RENAME_SWAP = 0x00000002
+RENAME_EXCL = 0x00000004
 RUNNING_EXECUTABLE_PATTERN = (
     rf"^(.*/)?{APP_NAME}[.]app/Contents/MacOS/{APP_NAME}([[:space:]].*)?$"
 )
+
+
+_LIBC = ctypes.CDLL(None, use_errno=True)
+_RENAME_WITH_FLAGS = getattr(_LIBC, "renamex_np", None)
+if _RENAME_WITH_FLAGS is not None:
+    _RENAME_WITH_FLAGS.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    _RENAME_WITH_FLAGS.restype = ctypes.c_int
 
 
 class InstallerError(RuntimeError):
@@ -37,6 +52,32 @@ class InstallerError(RuntimeError):
 
 class PreservedInstallStateError(InstallerError):
     """A failure whose recovery artifacts must not be deleted."""
+
+
+def _rename_with_flags(source: Path, destination: Path, flags: int) -> None:
+    if _RENAME_WITH_FLAGS is None:
+        raise OSError(errno.ENOSYS, "renamex_np is unavailable on this host")
+    result = _RENAME_WITH_FLAGS(
+        os.fsencode(source),
+        os.fsencode(destination),
+        flags,
+    )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(
+            error_number,
+            f"{os.strerror(error_number)}: {source} -> {destination}",
+        )
+
+
+def rename_exclusive(source: Path, destination: Path) -> None:
+    """Atomically rename without replacing an existing destination."""
+    _rename_with_flags(source, destination, RENAME_EXCL)
+
+
+def rename_swap(first: Path, second: Path) -> None:
+    """Atomically exchange two existing filesystem entries."""
+    _rename_with_flags(first, second, RENAME_SWAP)
 
 
 @dataclass(frozen=True)
@@ -160,11 +201,6 @@ class InstallerConfiguration:
             / APP_BUNDLE_NAME
         )
 
-    @property
-    def backup_path(self) -> Path:
-        return self.destination.parent / f".{APP_NAME}.backup.app"
-
-
 def _path_exists(path: Path) -> bool:
     return os.path.lexists(str(path))
 
@@ -213,7 +249,8 @@ class ReviewMonitorInstaller:
         host: Optional[HostEnvironment] = None,
         toolchain: Optional[Toolchain] = None,
         process_checker: Optional[Callable[[], Sequence[str]]] = None,
-        rename: Callable[[Path, Path], None] = os.rename,
+        exclusive_rename: Callable[[Path, Path], None] = rename_exclusive,
+        swap_rename: Callable[[Path, Path], None] = rename_swap,
         home_directory: Optional[Path] = None,
         applications_directory: Path = Path("/Applications"),
         output: TextIO = sys.stdout,
@@ -223,7 +260,8 @@ class ReviewMonitorInstaller:
         self.host = host or HostEnvironment.current()
         self.toolchain = toolchain or Toolchain()
         self.process_checker = process_checker or self._running_process_ids
-        self.rename = rename
+        self.exclusive_rename = exclusive_rename
+        self.swap_rename = swap_rename
         self.home_directory = home_directory or Path.home()
         self.applications_directory = applications_directory
         self.output = output
@@ -236,7 +274,6 @@ class ReviewMonitorInstaller:
     def _install_while_locked(self) -> None:
         self._ensure_app_not_running()
         self._ensure_destination_safe()
-        self._recover_interrupted_backup()
         self._build()
 
         destination_parent = self.configuration.destination.parent
@@ -264,12 +301,12 @@ class ReviewMonitorInstaller:
                 environment=ditto_environment,
             )
             self._sign(staged_app)
-            self._validate_app(staged_app)
+            staged_app_identity = self._validate_staged_app(staged_app)
             self._ensure_app_not_running()
             destination_identity = self._ensure_destination_safe()
-            self._replace_destination(
+            self._publish_staged_app(
                 staged_app,
-                stage_root,
+                expected_staged_identity=staged_app_identity,
                 expected_destination_identity=destination_identity,
             )
         except PreservedInstallStateError:
@@ -412,6 +449,14 @@ class ReviewMonitorInstaller:
                     f"The destination exists but is not an app directory: {destination}"
                 )
             self._require_expected_bundle_identifier(destination)
+            system_destination = _absolute_path(
+                self.applications_directory / APP_BUNDLE_NAME
+            )
+            if destination == system_destination:
+                raise InstallerError(
+                    f"An app already exists at {system_destination}. Remove it "
+                    "manually before installing into /Applications."
+                )
 
         conflicts = []
         for standard_path in standard_installation_paths(
@@ -485,12 +530,101 @@ class ReviewMonitorInstaller:
         path: Path,
         expected_identity: Optional[FilesystemIdentity],
     ) -> None:
+        self._require_filesystem_identity(path, expected_identity)
+        self._require_expected_bundle_identifier(path)
+
+    def _require_filesystem_identity(
+        self,
+        path: Path,
+        expected_identity: Optional[FilesystemIdentity],
+    ) -> None:
         actual_identity = self._filesystem_identity_if_exists(path)
         if expected_identity is None or actual_identity != expected_identity:
             raise InstallerError(
                 f"Filesystem identity changed for the app at {path}"
             )
-        self._require_expected_bundle_identifier(path)
+
+    def _validate_staged_app(self, staged_app: Path) -> FilesystemIdentity:
+        staged_identity = self._filesystem_identity_if_exists(staged_app)
+        if staged_identity is None:
+            raise InstallerError(f"The staged app disappeared: {staged_app}")
+        try:
+            self._validate_app(staged_app)
+        except BaseException as validation_error:
+            try:
+                self._require_filesystem_identity(staged_app, staged_identity)
+            except InstallerError as identity_error:
+                raise PreservedInstallStateError(
+                    "The staged app changed during validation. Nothing was deleted; "
+                    f"inspect it at {staged_app}."
+                ) from identity_error
+            raise
+
+        try:
+            self._require_expected_filesystem_app(staged_app, staged_identity)
+        except InstallerError as identity_error:
+            raise PreservedInstallStateError(
+                "The staged app changed during validation. Nothing was deleted; "
+                f"inspect it at {staged_app}."
+            ) from identity_error
+        return staged_identity
+
+    def _move_expected_app_exclusively(
+        self,
+        source: Path,
+        destination: Path,
+        expected_identity: Optional[FilesystemIdentity],
+    ) -> None:
+        try:
+            self._require_expected_filesystem_app(source, expected_identity)
+            self.exclusive_rename(source, destination)
+            self._require_expected_filesystem_app(destination, expected_identity)
+        except KeyboardInterrupt as error:
+            raise PreservedInstallStateError(
+                "Installation was interrupted during an app move. Nothing was "
+                f"deleted; inspect both paths:\n  source: {source}"
+                f"\n  destination: {destination}"
+            ) from error
+        except OSError as error:
+            raise InstallerError(
+                f"Could not move the app from {source} to {destination}: {error}"
+            ) from error
+        except InstallerError as error:
+            raise PreservedInstallStateError(
+                "The app identity changed while it was being moved. Nothing was "
+                f"deleted; inspect both paths:\n  source: {source}"
+                f"\n  destination: {destination}"
+            ) from error
+
+    def _swap_expected_apps(
+        self,
+        first: Path,
+        first_identity: Optional[FilesystemIdentity],
+        second: Path,
+        second_identity: Optional[FilesystemIdentity],
+    ) -> None:
+        try:
+            self._require_expected_filesystem_app(first, first_identity)
+            self._require_expected_filesystem_app(second, second_identity)
+            self.swap_rename(first, second)
+            self._require_expected_filesystem_app(first, second_identity)
+            self._require_expected_filesystem_app(second, first_identity)
+        except KeyboardInterrupt as error:
+            raise PreservedInstallStateError(
+                "Installation was interrupted during an atomic app swap. Nothing "
+                f"was deleted; inspect both paths:\n  first: {first}"
+                f"\n  second: {second}"
+            ) from error
+        except OSError as error:
+            raise InstallerError(
+                f"Could not atomically swap {first} and {second}: {error}"
+            ) from error
+        except InstallerError as error:
+            raise PreservedInstallStateError(
+                "An app identity changed during the atomic swap. Nothing was "
+                f"deleted; inspect both paths:\n  first: {first}"
+                f"\n  second: {second}"
+            ) from error
 
     def _running_process_ids(self) -> Sequence[str]:
         result = self.runner.run(
@@ -535,38 +669,6 @@ class ReviewMonitorInstaller:
             yield
         finally:
             os.close(descriptor)
-
-    def _recover_interrupted_backup(self) -> None:
-        backup = self.configuration.backup_path
-        destination = self.configuration.destination
-        if not _path_exists(backup):
-            return
-        if backup.is_symlink():
-            raise InstallerError(
-                f"Refusing to use a symbolic-link installer backup: {backup}"
-            )
-        if not backup.is_dir():
-            raise PreservedInstallStateError(
-                f"Installer backup is not an app directory and was not modified: "
-                f"{backup}"
-            )
-        self._require_expected_bundle_identifier(backup)
-        if _path_exists(destination):
-            raise PreservedInstallStateError(
-                "A previous installation left both the destination and backup in "
-                f"place. Inspect them before retrying:\n  destination: {destination}"
-                f"\n  backup: {backup}"
-            )
-        try:
-            self.rename(backup, destination)
-        except OSError as error:
-            raise PreservedInstallStateError(
-                f"Could not restore the previous app from {backup} to {destination}"
-            ) from error
-        print(
-            f"Recovered an interrupted previous installation at: {destination}",
-            file=self.output,
-        )
 
     def _build(self) -> None:
         build_product = self.configuration.build_product_path
@@ -717,24 +819,14 @@ class ReviewMonitorInstaller:
                 f"{app_path}"
             )
 
-    def _replace_destination(
+    def _publish_staged_app(
         self,
         staged_app: Path,
-        stage_root: Path,
         *,
+        expected_staged_identity: FilesystemIdentity,
         expected_destination_identity: Optional[FilesystemIdentity],
     ) -> None:
         destination = self.configuration.destination
-        backup = self.configuration.backup_path
-        failed_app = stage_root / f"{APP_NAME}.failed.app"
-        previous_app = stage_root / f"{APP_NAME}.previous.app"
-        old_app_moved = False
-
-        if _path_exists(backup):
-            raise PreservedInstallStateError(
-                f"Installer backup already exists and was not modified: {backup}"
-            )
-
         current_destination_identity = self._filesystem_identity_if_exists(destination)
         if current_destination_identity != expected_destination_identity:
             raise InstallerError(
@@ -742,154 +834,36 @@ class ReviewMonitorInstaller:
                 f"{destination}"
             )
 
-        published_app_identity = self._filesystem_identity_if_exists(staged_app)
-        if published_app_identity is None:
-            raise InstallerError(
-                f"The validated staged app disappeared before publication: {staged_app}"
-            )
-
-        if _path_exists(destination):
+        replacing_existing_app = expected_destination_identity is not None
+        if replacing_existing_app:
+            # Keep the previous local app in private staging instead of creating
+            # a shared backup pathname that needs its own recovery protocol.
             try:
-                self.rename(destination, backup)
-            except KeyboardInterrupt:
-                if _path_exists(backup) and not _path_exists(destination):
-                    raise PreservedInstallStateError(
-                        "Installation was interrupted after preserving the previous "
-                        f"app. Recovery state was kept:\n  backup: {backup}"
-                        f"\n  staging: {stage_root}"
-                    )
-                raise
-            except OSError as error:
-                raise InstallerError(
-                    f"Could not move the existing app to its backup path: {backup}"
-                ) from error
-
-            try:
-                self._require_expected_filesystem_app(
-                    backup,
-                    expected_destination_identity,
-                )
-            except (InstallerError, OSError) as identity_error:
-                try:
-                    self.rename(backup, destination)
-                except OSError as rollback_error:
-                    raise PreservedInstallStateError(
-                        "The destination changed during publication and could not be "
-                        f"restored. Recovery state was preserved:\n  backup: {backup}"
-                        f"\n  staging: {stage_root}\n  destination: {destination}"
-                    ) from rollback_error
-                raise InstallerError(
-                    "The destination changed during publication. The moved directory "
-                    f"was restored and the new app was not installed: {destination}"
-                ) from identity_error
-            old_app_moved = True
-
-        try:
-            self.rename(staged_app, destination)
-        except (Exception, KeyboardInterrupt) as install_error:
-            if old_app_moved:
-                try:
-                    self.rename(backup, destination)
-                except OSError as rollback_error:
-                    raise PreservedInstallStateError(
-                        "Installing the new app and restoring the previous app both "
-                        f"failed. Recovery state was preserved:\n  backup: {backup}"
-                        f"\n  staging: {stage_root}"
-                    ) from rollback_error
-            if isinstance(install_error, KeyboardInterrupt):
-                raise
-            raise InstallerError(
-                f"Could not move the new app into place at {destination}"
-            ) from install_error
-
-        try:
-            self._require_expected_filesystem_app(
-                destination,
-                published_app_identity,
-            )
-        except InstallerError as identity_error:
-            raise PreservedInstallStateError(
-                "The published app identity changed before final validation. "
-                f"Nothing was deleted; inspect the preserved state:\n"
-                f"  backup: {backup}\n  staging: {stage_root}"
-                f"\n  destination: {destination}"
-            ) from identity_error
-
-        try:
-            self._validate_app(destination)
-        except (Exception, KeyboardInterrupt) as validation_error:
-            try:
-                self._require_expected_filesystem_app(
+                self._swap_expected_apps(
+                    staged_app,
+                    expected_staged_identity,
                     destination,
-                    published_app_identity,
+                    expected_destination_identity,
                 )
-            except InstallerError as identity_error:
-                raise PreservedInstallStateError(
-                    "The destination changed during final validation. Nothing was "
-                    f"moved or deleted; inspect the preserved state:\n"
-                    f"  backup: {backup}\n  staging: {stage_root}"
-                    f"\n  destination: {destination}"
-                ) from identity_error
-            try:
-                self.rename(destination, failed_app)
-                if old_app_moved:
-                    self.rename(backup, destination)
-            except OSError as rollback_error:
-                raise PreservedInstallStateError(
-                    "The installed app failed validation and rollback did not "
-                    f"complete. Recovery state was preserved:\n  backup: {backup}"
-                    f"\n  staging: {stage_root}\n  destination: {destination}"
-                ) from rollback_error
-            if isinstance(validation_error, KeyboardInterrupt):
+            except PreservedInstallStateError:
                 raise
-            raise InstallerError(
-                "The installed app failed final validation; the previous app was "
-                "restored."
-                if old_app_moved
-                else "The installed app failed final validation and was removed."
-            ) from validation_error
-
-        try:
-            self._require_expected_filesystem_app(
-                destination,
-                published_app_identity,
-            )
-        except InstallerError as identity_error:
-            raise PreservedInstallStateError(
-                "The destination changed after final validation. The previous app "
-                f"was not deleted; inspect the preserved state:\n  backup: {backup}"
-                f"\n  staging: {stage_root}\n  destination: {destination}"
-            ) from identity_error
-
-        if old_app_moved:
-            try:
-                self._require_expected_filesystem_app(
-                    backup,
-                    expected_destination_identity,
-                )
-            except InstallerError as identity_error:
-                raise PreservedInstallStateError(
-                    f"The new app is installed and valid, but the backup changed "
-                    f"before cleanup. Recovery state was preserved:\n  backup: {backup}"
-                    f"\n  staging: {stage_root}"
-                ) from identity_error
-            try:
-                self.rename(backup, previous_app)
-            except (OSError, KeyboardInterrupt) as error:
-                raise PreservedInstallStateError(
-                    f"The new app is installed and valid, but the previous app "
-                    f"remains at {backup}. Staging was preserved at {stage_root}."
+            except InstallerError as error:
+                raise InstallerError(
+                    f"Could not atomically replace the app at {destination}"
                 ) from error
+        else:
             try:
-                self._require_expected_filesystem_app(
-                    previous_app,
-                    expected_destination_identity,
+                self._move_expected_app_exclusively(
+                    staged_app,
+                    destination,
+                    expected_staged_identity,
                 )
-            except InstallerError as identity_error:
-                raise PreservedInstallStateError(
-                    "The backup changed while moving into cleanup staging. Nothing "
-                    f"was deleted; inspect the preserved state at {stage_root}."
-                ) from identity_error
+            except PreservedInstallStateError:
+                raise
+            except InstallerError as error:
+                raise InstallerError(
+                    f"Could not install the app at {destination}"
+                ) from error
 
     @staticmethod
     def _remove_stage_root(stage_root: Path) -> None:
@@ -908,7 +882,8 @@ def parse_arguments(arguments: Optional[Sequence[str]] = None) -> argparse.Names
         "--destination",
         type=Path,
         help=(
-            f"app path to replace (default: ~/Applications/{APP_BUNDLE_NAME})"
+            f"app path to install or update (default: "
+            f"~/Applications/{APP_BUNDLE_NAME})"
         ),
     )
     parser.add_argument(

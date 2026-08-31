@@ -9,7 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from typing import Callable, Mapping, Optional, Sequence
+from typing import Mapping, Optional, Sequence
 from unittest import mock
 
 
@@ -52,9 +52,6 @@ class FakeRunner:
         self.architectures = "arm64\n"
         self.runtime_signature = True
         self.fail_build = False
-        self.fail_verify_at: Optional[int] = None
-        self.interrupt_verify_at: Optional[int] = None
-        self.verify_count = 0
         self.xattr_count = 0
         self.quarantine_at_xattr_call: Optional[int] = None
         self.fail_xattr_at: Optional[int] = None
@@ -62,7 +59,6 @@ class FakeRunner:
         self.pgrep_stdout = ""
         self.arm64_capability = "1\n"
         self.open_failure = False
-        self.verify_hook: Optional[Callable[[int, Path], None]] = None
 
     def run(
         self,
@@ -99,13 +95,6 @@ class FakeRunner:
             shutil.copytree(source, destination, symlinks=True)
             return installer.CommandResult(0)
         if executable == "codesign" and "--verify" in command:
-            self.verify_count += 1
-            if self.verify_hook is not None:
-                self.verify_hook(self.verify_count, Path(command[-1]))
-            if self.interrupt_verify_at == self.verify_count:
-                raise KeyboardInterrupt()
-            if self.fail_verify_at == self.verify_count:
-                raise installer.InstallerError("simulated verification failure")
             return installer.CommandResult(0)
         if executable == "codesign" and "--display" in command:
             flags = "adhoc,runtime" if self.runtime_signature else "adhoc"
@@ -219,7 +208,8 @@ class InstallerTestCase(unittest.TestCase):
         signing_identity: str = "-",
         launch: bool = False,
         process_checker=lambda: (),
-        rename=os.rename,
+        exclusive_rename=installer.rename_exclusive,
+        swap_rename=installer.rename_swap,
         applications_directory: Optional[Path] = None,
     ) -> installer.ReviewMonitorInstaller:
         configuration = installer.InstallerConfiguration(
@@ -234,7 +224,8 @@ class InstallerTestCase(unittest.TestCase):
             host=self.host,
             toolchain=self.toolchain,
             process_checker=process_checker,
-            rename=rename,
+            exclusive_rename=exclusive_rename,
+            swap_rename=swap_rename,
             home_directory=self.home,
             applications_directory=(
                 applications_directory or self.applications_directory
@@ -273,7 +264,6 @@ class InstallerTestCase(unittest.TestCase):
         self.make_installer().install()
 
         self.assertEqual(self.marker(self.destination), "new")
-        self.assertFalse(self.make_installer().configuration.backup_path.exists())
         self.assertEqual(self.staging_paths(), [])
 
         build_command = self.runner.commands_named("xcodebuild")[1]
@@ -308,7 +298,6 @@ class InstallerTestCase(unittest.TestCase):
         self.make_installer().install()
 
         self.assertEqual(self.marker(self.destination), "new")
-        self.assertFalse(self.make_installer().configuration.backup_path.exists())
 
     def test_build_failure_preserves_existing_app(self) -> None:
         create_app(self.destination, marker="old")
@@ -318,7 +307,6 @@ class InstallerTestCase(unittest.TestCase):
             self.make_installer().install()
 
         self.assertEqual(self.marker(self.destination), "old")
-        self.assertFalse(self.make_installer().configuration.backup_path.exists())
 
     def test_build_product_destination_is_rejected_before_cleanup(self) -> None:
         build_product = self.make_installer().configuration.build_product_path
@@ -476,6 +464,23 @@ class InstallerTestCase(unittest.TestCase):
 
         self.assertFalse(self.destination.exists())
 
+    def test_existing_system_destination_requires_manual_removal(self) -> None:
+        system_app = self.applications_directory / installer.APP_BUNDLE_NAME
+        create_app(system_app, marker="system app")
+
+        with self.assertRaisesRegex(installer.InstallerError, "Remove it manually"):
+            self.make_installer(destination=system_app).install()
+
+        self.assertEqual(self.marker(system_app), "system app")
+        self.assertEqual(
+            [
+                command
+                for command in self.runner.commands_named("xcodebuild")
+                if len(command) > 1 and command[1] == "build"
+            ],
+            [],
+        )
+
     def test_different_bundle_at_standard_path_does_not_conflict(self) -> None:
         system_app = self.applications_directory / installer.APP_BUNDLE_NAME
         create_app(system_app, bundle_identifier="example.Unrelated")
@@ -544,190 +549,98 @@ class InstallerTestCase(unittest.TestCase):
 
         self.assertEqual(self.marker(self.destination), "old")
 
-    def test_final_validation_failure_restores_previous_app(self) -> None:
-        create_app(self.destination, marker="old")
-        self.runner.fail_verify_at = 2
-
-        with self.assertRaisesRegex(installer.InstallerError, "previous app was restored"):
-            self.make_installer().install()
-
-        self.assertEqual(self.marker(self.destination), "old")
-        self.assertFalse(self.make_installer().configuration.backup_path.exists())
-        self.assertEqual(self.staging_paths(), [])
-
-    def test_destination_replaced_during_failed_validation_is_preserved(self) -> None:
-        create_app(self.destination, marker="old")
-        displaced_published_app = self.root / "Externally Displaced Published.app"
-
-        def replace_destination(verify_count: int, app_path: Path) -> None:
-            if verify_count != 2:
-                return
-            os.rename(app_path, displaced_published_app)
-            create_app(app_path, marker="external replacement")
-
-        self.runner.verify_hook = replace_destination
-        self.runner.fail_verify_at = 2
-
-        with self.assertRaisesRegex(
-            installer.PreservedInstallStateError,
-            "changed during final validation",
-        ):
-            self.make_installer().install()
-
-        self.assertEqual(self.marker(self.destination), "external replacement")
-        self.assertEqual(self.marker(displaced_published_app), "new")
-        backup = self.make_installer().configuration.backup_path
-        self.assertEqual(self.marker(backup), "old")
-        self.assertEqual(len(self.staging_paths()), 1)
-
-    def test_final_validation_failure_removes_invalid_new_install(self) -> None:
-        self.runner.fail_verify_at = 2
-
-        with self.assertRaisesRegex(installer.InstallerError, "was removed"):
-            self.make_installer().install()
-
-        self.assertFalse(self.destination.exists())
-        self.assertEqual(self.staging_paths(), [])
-
-    def test_existing_app_backup_failure_leaves_destination_unchanged(self) -> None:
+    def test_atomic_swap_failure_leaves_existing_app_unchanged(self) -> None:
         create_app(self.destination, marker="old")
 
-        def fail_backup(source: Path, destination: Path) -> None:
-            del source, destination
-            raise OSError("simulated backup failure")
+        def fail_swap(first: Path, second: Path) -> None:
+            del first, second
+            raise OSError("simulated atomic swap failure")
 
-        with self.assertRaisesRegex(installer.InstallerError, "backup path"):
-            self.make_installer(rename=fail_backup).install()
+        with self.assertRaisesRegex(installer.InstallerError, "atomically replace"):
+            self.make_installer(swap_rename=fail_swap).install()
 
         self.assertEqual(self.marker(self.destination), "old")
         self.assertEqual(self.staging_paths(), [])
 
-    def test_unrelated_stale_backup_is_not_moved(self) -> None:
-        backup = self.make_installer().configuration.backup_path
-        create_app(backup, bundle_identifier="example.Unrelated", marker="unrelated")
-
-        with self.assertRaisesRegex(installer.InstallerError, "Unexpected bundle"):
-            self.make_installer().install()
-
-        self.assertEqual(self.marker(backup), "unrelated")
-        self.assertFalse(self.destination.exists())
-
-    def test_stale_backup_uses_the_existing_app_acceptance_contract(self) -> None:
+    def test_exclusive_move_interrupt_after_syscall_preserves_the_app(self) -> None:
+        source = self.root / "Exclusive Source.app"
+        destination = self.root / "Exclusive Destination.app"
+        create_app(source, marker="source")
         local_installer = self.make_installer()
-        backup = local_installer.configuration.backup_path
-        create_app(backup, marker="accepted old app")
-        executable = backup / "Contents" / "MacOS" / installer.APP_NAME
-        executable.chmod(0o644)
+        source_identity = local_installer._filesystem_identity_if_exists(source)
+        require_app = local_installer._require_expected_filesystem_app
+        checks = 0
 
-        local_installer._recover_interrupted_backup()
+        def interrupt_after_move(path: Path, expected_identity) -> None:
+            nonlocal checks
+            checks += 1
+            if checks == 2:
+                raise KeyboardInterrupt()
+            require_app(path, expected_identity)
 
-        self.assertEqual(self.marker(self.destination), "accepted old app")
-        self.assertFalse(backup.exists())
-        self.assertEqual(self.runner.commands_named("codesign"), [])
-        self.assertEqual(self.runner.commands_named("xattr"), [])
-
-    def test_new_app_move_failure_restores_previous_app(self) -> None:
-        create_app(self.destination, marker="old")
-        rename_count = 0
-
-        def fail_new_app_move(source: Path, destination: Path) -> None:
-            nonlocal rename_count
-            rename_count += 1
-            if rename_count == 2:
-                raise OSError("simulated new app move failure")
-            os.rename(source, destination)
-
-        with self.assertRaisesRegex(installer.InstallerError, "new app into place"):
-            self.make_installer(rename=fail_new_app_move).install()
-
-        self.assertEqual(self.marker(self.destination), "old")
-        self.assertFalse(self.make_installer().configuration.backup_path.exists())
-        self.assertEqual(self.staging_paths(), [])
-
-    def test_destination_swap_during_backup_is_restored_and_never_deleted(self) -> None:
-        create_app(self.destination, marker="old")
-        displaced_app = self.root / "Externally Displaced.app"
-        rename_count = 0
-
-        def swap_before_backup(source: Path, destination: Path) -> None:
-            nonlocal rename_count
-            rename_count += 1
-            if rename_count == 1:
-                os.rename(source, displaced_app)
-                create_app(source, marker="external replacement")
-            os.rename(source, destination)
-
-        with self.assertRaisesRegex(installer.InstallerError, "changed during"):
-            self.make_installer(rename=swap_before_backup).install()
-
-        self.assertEqual(self.marker(self.destination), "external replacement")
-        self.assertEqual(self.marker(displaced_app), "old")
-        self.assertFalse(self.make_installer().configuration.backup_path.exists())
-        self.assertEqual(self.staging_paths(), [])
-
-    def test_backup_swap_before_cleanup_is_preserved_and_never_deleted(self) -> None:
-        create_app(self.destination, marker="old")
-        displaced_backup = self.root / "Externally Displaced Backup.app"
-        rename_count = 0
-
-        def swap_before_cleanup(source: Path, destination: Path) -> None:
-            nonlocal rename_count
-            rename_count += 1
-            if rename_count == 3:
-                os.rename(source, displaced_backup)
-                create_app(source, marker="external replacement")
-            os.rename(source, destination)
+        local_installer._require_expected_filesystem_app = interrupt_after_move
 
         with self.assertRaisesRegex(
             installer.PreservedInstallStateError,
-            "Nothing was deleted",
+            "interrupted during an app move",
         ):
-            self.make_installer(rename=swap_before_cleanup).install()
+            local_installer._move_expected_app_exclusively(
+                source,
+                destination,
+                source_identity,
+            )
 
-        self.assertEqual(self.marker(self.destination), "new")
-        self.assertEqual(self.marker(displaced_backup), "old")
-        staging_paths = self.staging_paths()
-        self.assertEqual(len(staging_paths), 1)
-        self.assertEqual(
-            self.marker(staging_paths[0] / f"{installer.APP_NAME}.previous.app"),
-            "external replacement",
-        )
+        self.assertFalse(source.exists())
+        self.assertEqual(self.marker(destination), "source")
 
-    def test_rollback_failure_preserves_backup_and_failed_stage(self) -> None:
-        create_app(self.destination, marker="old")
-        self.runner.fail_verify_at = 2
-        rename_count = 0
+    def test_swap_interrupt_after_syscall_preserves_both_apps(self) -> None:
+        first = self.root / "First.app"
+        second = self.root / "Second.app"
+        create_app(first, marker="first")
+        create_app(second, marker="second")
+        local_installer = self.make_installer()
+        first_identity = local_installer._filesystem_identity_if_exists(first)
+        second_identity = local_installer._filesystem_identity_if_exists(second)
+        require_app = local_installer._require_expected_filesystem_app
+        checks = 0
 
-        def fail_restore(source: Path, destination: Path) -> None:
-            nonlocal rename_count
-            rename_count += 1
-            if rename_count == 4:
-                raise OSError("simulated rollback failure")
-            os.rename(source, destination)
+        def interrupt_after_swap(path: Path, expected_identity) -> None:
+            nonlocal checks
+            checks += 1
+            if checks == 3:
+                raise KeyboardInterrupt()
+            require_app(path, expected_identity)
+
+        local_installer._require_expected_filesystem_app = interrupt_after_swap
 
         with self.assertRaisesRegex(
             installer.PreservedInstallStateError,
-            "Recovery state was preserved",
+            "interrupted during an atomic app swap",
         ):
-            self.make_installer(rename=fail_restore).install()
+            local_installer._swap_expected_apps(
+                first,
+                first_identity,
+                second,
+                second_identity,
+            )
 
-        backup = self.make_installer().configuration.backup_path
-        self.assertEqual(self.marker(backup), "old")
-        staging_paths = self.staging_paths()
-        self.assertEqual(len(staging_paths), 1)
-        self.assertEqual(
-            self.marker(staging_paths[0] / f"{installer.APP_NAME}.failed.app"),
-            "new",
-        )
+        self.assertEqual(self.marker(first), "second")
+        self.assertEqual(self.marker(second), "first")
 
-    def test_keyboard_interrupt_rolls_back_previous_app(self) -> None:
-        create_app(self.destination, marker="old")
-        self.runner.interrupt_verify_at = 2
+    def test_new_destination_collision_is_not_replaced(self) -> None:
+        def occupy_destination_before_publish(
+            source: Path,
+            destination: Path,
+        ) -> None:
+            create_app(self.destination, marker="external destination")
+            installer.rename_exclusive(source, destination)
 
-        with self.assertRaises(KeyboardInterrupt):
-            self.make_installer().install()
+        with self.assertRaisesRegex(installer.InstallerError, "Could not install"):
+            self.make_installer(
+                exclusive_rename=occupy_destination_before_publish
+            ).install()
 
-        self.assertEqual(self.marker(self.destination), "old")
+        self.assertEqual(self.marker(self.destination), "external destination")
         self.assertEqual(self.staging_paths(), [])
 
     def test_app_started_during_build_stops_before_publish(self) -> None:
@@ -744,6 +657,62 @@ class InstallerTestCase(unittest.TestCase):
 
         self.assertEqual(self.marker(self.destination), "old")
         self.assertEqual(self.staging_paths(), [])
+
+    def test_staged_app_swap_after_validation_is_preserved(self) -> None:
+        displaced_staged_app = self.root / "Displaced Validated Staged.app"
+        checks = 0
+
+        def process_checker():
+            nonlocal checks
+            checks += 1
+            if checks == 3:
+                stage_root = self.staging_paths()[0]
+                staged_app = stage_root / installer.APP_BUNDLE_NAME
+                os.rename(staged_app, displaced_staged_app)
+                create_app(staged_app, marker="external staged app")
+            return ()
+
+        with self.assertRaisesRegex(
+            installer.PreservedInstallStateError,
+            "identity changed while it was being moved",
+        ):
+            self.make_installer(process_checker=process_checker).install()
+
+        self.assertFalse(self.destination.exists())
+        self.assertEqual(self.marker(displaced_staged_app), "new")
+        staging_paths = self.staging_paths()
+        self.assertEqual(len(staging_paths), 1)
+        self.assertEqual(
+            self.marker(staging_paths[0] / installer.APP_BUNDLE_NAME),
+            "external staged app",
+        )
+
+    def test_staged_app_swap_during_validation_is_preserved(self) -> None:
+        displaced_staged_app = self.root / "Displaced During Validation.app"
+        local_installer = self.make_installer()
+        validate_app = local_installer._validate_app
+
+        def swap_after_validation(staged_app: Path) -> None:
+            validate_app(staged_app)
+            os.rename(staged_app, displaced_staged_app)
+            create_app(staged_app, marker="external unvalidated app")
+
+        local_installer._validate_app = swap_after_validation
+
+        with self.assertRaisesRegex(
+            installer.PreservedInstallStateError,
+            "changed during validation",
+        ):
+            local_installer.install()
+
+        self.assertFalse(self.destination.exists())
+        self.assertEqual(self.marker(displaced_staged_app), "new")
+        staging_paths = self.staging_paths()
+        self.assertEqual(len(staging_paths), 1)
+        self.assertEqual(
+            self.marker(staging_paths[0] / installer.APP_BUNDLE_NAME),
+            "external unvalidated app",
+        )
 
     def test_explicit_identity_is_one_argument_and_launches_after_install(self) -> None:
         identity = "Apple Development: Local Developer (ABCDE12345)"
@@ -865,10 +834,14 @@ class InstallerIntegrationTests(unittest.TestCase):
                 home_directory=root / "Home",
                 applications_directory=applications_directory,
             )
+            create_app(destination, marker="old")
 
             local_installer.install()
 
             self.assertTrue(destination.is_dir())
+            self.assertFalse(
+                (destination / "Contents" / "Resources" / "build-marker.txt").exists()
+            )
             self.assertEqual(
                 local_installer._bundle_identifier(destination),
                 installer.BUNDLE_IDENTIFIER,

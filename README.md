@@ -48,8 +48,9 @@ by the repository.
 
 Quit CodexReviewMonitor before installing. The installer also refuses to
 create a second standard installation with the same bundle identifier. To
-replace an existing `/Applications` copy instead of installing for the current
-user, select it explicitly:
+install for all users, remove any existing
+`/Applications/CodexReviewMonitor.app` manually, then select that destination
+explicitly:
 
 ```bash
 ./scripts/install_review_monitor.py \
