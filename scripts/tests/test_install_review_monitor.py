@@ -179,10 +179,10 @@ class InstallerTestCase(unittest.TestCase):
 
         self.home = self.root / "Home With Spaces"
         self.applications_directory = self.root / "System Applications"
+        self.applications_directory.mkdir()
         self.destination = (
             self.home / "Applications" / installer.APP_BUNDLE_NAME
         )
-        self.lock_directory = self.root / "locks"
         self.toolchain = self._create_fake_toolchain()
         self.host = installer.HostEnvironment(
             system="Darwin",
@@ -220,6 +220,7 @@ class InstallerTestCase(unittest.TestCase):
         launch: bool = False,
         process_checker=lambda: (),
         rename=os.rename,
+        applications_directory: Optional[Path] = None,
     ) -> installer.ReviewMonitorInstaller:
         configuration = installer.InstallerConfiguration(
             repo_root=self.repo_root,
@@ -235,8 +236,9 @@ class InstallerTestCase(unittest.TestCase):
             process_checker=process_checker,
             rename=rename,
             home_directory=self.home,
-            applications_directory=self.applications_directory,
-            lock_directory=self.lock_directory,
+            applications_directory=(
+                applications_directory or self.applications_directory
+            ),
             output=self.output,
         )
 
@@ -317,6 +319,98 @@ class InstallerTestCase(unittest.TestCase):
 
         self.assertEqual(self.marker(self.destination), "old")
         self.assertFalse(self.make_installer().configuration.backup_path.exists())
+
+    def test_build_product_destination_is_rejected_before_cleanup(self) -> None:
+        build_product = self.make_installer().configuration.build_product_path
+        create_app(build_product, marker="existing destination")
+
+        with self.assertRaisesRegex(installer.InstallerError, "outside Xcode"):
+            self.make_installer(destination=build_product).install()
+
+        self.assertEqual(self.marker(build_product), "existing destination")
+        self.assertEqual(
+            [
+                command
+                for command in self.runner.commands_named("xcodebuild")
+                if len(command) > 1 and command[1] == "build"
+            ],
+            [],
+        )
+        self.assertEqual(self.runner.commands_named("ditto"), [])
+
+    def test_nested_build_product_destination_is_rejected_before_cleanup(self) -> None:
+        build_product = self.make_installer().configuration.build_product_path
+        destination = build_product / "Nested" / installer.APP_BUNDLE_NAME
+        create_app(destination, marker="nested destination")
+
+        with self.assertRaisesRegex(installer.InstallerError, "outside Xcode"):
+            self.make_installer(destination=destination).install()
+
+        self.assertEqual(self.marker(destination), "nested destination")
+        self.assertEqual(
+            [
+                command
+                for command in self.runner.commands_named("xcodebuild")
+                if len(command) > 1 and command[1] == "build"
+            ],
+            [],
+        )
+
+    def test_build_product_destination_via_parent_symlink_is_rejected(self) -> None:
+        build_product = self.make_installer().configuration.build_product_path
+        destination = build_product / "Nested" / installer.APP_BUNDLE_NAME
+        create_app(destination, marker="aliased destination")
+        alias = self.root / "Build Product Alias"
+        alias.symlink_to(build_product, target_is_directory=True)
+        aliased_destination = alias / "Nested" / installer.APP_BUNDLE_NAME
+
+        with self.assertRaisesRegex(installer.InstallerError, "outside Xcode"):
+            self.make_installer(destination=aliased_destination).install()
+
+        self.assertEqual(self.marker(destination), "aliased destination")
+        self.assertEqual(
+            [
+                command
+                for command in self.runner.commands_named("xcodebuild")
+                if len(command) > 1 and command[1] == "build"
+            ],
+            [],
+        )
+        self.assertEqual(self.runner.commands_named("ditto"), [])
+
+    def test_derived_data_name_prefix_does_not_overlap(self) -> None:
+        derived_data = self.make_installer().configuration.derived_data_path
+        destination = (
+            derived_data.parent
+            / f"{derived_data.name}-copy"
+            / installer.APP_BUNDLE_NAME
+        )
+
+        self.make_installer(destination=destination).install()
+
+        self.assertEqual(self.marker(destination), "new")
+
+    def test_destination_containing_derived_data_is_rejected(self) -> None:
+        destination = self.root / "Workspace" / installer.APP_BUNDLE_NAME
+        configuration = installer.InstallerConfiguration(
+            repo_root=destination / "Checkout",
+            destination=destination,
+            signing_identity="-",
+            launch=False,
+        )
+        local_installer = installer.ReviewMonitorInstaller(
+            configuration,
+            runner=self.runner,
+            host=self.host,
+            toolchain=self.toolchain,
+            process_checker=lambda: (),
+            home_directory=self.home,
+            applications_directory=self.applications_directory,
+            output=self.output,
+        )
+
+        with self.assertRaisesRegex(installer.InstallerError, "outside Xcode"):
+            local_installer._ensure_destination_safe()
 
     def test_running_app_fails_before_build(self) -> None:
         with self.assertRaisesRegex(installer.InstallerError, "active reviews"):
@@ -675,13 +769,11 @@ class InstallerTestCase(unittest.TestCase):
 
     def test_lock_contention_fails_before_build(self) -> None:
         first = self.make_installer()
-        second_destination = (
-            self.root / "Alternate Applications" / installer.APP_BUNDLE_NAME
-        )
+        second_destination = self.applications_directory / installer.APP_BUNDLE_NAME
         second = self.make_installer(destination=second_destination)
 
         with first._exclusive_install_lock():
-            with self.assertRaisesRegex(installer.InstallerError, "already targeting"):
+            with self.assertRaisesRegex(installer.InstallerError, "already running"):
                 second.install()
 
         build_commands = [
@@ -691,28 +783,53 @@ class InstallerTestCase(unittest.TestCase):
         ]
         self.assertEqual(build_commands, [])
 
-    def test_lock_file_is_shared_by_bundle_instead_of_user_id(self) -> None:
+    def test_lock_uses_the_existing_system_applications_directory(self) -> None:
         local_installer = self.make_installer()
+        entries_before_lock = list(self.applications_directory.iterdir())
 
         with mock.patch.object(installer.os, "open", wraps=os.open) as open_lock:
             with local_installer._exclusive_install_lock():
-                lock_paths = list(self.lock_directory.iterdir())
+                self.assertEqual(
+                    list(self.applications_directory.iterdir()),
+                    entries_before_lock,
+                )
 
-        self.assertEqual(
-            [path.name for path in lock_paths],
-            [f"{installer.BUNDLE_IDENTIFIER}.lock"],
+        lock_path, open_flags = open_lock.call_args.args
+        self.assertEqual(Path(lock_path), self.applications_directory)
+        for required_flag in (
+            os.O_DIRECTORY,
+            os.O_NOFOLLOW,
+            os.O_CLOEXEC,
+            os.O_EXLOCK,
+            os.O_NONBLOCK,
+        ):
+            self.assertTrue(open_flags & required_flag)
+        self.assertFalse(open_flags & os.O_CREAT)
+
+    def test_invalid_shared_lock_anchors_are_rejected(self) -> None:
+        real_directory = self.root / "Real Applications"
+        real_directory.mkdir()
+        invalid_anchors = {
+            "missing": self.root / "Missing Applications",
+            "file": self.root / "Applications File",
+            "symlink": self.root / "Applications Link",
+        }
+        invalid_anchors["file"].write_text("not a directory", encoding="utf-8")
+        invalid_anchors["symlink"].symlink_to(
+            real_directory,
+            target_is_directory=True,
         )
-        self.assertEqual(lock_paths[0].stat().st_mode & 0o777, 0o644)
-        self.assertTrue(open_lock.call_args.args[1] & os.O_NONBLOCK)
 
-    def test_non_regular_lock_file_is_rejected(self) -> None:
-        lock_path = self.lock_directory / f"{installer.BUNDLE_IDENTIFIER}.lock"
-        lock_path.parent.mkdir(parents=True)
-        lock_path.mkdir()
-
-        with self.assertRaisesRegex(installer.InstallerError, "not a regular file"):
-            with self.make_installer()._exclusive_install_lock():
-                self.fail("a non-regular lock must not be acquired")
+        for name, anchor in invalid_anchors.items():
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(
+                    installer.InstallerError,
+                    "shared installation namespace",
+                ):
+                    with self.make_installer(
+                        applications_directory=anchor
+                    )._exclusive_install_lock():
+                        self.fail("an invalid lock anchor must not be acquired")
 
     def test_help_is_available_without_running_installer(self) -> None:
         help_output = io.StringIO()
@@ -734,6 +851,8 @@ class InstallerIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             destination = root / "Applications" / installer.APP_BUNDLE_NAME
+            applications_directory = root / "System Applications"
+            applications_directory.mkdir()
             configuration = installer.InstallerConfiguration(
                 repo_root=repo_root,
                 destination=destination,
@@ -744,8 +863,7 @@ class InstallerIntegrationTests(unittest.TestCase):
                 configuration,
                 process_checker=lambda: (),
                 home_directory=root / "Home",
-                applications_directory=root / "System Applications",
-                lock_directory=root / "locks",
+                applications_directory=applications_directory,
             )
 
             local_installer.install()

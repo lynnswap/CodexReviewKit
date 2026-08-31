@@ -4,14 +4,12 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import os
 import platform
 import plistlib
 import re
 import shlex
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
@@ -218,7 +216,6 @@ class ReviewMonitorInstaller:
         rename: Callable[[Path, Path], None] = os.rename,
         home_directory: Optional[Path] = None,
         applications_directory: Path = Path("/Applications"),
-        lock_directory: Optional[Path] = None,
         output: TextIO = sys.stdout,
     ) -> None:
         self.configuration = configuration
@@ -229,7 +226,6 @@ class ReviewMonitorInstaller:
         self.rename = rename
         self.home_directory = home_directory or Path.home()
         self.applications_directory = applications_directory
-        self.lock_directory = lock_directory or Path("/tmp")
         self.output = output
 
     def install(self) -> None:
@@ -403,6 +399,7 @@ class ReviewMonitorInstaller:
             )
 
     def _ensure_destination_safe(self) -> Optional[FilesystemIdentity]:
+        self._ensure_build_workspace_disjoint_from_destination()
         destination = self.configuration.destination
         destination_identity = self._filesystem_identity_if_exists(destination)
         if destination.is_symlink():
@@ -438,6 +435,32 @@ class ReviewMonitorInstaller:
                 f"selected destination:\n{locations}"
             )
         return destination_identity
+
+    def _ensure_build_workspace_disjoint_from_destination(self) -> None:
+        try:
+            destination = self.configuration.destination.resolve(strict=False)
+            derived_data = self.configuration.derived_data_path.resolve(strict=False)
+        except (OSError, RuntimeError) as error:
+            raise InstallerError(
+                "Could not resolve the installation and build workspace paths"
+            ) from error
+
+        # macOS volumes are commonly case-insensitive even though resolve() keeps
+        # the caller's spelling, so compare path components conservatively.
+        destination_parts = tuple(part.casefold() for part in destination.parts)
+        derived_data_parts = tuple(part.casefold() for part in derived_data.parts)
+        destination_contains_build = (
+            destination_parts == derived_data_parts[: len(destination_parts)]
+        )
+        build_contains_destination = (
+            derived_data_parts == destination_parts[: len(derived_data_parts)]
+        )
+        if destination_contains_build or build_contains_destination:
+            raise InstallerError(
+                "The installation destination must be outside Xcode DerivedData:"
+                f"\n  destination: {destination}"
+                f"\n  DerivedData: {derived_data}"
+            )
 
     @staticmethod
     def _filesystem_identity_if_exists(
@@ -486,44 +509,32 @@ class ReviewMonitorInstaller:
 
     @contextmanager
     def _exclusive_install_lock(self):
-        self.lock_directory.mkdir(parents=True, exist_ok=True)
-        lock_path = self.lock_directory / f"{BUNDLE_IDENTIFIER}.lock"
-        open_flags = os.O_CREAT | os.O_RDONLY | os.O_NONBLOCK
-        if hasattr(os, "O_CLOEXEC"):
-            open_flags |= os.O_CLOEXEC
-        if hasattr(os, "O_NOFOLLOW"):
-            open_flags |= os.O_NOFOLLOW
+        # A created lockfile can be unlinked and replaced while its old inode is
+        # locked. The system Applications directory is an existing protected inode.
+        lock_anchor = self.applications_directory
+        open_flags = (
+            os.O_RDONLY
+            | os.O_DIRECTORY
+            | os.O_NOFOLLOW
+            | os.O_CLOEXEC
+            | os.O_EXLOCK
+            | os.O_NONBLOCK
+        )
         try:
-            descriptor = os.open(str(lock_path), open_flags, 0o644)
+            descriptor = os.open(str(lock_anchor), open_flags)
+        except BlockingIOError as error:
+            raise InstallerError(
+                f"Another {APP_NAME} installer is already running"
+            ) from error
         except OSError as error:
-            raise InstallerError(f"Could not open installer lock {lock_path}: {error}")
+            raise InstallerError(
+                f"Could not lock the shared installation namespace at "
+                f"{lock_anchor}: {error}"
+            ) from error
         try:
-            lock_metadata = os.fstat(descriptor)
-            if not stat.S_ISREG(lock_metadata.st_mode):
-                raise InstallerError(
-                    f"Installer lock is not a regular file: {lock_path}"
-                )
-            if lock_metadata.st_uid == os.getuid():
-                os.fchmod(descriptor, 0o644)
-        except BaseException:
+            yield
+        finally:
             os.close(descriptor)
-            raise
-        with os.fdopen(descriptor, "r") as lock_file:
-            try:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as error:
-                raise InstallerError(
-                    f"Another installer is already targeting "
-                    f"{self.configuration.destination}"
-                ) from error
-            except OSError as error:
-                raise InstallerError(
-                    f"Could not lock installer state at {lock_path}: {error}"
-                ) from error
-            try:
-                yield
-            finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def _recover_interrupted_backup(self) -> None:
         backup = self.configuration.backup_path
