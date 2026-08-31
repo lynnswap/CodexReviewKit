@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import fcntl
-import hashlib
 import os
 import platform
 import plistlib
@@ -43,6 +42,13 @@ class CommandResult:
     returncode: int
     stdout: str = ""
     stderr: str = ""
+
+
+@dataclass(frozen=True)
+class FilesystemIdentity:
+    device: int
+    inode: int
+    mode: int
 
 
 class CommandRunner:
@@ -258,8 +264,12 @@ class ReviewMonitorInstaller:
             self._sign(staged_app)
             self._validate_app(staged_app)
             self._ensure_app_not_running()
-            self._ensure_destination_safe()
-            self._replace_destination(staged_app, stage_root)
+            destination_identity = self._ensure_destination_safe()
+            self._replace_destination(
+                staged_app,
+                stage_root,
+                expected_destination_identity=destination_identity,
+            )
         except PreservedInstallStateError:
             raise
         except BaseException:
@@ -381,8 +391,9 @@ class ReviewMonitorInstaller:
                 f"interrupted. Running process IDs: {process_list}"
             )
 
-    def _ensure_destination_safe(self) -> None:
+    def _ensure_destination_safe(self) -> Optional[FilesystemIdentity]:
         destination = self.configuration.destination
+        destination_identity = self._filesystem_identity_if_exists(destination)
         if destination.is_symlink():
             raise InstallerError(
                 f"Refusing to replace a symbolic-link destination: {destination}"
@@ -415,6 +426,25 @@ class ReviewMonitorInstaller:
                 "Another CodexReviewMonitor installation would conflict with the "
                 f"selected destination:\n{locations}"
             )
+        return destination_identity
+
+    @staticmethod
+    def _filesystem_identity_if_exists(
+        path: Path,
+    ) -> Optional[FilesystemIdentity]:
+        if not _path_exists(path):
+            return None
+        try:
+            metadata = os.stat(path, follow_symlinks=False)
+        except OSError as error:
+            raise InstallerError(
+                f"Could not inspect filesystem identity for {path}: {error}"
+            ) from error
+        return FilesystemIdentity(
+            device=metadata.st_dev,
+            inode=metadata.st_ino,
+            mode=metadata.st_mode,
+        )
 
     def _running_process_ids(self) -> Sequence[str]:
         result = self.runner.run(
@@ -434,12 +464,7 @@ class ReviewMonitorInstaller:
     @contextmanager
     def _exclusive_install_lock(self):
         self.lock_directory.mkdir(parents=True, exist_ok=True)
-        destination_digest = hashlib.sha256(
-            str(self.configuration.destination).encode("utf-8")
-        ).hexdigest()[:16]
-        lock_path = self.lock_directory / (
-            f"{BUNDLE_IDENTIFIER}.{os.getuid()}.{destination_digest}.lock"
-        )
+        lock_path = self.lock_directory / f"{BUNDLE_IDENTIFIER}.{os.getuid()}.lock"
         open_flags = os.O_CREAT | os.O_RDWR
         if hasattr(os, "O_CLOEXEC"):
             open_flags |= os.O_CLOEXEC
@@ -647,7 +672,13 @@ class ReviewMonitorInstaller:
                 f"{app_path}"
             )
 
-    def _replace_destination(self, staged_app: Path, stage_root: Path) -> None:
+    def _replace_destination(
+        self,
+        staged_app: Path,
+        stage_root: Path,
+        *,
+        expected_destination_identity: Optional[FilesystemIdentity],
+    ) -> None:
         destination = self.configuration.destination
         backup = self.configuration.backup_path
         failed_app = stage_root / f"{APP_NAME}.failed.app"
@@ -657,6 +688,13 @@ class ReviewMonitorInstaller:
         if _path_exists(backup):
             raise PreservedInstallStateError(
                 f"Installer backup already exists and was not modified: {backup}"
+            )
+
+        current_destination_identity = self._filesystem_identity_if_exists(destination)
+        if current_destination_identity != expected_destination_identity:
+            raise InstallerError(
+                "The destination changed after validation and was not modified: "
+                f"{destination}"
             )
 
         if _path_exists(destination):
@@ -674,6 +712,27 @@ class ReviewMonitorInstaller:
                 raise InstallerError(
                     f"Could not move the existing app to its backup path: {backup}"
                 ) from error
+
+            try:
+                backup_identity = self._filesystem_identity_if_exists(backup)
+                if backup_identity != expected_destination_identity:
+                    raise InstallerError(
+                        "The destination changed while it was being moved to backup."
+                    )
+                self._require_expected_bundle_identifier(backup)
+            except (InstallerError, OSError) as identity_error:
+                try:
+                    self.rename(backup, destination)
+                except OSError as rollback_error:
+                    raise PreservedInstallStateError(
+                        "The destination changed during publication and could not be "
+                        f"restored. Recovery state was preserved:\n  backup: {backup}"
+                        f"\n  staging: {stage_root}\n  destination: {destination}"
+                    ) from rollback_error
+                raise InstallerError(
+                    "The destination changed during publication. The moved directory "
+                    f"was restored and the new app was not installed: {destination}"
+                ) from identity_error
             old_app_moved = True
 
         try:

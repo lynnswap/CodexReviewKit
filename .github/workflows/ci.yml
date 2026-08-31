@@ -182,7 +182,7 @@ jobs:
   monitor-tests:
     name: ReviewMonitor Tests (macOS)
     runs-on: macos-26
-    timeout-minutes: 10
+    timeout-minutes: 15
     env:
       XCODE_MAJOR: '26'
     steps:
@@ -231,6 +231,16 @@ jobs:
         run: |
           xcodebuild -version
           xcodebuild -showsdks
+
+      - name: Run local installer integration test
+        timeout-minutes: 5
+        env:
+          RUN_INSTALLER_INTEGRATION: '1'
+        run: >-
+          python3 -m unittest discover
+          --start-directory scripts/tests
+          --pattern 'test_install_review_monitor.py'
+          --verbose
 
       - name: Run monitor app tests
         run: |

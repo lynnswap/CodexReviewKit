@@ -467,6 +467,27 @@ class InstallerTestCase(unittest.TestCase):
         self.assertFalse(self.make_installer().configuration.backup_path.exists())
         self.assertEqual(self.staging_paths(), [])
 
+    def test_destination_swap_during_backup_is_restored_and_never_deleted(self) -> None:
+        create_app(self.destination, marker="old")
+        displaced_app = self.root / "Externally Displaced.app"
+        rename_count = 0
+
+        def swap_before_backup(source: Path, destination: Path) -> None:
+            nonlocal rename_count
+            rename_count += 1
+            if rename_count == 1:
+                os.rename(source, displaced_app)
+                create_app(source, marker="external replacement")
+            os.rename(source, destination)
+
+        with self.assertRaisesRegex(installer.InstallerError, "changed during"):
+            self.make_installer(rename=swap_before_backup).install()
+
+        self.assertEqual(self.marker(self.destination), "external replacement")
+        self.assertEqual(self.marker(displaced_app), "old")
+        self.assertFalse(self.make_installer().configuration.backup_path.exists())
+        self.assertEqual(self.staging_paths(), [])
+
     def test_rollback_failure_preserves_backup_and_failed_stage(self) -> None:
         create_app(self.destination, marker="old")
         self.runner.fail_verify_at = 2
@@ -543,7 +564,10 @@ class InstallerTestCase(unittest.TestCase):
 
     def test_lock_contention_fails_before_build(self) -> None:
         first = self.make_installer()
-        second = self.make_installer()
+        second_destination = (
+            self.root / "Alternate Applications" / installer.APP_BUNDLE_NAME
+        )
+        second = self.make_installer(destination=second_destination)
 
         with first._exclusive_install_lock():
             with self.assertRaisesRegex(installer.InstallerError, "already targeting"):
