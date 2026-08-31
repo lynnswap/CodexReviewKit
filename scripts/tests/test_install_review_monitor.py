@@ -59,6 +59,7 @@ class FakeRunner:
         self.pgrep_stdout = ""
         self.arm64_capability = "1\n"
         self.open_failure = False
+        self.app_to_create_after_build: Optional[Path] = None
 
     def run(
         self,
@@ -88,6 +89,11 @@ class FakeRunner:
                 / "Release"
                 / installer.APP_BUNDLE_NAME
             )
+            if self.app_to_create_after_build is not None:
+                create_app(
+                    self.app_to_create_after_build,
+                    marker="external installation",
+                )
             return installer.CommandResult(0)
         if executable == "ditto":
             source = Path(command[-2])
@@ -248,15 +254,34 @@ class InstallerTestCase(unittest.TestCase):
             self.destination.parent.glob(f".{installer.APP_NAME}.install-*")
         )
 
-    def test_destination_defaults_to_user_applications(self) -> None:
-        selected = installer.select_destination(None, home_directory=self.home)
+    def test_destination_defaults_to_system_applications(self) -> None:
+        selected = installer.select_destination(
+            None,
+            home_directory=self.home,
+            applications_directory=self.applications_directory,
+        )
 
-        self.assertEqual(selected, self.destination)
+        self.assertEqual(
+            selected,
+            self.applications_directory / installer.APP_BUNDLE_NAME,
+        )
+
+    def test_default_destination_is_deployed_to_system_applications(self) -> None:
+        selected = installer.select_destination(
+            None,
+            home_directory=self.home,
+            applications_directory=self.applications_directory,
+        )
+
+        self.make_installer(destination=selected).install()
+
+        self.assertEqual(self.marker(selected), "new")
 
     def test_standard_destination_case_alias_is_canonicalized(self) -> None:
         selected = installer.select_destination(
             self.home / "applications" / installer.APP_BUNDLE_NAME,
             home_directory=self.home,
+            applications_directory=self.applications_directory,
         )
         create_app(self.destination, marker="old")
 
@@ -270,6 +295,7 @@ class InstallerTestCase(unittest.TestCase):
             installer.select_destination(
                 self.root / "Other.app",
                 home_directory=self.home,
+                applications_directory=self.applications_directory,
             )
 
     def test_new_install_builds_signs_and_validates_before_publish(self) -> None:
@@ -479,9 +505,14 @@ class InstallerTestCase(unittest.TestCase):
     def test_existing_system_destination_requires_manual_removal(self) -> None:
         system_app = self.applications_directory / installer.APP_BUNDLE_NAME
         create_app(system_app, marker="system app")
+        default_destination = installer.select_destination(
+            None,
+            home_directory=self.home,
+            applications_directory=self.applications_directory,
+        )
 
         with self.assertRaisesRegex(installer.InstallerError, "Remove it manually"):
-            self.make_installer(destination=system_app).install()
+            self.make_installer(destination=default_destination).install()
 
         self.assertEqual(self.marker(system_app), "system app")
         self.assertEqual(
@@ -490,6 +521,34 @@ class InstallerTestCase(unittest.TestCase):
                 for command in self.runner.commands_named("xcodebuild")
                 if len(command) > 1 and command[1] == "build"
             ],
+            [],
+        )
+
+    def test_system_destination_is_rechecked_after_build(self) -> None:
+        system_app = self.applications_directory / installer.APP_BUNDLE_NAME
+        default_destination = installer.select_destination(
+            None,
+            home_directory=self.home,
+            applications_directory=self.applications_directory,
+        )
+        self.runner.app_to_create_after_build = system_app
+
+        with self.assertRaisesRegex(installer.InstallerError, "Remove it manually"):
+            self.make_installer(destination=default_destination).install()
+
+        self.assertEqual(self.marker(system_app), "external installation")
+        build_commands = [
+            command
+            for command in self.runner.commands_named("xcodebuild")
+            if len(command) > 1 and command[1] == "build"
+        ]
+        self.assertEqual(len(build_commands), 1)
+        self.assertEqual(
+            list(
+                self.applications_directory.glob(
+                    f".{installer.APP_NAME}.install-*"
+                )
+            ),
             [],
         )
 
@@ -820,6 +879,10 @@ class InstallerTestCase(unittest.TestCase):
 
         self.assertEqual(exit_context.exception.code, 0)
         self.assertIn("--signing-identity", help_output.getvalue())
+        self.assertIn(
+            f"/Applications/{installer.APP_BUNDLE_NAME}",
+            help_output.getvalue(),
+        )
 
 
 @unittest.skipUnless(
