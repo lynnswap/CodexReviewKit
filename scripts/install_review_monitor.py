@@ -11,6 +11,7 @@ import plistlib
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,9 @@ MINIMUM_MACOS_MAJOR = 26
 MINIMUM_XCODE_VERSION = (26, 4)
 SUPPORTED_ARCHITECTURE = "arm64"
 QUARANTINE_ATTRIBUTE = "com.apple.quarantine"
+RUNNING_EXECUTABLE_PATTERN = (
+    rf"^(.*/)?{APP_NAME}[.]app/Contents/MacOS/{APP_NAME}([[:space:]].*)?$"
+)
 
 
 class InstallerError(RuntimeError):
@@ -118,6 +122,7 @@ class Toolchain:
     ditto: str = "/usr/bin/ditto"
     lipo: str = "/usr/bin/lipo"
     pgrep: str = "/usr/bin/pgrep"
+    sysctl: str = "/usr/sbin/sysctl"
     open: str = "/usr/bin/open"
     xattr: str = "/usr/bin/xattr"
 
@@ -129,6 +134,7 @@ class Toolchain:
             self.ditto,
             self.lipo,
             self.pgrep,
+            self.sysctl,
             self.open,
             self.xattr,
         )
@@ -223,7 +229,7 @@ class ReviewMonitorInstaller:
         self.rename = rename
         self.home_directory = home_directory or Path.home()
         self.applications_directory = applications_directory
-        self.lock_directory = lock_directory or Path(tempfile.gettempdir())
+        self.lock_directory = lock_directory or Path("/tmp")
         self.output = output
 
     def install(self) -> None:
@@ -331,15 +337,20 @@ class ReviewMonitorInstaller:
                 f"{APP_NAME} requires macOS {MINIMUM_MACOS_MAJOR} or newer; "
                 f"this Mac reports {self.host.macos_version}."
             )
-        if self.host.architecture != self.configuration.architecture:
-            raise InstallerError(
-                f"The verified local build supports {self.configuration.architecture}; "
-                f"this Mac reports {self.host.architecture}."
-            )
-
         for tool_path in self.toolchain.required_paths:
             if not os.path.isfile(tool_path) or not os.access(tool_path, os.X_OK):
                 raise InstallerError(f"Required tool is unavailable: {tool_path}")
+
+        arm64_capability = self.runner.run(
+            [self.toolchain.sysctl, "-in", "hw.optional.arm64"],
+            capture_output=True,
+        ).stdout.strip()
+        if arm64_capability != "1":
+            raise InstallerError(
+                f"The verified local build requires an Apple silicon Mac; "
+                f"this host reports arm64 capability {arm64_capability!r} "
+                f"from a {self.host.architecture} Python process."
+            )
 
         project_path = (
             self.configuration.repo_root
@@ -460,7 +471,7 @@ class ReviewMonitorInstaller:
 
     def _running_process_ids(self) -> Sequence[str]:
         result = self.runner.run(
-            [self.toolchain.pgrep, "-x", APP_NAME],
+            [self.toolchain.pgrep, "-a", "-f", RUNNING_EXECUTABLE_PATTERN],
             check=False,
             capture_output=True,
         )
@@ -476,17 +487,28 @@ class ReviewMonitorInstaller:
     @contextmanager
     def _exclusive_install_lock(self):
         self.lock_directory.mkdir(parents=True, exist_ok=True)
-        lock_path = self.lock_directory / f"{BUNDLE_IDENTIFIER}.{os.getuid()}.lock"
-        open_flags = os.O_CREAT | os.O_RDWR
+        lock_path = self.lock_directory / f"{BUNDLE_IDENTIFIER}.lock"
+        open_flags = os.O_CREAT | os.O_RDONLY | os.O_NONBLOCK
         if hasattr(os, "O_CLOEXEC"):
             open_flags |= os.O_CLOEXEC
         if hasattr(os, "O_NOFOLLOW"):
             open_flags |= os.O_NOFOLLOW
         try:
-            descriptor = os.open(str(lock_path), open_flags, 0o600)
+            descriptor = os.open(str(lock_path), open_flags, 0o644)
         except OSError as error:
             raise InstallerError(f"Could not open installer lock {lock_path}: {error}")
-        with os.fdopen(descriptor, "a+") as lock_file:
+        try:
+            lock_metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(lock_metadata.st_mode):
+                raise InstallerError(
+                    f"Installer lock is not a regular file: {lock_path}"
+                )
+            if lock_metadata.st_uid == os.getuid():
+                os.fchmod(descriptor, 0o644)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        with os.fdopen(descriptor, "r") as lock_file:
             try:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as error:

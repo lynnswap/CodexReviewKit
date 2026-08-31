@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Callable, Mapping, Optional, Sequence
+from unittest import mock
 
 
 SCRIPTS_DIRECTORY = Path(__file__).resolve().parents[1]
@@ -59,6 +60,7 @@ class FakeRunner:
         self.fail_xattr_at: Optional[int] = None
         self.pgrep_returncode = 1
         self.pgrep_stdout = ""
+        self.arm64_capability = "1\n"
         self.open_failure = False
         self.verify_hook: Optional[Callable[[int, Path], None]] = None
 
@@ -137,6 +139,8 @@ class FakeRunner:
             if check and result.returncode != 0:
                 raise installer.InstallerError("simulated pgrep failure")
             return result
+        if executable == "sysctl":
+            return installer.CommandResult(0, stdout=self.arm64_capability)
         if executable == "open":
             if self.open_failure:
                 raise installer.InstallerError("simulated launch failure")
@@ -198,6 +202,7 @@ class InstallerTestCase(unittest.TestCase):
             "ditto",
             "lipo",
             "pgrep",
+            "sysctl",
             "open",
             "xattr",
         ):
@@ -331,6 +336,42 @@ class InstallerTestCase(unittest.TestCase):
 
         with self.assertRaisesRegex(installer.InstallerError, "Could not determine"):
             local_installer.install()
+
+    def test_running_process_check_matches_the_full_app_executable_path(self) -> None:
+        local_installer = self.make_installer(process_checker=None)
+        local_installer.process_checker = local_installer._running_process_ids
+
+        self.assertEqual(local_installer._running_process_ids(), ())
+
+        pgrep_command = self.runner.commands_named("pgrep")[-1]
+        self.assertEqual(pgrep_command[1:3], ["-a", "-f"])
+        self.assertEqual(pgrep_command[3], installer.RUNNING_EXECUTABLE_PATTERN)
+        self.assertTrue(pgrep_command[3].startswith("^"))
+        self.assertIn("Contents/MacOS/CodexReviewMonitor", pgrep_command[3])
+
+    def test_rosetta_process_is_allowed_on_an_apple_silicon_host(self) -> None:
+        self.host = installer.HostEnvironment(
+            system="Darwin",
+            macos_version="26.6.2",
+            architecture="x86_64",
+        )
+
+        self.make_installer().install()
+
+        self.assertTrue(self.destination.exists())
+
+    def test_physical_host_without_arm64_capability_is_rejected(self) -> None:
+        self.host = installer.HostEnvironment(
+            system="Darwin",
+            macos_version="26.6.2",
+            architecture="x86_64",
+        )
+        self.runner.arm64_capability = "0\n"
+
+        with self.assertRaisesRegex(installer.InstallerError, "Apple silicon"):
+            self.make_installer().install()
+
+        self.assertFalse(self.destination.exists())
 
     def test_conflicting_system_installation_fails_before_build(self) -> None:
         system_app = self.applications_directory / installer.APP_BUNDLE_NAME
@@ -649,6 +690,29 @@ class InstallerTestCase(unittest.TestCase):
             if len(command) > 1 and command[1] == "build"
         ]
         self.assertEqual(build_commands, [])
+
+    def test_lock_file_is_shared_by_bundle_instead_of_user_id(self) -> None:
+        local_installer = self.make_installer()
+
+        with mock.patch.object(installer.os, "open", wraps=os.open) as open_lock:
+            with local_installer._exclusive_install_lock():
+                lock_paths = list(self.lock_directory.iterdir())
+
+        self.assertEqual(
+            [path.name for path in lock_paths],
+            [f"{installer.BUNDLE_IDENTIFIER}.lock"],
+        )
+        self.assertEqual(lock_paths[0].stat().st_mode & 0o777, 0o644)
+        self.assertTrue(open_lock.call_args.args[1] & os.O_NONBLOCK)
+
+    def test_non_regular_lock_file_is_rejected(self) -> None:
+        lock_path = self.lock_directory / f"{installer.BUNDLE_IDENTIFIER}.lock"
+        lock_path.parent.mkdir(parents=True)
+        lock_path.mkdir()
+
+        with self.assertRaisesRegex(installer.InstallerError, "not a regular file"):
+            with self.make_installer()._exclusive_install_lock():
+                self.fail("a non-regular lock must not be acquired")
 
     def test_help_is_available_without_running_installer(self) -> None:
         help_output = io.StringIO()
