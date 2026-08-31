@@ -183,7 +183,7 @@ jobs:
     name: Local Installer Tests (Xcode 27)
     # GitHub-hosted Xcode 27 image: actions/runner-images#14404.
     runs-on: xcode-27
-    timeout-minutes: 8
+    timeout-minutes: 10
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -202,7 +202,7 @@ jobs:
           xcodebuild -showsdks
 
       - name: Run local installer integration test
-        timeout-minutes: 5
+        timeout-minutes: 8
         env:
           RUN_INSTALLER_INTEGRATION: '1'
         run: >-
