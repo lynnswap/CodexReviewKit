@@ -709,6 +709,12 @@ class ReviewMonitorInstaller:
                 f"{destination}"
             )
 
+        published_app_identity = self._filesystem_identity_if_exists(staged_app)
+        if published_app_identity is None:
+            raise InstallerError(
+                f"The validated staged app disappeared before publication: {staged_app}"
+            )
+
         if _path_exists(destination):
             try:
                 self.rename(destination, backup)
@@ -764,8 +770,33 @@ class ReviewMonitorInstaller:
             ) from install_error
 
         try:
+            self._require_expected_filesystem_app(
+                destination,
+                published_app_identity,
+            )
+        except InstallerError as identity_error:
+            raise PreservedInstallStateError(
+                "The published app identity changed before final validation. "
+                f"Nothing was deleted; inspect the preserved state:\n"
+                f"  backup: {backup}\n  staging: {stage_root}"
+                f"\n  destination: {destination}"
+            ) from identity_error
+
+        try:
             self._validate_app(destination)
         except (Exception, KeyboardInterrupt) as validation_error:
+            try:
+                self._require_expected_filesystem_app(
+                    destination,
+                    published_app_identity,
+                )
+            except InstallerError as identity_error:
+                raise PreservedInstallStateError(
+                    "The destination changed during final validation. Nothing was "
+                    f"moved or deleted; inspect the preserved state:\n"
+                    f"  backup: {backup}\n  staging: {stage_root}"
+                    f"\n  destination: {destination}"
+                ) from identity_error
             try:
                 self.rename(destination, failed_app)
                 if old_app_moved:
@@ -784,6 +815,18 @@ class ReviewMonitorInstaller:
                 if old_app_moved
                 else "The installed app failed final validation and was removed."
             ) from validation_error
+
+        try:
+            self._require_expected_filesystem_app(
+                destination,
+                published_app_identity,
+            )
+        except InstallerError as identity_error:
+            raise PreservedInstallStateError(
+                "The destination changed after final validation. The previous app "
+                f"was not deleted; inspect the preserved state:\n  backup: {backup}"
+                f"\n  staging: {stage_root}\n  destination: {destination}"
+            ) from identity_error
 
         if old_app_moved:
             try:

@@ -9,7 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from typing import Mapping, Optional, Sequence
+from typing import Callable, Mapping, Optional, Sequence
 
 
 SCRIPTS_DIRECTORY = Path(__file__).resolve().parents[1]
@@ -60,6 +60,7 @@ class FakeRunner:
         self.pgrep_returncode = 1
         self.pgrep_stdout = ""
         self.open_failure = False
+        self.verify_hook: Optional[Callable[[int, Path], None]] = None
 
     def run(
         self,
@@ -97,6 +98,8 @@ class FakeRunner:
             return installer.CommandResult(0)
         if executable == "codesign" and "--verify" in command:
             self.verify_count += 1
+            if self.verify_hook is not None:
+                self.verify_hook(self.verify_count, Path(command[-1]))
             if self.interrupt_verify_at == self.verify_count:
                 raise KeyboardInterrupt()
             if self.fail_verify_at == self.verify_count:
@@ -416,6 +419,31 @@ class InstallerTestCase(unittest.TestCase):
         self.assertEqual(self.marker(self.destination), "old")
         self.assertFalse(self.make_installer().configuration.backup_path.exists())
         self.assertEqual(self.staging_paths(), [])
+
+    def test_destination_replaced_during_failed_validation_is_preserved(self) -> None:
+        create_app(self.destination, marker="old")
+        displaced_published_app = self.root / "Externally Displaced Published.app"
+
+        def replace_destination(verify_count: int, app_path: Path) -> None:
+            if verify_count != 2:
+                return
+            os.rename(app_path, displaced_published_app)
+            create_app(app_path, marker="external replacement")
+
+        self.runner.verify_hook = replace_destination
+        self.runner.fail_verify_at = 2
+
+        with self.assertRaisesRegex(
+            installer.PreservedInstallStateError,
+            "changed during final validation",
+        ):
+            self.make_installer().install()
+
+        self.assertEqual(self.marker(self.destination), "external replacement")
+        self.assertEqual(self.marker(displaced_published_app), "new")
+        backup = self.make_installer().configuration.backup_path
+        self.assertEqual(self.marker(backup), "old")
+        self.assertEqual(len(self.staging_paths()), 1)
 
     def test_final_validation_failure_removes_invalid_new_install(self) -> None:
         self.runner.fail_verify_at = 2
