@@ -8,17 +8,13 @@ visible.
 
 ## Quick Start
 
-1. From the repository root, build, install, and launch the app:
+1. Download the signed and notarized DMG from the
+   [latest release](https://github.com/lynnswap/CodexReviewKit/releases/latest).
 
-   ```bash
-   ./scripts/install_review_monitor.py --launch
-   ```
+2. Open `CodexReviewMonitor_<version>.dmg`, drag `CodexReviewMonitor.app` to
+   Applications, then launch the app.
 
-   The default destination is `~/Applications/CodexReviewMonitor.app`. The
-   installer builds the current checkout, applies an ad-hoc hardened-runtime
-   signature, and validates the app before replacing an existing local copy.
-
-2. Register the local MCP endpoint in the client you use.
+3. Register the local MCP endpoint in the client you use.
 
    Codex CLI:
 
@@ -32,7 +28,7 @@ visible.
    claude mcp add --transport http codex_review http://localhost:9417/mcp
    ```
 
-3. Use the review tools from Codex:
+4. Use the review tools from Codex:
 
    - `review_start`
    - `review_await`
@@ -40,21 +36,31 @@ visible.
    - `review_read`
    - `review_cancel`
 
-## Local Build Requirements
+## Build from Source
+
+To build, install, and launch CodexReviewMonitor from the current checkout, run
+the installer from the repository root:
+
+```bash
+./scripts/install_review_monitor.py --launch
+```
+
+The installer builds the current checkout, applies an ad-hoc hardened-runtime
+signature, validates the app, and deploys it to
+`/Applications/CodexReviewMonitor.app`. Installing there requires write access.
 
 The local installer requires macOS 26 or newer, an Apple silicon Mac, and
 Xcode 26.4 or newer. The first build may download the package versions locked
 by the repository.
 
-Quit CodexReviewMonitor before installing. The installer also refuses to
-create a second standard installation with the same bundle identifier. To
-install for all users, remove any existing
-`/Applications/CodexReviewMonitor.app` manually, then select that destination
-explicitly:
+Quit CodexReviewMonitor before installing. If the default destination already
+exists, the installer stops before building; remove the app manually before
+rerunning it. The destination is checked again before deployment. To install
+only for the current user, select `~/Applications` explicitly:
 
 ```bash
 ./scripts/install_review_monitor.py \
-  --destination /Applications/CodexReviewMonitor.app \
+  --destination ~/Applications/CodexReviewMonitor.app \
   --launch
 ```
 
