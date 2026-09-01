@@ -3797,7 +3797,7 @@ private extension TurnNotificationPayload {
             kind: kind,
             text: message,
             groupID: itemID,
-            replacesGroup: false,
+            replacesGroup: true,
             metadata: metadata
         )
     }

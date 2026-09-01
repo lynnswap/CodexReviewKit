@@ -1330,7 +1330,7 @@ struct ReviewMonitorLogProjectionTests {
 
     @Test func toolLifecycleUsesOneStableItemGroup() {
         var projection = ReviewMonitorLog.Projection()
-        let document = projection.render(entries: [
+        let entries: [ReviewLogEntry] = [
             .init(
                 kind: .toolCall,
                 groupID: "tool-1",
@@ -1348,7 +1348,15 @@ struct ReviewMonitorLogProjectionTests {
             .init(
                 kind: .toolCall,
                 groupID: "tool-1",
+                replacesGroup: true,
                 text: "Reading review job.",
+                metadata: .init(sourceType: "mcpToolCall", title: "codex_review.review_read", status: "updated")
+            ),
+            .init(
+                kind: .toolCall,
+                groupID: "tool-1",
+                replacesGroup: true,
+                text: "Still reading.",
                 metadata: .init(sourceType: "mcpToolCall", title: "codex_review.review_read", status: "updated")
             ),
             .init(
@@ -1358,7 +1366,16 @@ struct ReviewMonitorLogProjectionTests {
                 text: "codex_review.review_read completed.",
                 metadata: .init(sourceType: "mcpToolCall", title: "codex_review.review_read", status: "completed")
             ),
+        ]
+        let progressDocument = projection.render(entries: Array(entries.dropLast()))
+        let progressText = progressDocument.text as NSString
+
+        #expect(progressDocument.blocks.map { progressText.substring(with: $0.range) } == [
+            "Still reading.",
+            "web.search started.",
         ])
+
+        let document = projection.render(entries: entries)
 
         #expect(document.blocks.map(\.id) == [
             ReviewMonitorLog.BlockID("toolCall:tool-1"),

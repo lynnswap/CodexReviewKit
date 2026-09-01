@@ -5364,6 +5364,15 @@ struct AppServerClientTests {
             )
         )
         try await transport.emitServerNotification(
+            method: "item/mcpToolCall/progress",
+            params: TestMessageNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                itemID: "tool-1",
+                message: "Still reading"
+            )
+        )
+        try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
                 lifecycle: .completed,
@@ -5566,7 +5575,14 @@ struct AppServerClientTests {
             kind: .toolCall,
             text: "Reading review job",
             groupID: "tool-1",
-            replacesGroup: false,
+            replacesGroup: true,
+            metadata: .init(sourceType: "mcpToolCall", title: "Tool progress")
+        ))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .toolCall,
+            text: "Still reading",
+            groupID: "tool-1",
+            replacesGroup: true,
             metadata: .init(sourceType: "mcpToolCall", title: "Tool progress")
         ))
         #expect(try await iterator.next() == .logEntry(
