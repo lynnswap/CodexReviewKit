@@ -387,6 +387,26 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
     private static func parseMarkdownLinkLocation(
         _ text: String
     ) -> ParsedReviewResult.Finding.Location? {
+        guard let link = parseSimpleMarkdownLink(text),
+              let destinationLocation = parseBareLocation(link.destination),
+              let destinationPath = parseLocalFilePath(destinationLocation.path),
+              hasURIScheme(destinationPath) == false,
+              destinationPath == link.label
+                || destinationPath.hasSuffix("/\(link.label)")
+        else {
+            return nil
+        }
+
+        return ParsedReviewResult.Finding.Location(
+            path: destinationPath,
+            startLine: destinationLocation.startLine,
+            endLine: destinationLocation.endLine
+        )
+    }
+
+    private static func parseSimpleMarkdownLink(
+        _ text: String
+    ) -> (label: String, destination: String)? {
         guard text.first == "[",
               text.last == ")",
               let delimiterRange = text.range(of: "]("),
@@ -398,29 +418,51 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
 
         let labelStart = text.index(after: text.startIndex)
         let label = String(text[labelStart..<delimiterRange.lowerBound])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
         let destination = String(
             text[delimiterRange.upperBound..<text.index(before: text.endIndex)]
-        ).trimmingCharacters(in: .whitespacesAndNewlines)
-        let markupCharacters = CharacterSet(charactersIn: "[]()`")
+        )
+        let unsupportedLabelSyntax = CharacterSet(charactersIn: "[]`\\&<>")
+        let unsupportedDestinationSyntax = CharacterSet(charactersIn: "[]()`\\&<>\"'")
         guard label.isEmpty == false,
+              label == label.trimmingCharacters(in: .whitespacesAndNewlines),
+              containsASCIIControl(label) == false,
+              label.rangeOfCharacter(from: unsupportedLabelSyntax) == nil,
               destination.isEmpty == false,
-              label.rangeOfCharacter(from: markupCharacters) == nil,
-              destination.rangeOfCharacter(from: markupCharacters) == nil,
-              let destinationLocation = parseBareLocation(destination),
-              let destinationPath = destinationLocation.path.removingPercentEncoding,
-              hasURIScheme(destinationPath) == false,
-              destinationPath == label
-                || destinationPath.hasSuffix("/\(label)")
+              destination.rangeOfCharacter(from: .whitespacesAndNewlines) == nil,
+              containsASCIIControl(destination) == false,
+              destination.rangeOfCharacter(from: unsupportedDestinationSyntax) == nil
         else {
             return nil
         }
+        return (label, destination)
+    }
 
-        return ParsedReviewResult.Finding.Location(
-            path: destinationPath,
-            startLine: destinationLocation.startLine,
-            endLine: destinationLocation.endLine
-        )
+    private static func parseLocalFilePath(_ encodedPath: String) -> String? {
+        // Keep default URLComponents parsing for raw Unicode. The wrapper grammar and
+        // removingPercentEncoding reject the invalid input that default parsing repairs.
+        guard let decodedPath = encodedPath.removingPercentEncoding,
+              let components = URLComponents(string: encodedPath),
+              components.scheme == nil,
+              components.user == nil,
+              components.password == nil,
+              components.host == nil,
+              components.port == nil,
+              components.query == nil,
+              components.fragment == nil,
+              components.path == decodedPath,
+              decodedPath.isEmpty == false,
+              decodedPath.hasPrefix("//") == false,
+              containsASCIIControl(decodedPath) == false
+        else {
+            return nil
+        }
+        return decodedPath
+    }
+
+    private static func containsASCIIControl(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            scalar.value < 32 || scalar.value == 127
+        }
     }
 
     private static func hasURIScheme(_ path: String) -> Bool {

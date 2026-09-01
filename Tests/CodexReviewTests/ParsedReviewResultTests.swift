@@ -93,6 +93,31 @@ struct ParsedReviewResultTests {
 
         Decode the local file destination.
         """)
+        let unicodePath = ParsedReviewResult.parse(finalReviewText: """
+        [P2] Preserve a Unicode path — [日本語.swift](/tmp/日本語.swift:5)
+
+        Preserve the decoded local file destination.
+        """)
+        let encodedPunctuation = ParsedReviewResult.parse(finalReviewText: """
+        [P2] Preserve encoded punctuation — [Foo?#.swift](/tmp/Foo%3F%23.swift:6)
+
+        Keep encoded query and fragment characters as path data.
+        """)
+        let relativePath = ParsedReviewResult.parse(finalReviewText: """
+        [P2] Preserve a relative path — [Foo.swift](./Foo.swift:7)
+
+        Keep the relative path spelling.
+        """)
+        let colonPath = ParsedReviewResult.parse(finalReviewText: """
+        [P2] Preserve a path colon — [Foo.swift](/tmp/a:b/Foo.swift:8)
+
+        Do not treat an interior path colon as a scheme.
+        """)
+        let punctuationLabel = ParsedReviewResult.parse(finalReviewText: """
+        [P2] Preserve filename punctuation — [My_File~*.swift](/tmp/My_File~*.swift:9)
+
+        Keep literal filename punctuation when the destination matches it exactly.
+        """)
 
         #expect(singleLine.findings.first?.location == .init(
             path: "/tmp/review/AccessGate.swift",
@@ -108,6 +133,31 @@ struct ParsedReviewResultTests {
             path: "/tmp/My Project/My File.swift",
             startLine: 4,
             endLine: 4
+        ))
+        #expect(unicodePath.findings.first?.location == .init(
+            path: "/tmp/日本語.swift",
+            startLine: 5,
+            endLine: 5
+        ))
+        #expect(encodedPunctuation.findings.first?.location == .init(
+            path: "/tmp/Foo?#.swift",
+            startLine: 6,
+            endLine: 6
+        ))
+        #expect(relativePath.findings.first?.location == .init(
+            path: "./Foo.swift",
+            startLine: 7,
+            endLine: 7
+        ))
+        #expect(colonPath.findings.first?.location == .init(
+            path: "/tmp/a:b/Foo.swift",
+            startLine: 8,
+            endLine: 8
+        ))
+        #expect(punctuationLabel.findings.first?.location == .init(
+            path: "/tmp/My_File~*.swift",
+            startLine: 9,
+            endLine: 9
         ))
     }
 
@@ -127,6 +177,16 @@ struct ParsedReviewResultTests {
 
         Preserve the parser-v3 plain-path contract when the full token is not a link wrapper.
         """)
+        let pathWithSpaces = ParsedReviewResult.parse(finalReviewText: """
+        [P1] Preserve a plain path containing spaces — My Project/File.swift:18
+
+        Keep parser-v3 plain-path semantics outside a Markdown wrapper.
+        """)
+        let uriLikePath = ParsedReviewResult.parse(finalReviewText: """
+        [P1] Preserve a URI-like plain path — file:/tmp/File.swift:20
+
+        Apply the local URI gate only inside a complete Markdown wrapper.
+        """)
 
         #expect(bracketedDirectory.findings.first?.location == .init(
             path: "[generated]/Page.swift",
@@ -143,6 +203,16 @@ struct ParsedReviewResultTests {
             startLine: 16,
             endLine: 16
         ))
+        #expect(pathWithSpaces.findings.first?.location == .init(
+            path: "My Project/File.swift",
+            startLine: 18,
+            endLine: 18
+        ))
+        #expect(uriLikePath.findings.first?.location == .init(
+            path: "file:/tmp/File.swift",
+            startLine: 20,
+            endLine: 20
+        ))
     }
 
     @Test(arguments: [
@@ -151,12 +221,36 @@ struct ParsedReviewResultTests {
         "[AccessGate.swift](https://example.com/AccessGate.swift:3)",
         "[AccessGate.swift](file:///tmp/review/AccessGate.swift:3)",
         "[AccessGate.swift](file:/tmp/review/AccessGate.swift:3)",
+        "[AccessGate.swift](FiLe:/tmp/review/AccessGate.swift:3)",
         "[AccessGate.swift](mailto:AccessGate.swift:3)",
+        "[AccessGate.swift](%66ile%3A/tmp/review/AccessGate.swift:3)",
+        "[AccessGate.swift](//example.com/review/AccessGate.swift:3)",
+        "[AccessGate.swift](///tmp/review/AccessGate.swift:3)",
+        "[AccessGate.swift](%2F%2Fexample.com/review/AccessGate.swift:3)",
+        "[AccessGate.swift](/tmp/Other.swift?redirect=/AccessGate.swift:3)",
+        "[AccessGate.swift](/tmp/Other.swift#anchor/AccessGate.swift:3)",
+        "[My File.swift](/tmp/My Project/My File.swift:4)",
+        "[AccessGate.swift](/tmp/review\t/AccessGate.swift:3)",
         "[AccessGate.swift](/tmp/review%ZZ/AccessGate.swift:3)",
+        "[AccessGate.swift](/tmp/review%/AccessGate.swift:3)",
+        "[AccessGate.swift](/tmp/review%2/AccessGate.swift:3)",
+        "[AccessGate.swift](/tmp/review%FF/AccessGate.swift:3)",
+        "[AccessGate.swift](/tmp/review%00/AccessGate.swift:3)",
+        "[AccessGate.swift](/tmp/review%0A/AccessGate.swift:3)",
         "[AccessGate.swift](/tmp/review/AccessGate.swift:not-a-line)",
+        "[AccessGate.swift](/tmp/review/AccessGate.swift:0)",
+        "[AccessGate.swift](/tmp/review/AccessGate.swift:12-10)",
         "[AccessGate.swift(/tmp/review/AccessGate.swift:3)",
         "[Access[Gate.swift]](/tmp/review/AccessGate.swift:3)",
         "[AccessGate.swift](/tmp/review/AccessGate.swift:3)[Other.swift](Other.swift:4)",
+        "[](/tmp/review/AccessGate.swift:3)",
+        "[ AccessGate.swift](/tmp/review/AccessGate.swift:3)",
+        "[AccessGate.swift ](/tmp/review/AccessGate.swift:3)",
+        "[AccessGate.swift](/tmp/review/AccessGate.swift:3 \"title\")",
+        "[AccessGate.swift](</tmp/review/AccessGate.swift:3>)",
+        "[AccessGate.swift](/tmp/review/(debug)/AccessGate.swift:3)",
+        "[`AccessGate.swift`](/tmp/review/AccessGate.swift:3)",
+        "[Access&amp;Gate.swift](/tmp/review/Access%26Gate.swift:3)",
     ])
     func malformedMarkdownLinkLocationReportsUnknown(location: String) {
         let result = ParsedReviewResult.parse(finalReviewText: """
