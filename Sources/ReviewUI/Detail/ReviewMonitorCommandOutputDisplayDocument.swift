@@ -102,7 +102,15 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                     commandTextByGroupID: commandTextByGroupID
                 )
                 let hasOutput = panelSource.output != nil
-                let isActive = commandOutputIsActive(metadata, hasOutput: hasOutput)
+                let status = commandOutputStatus(metadata, hasOutput: hasOutput)
+                let isActive = status == .running
+                let actions = commandActionRows(
+                    metadata: metadata,
+                    activityID: metadata?.itemID?.nilIfEmpty
+                        ?? panelSource.anchor.groupID?.nilIfEmpty
+                        ?? blockID.rawValue,
+                    isActive: isActive
+                )
                 let title = commandOutputTitle(
                     metadata: metadata,
                     commandText: commandText,
@@ -117,7 +125,8 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                 let placeholder = commandOutputPlaceholder(
                     title: title,
                     includesActiveTimer: isActive && metadata?.startedAt != nil,
-                    includesPanelAttachment: isExpanded
+                    includesPanelAttachment: isExpanded,
+                    actions: isExpanded ? actions : []
                 )
                 let displayRange = appendText(placeholder)
                 let controlRange = commandOutputControlRange(
@@ -137,6 +146,14 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                     range: controlRange,
                     style: .commandOutputControl(keepsTrailingContent: isActive && metadata?.startedAt != nil)
                 ))
+                for actionRange in commandActionDisplayRanges(
+                    in: displayRange,
+                    title: title,
+                    includesActiveTimer: isActive && metadata?.startedAt != nil,
+                    actions: isExpanded ? actions : []
+                ) {
+                    styleRuns.append(.init(range: actionRange, style: .muted))
+                }
                 panels.append(.init(
                     blockID: blockID,
                     range: displayRange,
@@ -149,10 +166,11 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                         isExpanded: isExpanded
                     ),
                     isExpanded: isExpanded,
-                    isActive: isActive,
+                    status: status,
                     startedAt: metadata?.startedAt,
                     title: title,
-                    exitText: commandOutputResultText(for: metadata)
+                    exitText: commandOutputResultText(for: metadata, status: status),
+                    actions: actions
                 ))
             } else {
                 let displayRange = appendText(sourceString.substring(with: block.range))
@@ -414,10 +432,39 @@ enum ReviewMonitorCommandOutputDisplayDocument {
     private static func commandOutputPlaceholder(
         title: String,
         includesActiveTimer: Bool,
-        includesPanelAttachment: Bool
+        includesPanelAttachment: Bool,
+        actions: [ReviewMonitorLog.CommandOutputPanel.Action]
     ) -> String {
         let label = "\(toggleAttachmentCharacter)\(title)\(includesActiveTimer ? toggleAttachmentCharacter : "")"
-        return includesPanelAttachment ? "\(label)\n\(toggleAttachmentCharacter)" : label
+        guard includesPanelAttachment else {
+            return label
+        }
+        let actionText = actions.map(\.displayLine).joined(separator: "\n")
+        return actionText.isEmpty
+            ? "\(label)\n\(toggleAttachmentCharacter)"
+            : "\(label)\n\(actionText)\n\(toggleAttachmentCharacter)"
+    }
+
+    private static func commandActionDisplayRanges(
+        in displayRange: NSRange,
+        title: String,
+        includesActiveTimer: Bool,
+        actions: [ReviewMonitorLog.CommandOutputPanel.Action]
+    ) -> [NSRange] {
+        guard actions.isEmpty == false else {
+            return []
+        }
+        let headerLength = (
+            toggleAttachmentCharacter
+                + title
+                + (includesActiveTimer ? toggleAttachmentCharacter : "")
+        ).utf16.count
+        var location = displayRange.location + headerLength + 1
+        return actions.map { action in
+            let length = action.displayLine.utf16.count
+            defer { location += length + 1 }
+            return NSRange(location: location, length: length)
+        }
     }
 
     private static func commandOutputControlRange(
@@ -535,7 +582,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         else {
             return nil
         }
-        guard actions.allSatisfy({ $0.kind != .unknown }) else {
+        guard actions.allSatisfy({ $0.kind == .unknown }) == false else {
             return nil
         }
 
@@ -567,28 +614,85 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         return nil
     }
 
-    private static func commandOutputIsActive(
+    private static func commandActionRows(
+        metadata: ReviewLogEntry.Metadata?,
+        activityID: String,
+        isActive: Bool
+    ) -> [ReviewMonitorLog.CommandOutputPanel.Action] {
+        let actions = metadata?.commandActions ?? []
+        return actions.enumerated().map { index, action in
+            let id = ReviewMonitorLog.BlockID("activityAction:\(activityID):\(index)")
+            switch action.kind {
+            case .read:
+                let label = readActionLabel(action) ?? action.command?.nilIfEmpty ?? "file"
+                return .init(
+                    id: id,
+                    kind: .read,
+                    text: "\(isActive ? "Reading" : "Read") \(label)"
+                )
+            case .search:
+                let label = searchActionLabel(action) ?? action.command?.nilIfEmpty ?? "files"
+                return .init(
+                    id: id,
+                    kind: .search,
+                    text: "\(isActive ? "Searching" : "Searched") \(label)"
+                )
+            case .listFiles:
+                let label = listActionLabel(action) ?? action.command?.nilIfEmpty ?? "files"
+                return .init(
+                    id: id,
+                    kind: .listFiles,
+                    text: "\(isActive ? "Listing" : "Listed") \(label)"
+                )
+            case .unknown:
+                let label = action.command?.nilIfEmpty
+                    ?? action.name?.nilIfEmpty
+                    ?? action.path?.nilIfEmpty
+                    ?? action.query?.nilIfEmpty
+                    ?? "command"
+                return .init(
+                    id: id,
+                    kind: .command,
+                    text: "\(isActive ? "Running" : "Ran") \(label)"
+                )
+            }
+        }
+    }
+
+    private static func commandOutputStatus(
         _ metadata: ReviewLogEntry.Metadata?,
         hasOutput: Bool
-    ) -> Bool {
+    ) -> ReviewMonitorLog.CommandOutputPanel.Status {
+        if let exitCode = metadata?.exitCode {
+            return exitCode == 0 ? .completed : .failed
+        }
         guard let metadata else {
-            return hasOutput == false
+            return hasOutput ? .unknown(nil) : .running
         }
         let status = (metadata.commandStatus ?? metadata.status)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
+        guard let status, status.isEmpty == false else {
+            return .running
+        }
         switch status {
-        case "completed", "succeeded", "success", "failed", "failure", "errored", "declined", "canceled", "cancelled":
-            return false
+        case "completed", "succeeded", "success":
+            return .completed
+        case "failed", "failure", "errored":
+            return .failed
+        case "canceled", "cancelled":
+            return .cancelled
+        case "declined":
+            return .declined
         case "inprogress", "in_progress", "started", "running":
-            return true
+            return .running
         default:
             break
         }
         if metadata.completedAt != nil || metadata.durationMs != nil || metadata.exitCode != nil {
-            return false
+            return .completed
         }
-        return true
+        return .unknown(status)
     }
 
     private static func commandDurationText(
@@ -641,25 +745,27 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         return normalized == "command" || normalized == "command output"
     }
 
-    private static func commandOutputResultText(for metadata: ReviewLogEntry.Metadata?) -> String? {
-        if let exitCode = metadata?.exitCode {
-            return exitCode == 0 ? "Success" : "exit \(exitCode)"
-        }
-
-        let rawStatus = metadata?.commandStatus ?? metadata?.status
-        let normalizedStatus = rawStatus?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        if normalizedStatus == "succeeded" || normalizedStatus == "success" || normalizedStatus == "completed" {
+    private static func commandOutputResultText(
+        for metadata: ReviewLogEntry.Metadata?,
+        status: ReviewMonitorLog.CommandOutputPanel.Status
+    ) -> String? {
+        switch status {
+        case .running:
+            return nil
+        case .completed:
             return "Success"
-        }
-        if normalizedStatus == "failed" || normalizedStatus == "failure" || normalizedStatus == "errored" {
+        case .failed:
             if let exitCode = metadata?.exitCode {
                 return "exit \(exitCode)"
             }
             return "Failed"
+        case .cancelled:
+            return "Cancelled"
+        case .declined:
+            return "Declined"
+        case .unknown(let rawStatus):
+            return rawStatus?.nilIfEmpty
         }
-        return rawStatus?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
     }
 
     private static func commandSummaryName(_ commandText: String) -> String {

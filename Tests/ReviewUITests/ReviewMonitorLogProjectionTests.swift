@@ -1151,7 +1151,7 @@ struct ReviewMonitorLogProjectionTests {
         #expect(attachmentCount == 1)
     }
 
-    @Test func commandActionsDriveReadSearchAndListTitles() {
+    @Test func commandActionsDriveReadAndSearchTitles() {
         let readJob = CodexReviewJob.makeForTesting(
             id: "job-command-read",
             cwd: "/tmp/workspace",
@@ -1216,6 +1216,160 @@ struct ReviewMonitorLogProjectionTests {
 
         #expect(visibleReadText == "Reading ThreadItem.ts")
         #expect(visibleSearchText == "Searched files in workspace for 2s")
+    }
+
+    @Test func commandActionsRenderOrderedTypedChildRowsWithoutParsingShellText() {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-command-actions",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(
+                    kind: .command,
+                    groupID: "activity-1",
+                    text: "$ misleading shell text",
+                    metadata: .init(
+                        sourceType: "commandExecution",
+                        status: "completed",
+                        itemID: "activity-1",
+                        command: "misleading shell text",
+                        commandActions: [
+                            .init(kind: .read, command: "cat ignored", name: "App.swift", path: "/tmp/workspace/Sources/App.swift"),
+                            .init(kind: .search, command: "rg ignored", path: "/tmp/workspace/Sources", query: "needle"),
+                            .init(kind: .listFiles, command: "find ignored", path: "/tmp/workspace/Sources"),
+                            .init(kind: .unknown, command: "typed-command --flag"),
+                        ],
+                        commandStatus: "completed"
+                    )
+                ),
+            ]
+        )
+        let blockID = ReviewMonitorLog.BlockID("commandOutput:activity-1")
+        let collapsed = ReviewMonitorCommandOutputDisplayDocument.make(
+            from: document(for: job),
+            expandedBlockIDs: []
+        )
+        let expanded = ReviewMonitorCommandOutputDisplayDocument.make(
+            from: document(for: job),
+            expandedBlockIDs: [blockID]
+        )
+        let panel = expanded.commandOutputPanels.first
+
+        #expect(ReviewMonitorCommandOutputDisplayDocument.userVisibleText(
+            from: collapsed.text
+        ) == "Explored")
+        #expect(panel?.status == .completed)
+        #expect(panel?.exitText == "Success")
+        #expect(panel?.actions.map(\.id) == (0..<4).map {
+            ReviewMonitorLog.BlockID("activityAction:activity-1:\($0)")
+        })
+        #expect(panel?.actions.map(\.kind) == [.read, .search, .listFiles, .command])
+        #expect(panel?.actions.map(\.text) == [
+            "Read App.swift",
+            "Searched needle in Sources",
+            "Listed Sources",
+            "Ran typed-command --flag",
+        ])
+        #expect(ReviewMonitorCommandOutputDisplayDocument.userVisibleText(
+            from: expanded.text
+        ) == """
+        Explored
+            Read App.swift
+            Searched needle in Sources
+            Listed Sources
+            Ran typed-command --flag
+        """)
+        #expect(expanded.styleRuns.filter { $0.style == .muted }.count == 4)
+    }
+
+    @Test func commandActivityStatusesRemainDistinct() throws {
+        let cases: [(raw: String, status: ReviewMonitorLog.CommandOutputPanel.Status, result: String?, tone: ReviewMonitorLog.StatusTone)] = [
+            ("inProgress", .running, nil, .running),
+            ("completed", .completed, "Success", .success),
+            ("failed", .failed, "Failed", .failure),
+            ("canceled", .cancelled, "Cancelled", .warning),
+        ]
+
+        for testCase in cases {
+            let job = CodexReviewJob.makeForTesting(
+                id: "job-command-\(testCase.raw)",
+                cwd: "/tmp/workspace",
+                targetSummary: "Uncommitted changes",
+                status: .running,
+                summary: "Running",
+                logEntries: [
+                    .init(
+                        kind: .command,
+                        groupID: "cmd-1",
+                        text: "$ swift test",
+                        metadata: .init(
+                            sourceType: "commandExecution",
+                            status: testCase.raw,
+                            itemID: "cmd-1",
+                            command: "swift test",
+                            commandStatus: testCase.raw
+                        )
+                    ),
+                ]
+            )
+            let source = document(for: job)
+            let display = ReviewMonitorCommandOutputDisplayDocument.make(
+                from: source,
+                expandedBlockIDs: []
+            )
+            let panel = try #require(display.commandOutputPanels.first)
+
+            #expect(panel.status == testCase.status)
+            #expect(panel.exitText == testCase.result)
+            #expect(panel.isActive == (testCase.status == .running))
+            #expect(source.decorations.first?.style == .command(tone: testCase.tone))
+        }
+    }
+
+    @Test func toolLifecycleUsesOneStableItemGroup() {
+        var projection = ReviewMonitorLog.Projection()
+        let document = projection.render(entries: [
+            .init(
+                kind: .toolCall,
+                groupID: "tool-1",
+                replacesGroup: true,
+                text: "codex_review.review_read started.",
+                metadata: .init(sourceType: "mcpToolCall", title: "codex_review.review_read", status: "started")
+            ),
+            .init(
+                kind: .toolCall,
+                groupID: "tool-2",
+                replacesGroup: true,
+                text: "web.search started.",
+                metadata: .init(sourceType: "dynamicToolCall", title: "web.search", status: "started")
+            ),
+            .init(
+                kind: .toolCall,
+                groupID: "tool-1",
+                text: "Reading review job.",
+                metadata: .init(sourceType: "mcpToolCall", title: "codex_review.review_read", status: "updated")
+            ),
+            .init(
+                kind: .toolCall,
+                groupID: "tool-1",
+                replacesGroup: true,
+                text: "codex_review.review_read completed.",
+                metadata: .init(sourceType: "mcpToolCall", title: "codex_review.review_read", status: "completed")
+            ),
+        ])
+
+        #expect(document.blocks.map(\.id) == [
+            ReviewMonitorLog.BlockID("toolCall:tool-1"),
+            ReviewMonitorLog.BlockID("toolCall:tool-2"),
+        ])
+        let documentText = document.text as NSString
+        #expect(document.blocks.map { documentText.substring(with: $0.range) } == [
+            "codex_review.review_read completed.",
+            "web.search started.",
+        ])
+        #expect(document.blocks.map { $0.metadata?.status } == ["completed", "started"])
     }
 
     @Test func commandTimerAttachmentViewCountsUpFromStartDate() {

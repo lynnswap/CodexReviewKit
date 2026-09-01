@@ -723,7 +723,12 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
             return nil
         }
         let labelLength = commandOutputHeaderUTF16Length(for: panel)
-        return NSRange(location: panel.range.location + labelLength + 1, length: 1)
+        let actionLength = panel.actionDisplayText.utf16.count
+        let actionOffset = actionLength == 0 ? 0 : actionLength + 1
+        return NSRange(
+            location: panel.range.location + labelLength + 1 + actionOffset,
+            length: 1
+        )
     }
 
     private func commandOutputTimerAttachmentRange(

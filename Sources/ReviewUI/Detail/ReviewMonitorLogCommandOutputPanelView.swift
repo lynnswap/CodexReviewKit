@@ -982,6 +982,7 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
             terminalText = nextTerminalText
         }
         resultLabel.stringValue = panel.exitText ?? ""
+        resultLabel.textColor = Self.resultColor(for: panel.status)
         needsLayout = true
         return true
     }
@@ -1459,6 +1460,21 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         label.textColor = .secondaryLabelColor
         label.font = Self.labelFont()
         label.lineBreakMode = .byTruncatingTail
+    }
+
+    private static func resultColor(
+        for status: ReviewMonitorLog.CommandOutputPanel.Status
+    ) -> NSColor {
+        switch status {
+        case .running, .unknown:
+            .secondaryLabelColor
+        case .completed:
+            .systemGreen
+        case .failed:
+            .systemRed
+        case .cancelled, .declined:
+            .systemOrange
+        }
     }
 
     private func configureTerminalTextView(

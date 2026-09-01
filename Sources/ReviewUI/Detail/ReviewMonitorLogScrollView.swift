@@ -875,10 +875,12 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             hasher.combine(panel.blockID)
             combine(range, into: &hasher)
             hasher.combine(panel.commandText)
+            hasher.combine(panel.status)
             hasher.combine(panel.isActive)
             hasher.combine(panel.startedAt)
             hasher.combine(panel.title)
             hasher.combine(panel.exitText)
+            hasher.combine(panel.actions)
             hasher.combine(panel.isExpanded)
             if panel.isExpanded {
                 hasher.combine(panel.lineCount)
