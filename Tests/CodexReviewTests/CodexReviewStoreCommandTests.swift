@@ -656,7 +656,7 @@ struct CodexReviewStoreCommandTests {
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
             await backend.yield(.completed(summary: "Succeeded.", result: """
-            [P2] Add parser tests — Sources/Parser.swift:12
+            [P2] Add parser tests — `Sources/Parser.swift:12`
 
             The final review parser should be covered at the model layer.
             """))

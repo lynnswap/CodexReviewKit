@@ -47,7 +47,7 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         }
     }
 
-    public static let currentParserVersion = 2
+    public static let currentParserVersion = 3
 
     public var state: State
     public var findingCount: Int?
@@ -323,7 +323,9 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
     }
 
     private static func parseLocation(_ text: String) -> ParsedReviewResult.Finding.Location? {
-        guard let colonIndex = text.lastIndex(of: ":") else {
+        guard let text = locationText(from: text),
+              let colonIndex = text.lastIndex(of: ":")
+        else {
             return nil
         }
         let path = String(text[..<colonIndex])
@@ -344,6 +346,24 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
             startLine: startLine,
             endLine: endLine
         )
+    }
+
+    private static func locationText(from text: String) -> String? {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let startsWithBacktick = text.first == "`"
+        let endsWithBacktick = text.last == "`"
+        switch (startsWithBacktick, endsWithBacktick) {
+        case (false, false):
+            return text.contains("`") ? nil : text
+        case (true, true):
+            let content = text.dropFirst().dropLast()
+            guard content.isEmpty == false, content.contains("`") == false else {
+                return nil
+            }
+            return String(content)
+        case (true, false), (false, true):
+            return nil
+        }
     }
 
     private static func parsePriority(_ title: String) -> Int? {

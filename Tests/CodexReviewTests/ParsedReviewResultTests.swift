@@ -53,6 +53,49 @@ struct ParsedReviewResultTests {
         #expect(finding.rawText.contains("総評:") == false)
     }
 
+    @Test func currentReviewAgentFormatParsesInlineCodeLocations() {
+        let singleLine = ParsedReviewResult.parse(finalReviewText: """
+        [P0] Restore token validation — `AccessGate.swift:3`
+
+        Reject mismatched tokens.
+        """)
+        let range = ParsedReviewResult.parse(finalReviewText: """
+        [P1] Preserve terminal ownership — `Sources/Store.swift:10-12`
+
+        Keep one terminal owner.
+        """)
+
+        #expect(singleLine.findings.first?.location == .init(
+            path: "AccessGate.swift",
+            startLine: 3,
+            endLine: 3
+        ))
+        #expect(range.findings.first?.location == .init(
+            path: "Sources/Store.swift",
+            startLine: 10,
+            endLine: 12
+        ))
+    }
+
+    @Test(arguments: [
+        "`AccessGate.swift:3",
+        "AccessGate.swift:3`",
+        "``AccessGate.swift:3``",
+        "`AccessGate.swift`:3",
+        "`Access`Gate.swift:3`",
+    ])
+    func malformedInlineCodeLocationReportsUnknown(location: String) {
+        let result = ParsedReviewResult.parse(finalReviewText: """
+        [P1] Reject malformed location markup — \(location)
+
+        Do not guess the path or line.
+        """)
+
+        #expect(result.state == .unknown)
+        #expect(result.findings.isEmpty)
+        #expect(result.source == .unrecognizedFindingBlock)
+    }
+
     @Test func currentReviewAgentFormatParsesMultipleFindingsAndRanges() throws {
         let result = ParsedReviewResult.parse(finalReviewText: """
         Review summary before findings.

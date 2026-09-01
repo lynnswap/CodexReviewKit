@@ -145,7 +145,7 @@ struct ReviewHistoryDatabaseTests {
     func currentReviewAgentFindingRoundTrip() async throws {
         let (database, _) = try ReviewHistoryTestSupport.database()
         let finalReview = """
-        [P0] Restore token validation — AccessGate.swift:3
+        [P0] Restore token validation — `AccessGate.swift:3`
 
         Reject a supplied token that does not equal the expected token.
 
@@ -224,6 +224,43 @@ struct ReviewHistoryDatabaseTests {
         #expect(persisted.findings.count == 1)
         #expect(persisted.findings.first?.startLine == 3)
         #expect(persisted.findings.first?.endLine == 3)
+    }
+
+    @Test("upgrades a parser-v2 inline-code location from its canonical review")
+    func staleInlineCodeLocationUpgrade() async throws {
+        let (database, _) = try ReviewHistoryTestSupport.database()
+        let finalReview = """
+        [P0] Restore token validation — `AccessGate.swift:3`
+
+        Reject a supplied token that does not equal the expected token.
+        """
+        let staleResult = ParsedReviewResult(
+            state: .unknown,
+            findingCount: nil,
+            findings: [],
+            source: .unrecognizedFindingBlock,
+            parserVersion: 2
+        )
+        _ = try await ReviewHistoryTestSupport.record(
+            started: ReviewHistoryTestSupport.started(id: "stale-inline-location"),
+            terminal: ReviewHistoryTestSupport.completed(
+                id: "stale-inline-location",
+                finalReview: finalReview,
+                parsedResult: staleResult
+            ),
+            in: database
+        )
+
+        let restored = try #require(
+            try await database.load(retentionPolicy: .default).first
+        )
+        #expect(restored.terminal.parsedResult?.state == .hasFindings)
+        #expect(restored.terminal.parsedResult?.parserVersion == ParsedReviewResult.currentParserVersion)
+        #expect(restored.terminal.parsedResult?.findings.first?.location == .init(
+            path: "AccessGate.swift",
+            startLine: 3,
+            endLine: 3
+        ))
     }
 
     @Test("converts abandoned active rows without inventing an end time")
