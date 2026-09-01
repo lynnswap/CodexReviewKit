@@ -6066,7 +6066,7 @@ struct AppServerClientTests {
         ))
     }
 
-    @Test func backendRejectsTerminalSummaryWithoutAgentLifecycleIdentity() async throws {
+    @Test func backendAcceptsLegacyTerminalOnlySparseFinalSummary() async throws {
         let transport = FakeJSONRPCTransport()
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
         let run = CodexReviewBackendModel.Review.Run(
@@ -6084,18 +6084,26 @@ struct AppServerClientTests {
                 items: [.init(
                     type: "agentMessage",
                     id: "final",
-                    text: "Final review",
-                    phase: "final_answer"
+                    text: "Final review"
                 )],
                 itemsView: "summary"
             )
         )
 
-        #expect(try await iterator.next() == .failed(
-            ReviewIngestionError.malformedKnownEvent(
-                method: "turn/completed",
-                message: "agent message summary requires a prior lifecycle identity for final"
-            ).localizedDescription
+        #expect(try await iterator.next() == .logEntry(
+            kind: .agentMessage,
+            text: "Final review",
+            groupID: "final",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "canonicalReviewResult",
+                detail: "final_answer",
+                itemID: "final"
+            )
+        ))
+        #expect(try await iterator.next() == .completed(
+            summary: "Succeeded.",
+            result: "Final review"
         ))
     }
 

@@ -3013,10 +3013,10 @@ private actor AppServerReviewEventSession {
         }
         for item in notification.payload.turn?.items ?? [] where item.type == "agentMessage" {
             guard let recorded = agentMessageIdentitiesByItemID[item.id] else {
-                throw ReviewIngestionError.malformedKnownEvent(
-                    method: notification.method,
-                    message: "agent message summary requires a prior lifecycle identity for \(item.id)"
+                agentMessageIdentitiesByItemID[item.id] = .init(
+                    phase: item.agentMessagePhase
                 )
+                continue
             }
             _ = try resolveAgentMessageIdentity(
                 item: item,
