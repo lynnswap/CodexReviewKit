@@ -600,7 +600,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         return try await client.sendStartRequest(
             AppServerAPI.Turn.Start.Request(params: .init(
                 threadID: threadID,
-                prompt: invocation.prompt,
+                input: invocation.input,
                 cwd: request.request.cwd
             )),
             overloadRetryAdmission: { event in

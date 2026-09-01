@@ -194,7 +194,7 @@ extension ReviewUITests {
     @Test func normalReviewTurnRendersCommentaryCommandsAndFinalAnswer() async throws {
         let transport = FakeJSONRPCTransport()
         try await transport.enqueue(
-            AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"),
+            AppServerAPI.Initialize.Response(codexHome: "/tmp/Codex Review #1 (QA)"),
             for: "initialize"
         )
         try await transport.enqueue(
@@ -507,7 +507,15 @@ extension ReviewUITests {
                 from: turnStart.params
             )
             #expect(turnStartParams.cwd == "/tmp/project")
-            #expect(turnStartParams.input[0].text.contains("$review-agent"))
+            #expect(turnStartParams.input == [
+                .skill(
+                    name: "review-agent",
+                    path: "/tmp/Codex Review #1 (QA)/skills/.system/review-agent/SKILL.md"
+                ),
+                .text(
+                    "Review the current code changes (staged, unstaged, and untracked files)."
+                ),
+            ])
 
             #expect(contentPane.logCommandOutputPanelCountForTesting == 2)
             let firstCommandID = ReviewMonitorLog.BlockID("commandOutput:command-1")

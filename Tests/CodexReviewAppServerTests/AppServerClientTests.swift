@@ -1889,8 +1889,42 @@ struct AppServerClientTests {
         #expect(input[0]["text"] as? String == "Review main")
     }
 
+    @Test func turnStartEncodesExactStructuredSkillPathBeforeInstructions() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(
+            AppServerAPI.Turn.Start.Response(turnID: "turn-1"),
+            for: "turn/start"
+        )
+        let client = AppServerClient(transport: transport)
+        let skillPath = "/tmp/Codex Review #1 (QA)/skills/.system/review-agent/SKILL.md"
+
+        let _: AppServerAPI.Turn.Start.Response = try await client.send(
+            AppServerAPI.Turn.Start.Request(params: .init(
+                threadID: "thread-1",
+                input: [
+                    .skill(name: "review-agent", path: skillPath),
+                    .text("Review main"),
+                ],
+                cwd: "/tmp/project"
+            ))
+        )
+
+        let request = try #require(await transport.recordedRequests().last)
+        let object = try #require(JSONSerialization.jsonObject(with: request.params) as? [String: Any])
+        let input = try #require(object["input"] as? [[String: Any]])
+        #expect(input.count == 2)
+        #expect(input[0]["type"] as? String == "skill")
+        #expect(input[0]["name"] as? String == "review-agent")
+        #expect(input[0]["path"] as? String == skillPath)
+        #expect(input[1]["type"] as? String == "text")
+        #expect(input[1]["text"] as? String == "Review main")
+    }
+
     @Test func reviewTurnInvocationRendersEveryTypedTargetThroughOneSkillReference() throws {
-        let skillReference = "Use [$review-agent](/tmp/codex/skills/.system/review-agent/SKILL.md) for this review."
+        let skill = AppServerAPI.Turn.Start.UserInput.skill(
+            name: "review-agent",
+            path: "/tmp/codex/skills/.system/review-agent/SKILL.md"
+        )
         let cases: [(CodexReviewAPI.Target, String)] = [
             (
                 .uncommittedChanges,
@@ -1915,8 +1949,7 @@ struct AppServerClientTests {
                 codexHome: "/tmp/codex",
                 target: target
             )
-            #expect(invocation.prompt == "\(skillReference)\n\n\(instruction)")
-            #expect(invocation.prompt.components(separatedBy: "$review-agent").count == 2)
+            #expect(invocation.input == [skill, .text(instruction)])
         }
     }
 
@@ -1926,7 +1959,6 @@ struct AppServerClientTests {
         "relative/codex",
         "/tmp/codex ",
         "/tmp/codex\ninjected",
-        "/tmp/Codex Review (QA)",
     ] as [String?])
     func reviewTurnInvocationRejectsInvalidServerCodexHome(codexHome: String?) {
         #expect(throws: ReviewAttemptContractFailure.self) {
@@ -1937,14 +1969,15 @@ struct AppServerClientTests {
         }
     }
 
-    @Test func reviewTurnInvocationPreservesMentionParserSafeCodexHomeCharacters() throws {
+    @Test func reviewTurnInvocationPreservesSpecialCharactersInStructuredSkillPath() throws {
         let invocation = try AppServerReviewTurnInvocation(
-            codexHome: "/tmp/Codex Review #1",
+            codexHome: "/tmp/Codex Review #1 (QA)",
             target: .uncommittedChanges
         )
 
-        #expect(invocation.prompt.hasPrefix(
-            "Use [$review-agent](/tmp/Codex Review #1/skills/.system/review-agent/SKILL.md) "
+        #expect(invocation.input.first == .skill(
+            name: "review-agent",
+            path: "/tmp/Codex Review #1 (QA)/skills/.system/review-agent/SKILL.md"
         ))
     }
 
@@ -2005,12 +2038,13 @@ struct AppServerClientTests {
         )
         #expect(turnStartParams.threadID == "thread-1")
         #expect(turnStartParams.cwd == "/tmp/project")
-        #expect(turnStartParams.input.count == 1)
-        #expect(turnStartParams.input[0].text == """
-        Use [$review-agent](/tmp/codex/skills/.system/review-agent/SKILL.md) for this review.
-
-        Review the current code changes (staged, unstaged, and untracked files).
-        """)
+        #expect(turnStartParams.input == [
+            .skill(
+                name: "review-agent",
+                path: "/tmp/codex/skills/.system/review-agent/SKILL.md"
+            ),
+            .text("Review the current code changes (staged, unstaged, and untracked files)."),
+        ])
     }
 
     @Test func backendDoesNotWriteThreadStartAfterQueuedCancellation() async throws {
@@ -3767,10 +3801,13 @@ struct AppServerClientTests {
         let restartParams = try JSONDecoder().decode(AppServerAPI.Turn.Start.Params.self, from: restart.params)
         #expect(restartParams.threadID == "thread-1")
         #expect(restartParams.cwd == "/tmp/project")
-        #expect(restartParams.input.count == 1)
-        #expect(restartParams.input[0].text.hasSuffix(
-            "Review the code changes against the base branch \"main\"."
-        ))
+        #expect(restartParams.input == [
+            .skill(
+                name: "review-agent",
+                path: "/tmp/codex/skills/.system/review-agent/SKILL.md"
+            ),
+            .text("Review the code changes against the base branch \"main\"."),
+        ])
     }
 
     @Test func recoveredAttemptUsesFreshControlForTypedCancellation() async throws {
@@ -3900,9 +3937,13 @@ struct AppServerClientTests {
         let restartParams = try JSONDecoder().decode(AppServerAPI.Turn.Start.Params.self, from: restart.params)
         #expect(restartParams.threadID == "parent-thread")
         #expect(restartParams.cwd == "/tmp/project")
-        #expect(restartParams.input[0].text.hasSuffix(
-            "Review the code changes against the base branch \"main\"."
-        ))
+        #expect(restartParams.input == [
+            .skill(
+                name: "review-agent",
+                path: "/tmp/codex/skills/.system/review-agent/SKILL.md"
+            ),
+            .text("Review the code changes against the base branch \"main\"."),
+        ])
     }
 
     @Test func backendRecoveryRollsBackTheRunThread() async throws {
@@ -3968,9 +4009,13 @@ struct AppServerClientTests {
         let restartParams = try JSONDecoder().decode(AppServerAPI.Turn.Start.Params.self, from: restart.params)
         #expect(restartParams.threadID == "parent-thread")
         #expect(restartParams.cwd == "/tmp/project")
-        #expect(restartParams.input[0].text.hasSuffix(
-            "Review the code changes against the base branch \"main\"."
-        ))
+        #expect(restartParams.input == [
+            .skill(
+                name: "review-agent",
+                path: "/tmp/codex/skills/.system/review-agent/SKILL.md"
+            ),
+            .text("Review the code changes against the base branch \"main\"."),
+        ])
     }
 
     @Test func backendRecoverReviewDefaultsMissingReviewThreadToActiveThread() async throws {
