@@ -161,6 +161,36 @@ struct ParsedReviewResultTests {
         """)
     }
 
+    @Test func indentedPriorityExampleAfterBlankLineIsNotPromotedToAFinding() throws {
+        let result = ParsedReviewResult.parse(finalReviewText: """
+        [P1] Document priority semantics — Sources/Parser.swift:10
+
+        Describe the top-level finding.
+
+          - [P2] Example only — Docs/Guide.md:20
+        """)
+
+        #expect(result.state == .hasFindings)
+        #expect(result.findingCount == 1)
+        #expect(result.findings.first?.title == "[P1] Document priority semantics")
+    }
+
+    @Test func quotedLegacyBlockAfterCurrentFindingDoesNotReplaceCurrentFormat() throws {
+        let result = ParsedReviewResult.parse(finalReviewText: """
+        [P1] Keep the current finding — Sources/Parser.swift:10
+
+        Parse this finding before the assessment.
+
+        Full review comments:
+        - [P3] Quoted legacy example — Docs/Guide.md:20-22
+          This block documents the former output contract.
+        """)
+
+        #expect(result.state == .hasFindings)
+        #expect(result.findingCount == 1)
+        #expect(result.findings.first?.title == "[P1] Keep the current finding")
+    }
+
     @Test func malformedFindingBlockReportsUnknown() {
         let result = ParsedReviewResult.parse(finalReviewText: """
         Review comment:

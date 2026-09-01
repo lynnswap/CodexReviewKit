@@ -86,13 +86,18 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         }
 
         let lines = text.components(separatedBy: .newlines)
-        if let headerIndex = lines.firstIndex(where: isFindingHeader) {
-            return parseLegacyFindings(in: lines.dropFirst(headerIndex + 1))
+        let legacyHeaderIndex = lines.indices.first {
+            isLegacyFindingHeader(in: lines, at: $0)
         }
-
         let currentFindingLines = lines.indices.filter {
             isCurrentFindingCandidate(in: lines, at: $0)
         }
+        if let headerIndex = legacyHeaderIndex,
+           currentFindingLines.first.map({ headerIndex < $0 }) != false
+        {
+            return parseLegacyFindings(in: lines.dropFirst(headerIndex + 1))
+        }
+
         if currentFindingLines.isEmpty == false {
             return parseCurrentFindings(in: lines, at: currentFindingLines)
         }
@@ -232,6 +237,20 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         return trimmed == "Review comment:" || trimmed == "Full review comments:"
     }
 
+    private static func isLegacyFindingHeader(
+        in lines: [String],
+        at index: Int
+    ) -> Bool {
+        guard isFindingHeader(lines[index]) else {
+            return false
+        }
+        return lines[(index + 1)...].first { line in
+            line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        }.flatMap {
+            parseFindingLine($0, requiresBullet: true, requiresPriority: false)
+        } != nil
+    }
+
     private static func isExplicitNoFindings(_ lines: [String]) -> Bool {
         guard let firstLine = lines.lazy
             .map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) })
@@ -251,13 +270,16 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         in lines: [String],
         at index: Int
     ) -> Bool {
+        guard lines[index].first?.isWhitespace != true else {
+            return false
+        }
         if index > lines.startIndex,
            lines[index - 1].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         {
             return false
         }
-        let trimmed = lines[index].trimmingCharacters(in: .whitespaces)
-        let content = trimmed.hasPrefix("- ") ? String(trimmed.dropFirst(2)) : trimmed
+        let line = lines[index]
+        let content = line.hasPrefix("- ") ? String(line.dropFirst(2)) : line
         return parsePriority(content) != nil
     }
 
