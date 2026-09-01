@@ -2637,21 +2637,6 @@ private actor AppServerReviewEventSession {
                 return
             }
         }
-        if shouldCloseActiveCommandsBeforeEvents(
-            notification: notification,
-            decoded: decoded
-        ) {
-            if await flushPendingStreamedLog() {
-                return
-            }
-            let closedItemIDs = Set(commandLifecycleByItemID.keys)
-            if await closeActiveCommandsForProgressBoundary() {
-                return
-            }
-            for itemID in closedItemIDs {
-                decodedCommandLifecycleByItemID.removeValue(forKey: itemID)
-            }
-        }
         commandLifecycleByItemID = decodedCommandLifecycleByItemID
         agentMessageIdentitiesByItemID = decodedAgentMessageIdentitiesByItemID
 
@@ -3086,58 +3071,6 @@ private actor AppServerReviewEventSession {
             recordReviewEvent(event)
         }
         await mailbox.finish()
-    }
-
-    private func shouldCloseActiveCommandsBeforeEvents(
-        notification: AppServerRoutedReviewNotification,
-        decoded: DecodedReviewNotification
-    ) -> Bool {
-        guard commandLifecycleByItemID.isEmpty == false else {
-            return false
-        }
-        let startsNewCommand = notification.method == "item/started"
-            && notification.payload.item?.type == "commandExecution"
-        let reachesModelProgress = decoded.events.contains(where: Self.isCommandProgressBoundary(_:))
-        guard startsNewCommand || reachesModelProgress else {
-            return false
-        }
-
-        switch notification.method {
-        case "item/commandExecution/outputDelta",
-            "item/commandExecution/terminalInteraction":
-            return false
-        case "item/completed" where notification.payload.item?.type == "commandExecution":
-            return false
-        case "turn/completed", "thread/closed":
-            return false
-        default:
-            return true
-        }
-    }
-
-    private static func isCommandProgressBoundary(_ event: CodexReviewBackendModel.Review.Event) -> Bool {
-        switch event {
-        case .started, .message, .messageDelta, .agentMessageDelta, .log:
-            return true
-        case .logEntry(let kind, _, _, _, _, _):
-            return kind != .command && kind != .commandOutput
-        case .completed, .failed, .cancelled:
-            return false
-        }
-    }
-
-    private func closeActiveCommandsForProgressBoundary() async -> Bool {
-        guard commandLifecycleByItemID.isEmpty == false else {
-            return false
-        }
-        let status = cancellationRequests.hasIntent ? "canceled" : "completed"
-        for commandEvent in commandLifecycleByItemID.closeActiveCommands(status: status) {
-            if await emit(commandEvent) {
-                return true
-            }
-        }
-        commandLifecycleByItemID.removeAll(keepingCapacity: true)
-        return false
     }
 
     private func closeActiveCommandsForReviewExit() async -> Bool {
@@ -3682,7 +3615,7 @@ private func normalizeReviewNotification(
                 kind: .toolCall,
                 text: "File changes updated.",
                 groupID: $0,
-                replacesGroup: false,
+                replacesGroup: true,
                 metadata: .init(sourceType: "fileChange", title: "File changes", status: "updated")
             )]
         } ?? []
@@ -3864,7 +3797,7 @@ private extension TurnNotificationPayload {
             kind: kind,
             text: message,
             groupID: itemID,
-            replacesGroup: false,
+            replacesGroup: true,
             metadata: metadata
         )
     }

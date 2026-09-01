@@ -231,11 +231,15 @@ extension ReviewUITests {
                 snapshot.job("job-1")?.activeRun?.turnID == "turn-review"
             } != nil)
             let job = try #require(store.job(id: "job-1"))
-            let harness = makeWindowHarness(store: store)
+            let harness = makeWindowHarness(
+                store: store,
+                contentSize: NSSize(width: 860, height: 900)
+            )
             defer { harness.window.close() }
             let contentPane = harness.viewController.transportViewControllerForTesting
             harness.viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
             _ = try await awaitTransportRender(contentPane)
+            contentPane.setLogReduceMotionForTesting(true)
 
             try await transport.emitServerNotification(
                 method: "item/started",
@@ -330,7 +334,52 @@ extension ReviewUITests {
                 params: ReviewUIV2ItemNotification(
                     threadID: "thread-review",
                     turnID: "turn-review",
-                    item: .command(id: "command-1", status: "inProgress")
+                    item: .command(
+                        id: "command-1",
+                        status: "inProgress",
+                        commandActions: [
+                            ["type": "read", "command": "cat Sources/App.swift", "name": "App.swift", "path": "Sources/App.swift"],
+                            ["type": "search", "command": "rg lifecycle", "query": "lifecycle", "path": "Sources"],
+                            ["type": "listFiles", "command": "rg --files Sources", "path": "Sources"],
+                            ["type": "unknown", "command": "swift test"],
+                        ]
+                    )
+                )
+            )
+            try await transport.emitServerNotification(
+                method: "item/started",
+                params: ReviewUIV2ItemNotification(
+                    threadID: "thread-review",
+                    turnID: "turn-review",
+                    item: .init(
+                        type: "mcpToolCall",
+                        id: "tool-1",
+                        status: "inProgress",
+                        arguments: [:],
+                        server: "codex_review",
+                        tool: "review_read"
+                    )
+                )
+            )
+            try await transport.emitServerNotification(
+                method: "item/started",
+                params: ReviewUIV2ItemNotification(
+                    threadID: "thread-review",
+                    turnID: "turn-review",
+                    item: .command(
+                        id: "command-2",
+                        status: "inProgress",
+                        command: "git diff"
+                    )
+                )
+            )
+            try await transport.emitServerNotification(
+                method: "item/mcpToolCall/progress",
+                params: ReviewUIV2MessageNotification(
+                    threadID: "thread-review",
+                    turnID: "turn-review",
+                    itemID: "tool-1",
+                    message: "Reading review job."
                 )
             )
             try await transport.emitServerNotification(
@@ -340,6 +389,44 @@ extension ReviewUITests {
                     turnID: "turn-review",
                     itemID: "command-1",
                     delta: "All tests passed."
+                )
+            )
+            try await transport.emitServerNotification(
+                method: "item/completed",
+                params: ReviewUIV2ItemNotification(
+                    threadID: "thread-review",
+                    turnID: "turn-review",
+                    item: .init(
+                        type: "mcpToolCall",
+                        id: "tool-1",
+                        status: "completed",
+                        arguments: [:],
+                        server: "codex_review",
+                        tool: "review_read",
+                        result: "Review state loaded."
+                    )
+                )
+            )
+            try await transport.emitServerNotification(
+                method: "item/commandExecution/outputDelta",
+                params: ReviewUIV2DeltaNotification(
+                    threadID: "thread-review",
+                    turnID: "turn-review",
+                    itemID: "command-2",
+                    delta: "README.md | 1 +"
+                )
+            )
+            try await transport.emitServerNotification(
+                method: "item/completed",
+                params: ReviewUIV2ItemNotification(
+                    threadID: "thread-review",
+                    turnID: "turn-review",
+                    item: .command(
+                        id: "command-2",
+                        status: "failed",
+                        command: "git diff",
+                        exitCode: 1
+                    )
                 )
             )
             try await transport.emitServerNotification(
@@ -390,7 +477,10 @@ extension ReviewUITests {
             #expect(result.core.output.lastAgentMessage == "No findings.")
             #expect(rendered.log.contains("Inspecting repository instructions and diff."))
             #expect(rendered.log.contains("Analyzing review contracts."))
-            #expect(rendered.log.contains("Ran swift test"))
+            #expect(rendered.log.contains("Explored"))
+            #expect(rendered.log.contains("Ran git diff"))
+            #expect(rendered.log.contains("codex_review.review_read completed."))
+            #expect(rendered.log.contains("codex_review.review_read started.") == false)
             #expect(rendered.log.contains("No findings."))
             #expect(job.logEntries.contains {
                 $0.kind == .commandOutput && $0.text.contains("All tests passed.")
@@ -419,11 +509,37 @@ extension ReviewUITests {
             #expect(turnStartParams.cwd == "/tmp/project")
             #expect(turnStartParams.input[0].text.contains("$review-agent"))
 
-            #expect(contentPane.logCommandOutputPanelCountForTesting == 1)
-            #expect(contentPane.clickFirstLogCommandOutputPanelHeaderForTesting())
+            #expect(contentPane.logCommandOutputPanelCountForTesting == 2)
+            let firstCommandID = ReviewMonitorLog.BlockID("commandOutput:command-1")
+            let secondCommandID = ReviewMonitorLog.BlockID("commandOutput:command-2")
+            #expect(contentPane.clickLogCommandOutputPanelHeaderForTesting(blockID: firstCommandID))
+            #expect(contentPane.clickLogCommandOutputPanelHeaderForTesting(blockID: secondCommandID))
             await awaitNativeLayoutTurn()
-            #expect(contentPane.logCommandOutputPanelTerminalTextForTesting?
+            #expect(contentPane.logCommandOutputPanelTerminalTextForTesting(blockID: firstCommandID)?
                 .contains("All tests passed.") == true)
+            #expect(contentPane.logCommandOutputPanelTerminalTextForTesting(blockID: firstCommandID)?
+                .contains("README.md | 1 +") == false)
+            #expect(contentPane.logCommandOutputPanelTerminalTextForTesting(blockID: secondCommandID)?
+                .contains("README.md | 1 +") == true)
+            #expect(contentPane.logCommandOutputPanelTerminalTextForTesting(blockID: secondCommandID)?
+                .contains("All tests passed.") == false)
+            let expandedLog = contentPane.displayedLogForTesting
+            for child in [
+                "Read App.swift",
+                "Searched lifecycle in Sources",
+                "Listed Sources",
+                "Ran swift test",
+            ] {
+                #expect(expandedLog.contains(child))
+                #expect(contentPane.logAccessibilityValueForTesting?.contains(child) == true)
+                #expect(contentPane.logFindStringForTesting.contains(child))
+            }
+            let childSelection = (contentPane.logFindStringForTesting as NSString)
+                .range(of: "Read App.swift")
+            try #require(childSelection.location != NSNotFound)
+            contentPane.setSelectedLogRangeForTesting(childSelection)
+            #expect(contentPane.logSelectedTextForTesting == "Read App.swift")
+            #expect(contentPane.logWordGlowCountForTesting == 0)
         }
         #expect(await transport.isClosedForTesting())
         #expect(await backend.reviewEventSessionCountForTesting() == 0)
@@ -918,6 +1034,12 @@ private struct ReviewUIV2ItemNotification: Encodable, Sendable {
         var commandActions: [[String: String]]?
         var aggregatedOutput: String?
         var exitCode: Int?
+        var arguments: [String: String]?
+        var server: String?
+        var namespace: String?
+        var tool: String?
+        var result: String?
+        var error: String?
         var phase: String?
         var summary: [String]?
         var content: [String]?
@@ -934,6 +1056,12 @@ private struct ReviewUIV2ItemNotification: Encodable, Sendable {
             commandActions: [[String: String]]? = nil,
             aggregatedOutput: String? = nil,
             exitCode: Int? = nil,
+            arguments: [String: String]? = nil,
+            server: String? = nil,
+            namespace: String? = nil,
+            tool: String? = nil,
+            result: String? = nil,
+            error: String? = nil,
             phase: String? = nil,
             summary: [String]? = nil,
             content: [String]? = nil
@@ -949,6 +1077,12 @@ private struct ReviewUIV2ItemNotification: Encodable, Sendable {
             self.commandActions = commandActions
             self.aggregatedOutput = aggregatedOutput
             self.exitCode = exitCode
+            self.arguments = arguments
+            self.server = server
+            self.namespace = namespace
+            self.tool = tool
+            self.result = result
+            self.error = error
             self.phase = phase
             self.summary = summary
             self.content = content
@@ -957,16 +1091,18 @@ private struct ReviewUIV2ItemNotification: Encodable, Sendable {
         static func command(
             id: String,
             status: String,
+            command: String = "swift test",
+            commandActions: [[String: String]] = [],
             exitCode: Int? = nil
         ) -> Self {
             .init(
                 type: "commandExecution",
                 id: id,
-                command: "swift test",
+                command: command,
                 cwd: "/tmp/project",
                 source: "agent",
                 status: status,
-                commandActions: [],
+                commandActions: commandActions,
                 aggregatedOutput: "",
                 exitCode: exitCode
             )
@@ -989,6 +1125,20 @@ private struct ReviewUIV2DeltaNotification: Encodable, Sendable {
         case delta
         case summaryIndex
         case contentIndex
+    }
+}
+
+private struct ReviewUIV2MessageNotification: Encodable, Sendable {
+    var threadID: String
+    var turnID: String
+    var itemID: String
+    var message: String
+
+    enum CodingKeys: String, CodingKey {
+        case threadID = "threadId"
+        case turnID = "turnId"
+        case itemID = "itemId"
+        case message
     }
 }
 

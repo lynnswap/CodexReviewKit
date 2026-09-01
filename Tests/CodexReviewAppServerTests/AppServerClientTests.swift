@@ -5364,6 +5364,15 @@ struct AppServerClientTests {
             )
         )
         try await transport.emitServerNotification(
+            method: "item/mcpToolCall/progress",
+            params: TestMessageNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                itemID: "tool-1",
+                message: "Still reading"
+            )
+        )
+        try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
                 lifecycle: .completed,
@@ -5566,7 +5575,14 @@ struct AppServerClientTests {
             kind: .toolCall,
             text: "Reading review job",
             groupID: "tool-1",
-            replacesGroup: false,
+            replacesGroup: true,
+            metadata: .init(sourceType: "mcpToolCall", title: "Tool progress")
+        ))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .toolCall,
+            text: "Still reading",
+            groupID: "tool-1",
+            replacesGroup: true,
             metadata: .init(sourceType: "mcpToolCall", title: "Tool progress")
         ))
         #expect(try await iterator.next() == .logEntry(
@@ -6126,7 +6142,10 @@ struct AppServerClientTests {
                     id: "cmd-1",
                     command: "cat Sources/ThreadItem.ts",
                     commandActions: [
-                        .read(command: "cat Sources/ThreadItem.ts", name: "ThreadItem.ts", path: "Sources/ThreadItem.ts")
+                        .read(command: "cat Sources/ThreadItem.ts", name: "ThreadItem.ts", path: "Sources/ThreadItem.ts"),
+                        .search(command: "rg lifecycle", query: "lifecycle", path: "Sources"),
+                        .listFiles(command: "rg --files Sources", path: "Sources"),
+                        .unknown(command: "custom-action --typed"),
                     ],
                     status: "inProgress"
                 ),
@@ -6152,12 +6171,17 @@ struct AppServerClientTests {
 
         let startedAt = Date(timeIntervalSince1970: TimeInterval(startedAtMs) / 1_000)
         let completedAt = Date(timeIntervalSince1970: TimeInterval(completedAtMs) / 1_000)
-        let action = ReviewLogEntry.Metadata.CommandAction(
-            kind: .read,
-            command: "cat Sources/ThreadItem.ts",
-            name: "ThreadItem.ts",
-            path: "Sources/ThreadItem.ts"
-        )
+        let actions: [ReviewLogEntry.Metadata.CommandAction] = [
+            .init(
+                kind: .read,
+                command: "cat Sources/ThreadItem.ts",
+                name: "ThreadItem.ts",
+                path: "Sources/ThreadItem.ts"
+            ),
+            .init(kind: .search, command: "rg lifecycle", path: "Sources", query: "lifecycle"),
+            .init(kind: .listFiles, command: "rg --files Sources", path: "Sources"),
+            .init(kind: .unknown, command: "custom-action --typed"),
+        ]
         var iterator = events.makeAsyncIterator()
         #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
         #expect(try await iterator.next() == .logEntry(
@@ -6171,7 +6195,7 @@ struct AppServerClientTests {
                 itemID: "cmd-1",
                 command: "cat Sources/ThreadItem.ts",
                 startedAt: startedAt,
-                commandActions: [action],
+                commandActions: actions,
                 commandStatus: "inProgress"
             )
         ))
@@ -6189,7 +6213,7 @@ struct AppServerClientTests {
                 startedAt: startedAt,
                 completedAt: completedAt,
                 durationMs: 3_000,
-                commandActions: [action],
+                commandActions: actions,
                 commandStatus: "completed"
             )
         ))
@@ -6207,7 +6231,7 @@ struct AppServerClientTests {
                 startedAt: startedAt,
                 completedAt: completedAt,
                 durationMs: 3_000,
-                commandActions: [action],
+                commandActions: actions,
                 commandStatus: "completed"
             )
         ))
@@ -6768,7 +6792,7 @@ struct AppServerClientTests {
         #expect(try await iterator.next() == nil)
     }
 
-    @Test func backendClosesMissingCommandCompletionBeforeFollowingReasoning() async throws {
+    @Test func backendKeepsMissingCommandActiveAcrossReasoningUntilReviewExit() async throws {
         let run = CodexReviewBackendModel.Review.Run(threadID: "thread-1", turnID: "turn-1")
         let transport = FakeJSONRPCTransport()
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
@@ -6843,9 +6867,15 @@ struct AppServerClientTests {
             replacesGroup: false,
             metadata: .init(sourceType: "commandExecution", title: "Command output", itemID: "cmd-1")
         ))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .reasoningSummary,
+            text: "Inspecting diffs",
+            groupID: "reasoning-1:summary:0",
+            replacesGroup: false
+        ))
         guard case .logEntry(let commandKind, _, let commandGroupID, let commandReplacesGroup, let commandMetadata, _) = try await iterator.next()
         else {
-            Issue.record("Expected following reasoning to close the active command execution.")
+            Issue.record("Expected review exit to close the active command execution.")
             return
         }
         #expect(commandKind == .command)
@@ -6857,7 +6887,7 @@ struct AppServerClientTests {
         #expect(commandMetadata?.completedAt != nil)
         guard case .logEntry(let outputKind, let outputText, let outputGroupID, let outputReplacesGroup, let outputMetadata, _) = try await iterator.next()
         else {
-            Issue.record("Expected following reasoning to close the active command output.")
+            Issue.record("Expected review exit to close the active command output.")
             return
         }
         #expect(outputKind == .commandOutput)
@@ -6867,12 +6897,6 @@ struct AppServerClientTests {
         #expect(outputMetadata?.status == "completed")
         #expect(outputMetadata?.itemID == "cmd-1")
         #expect(outputMetadata?.completedAt != nil)
-        #expect(try await iterator.next() == .logEntry(
-            kind: .reasoningSummary,
-            text: "Inspecting diffs",
-            groupID: "reasoning-1:summary:0",
-            replacesGroup: false
-        ))
         #expect(try await iterator.next() == .logEntry(
             kind: .agentMessage,
             text: "final review text",
@@ -6991,6 +7015,10 @@ struct AppServerClientTests {
             params: TestMessageNotification(threadID: "thread-1", turnID: "turn-1", itemID: "file-1", message: "patch")
         )
         try await transport.emitServerNotification(
+            method: "item/fileChange/patchUpdated",
+            params: TestMessageNotification(threadID: "thread-1", turnID: "turn-1", itemID: "file-1", message: "new patch")
+        )
+        try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
                 lifecycle: .completed,
@@ -7042,7 +7070,14 @@ struct AppServerClientTests {
             kind: .toolCall,
             text: "File changes updated.",
             groupID: "file-1",
-            replacesGroup: false,
+            replacesGroup: true,
+            metadata: .init(sourceType: "fileChange", title: "File changes", status: "updated")
+        ))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .toolCall,
+            text: "File changes updated.",
+            groupID: "file-1",
+            replacesGroup: true,
             metadata: .init(sourceType: "fileChange", title: "File changes", status: "updated")
         ))
         #expect(try await iterator.next() == .logEntry(
@@ -8378,6 +8413,14 @@ private struct TestCommandAction: Encodable, Sendable {
 
     static func search(command: String, query: String?, path: String?) -> Self {
         .init(type: "search", command: command, path: path, query: query)
+    }
+
+    static func listFiles(command: String, path: String) -> Self {
+        .init(type: "listFiles", command: command, path: path)
+    }
+
+    static func unknown(command: String) -> Self {
+        .init(type: "unknown", command: command)
     }
 }
 

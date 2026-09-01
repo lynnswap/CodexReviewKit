@@ -111,6 +111,32 @@ struct Decoration: Equatable, Sendable {
 }
 
 struct CommandOutputPanel: Equatable, Sendable {
+    struct Action: Hashable, Sendable {
+        enum Kind: Hashable, Sendable {
+            case read
+            case search
+            case listFiles
+            case command
+        }
+
+        var id: ReviewMonitorLog.BlockID
+        var kind: Kind
+        var text: String
+
+        var displayLine: String {
+            "    \(text)"
+        }
+    }
+
+    enum Status: Hashable, Sendable {
+        case running
+        case completed
+        case failed
+        case cancelled
+        case declined
+        case unknown(String?)
+    }
+
     var blockID: ReviewMonitorLog.BlockID
     var range: NSRange
     var commandText: String
@@ -118,10 +144,19 @@ struct CommandOutputPanel: Equatable, Sendable {
     var outputSourceRange: NSRange? = nil
     var lineCount: Int
     var isExpanded: Bool
-    var isActive: Bool
+    var status: Status
     var startedAt: Date?
     var title: String
     var exitText: String?
+    var actions: [Action]
+
+    var isActive: Bool {
+        status == .running
+    }
+
+    var actionDisplayText: String {
+        actions.map(\.displayLine).joined(separator: "\n")
+    }
 }
 
 struct Append: Equatable, Sendable {
@@ -451,9 +486,9 @@ private enum ReviewMonitorLogStyler {
             return .running
         case "completed", "complete", "succeeded", "success", "passed", "applied":
             return .success
-        case "failed", "failure", "errored", "error", "cancelled", "canceled":
+        case "failed", "failure", "errored", "error":
             return .failure
-        case "warning", "warn", "updated":
+        case "cancelled", "canceled", "declined", "warning", "warn", "updated":
             return .warning
         default:
             return .neutral
@@ -1747,9 +1782,9 @@ struct Projection: Sendable {
         }
 
         switch entry.kind {
-        case .agentMessage, .command, .commandOutput, .plan, .reasoning, .reasoningSummary, .rawReasoning, .contextCompaction:
+        case .agentMessage, .command, .commandOutput, .plan, .reasoning, .reasoningSummary, .rawReasoning, .toolCall, .contextCompaction:
             return GroupKey(kind: entry.kind, audience: entry.audience, groupID: groupID)
-        case .todoList, .toolCall, .diagnostic, .error, .progress, .event:
+        case .todoList, .diagnostic, .error, .progress, .event:
             return nil
         }
     }
