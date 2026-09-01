@@ -47,7 +47,7 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         }
     }
 
-    public static let currentParserVersion = 3
+    public static let currentParserVersion = 4
 
     public var state: State
     public var findingCount: Int?
@@ -323,8 +323,21 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
     }
 
     private static func parseLocation(_ text: String) -> ParsedReviewResult.Finding.Location? {
-        guard let text = locationText(from: text),
-              let colonIndex = text.lastIndex(of: ":")
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if isMarkdownLinkCandidate(text) {
+            return parseMarkdownLinkLocation(text)
+        }
+
+        guard let text = inlineCodeOrPlainLocationText(from: text) else {
+            return nil
+        }
+        return parseBareLocation(text)
+    }
+
+    private static func parseBareLocation(
+        _ text: String
+    ) -> ParsedReviewResult.Finding.Location? {
+        guard let colonIndex = text.lastIndex(of: ":")
         else {
             return nil
         }
@@ -348,7 +361,7 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         )
     }
 
-    private static func locationText(from text: String) -> String? {
+    private static func inlineCodeOrPlainLocationText(from text: String) -> String? {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let startsWithBacktick = text.first == "`"
         let endsWithBacktick = text.last == "`"
@@ -364,6 +377,44 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         case (true, false), (false, true):
             return nil
         }
+    }
+
+    private static func isMarkdownLinkCandidate(_ text: String) -> Bool {
+        text.first == "[" || text.contains("](")
+    }
+
+    private static func parseMarkdownLinkLocation(
+        _ text: String
+    ) -> ParsedReviewResult.Finding.Location? {
+        guard text.first == "[",
+              text.last == ")",
+              let delimiterRange = text.range(of: "]("),
+              text[delimiterRange.upperBound..<text.index(before: text.endIndex)]
+                .contains("](") == false
+        else {
+            return nil
+        }
+
+        let labelStart = text.index(after: text.startIndex)
+        let label = String(text[labelStart..<delimiterRange.lowerBound])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let destination = String(
+            text[delimiterRange.upperBound..<text.index(before: text.endIndex)]
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        let markupCharacters = CharacterSet(charactersIn: "[]()`")
+        guard label.isEmpty == false,
+              destination.isEmpty == false,
+              label.rangeOfCharacter(from: markupCharacters) == nil,
+              destination.rangeOfCharacter(from: markupCharacters) == nil,
+              let destinationLocation = parseBareLocation(destination),
+              destinationLocation.path.contains("://") == false,
+              destinationLocation.path == label
+                || destinationLocation.path.hasSuffix("/\(label)")
+        else {
+            return nil
+        }
+
+        return destinationLocation
     }
 
     private static func parsePriority(_ title: String) -> Int? {

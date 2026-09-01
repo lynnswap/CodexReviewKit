@@ -263,6 +263,43 @@ struct ReviewHistoryDatabaseTests {
         ))
     }
 
+    @Test("upgrades a parser-v3 Markdown-link location from its canonical review")
+    func staleMarkdownLinkLocationUpgrade() async throws {
+        let (database, _) = try ReviewHistoryTestSupport.database()
+        let finalReview = """
+        [P0] Restore token validation — [AccessGate.swift](/tmp/review/AccessGate.swift:3)
+
+        Reject a supplied token that does not equal the expected token.
+        """
+        let staleResult = ParsedReviewResult(
+            state: .unknown,
+            findingCount: nil,
+            findings: [],
+            source: .unrecognizedFindingBlock,
+            parserVersion: 3
+        )
+        _ = try await ReviewHistoryTestSupport.record(
+            started: ReviewHistoryTestSupport.started(id: "stale-markdown-link-location"),
+            terminal: ReviewHistoryTestSupport.completed(
+                id: "stale-markdown-link-location",
+                finalReview: finalReview,
+                parsedResult: staleResult
+            ),
+            in: database
+        )
+
+        let restored = try #require(
+            try await database.load(retentionPolicy: .default).first
+        )
+        #expect(restored.terminal.parsedResult?.state == .hasFindings)
+        #expect(restored.terminal.parsedResult?.parserVersion == ParsedReviewResult.currentParserVersion)
+        #expect(restored.terminal.parsedResult?.findings.first?.location == .init(
+            path: "/tmp/review/AccessGate.swift",
+            startLine: 3,
+            endLine: 3
+        ))
+    }
+
     @Test("converts abandoned active rows without inventing an end time")
     func orphanConversion() async throws {
         let (database, _) = try ReviewHistoryTestSupport.database()

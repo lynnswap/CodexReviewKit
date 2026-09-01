@@ -77,6 +77,54 @@ struct ParsedReviewResultTests {
         ))
     }
 
+    @Test func currentReviewAgentFormatParsesMarkdownLinkLocations() {
+        let singleLine = ParsedReviewResult.parse(finalReviewText: """
+        [P0] Restore token validation — [AccessGate.swift](/tmp/review/AccessGate.swift:3)
+
+        Reject mismatched tokens.
+        """)
+        let range = ParsedReviewResult.parse(finalReviewText: """
+        [P1] Preserve terminal ownership — [Store.swift](Sources/Store.swift:10-12)
+
+        Keep one terminal owner.
+        """)
+
+        #expect(singleLine.findings.first?.location == .init(
+            path: "/tmp/review/AccessGate.swift",
+            startLine: 3,
+            endLine: 3
+        ))
+        #expect(range.findings.first?.location == .init(
+            path: "Sources/Store.swift",
+            startLine: 10,
+            endLine: 12
+        ))
+    }
+
+    @Test(arguments: [
+        "[AccessGate.swift](/tmp/review/Other.swift:3)",
+        "[Gate.swift](/tmp/review/AccessGate.swift:3)",
+        "[AccessGate.swift](https://example.com/AccessGate.swift:3)",
+        "[AccessGate.swift](file:///tmp/review/AccessGate.swift:3)",
+        "[AccessGate.swift](mailto:AccessGate.swift:3)",
+        "[AccessGate.swift](/tmp/review/AccessGate.swift:not-a-line)",
+        "[AccessGate.swift(/tmp/review/AccessGate.swift:3)",
+        "[Access[Gate.swift]](/tmp/review/AccessGate.swift:3)",
+        "[AccessGate.swift](/tmp/review/AccessGate.swift):3",
+        "[AccessGate.swift](/tmp/review/AccessGate.swift:3)[Other.swift](Other.swift:4)",
+    ])
+    func malformedMarkdownLinkLocationReportsUnknown(location: String) {
+        let result = ParsedReviewResult.parse(finalReviewText: """
+        [P1] Reject malformed location markup — \(location)
+
+        Do not guess the path or line.
+        """)
+
+        #expect(result.state == .unknown)
+        #expect(result.findings.isEmpty)
+        #expect(result.source == .unrecognizedFindingBlock)
+    }
+
     @Test(arguments: [
         "`AccessGate.swift:3",
         "AccessGate.swift:3`",
