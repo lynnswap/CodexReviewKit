@@ -321,12 +321,46 @@ struct Error: Codable, Equatable, Sendable {
 
 
 package extension AppServerAPI.Turn.Start {
-struct TextInput: Codable, Equatable, Sendable {
-    package var type = "text"
-    package var text: String
+enum UserInput: Codable, Equatable, Sendable {
+    case text(String)
+    case skill(name: String, path: String)
 
-    package init(text: String) {
-        self.text = text
+    private enum CodingKeys: String, CodingKey {
+        case type
+        case text
+        case name
+        case path
+    }
+
+    private enum Kind: String, Codable {
+        case text
+        case skill
+    }
+
+    package init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        switch try container.decode(Kind.self, forKey: .type) {
+        case .text:
+            self = .text(try container.decode(String.self, forKey: .text))
+        case .skill:
+            self = .skill(
+                name: try container.decode(String.self, forKey: .name),
+                path: try container.decode(String.self, forKey: .path)
+            )
+        }
+    }
+
+    package func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .text(let text):
+            try container.encode(Kind.text, forKey: .type)
+            try container.encode(text, forKey: .text)
+        case .skill(let name, let path):
+            try container.encode(Kind.skill, forKey: .type)
+            try container.encode(name, forKey: .name)
+            try container.encode(path, forKey: .path)
+        }
     }
 }
 }
@@ -335,7 +369,7 @@ struct TextInput: Codable, Equatable, Sendable {
 package extension AppServerAPI.Turn.Start {
 struct Params: Codable, Equatable, Sendable {
     package var threadID: String
-    package var input: [AppServerAPI.Turn.Start.TextInput]
+    package var input: [AppServerAPI.Turn.Start.UserInput]
     package var cwd: String
 
     enum CodingKeys: String, CodingKey {
@@ -346,7 +380,17 @@ struct Params: Codable, Equatable, Sendable {
 
     package init(threadID: String, prompt: String, cwd: String) {
         self.threadID = threadID
-        self.input = [.init(text: prompt)]
+        self.input = [.text(prompt)]
+        self.cwd = cwd
+    }
+
+    package init(
+        threadID: String,
+        input: [AppServerAPI.Turn.Start.UserInput],
+        cwd: String
+    ) {
+        self.threadID = threadID
+        self.input = input
         self.cwd = cwd
     }
 }

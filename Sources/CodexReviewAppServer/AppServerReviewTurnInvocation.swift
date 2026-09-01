@@ -2,7 +2,7 @@ import CodexReview
 import Foundation
 
 package struct AppServerReviewTurnInvocation: Equatable, Sendable {
-    package let prompt: String
+    package let input: [AppServerAPI.Turn.Start.UserInput]
 
     package init(
         codexHome: String?,
@@ -16,11 +16,10 @@ package struct AppServerReviewTurnInvocation: Equatable, Sendable {
             )
         }
         guard codexHome == codexHome.trimmingCharacters(in: .whitespacesAndNewlines),
-              codexHome.rangeOfCharacter(from: .newlines) == nil,
-              codexHome.contains(")") == false
+              codexHome.rangeOfCharacter(from: .newlines) == nil
         else {
             throw ReviewAttemptContractFailure(
-                message: "Review execution cannot reference a Codex home with boundary whitespace, a line break, or `)`."
+                message: "Review execution cannot reference a Codex home with boundary whitespace or a line break."
             )
         }
         // The app-server provisions built-in skills before returning initialize.
@@ -31,7 +30,12 @@ package struct AppServerReviewTurnInvocation: Equatable, Sendable {
             .appending(path: "review-agent", directoryHint: .isDirectory)
             .appending(path: "SKILL.md", directoryHint: .notDirectory)
             .path
-        prompt = "Use [$review-agent](\(skillPath)) for this review.\n\n\(Self.instruction(for: target))"
+        // Keep the skill as typed input. A Markdown skill mention truncates a path at `)`
+        // before Codex can match the app-server-provisioned skill identity.
+        input = [
+            .skill(name: "review-agent", path: skillPath),
+            .text(Self.instruction(for: target)),
+        ]
     }
 
     private static func instruction(for target: CodexReviewAPI.Target) -> String {
