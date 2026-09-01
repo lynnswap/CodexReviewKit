@@ -18,6 +18,18 @@ actor ReviewMonitorLogRenderer {
         renderedDocument(from: projection.render(entries: entries))
     }
 
+    func render(
+        entries: [ReviewLogEntry],
+        terminal: ReviewTerminalRecord?,
+        fallbackSummary: String?
+    ) -> ReviewMonitorRenderedLogDocument {
+        renderedDocument(from: projection.render(
+            entries: entries,
+            terminal: terminal,
+            fallbackSummary: fallbackSummary
+        ))
+    }
+
     func append(
         entries: [ReviewLogEntry],
         sourceRange: Range<Int>
