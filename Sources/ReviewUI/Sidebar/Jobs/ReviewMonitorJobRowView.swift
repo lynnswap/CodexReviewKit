@@ -76,12 +76,18 @@ struct ReviewMonitorJobRowView: View {
         }
     }
 
-    private var subtitleText: String? {
+    var subtitleText: String? {
         if job.core.output.hasFinalReview,
            let finalReview = job.core.output.lastAgentMessage?.trimmingCharacters(in: .whitespacesAndNewlines),
            finalReview.isEmpty == false
         {
             return finalReview
+        }
+        if let terminal = ReviewMonitorTerminalPresentation(
+            terminal: job.core.lifecycle.terminal,
+            fallbackSummary: job.core.output.summary
+        ) {
+            return terminal.text
         }
         if job.core.lifecycle.status == .cancelled {
             let reviewText = job.reviewText.trimmingCharacters(in: .whitespacesAndNewlines)

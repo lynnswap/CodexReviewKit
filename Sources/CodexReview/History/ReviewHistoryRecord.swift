@@ -315,31 +315,27 @@ private extension TerminalReviewRecord {
                 timestamp: timestamp
             )]
         }
-        let message: String? = switch terminal {
+        let terminalMessage: String?
+        switch terminal {
         case .completed:
-            nil
-        case .interrupted(.requested(let cancellation)):
-            cancellation.message
+            terminalMessage = nil
+        case .interrupted(.requested):
+            return []
         case .interrupted(.server(let message)):
-            message
+            terminalMessage = message
         case .interrupted(.transport(let message)):
-            message
+            terminalMessage = message
         case .interrupted(.previousProcessExit):
-            "The previous review process exited before completion."
+            terminalMessage = "The previous review process exited before completion."
         case .failed(let message):
-            message
+            terminalMessage = message
         }
-        let text = message?.nilIfEmpty ?? summary.nilIfEmpty
+        let text = terminalMessage?.nilIfEmpty ?? summary.nilIfEmpty
         guard let text else {
             return []
         }
-        let kind: ReviewLogEntry.Kind = if case .interrupted(.requested) = terminal {
-            .event
-        } else {
-            .error
-        }
         return [ReviewLogEntry(
-            kind: kind,
+            kind: .error,
             text: text,
             metadata: .init(sourceType: "persistedReviewTerminal"),
             timestamp: timestamp

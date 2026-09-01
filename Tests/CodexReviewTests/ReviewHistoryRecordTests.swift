@@ -124,4 +124,35 @@ struct ReviewHistoryRecordTests {
         #expect(job.logEntries.map(\.kind) == [.error])
         #expect(job.logEntries.first?.timestamp == startedAt)
     }
+
+    @Test func requestedCancellationRestoresTypedTerminalWithoutSyntheticLog() throws {
+        let cancellation = ReviewCancellation.mcpClient(message: "Stop review.")
+        let restored = try RestoredReviewRecord(
+            started: StartedReviewRecord(
+                id: "review-1",
+                cwd: "/tmp/project",
+                workspaceSortOrder: 0,
+                sortOrder: 0,
+                target: .uncommittedChanges,
+                model: nil,
+                startedAt: Date(timeIntervalSince1970: 1)
+            ),
+            terminal: TerminalReviewRecord(
+                id: "review-1",
+                model: nil,
+                terminal: .interrupted(.requested(cancellation)),
+                endedAt: Date(timeIntervalSince1970: 2),
+                summary: cancellation.message,
+                canonicalReview: nil,
+                parsedResult: nil
+            )
+        )
+
+        let job = restored.makeRestoredJob()
+
+        #expect(job.core.lifecycle.terminal == .interrupted(.requested(cancellation)))
+        #expect(job.core.lifecycle.cancellation == cancellation)
+        #expect(job.logEntries.isEmpty)
+        #expect(job.rawLogText.isEmpty)
+    }
 }

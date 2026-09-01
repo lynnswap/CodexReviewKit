@@ -35,6 +35,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private var logRenderGeneration: UInt64 = 0
     private var appliedLogRenderGeneration: UInt64 = 0
     private var appliedLogEntrySignatures: [LogEntryRenderSignature] = []
+    private var appliedLogTerminal: ReviewTerminalRecord?
     private var hasAppliedBoundJobLog = false
 
     init(store: CodexReviewStore, uiState: ReviewMonitorUIState) {
@@ -169,6 +170,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
         selectedJobObservation = withPortableContinuousObservation { [weak self] event in
             _ = selectedJob.logRevision
+            _ = selectedJob.core.lifecycle.terminal
             guard let self,
                   self.boundJob === selectedJob
             else {
@@ -364,6 +366,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
     @discardableResult
     private func renderSelectedJobLog(
         entries: [ReviewLogEntry],
+        terminal: ReviewTerminalRecord?,
         targetSignatures: [LogEntryRenderSignature],
         restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget,
         allowIncrementalUpdate: Bool
@@ -378,7 +381,10 @@ final class ReviewMonitorTransportViewController: NSViewController {
         let jobID = boundJob.id
         logRenderTask?.cancel()
         logRenderTask = Task.detached(priority: .userInitiated) { [weak self] in
-            let renderedDocument = await renderer.render(entries: entries)
+            let renderedDocument = await renderer.render(
+                entries: entries,
+                terminal: terminal
+            )
             await MainActor.run { [weak self] in
                 guard Task.isCancelled == false,
                       let self,
@@ -394,6 +400,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
                     allowIncrementalUpdate: allowIncrementalUpdate
                 )
                 self.appliedLogEntrySignatures = targetSignatures
+                self.appliedLogTerminal = terminal
                 self.appliedLogRenderGeneration = generation
                 self.hasAppliedBoundJobLog = true
             }
@@ -457,6 +464,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
                     )
                 }
                 self.appliedLogEntrySignatures = resolved.signatures
+                self.appliedLogTerminal = nil
                 self.appliedLogRenderGeneration = generation
                 self.hasAppliedBoundJobLog = true
             }
@@ -474,9 +482,12 @@ final class ReviewMonitorTransportViewController: NSViewController {
             return false
         }
         let entries = job.logEntries
+        let terminal = job.core.lifecycle.terminal
         let targetSignatures = entries.map(LogEntryRenderSignature.init)
         if allowIncrementalUpdate,
            hasAppliedBoundJobLog,
+           terminal == nil,
+           appliedLogTerminal == nil,
            targetSignatures.starts(with: appliedLogEntrySignatures) {
             let appendedStartIndex = appliedLogEntrySignatures.count
             let appendedEntries = Array(entries.dropFirst(appendedStartIndex))
@@ -491,6 +502,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         }
         return renderSelectedJobLog(
             entries: entries,
+            terminal: terminal,
             targetSignatures: targetSignatures,
             restorationTarget: restorationTarget,
             allowIncrementalUpdate: allowIncrementalUpdate
@@ -510,6 +522,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         logRenderGeneration &+= 1
         appliedLogRenderGeneration = logRenderGeneration
         appliedLogEntrySignatures = []
+        appliedLogTerminal = nil
         hasAppliedBoundJobLog = false
         logRenderer = ReviewMonitorLogRenderer()
     }
@@ -965,7 +978,10 @@ extension ReviewMonitorTransportViewController {
                 summary: nil,
                 log: {
                     var projection = ReviewMonitorLog.Projection()
-                    let document = projection.render(entries: job.logEntries)
+                    let document = projection.render(
+                        entries: job.logEntries,
+                        terminal: job.core.lifecycle.terminal
+                    )
                     return logScrollView.displayTextForTesting(sourceDocument: document)
                 }(),
                 isShowingEmptyState: false

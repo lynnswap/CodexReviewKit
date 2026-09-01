@@ -6,6 +6,32 @@ import CodexReviewTesting
 @Suite("review terminal contract")
 @MainActor
 struct ReviewTerminalContractTests {
+    @Test func cancellationAlwaysCarriesAVisibleMessage() throws {
+        let cancellations = [
+            ReviewCancellation(source: .userInterface, message: ""),
+            ReviewCancellation(source: .mcpClient, message: " \n\t"),
+            ReviewCancellation(source: .sessionClosed, message: ""),
+            ReviewCancellation(source: .system, message: ""),
+        ]
+
+        #expect(cancellations.map(\.message) == [
+            "Cancelled by user from Review Monitor.",
+            "Cancellation requested by MCP client.",
+            "Cancellation requested because the MCP session closed.",
+            "Cancellation requested.",
+        ])
+
+        let decoded = try JSONDecoder().decode(
+            ReviewCancellation.self,
+            from: Data(#"{"source":"mcpClient","message":""}"#.utf8)
+        )
+        #expect(decoded == .mcpClient())
+
+        var mutated = ReviewCancellation.system(message: "Initial")
+        mutated.message = ""
+        #expect(mutated == .system())
+    }
+
     @Test func oldLifecycleInitializerKeepsItsExactFunctionReferenceShape() {
         let initializer: (
             ReviewJobState,

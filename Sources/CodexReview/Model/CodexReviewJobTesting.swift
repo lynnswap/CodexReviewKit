@@ -21,7 +21,8 @@ extension CodexReviewJob {
         lastAgentMessage: String? = "",
         logEntries: [ReviewLogEntry] = [],
         errorMessage: String? = nil,
-        exitCode: Int? = nil
+        exitCode: Int? = nil,
+        terminal: ReviewTerminalRecord? = nil
     ) -> CodexReviewJob {
         CodexReviewJob(
             id: id,
@@ -41,7 +42,8 @@ extension CodexReviewJob {
                     startedAt: startedAt,
                     endedAt: endedAt,
                     cancellation: cancellation,
-                    errorMessage: errorMessage
+                    errorMessage: errorMessage,
+                    terminal: terminal
                 ),
                 output: .init(
                     summary: summary,

@@ -564,6 +564,17 @@ extension ReviewUITests {
             _ = try await awaitTransportRender(contentPane) { snapshot in
                 snapshot.log.contains("Partial review before cancellation.")
             }
+            try await transport.emitServerNotification(
+                method: "item/started",
+                params: ReviewUIV2ItemNotification(
+                    threadID: "thread-review",
+                    turnID: "turn-review",
+                    item: .command(id: "active-command", status: "inProgress")
+                )
+            )
+            _ = try await awaitTransportRender(contentPane) { snapshot in
+                snapshot.log.contains("swift test")
+            }
 
             var cancellationActionWasAvailable = false
             var cancellationActionWasSent = false
@@ -679,6 +690,22 @@ extension ReviewUITests {
             #expect(job.logEntries.contains { $0.kind == .error } == false)
             #expect(rendered.log.contains("Partial review before cancellation."))
             #expect(rendered.log.contains(interleavedStatus))
+            #expect(rendered.log.contains("Ran swift test"))
+            #expect(rendered.log.components(separatedBy: expectedCancellation.message).count == 2)
+            let partialRange = try #require(
+                rendered.log.range(of: "Partial review before cancellation.")
+            )
+            let cancellationRange = try #require(
+                rendered.log.range(of: expectedCancellation.message)
+            )
+            let commandRange = try #require(rendered.log.range(of: "Ran swift test"))
+            #expect(partialRange.lowerBound < cancellationRange.lowerBound)
+            #expect(commandRange.lowerBound < cancellationRange.lowerBound)
+            #expect(contentPane.logTerminalDecorationRectCountForTesting == 1)
+            #expect(job.logEntries.contains {
+                $0.groupID == "active-command"
+                    && $0.metadata?.status == "canceled"
+            })
             #expect(rendered.log.contains(reviewExitArtifact) == false)
             #expect(rendered.log.contains(companionArtifact) == false)
 
@@ -690,6 +717,7 @@ extension ReviewUITests {
             #expect(defaultRead.logs.allSatisfy { $0.audience == .product })
             #expect(defaultRead.logs.contains { $0.text == reviewExitArtifact } == false)
             #expect(defaultRead.logs.contains { $0.text == companionArtifact } == false)
+            #expect(defaultRead.logs.contains { $0.text == expectedCancellation.message } == false)
             #expect(defaultRead.logs.contains { $0.text == interleavedStatus })
             #expect(developerDiagnostics.map(\.kind) == [.diagnostic, .diagnostic])
             #expect(developerDiagnostics.map(\.groupID) == [

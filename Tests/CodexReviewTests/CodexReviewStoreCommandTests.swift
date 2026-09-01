@@ -1146,9 +1146,13 @@ struct CodexReviewStoreCommandTests {
             #expect(await waitUntil {
                 store.job(id: "job-1")?.logText.hasSuffix(delta) == true
             })
+            let requestedCancellation = ReviewCancellation.mcpClient(message: "Stop")
+            let logCountBeforeCancellation = try #require(
+                store.job(id: "job-1")?.logEntries.count
+            )
             async let cancellation = store.cancelReview(
                 jobID: "job-1",
-                cancellation: .mcpClient(message: "Stop")
+                cancellation: requestedCancellation
             )
             try await backend.waitForInterruptReview(timeout: .seconds(2))
             await backend.yield(.cancelled("Stop"))
@@ -1157,6 +1161,10 @@ struct CodexReviewStoreCommandTests {
             let job = try #require(store.job(id: "job-1"))
 
             #expect(read.core.lifecycle.status == .cancelled)
+            #expect(read.core.lifecycle.terminal == .interrupted(.requested(
+                requestedCancellation
+            )))
+            #expect(job.logEntries.count == logCountBeforeCancellation)
             #expect(job.cappedLogBytes <= 256 * 1024)
             #expect(job.logText.hasSuffix(delta))
             #expect(job.lastLogMutation == .reload)

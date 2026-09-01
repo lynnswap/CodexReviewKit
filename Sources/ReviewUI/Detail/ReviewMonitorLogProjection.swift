@@ -410,6 +410,8 @@ private enum ReviewMonitorLogStyler {
             return .diagnostic(tone: tone)
         case .error:
             return .error
+        case .event where metadata?.sourceType == "reviewTerminal":
+            return .terminal(tone: .warning)
         case .progress, .event:
             return .event
         case .contextCompaction:
@@ -1145,22 +1147,33 @@ struct Projection: Sendable {
     private struct State: Sendable {
         var entries: [ReviewLogEntry]
         var entrySignatures: [EntrySignature]
+        var terminalPresentation: ReviewMonitorTerminalPresentation?
         var blocks: [RenderedBlock]
         var indexByGroup: [GroupKey: Int]
         var projection: Accumulator
 
-        init(entries: [ReviewLogEntry]) {
-            self = Self.rebuild(entries: entries)
+        init(
+            entries: [ReviewLogEntry],
+            terminalPresentation: ReviewMonitorTerminalPresentation?
+        ) {
+            self = Self.rebuild(
+                entries: entries,
+                terminalPresentation: terminalPresentation
+            )
         }
 
         var document: ReviewMonitorLog.Document {
             projection.document
         }
 
-        static func rebuild(entries: [ReviewLogEntry]) -> State {
+        static func rebuild(
+            entries: [ReviewLogEntry],
+            terminalPresentation: ReviewMonitorTerminalPresentation?
+        ) -> State {
             var state = State(
                 entries: entries,
                 entrySignatures: entries.map(EntrySignature.init),
+                terminalPresentation: terminalPresentation,
                 blocks: [],
                 indexByGroup: [:],
                 projection: .init()
@@ -1193,6 +1206,22 @@ struct Projection: Sendable {
                 ))
             }
 
+            if let terminalPresentation,
+               let source = terminalPresentation.requestedCancellationSource {
+                state.blocks.append(.init(
+                    id: ReviewMonitorLog.Projection.requestedCancellationBlockID,
+                    kind: .event,
+                    audience: .product,
+                    groupID: nil,
+                    text: terminalPresentation.text,
+                    metadata: .init(
+                        sourceType: "reviewTerminal",
+                        status: "cancelled",
+                        detail: source.rawValue
+                    )
+                ))
+            }
+
             for (index, block) in state.blocks.enumerated() {
                 _ = state.appendBlock(block, at: index)
             }
@@ -1202,12 +1231,14 @@ struct Projection: Sendable {
         private init(
             entries: [ReviewLogEntry],
             entrySignatures: [EntrySignature],
+            terminalPresentation: ReviewMonitorTerminalPresentation?,
             blocks: [RenderedBlock],
             indexByGroup: [GroupKey: Int],
             projection: Accumulator
         ) {
             self.entries = entries
             self.entrySignatures = entrySignatures
+            self.terminalPresentation = terminalPresentation
             self.blocks = blocks
             self.indexByGroup = indexByGroup
             self.projection = projection
@@ -1315,7 +1346,10 @@ struct Projection: Sendable {
             previousDocument: ReviewMonitorLog.Document,
             replacementBlockID: ReviewMonitorLog.BlockID
         ) -> ReviewMonitorLog.Replacement? {
-            let rebuilt = Self.rebuild(entries: entries)
+            let rebuilt = Self.rebuild(
+                entries: entries,
+                terminalPresentation: terminalPresentation
+            )
             guard let replacement = Self.replacement(
                 previous: previousDocument,
                 current: rebuilt.document,
@@ -1414,7 +1448,11 @@ struct Projection: Sendable {
         }
     }
 
-    private var state = State(entries: [])
+    private static let requestedCancellationBlockID = ReviewMonitorLog.BlockID(
+        "reviewTerminal:requested"
+    )
+
+    private var state = State(entries: [], terminalPresentation: nil)
     private var document = ReviewMonitorLog.Document()
 
     var entryCount: Int {
@@ -1426,14 +1464,25 @@ struct Projection: Sendable {
     }
 
     mutating func render(entries: [ReviewLogEntry]) -> ReviewMonitorLog.Document {
+        render(entries: entries, terminal: nil)
+    }
+
+    mutating func render(
+        entries: [ReviewLogEntry],
+        terminal: ReviewTerminalRecord?
+    ) -> ReviewMonitorLog.Document {
         let entrySignatures = entries.map(EntrySignature.init)
-        guard entrySignatures != state.entrySignatures else {
+        let terminalPresentation = Self.terminalPresentation(for: terminal)
+        guard entrySignatures != state.entrySignatures
+                || terminalPresentation != state.terminalPresentation
+        else {
             return document
         }
 
         let previousDocument = document
         let preferredChange: ReviewMonitorLog.Change?
-        if entrySignatures.count == state.entrySignatures.count + 1,
+        if terminalPresentation == state.terminalPresentation,
+           entrySignatures.count == state.entrySignatures.count + 1,
            entrySignatures.dropLast().elementsEqual(state.entrySignatures),
            let entry = entries.last {
             switch state.append(entry) {
@@ -1442,7 +1491,10 @@ struct Projection: Sendable {
             case .noVisibleChange:
                 preferredChange = nil
             case .needsReload(let replacementBlockID):
-                state = State.rebuild(entries: entries)
+                state = State.rebuild(
+                    entries: entries,
+                    terminalPresentation: terminalPresentation
+                )
                 if let replacementBlockID,
                    let replacement = State.replacement(
                        previous: previousDocument,
@@ -1455,7 +1507,10 @@ struct Projection: Sendable {
                 }
             }
         } else {
-            state = State.rebuild(entries: entries)
+            state = State.rebuild(
+                entries: entries,
+                terminalPresentation: terminalPresentation
+            )
             preferredChange = .reload
         }
 
@@ -1473,6 +1528,9 @@ struct Projection: Sendable {
         entries: [ReviewLogEntry],
         sourceRange: Range<Int>
     ) -> ReviewMonitorLog.Document? {
+        guard state.terminalPresentation == nil else {
+            return nil
+        }
         guard sourceRange.lowerBound <= state.entrySignatures.count else {
             return nil
         }
@@ -1523,6 +1581,17 @@ struct Projection: Sendable {
             }
         }
         return document
+    }
+
+    private static func terminalPresentation(
+        for terminal: ReviewTerminalRecord?
+    ) -> ReviewMonitorTerminalPresentation? {
+        guard let presentation = ReviewMonitorTerminalPresentation(terminal: terminal),
+              presentation.requestedCancellationSource != nil
+        else {
+            return nil
+        }
+        return presentation
     }
 
     private static func resolveDocument(

@@ -3760,6 +3760,49 @@ struct ReviewUITests {
         #expect(transport.logCommandOutputPanelUsesTextKit2ForTesting == false)
     }
 
+    @Test func restoredRequestedCancellationRendersTypedTerminalInSelectedDetail() async throws {
+        let cancellation = ReviewCancellation.sessionClosed(message: "Session closed.")
+        let restored = try RestoredReviewRecord(
+            started: StartedReviewRecord(
+                id: "job-restored-cancellation",
+                cwd: "/tmp/workspace-alpha",
+                workspaceSortOrder: 0,
+                sortOrder: 0,
+                target: .uncommittedChanges,
+                model: "gpt-5",
+                startedAt: Date(timeIntervalSince1970: 200)
+            ),
+            terminal: TerminalReviewRecord(
+                id: "job-restored-cancellation",
+                model: "gpt-5",
+                terminal: .interrupted(.requested(cancellation)),
+                endedAt: Date(timeIntervalSince1970: 201),
+                summary: cancellation.message,
+                canonicalReview: nil,
+                parsedResult: nil
+            )
+        )
+        let job = restored.makeRestoredJob()
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            content: makeSidebarContent(from: [job])
+        )
+        let harness = makeWindowHarness(store: store)
+        defer { harness.window.close() }
+        let sidebar = harness.viewController.sidebarViewControllerForTesting
+        let transport = harness.viewController.transportViewControllerForTesting
+
+        sidebar.selectJobForTesting(job)
+        let rendered = try await awaitTransportRender(transport)
+
+        #expect(job.logEntries.isEmpty)
+        #expect(job.core.lifecycle.terminal == .interrupted(.requested(cancellation)))
+        #expect(rendered.log == cancellation.message)
+        #expect(transport.logTerminalDecorationRectCountForTesting == 1)
+        #expect(ReviewMonitorJobRowView(job: job).subtitleText == cancellation.message)
+    }
+
     @Test func detailPaneHidesDeveloperDiagnosticsWithoutHidingProductFailures() async throws {
         let job = CodexReviewJob.makeForTesting(
             id: "job-developer-diagnostic",

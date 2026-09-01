@@ -6,6 +6,146 @@ import Testing
 @Suite("ReviewMonitor log projection")
 @MainActor
 struct ReviewMonitorLogProjectionTests {
+    @Test func terminalPresentationKeepsInterruptionKindsDistinct() throws {
+        let requested = try #require(ReviewMonitorTerminalPresentation(
+            terminal: .interrupted(.requested(.mcpClient(message: "Stop review."))),
+            fallbackSummary: "Fallback"
+        ))
+        let server = try #require(ReviewMonitorTerminalPresentation(
+            terminal: .interrupted(.server(message: nil)),
+            fallbackSummary: "Server summary"
+        ))
+        let transport = try #require(ReviewMonitorTerminalPresentation(
+            terminal: .interrupted(.transport(message: "Disconnected")),
+            fallbackSummary: "Fallback"
+        ))
+        let previousProcess = try #require(ReviewMonitorTerminalPresentation(
+            terminal: .interrupted(.previousProcessExit),
+            fallbackSummary: "Fallback"
+        ))
+        let failed = try #require(ReviewMonitorTerminalPresentation(
+            terminal: .failed(message: nil),
+            fallbackSummary: "Failure summary"
+        ))
+
+        #expect(requested.kind == .requested(.mcpClient))
+        #expect(requested.text == "Stop review.")
+        #expect(server.kind == .server)
+        #expect(server.text == "Server summary")
+        #expect(transport.kind == .transport)
+        #expect(transport.text == "Disconnected")
+        #expect(previousProcess.kind == .previousProcessExit)
+        #expect(previousProcess.text == "The previous review process exited before completion.")
+        #expect(failed.kind == .failed)
+        #expect(failed.text == "Failure summary")
+    }
+
+    @Test func sidebarUsesRequestedTerminalMessage() {
+        let cancellation = ReviewCancellation.sessionClosed(message: "Session closed.")
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-cancelled",
+            targetSummary: "Uncommitted changes",
+            status: .cancelled,
+            cancellation: cancellation,
+            summary: "Different summary",
+            terminal: .interrupted(.requested(cancellation))
+        )
+
+        #expect(ReviewMonitorJobRowView(job: job).subtitleText == cancellation.message)
+    }
+
+    @Test func requestedCancellationTerminalRendersOnceAfterActivity() throws {
+        let cancellation = ReviewCancellation.userInterface()
+        let entries = [
+            ReviewLogEntry(kind: .progress, text: "Closing active review work."),
+        ]
+        var projection = ReviewMonitorLog.Projection()
+
+        let active = projection.render(entries: entries, terminal: nil)
+        #expect(active.text == "Closing active review work.")
+
+        let terminal = projection.render(
+            entries: entries,
+            terminal: .interrupted(.requested(cancellation))
+        )
+        #expect(terminal.text == """
+        Closing active review work.
+        Cancelled by user from Review Monitor.
+        """)
+        #expect(terminal.blocks.map(\.id) == [
+            ReviewMonitorLog.BlockID(entries[0].id.uuidString),
+            ReviewMonitorLog.BlockID("reviewTerminal:requested"),
+        ])
+        #expect(terminal.blocks.last?.kind == .event)
+        #expect(terminal.blocks.last?.metadata == .init(
+            sourceType: "reviewTerminal",
+            status: "cancelled",
+            detail: ReviewCancellation.Source.userInterface.rawValue
+        ))
+        #expect(terminal.decorations.last?.style == .terminal(tone: .warning))
+
+        let repeated = projection.render(
+            entries: entries,
+            terminal: .interrupted(.requested(cancellation))
+        )
+        #expect(repeated == terminal)
+        #expect(repeated.blocks.filter {
+            $0.id == ReviewMonitorLog.BlockID("reviewTerminal:requested")
+        }.count == 1)
+    }
+
+    @Test func onlyRequestedInterruptionsCreateTerminalBlocks() {
+        let terminals: [ReviewTerminalRecord?] = [
+            nil,
+            .completed,
+            .failed(message: "Failed"),
+            .interrupted(.server(message: "Stopped")),
+            .interrupted(.transport(message: "Disconnected")),
+            .interrupted(.previousProcessExit),
+        ]
+
+        for terminal in terminals {
+            var projection = ReviewMonitorLog.Projection()
+            let document = projection.render(entries: [], terminal: terminal)
+            #expect(document.text.isEmpty)
+            #expect(document.blocks.isEmpty)
+        }
+    }
+
+    @Test func restoredRequestedCancellationUsesTypedTerminalWithoutHydratedLog() throws {
+        let cancellation = ReviewCancellation.sessionClosed(message: "Session closed.")
+        let restored = try RestoredReviewRecord(
+            started: StartedReviewRecord(
+                id: "review-1",
+                cwd: "/tmp/project",
+                workspaceSortOrder: 0,
+                sortOrder: 0,
+                target: .uncommittedChanges,
+                model: "gpt-5",
+                startedAt: Date(timeIntervalSince1970: 1)
+            ),
+            terminal: TerminalReviewRecord(
+                id: "review-1",
+                model: "gpt-5",
+                terminal: .interrupted(.requested(cancellation)),
+                endedAt: Date(timeIntervalSince1970: 2),
+                summary: cancellation.message,
+                canonicalReview: nil,
+                parsedResult: nil
+            )
+        )
+
+        let job = restored.makeRestoredJob()
+        let document = document(for: job)
+
+        #expect(job.logEntries.isEmpty)
+        #expect(job.core.lifecycle.terminal == .interrupted(.requested(cancellation)))
+        #expect(document.text == "Session closed.")
+        #expect(document.blocks.map(\.id) == [
+            ReviewMonitorLog.BlockID("reviewTerminal:requested"),
+        ])
+    }
+
     @Test func developerEntryCannotCaptureAProductLogGroup() {
         var projection = ReviewMonitorLog.Projection()
 
@@ -1722,6 +1862,9 @@ struct ReviewMonitorLogProjectionTests {
 
     private func document(for job: CodexReviewJob) -> ReviewMonitorLog.Document {
         var projection = ReviewMonitorLog.Projection()
-        return projection.render(entries: job.logEntries)
+        return projection.render(
+            entries: job.logEntries,
+            terminal: job.core.lifecycle.terminal
+        )
     }
 }
