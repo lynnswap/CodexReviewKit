@@ -41,7 +41,20 @@ struct ReviewHistoryRecordTests {
                 parsedResult: nil
             )
         }
+    }
 
+    @Test func previousProcessExitAcceptsKnownAndUnknownEndButRejectsFinalResult() throws {
+        for endedAt in [nil, Date(timeIntervalSince1970: 2)] {
+            _ = try TerminalReviewRecord(
+                id: "review-1",
+                model: "gpt-5",
+                terminal: .interrupted(.previousProcessExit),
+                endedAt: endedAt,
+                summary: "Interrupted",
+                canonicalReview: nil,
+                parsedResult: nil
+            )
+        }
         #expect(throws: ReviewHistoryRecordError.self) {
             try TerminalReviewRecord(
                 id: "review-1",
@@ -49,8 +62,24 @@ struct ReviewHistoryRecordTests {
                 terminal: .interrupted(.previousProcessExit),
                 endedAt: Date(timeIntervalSince1970: 2),
                 summary: "Interrupted",
-                canonicalReview: nil,
+                canonicalReview: "partial output",
                 parsedResult: nil
+            )
+        }
+        #expect(throws: ReviewHistoryRecordError.self) {
+            try TerminalReviewRecord(
+                id: "review-1",
+                model: "gpt-5",
+                terminal: .interrupted(.previousProcessExit),
+                endedAt: nil,
+                summary: "Interrupted",
+                canonicalReview: nil,
+                parsedResult: PersistedParsedReviewResult(.init(
+                    state: .noFindings,
+                    findingCount: 0,
+                    findings: [],
+                    source: .parsedFinalReviewText
+                ))
             )
         }
     }

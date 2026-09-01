@@ -180,9 +180,9 @@ package struct TerminalReviewRecord: Sendable, Hashable {
                 throw ReviewHistoryRecordError("A completed review requires its parsed result projection.")
             }
         case .interrupted(.previousProcessExit):
-            guard endedAt == nil, canonicalReview == nil, parsedResult == nil else {
+            guard canonicalReview == nil, parsedResult == nil else {
                 throw ReviewHistoryRecordError(
-                    "A previous-process interruption has an unknown end and no final result."
+                    "A previous-process interruption cannot retain a final result."
                 )
             }
         case .interrupted, .failed:

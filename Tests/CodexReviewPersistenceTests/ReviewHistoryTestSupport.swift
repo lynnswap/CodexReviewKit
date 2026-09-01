@@ -70,7 +70,7 @@ enum ReviewHistoryTestSupport {
         summary: String = "Review failed."
     ) throws -> TerminalReviewRecord {
         let resolvedEnd: Date? = if case .interrupted(.previousProcessExit) = terminal {
-            nil
+            endedAt
         } else {
             endedAt ?? startedAt.addingTimeInterval(15)
         }

@@ -124,9 +124,9 @@ extension ReviewUITests {
         ])
     }
 
-    @Test func terminalReviewWithUnknownEndDoesNotDisplayALiveTimer() {
-        let interrupted = CodexReviewJob.makeForTesting(
-            id: "interrupted-review",
+    @Test func terminalTimerRequiresAKnownEnd() {
+        let unknownEnd = CodexReviewJob.makeForTesting(
+            id: "unknown-end-review",
             cwd: "/tmp/persisted-workspace",
             targetSummary: "Uncommitted changes",
             status: .failed,
@@ -134,6 +134,16 @@ extension ReviewUITests {
             endedAt: nil,
             summary: "The previous review process exited before completion.",
             errorMessage: "The previous review process exited before completion."
+        )
+        let knownEnd = CodexReviewJob.makeForTesting(
+            id: "known-end-review",
+            cwd: "/tmp/persisted-workspace",
+            targetSummary: "Uncommitted changes",
+            status: .failed,
+            startedAt: Date(timeIntervalSince1970: 100),
+            endedAt: Date(timeIntervalSince1970: 120),
+            summary: "The review process exited before completion.",
+            errorMessage: "The review process exited before completion."
         )
         let running = makeJob(
             id: "running-review",
@@ -144,7 +154,8 @@ extension ReviewUITests {
             summary: "Running."
         )
 
-        #expect(TimerLabelView(job: interrupted).displaysTimer == false)
+        #expect(TimerLabelView(job: unknownEnd).displaysTimer == false)
+        #expect(TimerLabelView(job: knownEnd).displaysTimer)
         #expect(TimerLabelView(job: running).displaysTimer)
     }
 
