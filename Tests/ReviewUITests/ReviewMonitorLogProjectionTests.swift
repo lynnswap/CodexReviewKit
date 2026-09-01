@@ -40,20 +40,6 @@ struct ReviewMonitorLogProjectionTests {
         #expect(failed.text == "Failure summary")
     }
 
-    @Test func sidebarUsesRequestedTerminalMessage() {
-        let cancellation = ReviewCancellation.sessionClosed(message: "Session closed.")
-        let job = CodexReviewJob.makeForTesting(
-            id: "job-cancelled",
-            targetSummary: "Uncommitted changes",
-            status: .cancelled,
-            cancellation: cancellation,
-            summary: "Different summary",
-            terminal: .interrupted(.requested(cancellation))
-        )
-
-        #expect(ReviewMonitorJobRowView(job: job).subtitleText == cancellation.message)
-    }
-
     @Test func requestedCancellationTerminalRendersOnceAfterActivity() throws {
         let cancellation = ReviewCancellation.userInterface()
         let entries = [
