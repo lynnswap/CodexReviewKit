@@ -3615,7 +3615,7 @@ private func normalizeReviewNotification(
                 kind: .toolCall,
                 text: "File changes updated.",
                 groupID: $0,
-                replacesGroup: false,
+                replacesGroup: true,
                 metadata: .init(sourceType: "fileChange", title: "File changes", status: "updated")
             )]
         } ?? []

@@ -7015,6 +7015,10 @@ struct AppServerClientTests {
             params: TestMessageNotification(threadID: "thread-1", turnID: "turn-1", itemID: "file-1", message: "patch")
         )
         try await transport.emitServerNotification(
+            method: "item/fileChange/patchUpdated",
+            params: TestMessageNotification(threadID: "thread-1", turnID: "turn-1", itemID: "file-1", message: "new patch")
+        )
+        try await transport.emitServerNotification(
             method: "item/completed",
             params: TestItemNotification(
                 lifecycle: .completed,
@@ -7066,7 +7070,14 @@ struct AppServerClientTests {
             kind: .toolCall,
             text: "File changes updated.",
             groupID: "file-1",
-            replacesGroup: false,
+            replacesGroup: true,
+            metadata: .init(sourceType: "fileChange", title: "File changes", status: "updated")
+        ))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .toolCall,
+            text: "File changes updated.",
+            groupID: "file-1",
+            replacesGroup: true,
             metadata: .init(sourceType: "fileChange", title: "File changes", status: "updated")
         ))
         #expect(try await iterator.next() == .logEntry(
