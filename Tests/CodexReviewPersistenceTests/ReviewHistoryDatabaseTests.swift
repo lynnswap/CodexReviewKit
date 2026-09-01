@@ -141,6 +141,91 @@ struct ReviewHistoryDatabaseTests {
         #expect(byID["completed"]?.terminal.parsedResult?.findings[1].location == nil)
     }
 
+    @Test("round trips the current review-agent finding contract")
+    func currentReviewAgentFindingRoundTrip() async throws {
+        let (database, _) = try ReviewHistoryTestSupport.database()
+        let finalReview = """
+        [P0] Restore token validation — AccessGate.swift:3
+
+        Reject a supplied token that does not equal the expected token.
+
+        Overall assessment: this authorization bypass blocks the change.
+        """
+        let parsedResult = ParsedReviewResult.parse(finalReviewText: finalReview)
+
+        _ = try await ReviewHistoryTestSupport.record(
+            started: ReviewHistoryTestSupport.started(id: "current-review-agent"),
+            terminal: ReviewHistoryTestSupport.completed(
+                id: "current-review-agent",
+                finalReview: finalReview,
+                parsedResult: parsedResult
+            ),
+            in: database
+        )
+
+        let restored = try #require(
+            try await database.load(retentionPolicy: .default).first
+        )
+        #expect(restored.terminal.parsedResult?.state == .hasFindings)
+        #expect(restored.terminal.parsedResult?.parserVersion == ParsedReviewResult.currentParserVersion)
+        #expect(restored.terminal.parsedResult?.findings.first?.location == .init(
+            path: "AccessGate.swift",
+            startLine: 3,
+            endLine: 3
+        ))
+    }
+
+    @Test("upgrades a stale parsed projection from its canonical review")
+    func staleParsedResultUpgrade() async throws {
+        let (database, writer) = try ReviewHistoryTestSupport.database()
+        let finalReview = """
+        [P0] Restore token validation — AccessGate.swift:3
+
+        Reject a supplied token that does not equal the expected token.
+        """
+        let staleResult = ParsedReviewResult(
+            state: .noFindings,
+            findingCount: 0,
+            findings: [],
+            source: .parsedFinalReviewText,
+            parserVersion: 1
+        )
+        _ = try await ReviewHistoryTestSupport.record(
+            started: ReviewHistoryTestSupport.started(id: "stale-parser"),
+            terminal: ReviewHistoryTestSupport.completed(
+                id: "stale-parser",
+                finalReview: finalReview,
+                parsedResult: staleResult
+            ),
+            in: database
+        )
+
+        let restored = try #require(
+            try await database.load(retentionPolicy: .default).first
+        )
+        #expect(restored.terminal.parsedResult?.state == .hasFindings)
+        #expect(restored.terminal.parsedResult?.parserVersion == ParsedReviewResult.currentParserVersion)
+        #expect(restored.terminal.parsedResult?.findings.first?.location == .init(
+            path: "AccessGate.swift",
+            startLine: 3,
+            endLine: 3
+        ))
+
+        let persisted = try await writer.read { db in
+            (
+                parserVersion: try ReviewRecordRow.find("stale-parser")
+                    .fetchOne(db)?.parserVersion,
+                findings: try ReviewFindingRow
+                    .where { $0.reviewID.eq("stale-parser") }
+                    .fetchAll(db)
+            )
+        }
+        #expect(persisted.parserVersion == ParsedReviewResult.currentParserVersion)
+        #expect(persisted.findings.count == 1)
+        #expect(persisted.findings.first?.startLine == 3)
+        #expect(persisted.findings.first?.endLine == 3)
+    }
+
     @Test("converts abandoned active rows without inventing an end time")
     func orphanConversion() async throws {
         let (database, _) = try ReviewHistoryTestSupport.database()
