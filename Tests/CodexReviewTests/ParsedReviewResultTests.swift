@@ -112,16 +112,36 @@ struct ParsedReviewResultTests {
     }
 
     @Test func plainLocationContainingMarkdownLikeBracketsStillParses() {
-        let result = ParsedReviewResult.parse(finalReviewText: """
+        let bracketedDirectory = ParsedReviewResult.parse(finalReviewText: """
         [P1] Preserve generated output — [generated]/Page.swift:12
 
         Keep the existing plain-path contract.
         """)
+        let linkLikePrefix = ParsedReviewResult.parse(finalReviewText: """
+        [P1] Preserve debug output — [generated](debug)/Page.swift:14
 
-        #expect(result.findings.first?.location == .init(
+        Keep a complete plain path out of the Markdown-link parser.
+        """)
+        let linkLikeFilename = ParsedReviewResult.parse(finalReviewText: """
+        [P1] Preserve a link-like filename — [generated](debug):16
+
+        Preserve the parser-v3 plain-path contract when the full token is not a link wrapper.
+        """)
+
+        #expect(bracketedDirectory.findings.first?.location == .init(
             path: "[generated]/Page.swift",
             startLine: 12,
             endLine: 12
+        ))
+        #expect(linkLikePrefix.findings.first?.location == .init(
+            path: "[generated](debug)/Page.swift",
+            startLine: 14,
+            endLine: 14
+        ))
+        #expect(linkLikeFilename.findings.first?.location == .init(
+            path: "[generated](debug)",
+            startLine: 16,
+            endLine: 16
         ))
     }
 
@@ -136,7 +156,6 @@ struct ParsedReviewResultTests {
         "[AccessGate.swift](/tmp/review/AccessGate.swift:not-a-line)",
         "[AccessGate.swift(/tmp/review/AccessGate.swift:3)",
         "[Access[Gate.swift]](/tmp/review/AccessGate.swift:3)",
-        "[AccessGate.swift](/tmp/review/AccessGate.swift):3",
         "[AccessGate.swift](/tmp/review/AccessGate.swift:3)[Other.swift](Other.swift:4)",
     ])
     func malformedMarkdownLinkLocationReportsUnknown(location: String) {

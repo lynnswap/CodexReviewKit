@@ -324,7 +324,7 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
 
     private static func parseLocation(_ text: String) -> ParsedReviewResult.Finding.Location? {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if hasMarkdownLinkShape(text) {
+        if hasCompleteMarkdownLinkShape(text) {
             return parseMarkdownLinkLocation(text)
         }
 
@@ -342,12 +342,13 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
             return nil
         }
         let path = String(text[..<colonIndex])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         let rangeText = String(text[text.index(after: colonIndex)...])
         let parts = rangeText.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
         guard let startText = parts.first,
               let startLine = Int(startText),
               let endLine = parts.count == 1 ? startLine : Int(parts[1]),
-              path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+              path.isEmpty == false,
               startLine > 0,
               endLine >= startLine
         else {
@@ -355,7 +356,7 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         }
 
         return ParsedReviewResult.Finding.Location(
-            path: path.trimmingCharacters(in: .whitespacesAndNewlines),
+            path: path,
             startLine: startLine,
             endLine: endLine
         )
@@ -379,8 +380,8 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         }
     }
 
-    private static func hasMarkdownLinkShape(_ text: String) -> Bool {
-        text.first == "[" && text.contains("](")
+    private static func hasCompleteMarkdownLinkShape(_ text: String) -> Bool {
+        text.first == "[" && text.last == ")" && text.contains("](")
     }
 
     private static func parseMarkdownLinkLocation(
