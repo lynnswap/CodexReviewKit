@@ -307,6 +307,7 @@ enum Event: Equatable, Sendable {
     case started(turnID: String, reviewThreadID: String?, model: String?)
     case message(String)
     case messageDelta(String, itemID: String)
+    case agentMessageDelta(String, itemID: String, phase: ReviewAgentMessagePhase?)
     case log(String)
     case logEntry(
         kind: ReviewLogEntry.Kind,

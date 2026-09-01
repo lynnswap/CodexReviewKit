@@ -188,6 +188,20 @@ public struct ReviewLogEntry: Codable, Identifiable, Sendable, Hashable {
 
 }
 
+package enum ReviewAgentMessagePhase: String, Codable, Sendable, Hashable {
+    case commentary
+    case finalAnswer = "final_answer"
+}
+
+package extension ReviewLogEntry.Metadata {
+    var agentMessagePhase: ReviewAgentMessagePhase? {
+        guard sourceType == "agentMessage" || sourceType == "canonicalReviewResult" else {
+            return nil
+        }
+        return detail.flatMap(ReviewAgentMessagePhase.init(rawValue:))
+    }
+}
+
 package extension KeyedDecodingContainer {
     func decode(
         _ type: ReviewLogEntry.AudienceMetadata.Type,

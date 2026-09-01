@@ -12,10 +12,8 @@ package enum AppServerAPI {
             package enum Clean {}
         }
     }
-    package enum Review {
-        package enum Start {}
-    }
     package enum Turn {
+        package enum Start {}
         package enum Interrupt {}
     }
     package enum Config {
@@ -296,39 +294,6 @@ struct Request: AppServerAPI.Request {
 }
 
 
-package extension AppServerAPI.Review.Start {
-struct Params: Codable, Equatable, Sendable {
-    package var threadID: String
-    package var target: CodexReviewAPI.Target
-    package var delivery: AppServerAPI.Review.Start.Delivery
-
-    enum CodingKeys: String, CodingKey {
-        case threadID = "threadId"
-        case target
-        case delivery
-    }
-
-    package init(
-        threadID: String,
-        target: CodexReviewAPI.Target,
-        delivery: AppServerAPI.Review.Start.Delivery = .inline
-    ) {
-        self.threadID = threadID
-        self.target = target
-        self.delivery = delivery
-    }
-}
-}
-
-
-package extension AppServerAPI.Review.Start {
-enum Delivery: String, Codable, Equatable, Sendable {
-    case inline
-    case detached
-}
-}
-
-
 package extension AppServerAPI.Turn {
 struct Payload: Codable, Equatable, Sendable {
     package var id: String
@@ -355,47 +320,83 @@ struct Error: Codable, Equatable, Sendable {
 }
 
 
-package extension AppServerAPI.Review.Start {
+package extension AppServerAPI.Turn.Start {
+struct TextInput: Codable, Equatable, Sendable {
+    package var type = "text"
+    package var text: String
+
+    package init(text: String) {
+        self.text = text
+    }
+}
+}
+
+
+package extension AppServerAPI.Turn.Start {
+struct Params: Codable, Equatable, Sendable {
+    package var threadID: String
+    package var input: [AppServerAPI.Turn.Start.TextInput]
+    package var cwd: String
+
+    enum CodingKeys: String, CodingKey {
+        case threadID = "threadId"
+        case input
+        case cwd
+    }
+
+    package init(threadID: String, prompt: String, cwd: String) {
+        self.threadID = threadID
+        self.input = [.init(text: prompt)]
+        self.cwd = cwd
+    }
+}
+}
+
+
+package extension AppServerAPI.Turn.Start {
 struct Response: Codable, Equatable, Sendable {
     package var turnID: String
-    package var reviewThreadID: String?
 
     enum CodingKeys: String, CodingKey {
         case turn
-        case reviewThreadID = "reviewThreadId"
     }
 
-    package init(turnID: String, reviewThreadID: String? = nil) {
+    package init(turnID: String) {
         self.turnID = turnID
-        self.reviewThreadID = reviewThreadID
     }
 
     package init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.turnID = try container.decode(AppServerAPI.Turn.Payload.self, forKey: .turn).id
-        self.reviewThreadID = try container.decodeIfPresent(String.self, forKey: .reviewThreadID)
+        let turnID = try container.decode(AppServerAPI.Turn.Payload.self, forKey: .turn).id
+        guard turnID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .turn,
+                in: container,
+                debugDescription: "turn.id must be a nonempty string"
+            )
+        }
+        self.turnID = turnID
     }
 
     package func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(AppServerAPI.Turn.Payload(id: turnID), forKey: .turn)
-        try container.encodeIfPresent(reviewThreadID, forKey: .reviewThreadID)
     }
 }
 }
 
 
-package extension AppServerAPI.Review.Start {
+package extension AppServerAPI.Turn.Start {
 struct Request: AppServerAPI.Request {
-    package typealias Response = AppServerAPI.Review.Start.Response
+    package typealias Response = AppServerAPI.Turn.Start.Response
 
-    package static let method = "review/start"
-    package var params: AppServerAPI.Review.Start.Params
+    package static let method = "turn/start"
+    package var params: AppServerAPI.Turn.Start.Params
     package var scope: AppServerAPI.RequestScope? {
         .thread(params.threadID)
     }
 
-    package init(params: AppServerAPI.Review.Start.Params) {
+    package init(params: AppServerAPI.Turn.Start.Params) {
         self.params = params
     }
 }

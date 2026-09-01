@@ -542,14 +542,14 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         mutating func take(
             attemptID: String,
             operation: String
-        ) throws -> LiveRuntimeLifecycleHandle {
+        ) throws -> (CodexReviewBackendModel.Review.Run, LiveRuntimeLifecycleHandle) {
             guard let route = routes[attemptID], route.recovery == nil else {
                 throw ReviewAttemptContractFailure(
                     message: "Review \(operation) requires a runtime route for attempt \(attemptID)."
                 )
             }
             routes.removeValue(forKey: attemptID)
-            return route.runtime
+            return (route.run, route.runtime)
         }
 
         mutating func beginPreparation(
@@ -2481,19 +2481,20 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
     }
 
     func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async throws {
+        let routedRun: CodexReviewBackendModel.Review.Run
         let runtime: LiveRuntimeLifecycleHandle
         do {
             // Cleanup is a terminal admission, not a retry boundary. AppServer cleanup
             // can partially delete multiple resources before reporting failure, so
             // restoring this route would permit duplicate cleanup side effects.
-            runtime = try reviewAttemptRuntimeRoutes.take(
+            (routedRun, runtime) = try reviewAttemptRuntimeRoutes.take(
                 attemptID: run.attemptID,
                 operation: "cleanup"
             )
         } catch {
             throw ReviewRuntimeCloseFailure.cleanup(error.localizedDescription)
         }
-        try await cleanupReview(run, using: runtime)
+        try await cleanupReview(routedRun, using: runtime)
     }
 
     private func cleanupReview(

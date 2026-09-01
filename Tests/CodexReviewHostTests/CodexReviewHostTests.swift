@@ -292,7 +292,7 @@ struct CodexReviewHostTests {
         let homeURL = try temporaryHome()
         let configuredCodexHomeURL = homeURL.appendingPathComponent("custom-codex-home", isDirectory: true)
         let transport = FakeJSONRPCTransport()
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
         try await transport.enqueue(
             AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
@@ -318,7 +318,7 @@ struct CodexReviewHostTests {
     @Test func liveStorePassesRuntimePreferenceMCPPortAndPathToHTTPServerFactory() async throws {
         let homeURL = try temporaryHome()
         let transport = FakeJSONRPCTransport()
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
         try await transport.enqueue(
             AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
@@ -362,7 +362,7 @@ struct CodexReviewHostTests {
         let firstTransport = FakeJSONRPCTransport()
         let secondTransport = FakeJSONRPCTransport()
         for transport in [firstTransport, secondTransport] {
-            try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+            try await transport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
             try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
             try await transport.enqueue(
                 AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
@@ -406,7 +406,7 @@ struct CodexReviewHostTests {
     @Test func liveStoreStopsMCPServerAfterItsStartFails() async throws {
         let homeURL = try temporaryHome()
         let transport = FakeJSONRPCTransport()
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
         try await transport.enqueue(
             AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
@@ -482,7 +482,7 @@ struct CodexReviewHostTests {
             AppServerAPI.Thread.Start.Response(threadID: "route-thread", model: "gpt-5"),
             for: "thread/start"
         )
-        await transport.enqueueCancellation(for: "review/start")
+        await transport.enqueueCancellation(for: "turn/start")
         try await enqueueReviewCleanupResponses(transport)
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": try temporaryHome().path],
@@ -518,7 +518,16 @@ struct CodexReviewHostTests {
         let methodsAfterCleanup = await transport.recordedRequests().map(\.method)
         #expect(methodsAfterCleanup.filter { $0 == "thread/backgroundTerminals/clean" }.count == 1)
         #expect(methodsAfterCleanup.filter { $0 == "thread/unsubscribe" }.count == 1)
-        #expect(methodsAfterCleanup.filter { $0 == "thread/delete" }.count == 2)
+        #expect(methodsAfterCleanup.filter { $0 == "thread/delete" }.count == 1)
+        let deletedThreadIDs = try await transport.recordedRequests()
+            .filter { $0.method == "thread/delete" }
+            .map {
+                try JSONDecoder().decode(
+                    AppServerAPI.Thread.Delete.Params.self,
+                    from: $0.params
+                ).threadID
+            }
+        #expect(deletedThreadIDs == ["route-thread"])
         await #expect(throws: ReviewRuntimeCloseFailure.self) {
             try await store.backend.cleanupReview(lateActiveRun)
         }
@@ -533,8 +542,7 @@ struct CodexReviewHostTests {
         try await enqueueLiveRouteReviewStartResponses(
             transport,
             threadID: "route-thread",
-            turnID: "turn-1",
-            reviewThreadID: "review-thread-1"
+            turnID: "turn-1"
         )
         let cleanupGate = AsyncGate()
         await transport.holdNextIgnoringCancellation(
@@ -545,8 +553,7 @@ struct CodexReviewHostTests {
         try await enqueueLiveRouteReviewStartResponses(
             replacementTransport,
             threadID: "replacement-thread",
-            turnID: "replacement-turn",
-            reviewThreadID: "replacement-review-thread"
+            turnID: "replacement-turn"
         )
         try await enqueueReviewCleanupResponses(replacementTransport)
         let replacementFactoryStarted = AsyncGate()
@@ -613,8 +620,7 @@ struct CodexReviewHostTests {
         try await enqueueLiveRouteReviewStartResponses(
             transport,
             threadID: "route-thread",
-            turnID: "turn-1",
-            reviewThreadID: "review-thread-1"
+            turnID: "turn-1"
         )
         await transport.enqueueTransportFailure(
             message: "raw cleanup I/O failed",
@@ -624,8 +630,7 @@ struct CodexReviewHostTests {
         try await enqueueLiveRouteReviewStartResponses(
             replacementTransport,
             threadID: "replacement-thread",
-            turnID: "replacement-turn",
-            reviewThreadID: "replacement-review-thread"
+            turnID: "replacement-turn"
         )
         try await enqueueReviewCleanupResponses(replacementTransport)
         var transports = [transport, replacementTransport]
@@ -674,8 +679,7 @@ struct CodexReviewHostTests {
         try await enqueueLiveRouteReviewStartResponses(
             transport,
             threadID: "route-thread",
-            turnID: "turn-1",
-            reviewThreadID: "review-thread-1"
+            turnID: "turn-1"
         )
         let cleanupGate = AsyncGate()
         await transport.holdNextIgnoringCancellation(
@@ -686,8 +690,7 @@ struct CodexReviewHostTests {
         try await enqueueLiveRouteReviewStartResponses(
             replacementTransport,
             threadID: "replacement-thread",
-            turnID: "replacement-turn",
-            reviewThreadID: "replacement-review-thread"
+            turnID: "replacement-turn"
         )
         try await enqueueReviewCleanupResponses(replacementTransport)
         let replacementFactoryStarted = AsyncGate()
@@ -753,8 +756,7 @@ struct CodexReviewHostTests {
         try await enqueueLiveRouteReviewStartResponses(
             transport,
             threadID: "route-thread",
-            turnID: "turn-1",
-            reviewThreadID: "review-thread-1"
+            turnID: "turn-1"
         )
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         let interruptAccepted = AsyncGate()
@@ -810,7 +812,7 @@ struct CodexReviewHostTests {
         await interruptAccepted.wait()
         try await emitInterruptedTurn(
             transport,
-            threadID: "review-thread-1",
+            threadID: "route-thread",
             turnID: "turn-1",
             message: "Stop review"
         )
@@ -844,14 +846,12 @@ struct CodexReviewHostTests {
         try await enqueueLiveRouteReviewStartResponses(
             transport,
             threadID: "route-thread-1",
-            turnID: "turn-1",
-            reviewThreadID: "review-thread-1"
+            turnID: "turn-1"
         )
         try await enqueueLiveRouteReviewStartResponses(
             transport,
             threadID: "route-thread-2",
-            turnID: "turn-2",
-            reviewThreadID: "review-thread-2"
+            turnID: "turn-2"
         )
         let cleanupGate = AsyncGate()
         await transport.holdNextIgnoringCancellation(
@@ -866,8 +866,7 @@ struct CodexReviewHostTests {
         try await enqueueLiveRouteReviewStartResponses(
             replacementTransport,
             threadID: "replacement-thread",
-            turnID: "replacement-turn",
-            reviewThreadID: "replacement-review-thread"
+            turnID: "replacement-turn"
         )
         try await enqueueReviewCleanupResponses(replacementTransport)
         var transports = [transport, replacementTransport, unusedTransport]
@@ -939,7 +938,7 @@ struct CodexReviewHostTests {
             AppServerAPI.Thread.Start.Response(threadID: "compatibility-thread", model: "gpt-5"),
             for: "thread/start"
         )
-        await transport.enqueueCancellation(for: "review/start")
+        await transport.enqueueCancellation(for: "turn/start")
         try await enqueueReviewCleanupResponses(transport)
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": try temporaryHome().path],
@@ -971,8 +970,7 @@ struct CodexReviewHostTests {
         try await enqueueLiveRouteReviewStartResponses(
             source,
             threadID: "typed-source-thread",
-            turnID: "typed-source-turn",
-            reviewThreadID: "typed-source-review"
+            turnID: "typed-source-turn"
         )
         var transports = [source, replacement]
         let store = CodexReviewStore.makeLiveStoreForTesting(
@@ -1031,8 +1029,7 @@ struct CodexReviewHostTests {
         try await enqueueLiveRouteReviewStartResponses(
             transport,
             threadID: "typed-discard-thread",
-            turnID: "typed-discard-turn",
-            reviewThreadID: "typed-discard-review"
+            turnID: "typed-discard-turn"
         )
         try await enqueueReviewCleanupResponses(transport)
         let store = CodexReviewStore.makeLiveStoreForTesting(
@@ -1125,7 +1122,7 @@ struct CodexReviewHostTests {
         let destinationMethods = await fixture.destination.recordedRequests().map(\.method)
         #expect(sourceMethods.contains("thread/rollback") == false)
         #expect(destinationMethods.filter { $0 == "thread/rollback" }.count == 1)
-        #expect(destinationMethods.filter { $0 == "review/start" }.count == 1)
+        #expect(destinationMethods.filter { $0 == "turn/start" }.count == 1)
         await fixture.store.stop()
     }
 
@@ -1187,7 +1184,7 @@ struct CodexReviewHostTests {
         #expect(fixture.store.liveReviewRecoveryRouteCountForTesting == 0)
         let methods = await fixture.destination.recordedRequests().map(\.method)
         #expect(methods.filter { $0 == "thread/rollback" }.count == 1)
-        #expect(methods.filter { $0 == "review/start" }.count == (cancelAfterRollback ? 0 : 1))
+        #expect(methods.filter { $0 == "turn/start" }.count == (cancelAfterRollback ? 0 : 1))
         #expect(methods.filter { $0 == "thread/unsubscribe" }.count == 1)
         #expect(methods.filter { $0 == "thread/backgroundTerminals/clean" }.count == 1)
         await #expect(throws: ReviewRecoveryHandoffAlreadyConsumed.self) {
@@ -1208,14 +1205,12 @@ struct CodexReviewHostTests {
         try await enqueueLiveRouteReviewStartResponses(
             sourceTransport,
             threadID: "late-interrupt-thread",
-            turnID: "late-interrupt-turn",
-            reviewThreadID: "late-interrupt-review-thread"
+            turnID: "late-interrupt-turn"
         )
         try await enqueueLiveRouteReviewStartResponses(
             sourceTransport,
             threadID: "late-source-thread",
-            turnID: "late-source-turn",
-            reviewThreadID: "late-source-review-thread"
+            turnID: "late-source-turn"
         )
         try await sourceTransport.enqueue(EmptyResponse(), for: "turn/interrupt")
         var transports = [sourceTransport, replacementTransport]
@@ -1495,7 +1490,7 @@ struct CodexReviewHostTests {
             ]
         )
         let transport = FakeJSONRPCTransport()
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await transport.enqueue(
             TestAccountReadResponse(account: .init(type: "apiKey")),
             for: "account/read"
@@ -1590,7 +1585,7 @@ struct CodexReviewHostTests {
             ]]
         )
         let transport = FakeJSONRPCTransport()
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await transport.enqueue(
             TestAccountReadResponse(account: .init(type: "apiKey")),
             for: "account/read"
@@ -1629,7 +1624,7 @@ struct CodexReviewHostTests {
         let mainTransport = FakeJSONRPCTransport()
         try await enqueueRuntimeStartResponses(mainTransport, accountEmail: "active@example.com")
         let loginTransport = FakeJSONRPCTransport()
-        try await loginTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await loginTransport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await loginTransport.enqueue(
             AppServerAPI.Account.Login.Response.apiKey,
             for: "account/login/start"
@@ -2300,7 +2295,7 @@ struct CodexReviewHostTests {
 
     @Test func liveStoreCancelsLoginWhenAuthenticationSessionIsClosed() async throws {
         let transport = FakeJSONRPCTransport()
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
         try await transport.enqueue(
             AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
@@ -2592,7 +2587,7 @@ struct CodexReviewHostTests {
 
     @Test func liveStoreCancelsLoginWhenAuthenticationSessionSetupFails() async throws {
         let transport = FakeJSONRPCTransport()
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
         try await transport.enqueue(
             AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
@@ -2681,7 +2676,7 @@ struct CodexReviewHostTests {
 
     @Test func livePrimaryLoginCompletionRequiresExactNonNullChallenge() async throws {
         let transport = FakeJSONRPCTransport()
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
         try await transport.enqueue(
             AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
@@ -3470,7 +3465,7 @@ struct CodexReviewHostTests {
         )
         let loginTransport = FakeJSONRPCTransport()
         try await loginTransport.enqueue(
-            AppServerAPI.Initialize.Response(),
+            AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"),
             for: "initialize"
         )
         try await loginTransport.enqueue(
@@ -4418,7 +4413,7 @@ struct CodexReviewHostTests {
         let homeURL = try temporaryHome()
         let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
         let mainTransport = FakeJSONRPCTransport()
-        try await mainTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await mainTransport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await mainTransport.enqueue(
             AppServerAPI.Account.Read.Response(
                 account: .init(email: "active@example.com", planType: "pro")
@@ -4439,7 +4434,7 @@ struct CodexReviewHostTests {
         try await mainTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
 
         let authTransport = FakeJSONRPCTransport()
-        try await authTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await authTransport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await authTransport.enqueue(
             AppServerAPI.Account.Login.Response.chatgpt(
                 loginID: "login-2",
@@ -4464,7 +4459,7 @@ struct CodexReviewHostTests {
         let refreshTransport = FakeJSONRPCTransport()
         let refreshGate = AsyncGate()
         await refreshTransport.hold(method: "account/rateLimits/read", gate: refreshGate)
-        try await refreshTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await refreshTransport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await refreshTransport.enqueue(
             AppServerAPI.Account.Read.Response(
                 account: .init(email: "new@example.com", planType: "plus")
@@ -4591,7 +4586,7 @@ struct CodexReviewHostTests {
         try writeSavedAccountAuth(homeURL: homeURL, accountKey: "new@example.com")
 
         let mainTransport = FakeJSONRPCTransport()
-        try await mainTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await mainTransport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await mainTransport.enqueue(
             AppServerAPI.Account.Read.Response(account: .init(email: "active@example.com", planType: "pro")),
             for: "account/read"
@@ -4610,7 +4605,7 @@ struct CodexReviewHostTests {
         try await mainTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
 
         let refreshTransport = FakeJSONRPCTransport()
-        try await refreshTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await refreshTransport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await refreshTransport.enqueue(
             AppServerAPI.Account.Read.Response(account: .init(email: "active@example.com", planType: "pro")),
             for: "account/read"
@@ -4656,7 +4651,7 @@ struct CodexReviewHostTests {
             accounts: ["existing@example.com"]
         )
         let transport = FakeJSONRPCTransport()
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
         try await transport.enqueue(
             AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
@@ -4738,7 +4733,7 @@ struct CodexReviewHostTests {
             accounts: ["active@example.com"]
         )
         let mainTransport = FakeJSONRPCTransport()
-        try await mainTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await mainTransport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await mainTransport.enqueue(
             AppServerAPI.Account.Read.Response(account: .init(email: "active@example.com", planType: "pro")),
             for: "account/read"
@@ -4756,7 +4751,7 @@ struct CodexReviewHostTests {
         )
         try await mainTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
         let loginTransport = FakeJSONRPCTransport()
-        try await loginTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await loginTransport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await loginTransport.enqueue(
             AppServerAPI.Account.Login.Response.chatgpt(
                 loginID: "login-2",
@@ -4809,7 +4804,7 @@ struct CodexReviewHostTests {
 
     @Test func liveStoreIgnoresNonCodexRateLimitNotifications() async throws {
         let transport = FakeJSONRPCTransport()
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await transport.enqueue(
             AppServerAPI.Account.Read.Response(account: .init(email: "active@example.com", planType: "pro")),
             for: "account/read"
@@ -4872,7 +4867,7 @@ struct CodexReviewHostTests {
         try writeSavedAccountAuth(homeURL: homeURL, accountKey: "second@example.com")
 
         let firstTransport = FakeJSONRPCTransport()
-        try await firstTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await firstTransport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await firstTransport.enqueue(
             AppServerAPI.Account.Read.Response(account: .init(email: "first@example.com", planType: "pro")),
             for: "account/read"
@@ -4890,11 +4885,11 @@ struct CodexReviewHostTests {
             for: "account/rateLimits/read"
         )
         try await firstTransport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-first", model: "gpt-5"), for: "thread/start")
-        try await firstTransport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-first"), for: "review/start")
+        try await firstTransport.enqueue(AppServerAPI.Turn.Start.Response(turnID: "turn-first"), for: "turn/start")
         try await firstTransport.enqueue(EmptyResponse(), for: "turn/interrupt")
 
         let secondTransport = FakeJSONRPCTransport()
-        try await secondTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await secondTransport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await secondTransport.enqueue(
             AppServerAPI.Account.Read.Response(account: .init(email: "second@example.com", planType: "plus")),
             for: "account/read"
@@ -5062,7 +5057,7 @@ struct CodexReviewHostTests {
         )
 
         let firstTransport = FakeJSONRPCTransport()
-        try await firstTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await firstTransport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await firstTransport.enqueue(
             AppServerAPI.Account.Read.Response(account: .init(email: "active@example.com", planType: "pro")),
             for: "account/read"
@@ -5081,12 +5076,12 @@ struct CodexReviewHostTests {
             for: "account/rateLimits/read"
         )
         try await firstTransport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-active", model: "gpt-5"), for: "thread/start")
-        try await firstTransport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-active"), for: "review/start")
+        try await firstTransport.enqueue(AppServerAPI.Turn.Start.Response(turnID: "turn-active"), for: "turn/start")
         try await firstTransport.enqueue(EmptyResponse(), for: "turn/interrupt")
         try await firstTransport.enqueue(EmptyResponse(), for: "account/logout")
 
         let secondTransport = FakeJSONRPCTransport()
-        try await secondTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await secondTransport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await secondTransport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
         try await secondTransport.enqueue(
             AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
@@ -5151,7 +5146,7 @@ struct CodexReviewHostTests {
         try originalAuth.write(to: mainCodexHomeURL.appendingPathComponent("auth.json"))
 
         let transport = FakeJSONRPCTransport()
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await transport.enqueue(
             AppServerAPI.Account.Read.Response(account: .init(email: "first@example.com", planType: "pro")),
             for: "account/read"
@@ -5190,7 +5185,7 @@ struct CodexReviewHostTests {
         let interruptGate = AsyncGate()
         let transport = FakeJSONRPCTransport()
         await transport.holdNext(method: "turn/interrupt", gate: interruptGate)
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
         try await transport.enqueue(
             AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
@@ -5198,7 +5193,7 @@ struct CodexReviewHostTests {
         )
         try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
         try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
-        try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-1"), for: "review/start")
+        try await transport.enqueue(AppServerAPI.Turn.Start.Response(turnID: "turn-1"), for: "turn/start")
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
@@ -5265,7 +5260,7 @@ struct CodexReviewHostTests {
         let interruptGate = AsyncGate()
         let transport = FakeJSONRPCTransport()
         await transport.holdNext(method: "turn/interrupt", gate: interruptGate)
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
         try await transport.enqueue(
             AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
@@ -5273,7 +5268,7 @@ struct CodexReviewHostTests {
         )
         try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
         try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
-        try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-1"), for: "review/start")
+        try await transport.enqueue(AppServerAPI.Turn.Start.Response(turnID: "turn-1"), for: "turn/start")
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
@@ -5312,7 +5307,7 @@ struct CodexReviewHostTests {
             method: "thread/backgroundTerminals/clean",
             gate: cleanupGate
         )
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
         try await transport.enqueue(
             AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
@@ -5324,8 +5319,8 @@ struct CodexReviewHostTests {
             for: "thread/start"
         )
         try await transport.enqueue(
-            AppServerAPI.Review.Start.Response(turnID: "turn-1"),
-            for: "review/start"
+            AppServerAPI.Turn.Start.Response(turnID: "turn-1"),
+            for: "turn/start"
         )
         await transport.enqueueFailure(
             .responseError(code: -32000, message: "Interrupt rejected."),
@@ -5374,8 +5369,8 @@ struct CodexReviewHostTests {
         let homeURL = try temporaryHome()
         let reviewStartGate = AsyncGate()
         let transport = FakeJSONRPCTransport()
-        await transport.holdNextIgnoringCancellation(method: "review/start", gate: reviewStartGate)
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        await transport.holdNextIgnoringCancellation(method: "turn/start", gate: reviewStartGate)
+        try await transport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
         try await transport.enqueue(
             AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
@@ -5386,7 +5381,7 @@ struct CodexReviewHostTests {
             AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"),
             for: "thread/start"
         )
-        try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-1"), for: "review/start")
+        try await transport.enqueue(AppServerAPI.Turn.Start.Response(turnID: "turn-1"), for: "turn/start")
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
@@ -5402,11 +5397,11 @@ struct CodexReviewHostTests {
             )
         }
         try #require(await waitUntil(timeout: .seconds(2)) {
-            await transport.recordedRequests().contains { $0.method == "review/start" }
+            await transport.recordedRequests().contains { $0.method == "turn/start" }
         })
         let job = try #require(store.jobs.first)
         guard case .starting = store.reviewAttemptOwnerships[job.id] else {
-            Issue.record("Expected the held review/start to retain its starting owner.")
+            Issue.record("Expected the held turn/start to retain its starting owner.")
             return
         }
 
@@ -5449,7 +5444,7 @@ struct CodexReviewHostTests {
             method: "thread/backgroundTerminals/clean",
             gate: cleanupGate
         )
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
         try await transport.enqueue(
             AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
@@ -5461,8 +5456,8 @@ struct CodexReviewHostTests {
             for: "thread/start"
         )
         try await transport.enqueue(
-            AppServerAPI.Review.Start.Response(turnID: "turn-1", reviewThreadID: "review-thread-1"),
-            for: "review/start"
+            AppServerAPI.Turn.Start.Response(turnID: "turn-1"),
+            for: "turn/start"
         )
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         let store = CodexReviewStore.makeLiveStoreForTesting(
@@ -5489,7 +5484,7 @@ struct CodexReviewHostTests {
         })
         try await emitInterruptedTurn(
             transport,
-            threadID: "review-thread-1",
+            threadID: "thread-1",
             turnID: "turn-1",
             message: "Network recovery"
         )
@@ -5523,7 +5518,7 @@ struct CodexReviewHostTests {
     @Test func liveStoreMarksRuntimeFailedWhenAppServerNotificationStreamCloses() async throws {
         let homeURL = try temporaryHome()
         let transport = FakeJSONRPCTransport()
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
         try await transport.enqueue(
             AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
@@ -5560,7 +5555,7 @@ struct CodexReviewHostTests {
         let firstTransport = FakeJSONRPCTransport()
         let secondTransport = FakeJSONRPCTransport()
         for transport in [firstTransport, secondTransport] {
-            try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+            try await transport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
             try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
             try await transport.enqueue(
                 AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
@@ -5630,7 +5625,7 @@ struct CodexReviewHostTests {
         let interruptGate = AsyncGate()
         let transport = FakeJSONRPCTransport()
         await transport.holdNext(method: "turn/interrupt", gate: interruptGate)
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
         try await transport.enqueue(
             AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
@@ -5641,7 +5636,7 @@ struct CodexReviewHostTests {
             AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"),
             for: "thread/start"
         )
-        try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-1"), for: "review/start")
+        try await transport.enqueue(AppServerAPI.Turn.Start.Response(turnID: "turn-1"), for: "turn/start")
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
@@ -5725,7 +5720,7 @@ struct CodexReviewHostTests {
             accounts: ["active@example.com"]
         )
         let mainTransport = FakeJSONRPCTransport()
-        try await mainTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await mainTransport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await mainTransport.enqueue(
             AppServerAPI.Account.Read.Response(account: .init(email: "active@example.com", planType: "pro")),
             for: "account/read"
@@ -5736,7 +5731,7 @@ struct CodexReviewHostTests {
         )
         try await mainTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
         let loginTransport = FakeJSONRPCTransport()
-        try await loginTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await loginTransport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await loginTransport.enqueue(
             AppServerAPI.Account.Login.Response.chatgpt(
                 loginID: "login-1",
@@ -5812,7 +5807,7 @@ struct CodexReviewHostTests {
             .write(to: mainCodexHomeURL.appendingPathComponent("auth.json"))
 
         let firstTransport = FakeJSONRPCTransport()
-        try await firstTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await firstTransport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await firstTransport.enqueue(
             AppServerAPI.Account.Read.Response(account: .init(email: "active@example.com", planType: "pro")),
             for: "account/read"
@@ -5832,7 +5827,7 @@ struct CodexReviewHostTests {
         try await firstTransport.enqueue(EmptyResponse(), for: "account/logout")
 
         let secondTransport = FakeJSONRPCTransport()
-        try await secondTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await secondTransport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await secondTransport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
         try await secondTransport.enqueue(
             AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
@@ -5900,7 +5895,7 @@ struct CodexReviewHostTests {
             accounts: ["active@example.com"]
         )
         let mainTransport = FakeJSONRPCTransport()
-        try await mainTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await mainTransport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await mainTransport.enqueue(
             AppServerAPI.Account.Read.Response(account: .init(email: "active@example.com", planType: "pro")),
             for: "account/read"
@@ -5911,7 +5906,7 @@ struct CodexReviewHostTests {
         )
         try await mainTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
         let loginTransport = FakeJSONRPCTransport()
-        try await loginTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await loginTransport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         await loginTransport.enqueueFailure(
             .responseError(code: -32603, message: "login unavailable"),
             for: "account/login/start"
@@ -5953,7 +5948,7 @@ struct CodexReviewHostTests {
         try await enqueueRuntimeStartResponses(secondMainTransport, accountEmail: "active@example.com")
         let firstLoginTransport = FakeJSONRPCTransport()
         let secondLoginTransport = FakeJSONRPCTransport()
-        try await secondLoginTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await secondLoginTransport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await secondLoginTransport.enqueue(
             AppServerAPI.Account.Login.Response.chatgpt(
                 loginID: "login-after-stop",
@@ -6025,7 +6020,7 @@ struct CodexReviewHostTests {
         let mainTransport = FakeJSONRPCTransport()
         try await enqueueRuntimeStartResponses(mainTransport, accountEmail: "active@example.com")
         let firstLoginTransport = FakeJSONRPCTransport()
-        try await firstLoginTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await firstLoginTransport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         await firstLoginTransport.enqueueFailure(
             .responseError(code: -32603, message: "first login unavailable"),
             for: "account/login/start"
@@ -6033,7 +6028,7 @@ struct CodexReviewHostTests {
         let firstStartGate = AsyncGate()
         await firstLoginTransport.holdNextIgnoringCancellation(method: "account/login/start", gate: firstStartGate)
         let secondLoginTransport = FakeJSONRPCTransport()
-        try await secondLoginTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await secondLoginTransport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await secondLoginTransport.enqueue(
             AppServerAPI.Account.Login.Response.chatgpt(
                 loginID: "login-b",
@@ -6047,7 +6042,7 @@ struct CodexReviewHostTests {
             for: "account/login/cancel"
         )
         let laterFailingTransport = FakeJSONRPCTransport()
-        try await laterFailingTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await laterFailingTransport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         await laterFailingTransport.enqueueFailure(
             .responseError(code: -32603, message: "later login unavailable"),
             for: "account/login/start"
@@ -6117,7 +6112,7 @@ struct CodexReviewHostTests {
         let firstLoginTransport = FakeJSONRPCTransport()
         let secondLoginTransport = FakeJSONRPCTransport()
         for (transport, loginID) in [(firstLoginTransport, "login-a"), (secondLoginTransport, "login-b")] {
-            try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+            try await transport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
             try await transport.enqueue(
                 AppServerAPI.Account.Login.Response.chatgpt(
                     loginID: loginID,
@@ -6224,7 +6219,7 @@ struct CodexReviewHostTests {
             (finalTransport, "login-final", "lynnpd.CodexReviewMonitor.auth"),
         ]
         for (transport, loginID, callbackScheme) in loginFixtures {
-            try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+            try await transport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
             try await transport.enqueue(
                 AppServerAPI.Account.Login.Response.chatgpt(
                     loginID: loginID,
@@ -6373,7 +6368,7 @@ struct CodexReviewHostTests {
         let staleTransport = FakeJSONRPCTransport()
         let replacementTransport = FakeJSONRPCTransport()
         for (transport, loginID) in [(staleTransport, "login-stale-native"), (replacementTransport, "login-current")] {
-            try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+            try await transport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
             try await transport.enqueue(
                 AppServerAPI.Account.Login.Response.chatgpt(
                     loginID: loginID,
@@ -6449,7 +6444,7 @@ struct CodexReviewHostTests {
             accounts: ["active@example.com"]
         )
         let mainTransport = FakeJSONRPCTransport()
-        try await mainTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await mainTransport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await mainTransport.enqueue(
             AppServerAPI.Account.Read.Response(account: .init(email: "active@example.com", planType: "pro")),
             for: "account/read"
@@ -6460,7 +6455,7 @@ struct CodexReviewHostTests {
         )
         try await mainTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
         let loginTransport = FakeJSONRPCTransport()
-        try await loginTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await loginTransport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         try await loginTransport.enqueue(
             AppServerAPI.Account.Login.Response.chatgpt(
                 loginID: "login-2",
@@ -6709,7 +6704,10 @@ private func enqueueRuntimeStartResponses(
     _ transport: FakeJSONRPCTransport,
     accountEmail: String? = nil
 ) async throws {
-    try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+    try await transport.enqueue(
+        AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"),
+        for: "initialize"
+    )
     if let accountEmail {
         try await transport.enqueue(
             AppServerAPI.Account.Read.Response(
@@ -6748,19 +6746,15 @@ private func makeLiveRouteReviewStartRequest(
 private func enqueueLiveRouteReviewStartResponses(
     _ transport: FakeJSONRPCTransport,
     threadID: String,
-    turnID: String,
-    reviewThreadID: String
+    turnID: String
 ) async throws {
     try await transport.enqueue(
         AppServerAPI.Thread.Start.Response(threadID: threadID, model: "gpt-5"),
         for: "thread/start"
     )
     try await transport.enqueue(
-        AppServerAPI.Review.Start.Response(
-            turnID: turnID,
-            reviewThreadID: reviewThreadID
-        ),
-        for: "review/start"
+        AppServerAPI.Turn.Start.Response(turnID: turnID),
+        for: "turn/start"
     )
 }
 
@@ -6819,19 +6813,15 @@ private func makeLiveTypedRecoveryFixture(
     try await enqueueLiveRouteReviewStartResponses(
         source,
         threadID: "typed-stage-thread",
-        turnID: "typed-stage-source-turn",
-        reviewThreadID: "typed-stage-source-review"
+        turnID: "typed-stage-source-turn"
     )
     try await destination.enqueue(EmptyResponse(), for: "thread/rollback")
     if outcomeUnknown {
-        await destination.enqueueCancellation(for: "review/start")
+        await destination.enqueueCancellation(for: "turn/start")
     } else {
         try await destination.enqueue(
-            AppServerAPI.Review.Start.Response(
-                turnID: "typed-stage-destination-turn",
-                reviewThreadID: "typed-stage-destination-review"
-            ),
-            for: "review/start"
+            AppServerAPI.Turn.Start.Response(turnID: "typed-stage-destination-turn"),
+            for: "turn/start"
         )
     }
     try await enqueueReviewCleanupResponses(destination)

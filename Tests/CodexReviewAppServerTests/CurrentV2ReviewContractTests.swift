@@ -5,12 +5,14 @@ import Testing
 import CodexReview
 import CodexReviewTesting
 
-private enum CurrentV2FixturePin {
-    static let upstreamCodexRevision = "3b45c29062ff0e76e71c91b6753290400e7fa8da"
-    static let installedCodexVersion = "codex-cli 0.148.0-alpha.15"
-    static let schemaRevision = "codex-rs/app-server-protocol/src/protocol/v2@3b45c290"
+private enum ReviewWireFixtures {
+    // Keep this capture explicit: it proves backward compatibility with the
+    // retired inline-review shape and is not the source for normal turn tests.
+    static let legacyUpstreamCodexRevision = "3b45c29062ff0e76e71c91b6753290400e7fa8da"
+    static let legacyInstalledCodexVersion = "codex-cli 0.148.0-alpha.15"
+    static let legacySchemaRevision = "codex-rs/app-server-protocol/src/protocol/v2@3b45c290"
 
-    static let reviewStart = Data(#"""
+    static let normalTurnStartResponse = Data(#"""
     {
       "turn": {
         "id": "turn-review",
@@ -21,12 +23,11 @@ private enum CurrentV2FixturePin {
         "startedAt": null,
         "completedAt": null,
         "durationMs": null
-      },
-      "reviewThreadId": "thread-review"
+      }
     }
     """#.utf8)
 
-    static let fullReviewNotifications = [
+    static let legacyFullReviewNotifications = [
         Data(#"""
         {
           "method": "item/completed",
@@ -69,7 +70,7 @@ private enum CurrentV2FixturePin {
         """#.utf8),
     ]
 
-    static let sparseTurnCompleted = Data(#"""
+    static let legacySparseTurnCompleted = Data(#"""
     {
       "method": "turn/completed",
       "params": {
@@ -121,24 +122,23 @@ private enum CurrentV2FixturePin {
 
 @Suite("current-v2 review wire characterization")
 struct CurrentV2ReviewWireCharacterizationTests {
-    @Test func fixturePinsIdentifyTheApprovedContract() {
-        #expect(CurrentV2FixturePin.upstreamCodexRevision == "3b45c29062ff0e76e71c91b6753290400e7fa8da")
-        #expect(CurrentV2FixturePin.installedCodexVersion == "codex-cli 0.148.0-alpha.15")
-        #expect(CurrentV2FixturePin.schemaRevision.hasSuffix("@3b45c290"))
+    @Test func legacyFixturePinsIdentifyTheCompatibilityCapture() {
+        #expect(ReviewWireFixtures.legacyUpstreamCodexRevision == "3b45c29062ff0e76e71c91b6753290400e7fa8da")
+        #expect(ReviewWireFixtures.legacyInstalledCodexVersion == "codex-cli 0.148.0-alpha.15")
+        #expect(ReviewWireFixtures.legacySchemaRevision.hasSuffix("@3b45c290"))
     }
 
-    @Test func reviewStartFixesTheReviewThreadAndTurnPair() throws {
+    @Test func turnStartFixesTheTurnIdentity() throws {
         let response = try JSONDecoder().decode(
-            AppServerAPI.Review.Start.Response.self,
-            from: CurrentV2FixturePin.reviewStart
+            AppServerAPI.Turn.Start.Response.self,
+            from: ReviewWireFixtures.normalTurnStartResponse
         )
 
-        #expect(response.reviewThreadID == "thread-review")
         #expect(response.turnID == "turn-review")
     }
 
     @Test func terminalStatusAndSparseSummaryAreNestedInsideTurn() throws {
-        let object = try object(CurrentV2FixturePin.sparseTurnCompleted)
+        let object = try object(ReviewWireFixtures.legacySparseTurnCompleted)
         let params = try #require(object["params"] as? [String: Any])
         let turn = try #require(params["turn"] as? [String: Any])
         let items = try #require(turn["items"] as? [[String: Any]])
@@ -152,8 +152,8 @@ struct CurrentV2ReviewWireCharacterizationTests {
         #expect(items[0]["delivery"] is NSNull)
     }
 
-    @Test func fullDeliveryPlacesTheMarkerBeforeTheTurnTerminal() throws {
-        let methods = try CurrentV2FixturePin.fullReviewNotifications.map {
+    @Test func legacyFullDeliveryPlacesTheMarkerBeforeTheTurnTerminal() throws {
+        let methods = try ReviewWireFixtures.legacyFullReviewNotifications.map {
             try #require(object($0)["method"] as? String)
         }
 
@@ -161,9 +161,9 @@ struct CurrentV2ReviewWireCharacterizationTests {
     }
 
     @Test func reviewAndStandaloneCommandDeltasHaveDifferentRoutingIdentity() throws {
-        let review = try object(CurrentV2FixturePin.reviewCommandDelta)
+        let review = try object(ReviewWireFixtures.reviewCommandDelta)
         let reviewParams = try #require(review["params"] as? [String: Any])
-        let standalone = try object(CurrentV2FixturePin.standaloneCommandDelta)
+        let standalone = try object(ReviewWireFixtures.standaloneCommandDelta)
         let standaloneParams = try #require(standalone["params"] as? [String: Any])
 
         #expect(reviewParams["threadId"] as? String == "thread-review")
@@ -185,8 +185,8 @@ struct CurrentV2ReviewWireCharacterizationTests {
 struct CurrentV2ReviewDecoderReducerTests {
     @Test func fullMarkerIsTheCanonicalResultAndSuppressesItsTypedCompanion() throws {
         var reducer = makeReducer()
-        let marker = try reviewEnvelope(CurrentV2FixturePin.fullReviewNotifications[0])
-        let terminal = try reviewEnvelope(CurrentV2FixturePin.fullReviewNotifications[1])
+        let marker = try reviewEnvelope(ReviewWireFixtures.legacyFullReviewNotifications[0])
+        let terminal = try reviewEnvelope(ReviewWireFixtures.legacyFullReviewNotifications[1])
 
         #expect(try reducer.ingest(marker) == .accepted(nil))
         let result = try reducer.ingest(terminal)
@@ -201,9 +201,32 @@ struct CurrentV2ReviewDecoderReducerTests {
         #expect(final.suppressedAgentMessageItemIDs == ["assistant-final"])
     }
 
-    @Test func sparseSummaryPromotesOneSynchronousAgentMessage() throws {
+    @Test func legacyMarkerDoesNotSuppressRecordedCommentaryWhenSummaryOmitsPhase() throws {
         var reducer = makeReducer()
-        let terminal = try reviewEnvelope(CurrentV2FixturePin.sparseTurnCompleted)
+        let marker = try reviewEnvelope(notificationData(
+            method: "item/completed",
+            params: #"{"threadId":"thread-review","turnId":"turn-review","item":{"type":"exitedReviewMode","id":"review-result","review":"Canonical review"}}"#
+        ))
+        let terminal = try reviewEnvelope(try turnCompletedData(
+            turnFragment: #"{"items":[{"type":"agentMessage","id":"commentary","text":"Still inspecting","delivery":null}],"itemsView":"summary"}"#
+        ))
+
+        #expect(try reducer.ingest(marker) == .accepted(nil))
+        let resolution = try #require(try reducer.ingest(
+            terminal,
+            agentMessagePhasesByItemID: ["commentary": .commentary]
+        ).terminalResolution)
+        guard case .completed(let final) = resolution.terminal else {
+            Issue.record("Expected the legacy marker to remain canonical.")
+            return
+        }
+        #expect(final.text == "Canonical review")
+        #expect(final.suppressedAgentMessageItemIDs.isEmpty)
+    }
+
+    @Test func legacySparseReducerPromotesOneSynchronousAgentMessage() throws {
+        var reducer = makeReducer()
+        let terminal = try reviewEnvelope(ReviewWireFixtures.legacySparseTurnCompleted)
 
         let result = try reducer.ingest(terminal)
         let resolution = try #require(result.terminalResolution)
@@ -221,6 +244,7 @@ struct CurrentV2ReviewDecoderReducerTests {
         arguments: [
             #"{"items":[],"itemsView":"summary"}"#,
             #"{"items":[{"type":"agentMessage","id":"final","text":"   ","delivery":null}],"itemsView":"summary"}"#,
+            #"{"items":[{"type":"agentMessage","id":"commentary","text":"Still working","delivery":null,"phase":"commentary"}],"itemsView":"summary"}"#,
             #"{"items":[{"type":"agentMessage","id":"one","text":"one","delivery":null},{"type":"agentMessage","id":"two","text":"two","delivery":null}],"itemsView":"summary"}"#,
             #"{"items":[{"type":"agentMessage","id":"final","text":"async","delivery":"async"}],"itemsView":"summary"}"#,
             #"{"items":[{"type":"agentMessage","id":"final","text":"not loaded","delivery":null}],"itemsView":"notLoaded"}"#,
@@ -245,7 +269,7 @@ struct CurrentV2ReviewDecoderReducerTests {
             method: "item/completed",
             params: #"{"threadId":"thread-review","turnId":"turn-review","item":{"type":"exitedReviewMode","id":"marker","review":"  "}}"#
         ))
-        let terminal = try reviewEnvelope(CurrentV2FixturePin.sparseTurnCompleted)
+        let terminal = try reviewEnvelope(ReviewWireFixtures.legacySparseTurnCompleted)
 
         #expect(try reducer.ingest(marker) == .accepted(nil))
         let resolution = try #require(try reducer.ingest(terminal).terminalResolution)
@@ -329,7 +353,7 @@ struct CurrentV2ReviewDecoderReducerTests {
 
     @Test func stableLifecycleDuplicateIsNoOpAndConflictFails() throws {
         var reducer = makeReducer()
-        let marker = try reviewEnvelope(CurrentV2FixturePin.fullReviewNotifications[0])
+        let marker = try reviewEnvelope(ReviewWireFixtures.legacyFullReviewNotifications[0])
         #expect(try reducer.ingest(marker) == .accepted(nil))
         #expect(try reducer.ingest(marker) == .duplicate)
 
@@ -344,7 +368,7 @@ struct CurrentV2ReviewDecoderReducerTests {
 
     @Test func omittedItemsViewDefaultsToFullWithoutSuppressingHistory() throws {
         var reducer = makeReducer()
-        let marker = try reviewEnvelope(CurrentV2FixturePin.fullReviewNotifications[0])
+        let marker = try reviewEnvelope(ReviewWireFixtures.legacyFullReviewNotifications[0])
         let terminal = try reviewEnvelope(try outerNotificationData(
             method: "turn/completed",
             params: [
@@ -377,7 +401,7 @@ struct CurrentV2ReviewDecoderReducerTests {
     @Test(arguments: ["full", "summary"])
     func markerSuppressesOnlyTheSingleSummaryCompanion(_ itemsView: String) throws {
         var reducer = makeReducer()
-        let marker = try reviewEnvelope(CurrentV2FixturePin.fullReviewNotifications[0])
+        let marker = try reviewEnvelope(ReviewWireFixtures.legacyFullReviewNotifications[0])
         let terminal = try reviewEnvelope(try terminalData(
             status: "completed",
             items: [
@@ -448,7 +472,7 @@ struct CurrentV2ReviewDecoderReducerTests {
     }
 
     @Test func rawDeltaHasNoReceiptAndIsConsumedEachTime() throws {
-        let envelope = try reviewEnvelope(CurrentV2FixturePin.reviewCommandDelta)
+        let envelope = try reviewEnvelope(ReviewWireFixtures.reviewCommandDelta)
         var reducer = makeReducer()
 
         #expect(envelope.stableReceipt == nil)
@@ -457,7 +481,7 @@ struct CurrentV2ReviewDecoderReducerTests {
     }
 
     @Test func unregisteredStandaloneAndUnrelatedMethodsDoNotEnterTheReviewReducer() throws {
-        let standalone = try notification(CurrentV2FixturePin.standaloneCommandDelta)
+        let standalone = try notification(ReviewWireFixtures.standaloneCommandDelta)
         let unrelated = JSONRPC.Notification(
             method: "account/updated",
             params: Data(#"{"accountId":"account-1"}"#.utf8)
@@ -587,7 +611,7 @@ struct CurrentV2ReviewDecoderReducerTests {
         let items = [
             #"{"type":"userMessage","id":"item-1","content":[]}"#,
             #"{"type":"hookPrompt","id":"item-1","fragments":[]}"#,
-            #"{"type":"agentMessage","id":"item-1","text":"","delivery":null}"#,
+            #"{"type":"agentMessage","id":"item-1","text":"","delivery":null,"phase":"commentary"}"#,
             #"{"type":"plan","id":"item-1","text":""}"#,
             #"{"type":"reasoning","id":"item-1","summary":[],"content":[]}"#,
             #"{"type":"commandExecution","id":"item-1","command":"","commandActions":[],"cwd":"","source":"agent","status":"completed"}"#,
@@ -622,6 +646,7 @@ struct CurrentV2ReviewDecoderReducerTests {
             #"{"type":"userMessage","id":"item-1"}"#,
             #"{"type":"hookPrompt","id":"item-1"}"#,
             #"{"type":"agentMessage","id":"item-1"}"#,
+            #"{"type":"agentMessage","id":"item-1","text":"","phase":"future"}"#,
             #"{"type":"plan","id":"item-1"}"#,
             #"{"type":"commandExecution","id":"item-1","command":"","commandActions":[],"status":"completed"}"#,
             #"{"type":"commandExecution","id":"item-1","command":"","commandActions":[],"cwd":"","status":"future"}"#,
@@ -1192,6 +1217,21 @@ struct CurrentV2ReviewRoutingIntegrationTests {
                 )
             )
         )
+        for method in ["item/started", "item/completed"] {
+            try await transport.emitServerNotification(
+                method: method,
+                params: V2ItemNotification(
+                    threadID: "thread-review",
+                    turnID: "turn-review",
+                    item: .init(
+                        type: "agentMessage",
+                        id: "assistant-final",
+                        text: "No findings.",
+                        phase: "final_answer"
+                    )
+                )
+            )
+        }
         try await transport.emitServerNotification(
             method: "turn/completed",
             params: V2TurnNotification(
@@ -1202,7 +1242,8 @@ struct CurrentV2ReviewRoutingIntegrationTests {
                         .init(
                             type: "agentMessage",
                             id: "assistant-final",
-                            text: "No findings."
+                            text: "No findings.",
+                            phase: "final_answer"
                         ),
                     ],
                     itemsView: "summary",
@@ -2238,7 +2279,12 @@ struct CurrentV2ReviewRoutingIntegrationTests {
             params: V2ItemNotification(
                 threadID: "thread-review",
                 turnID: "turn-review",
-                item: .init(type: "agentMessage", id: "non-final", text: "")
+                item: .init(
+                    type: "agentMessage",
+                    id: "non-final",
+                    text: "",
+                    phase: "commentary"
+                )
             )
         )
         try await transport.emitServerNotification(
@@ -2274,7 +2320,12 @@ struct CurrentV2ReviewRoutingIntegrationTests {
             params: V2ItemNotification(
                 threadID: "thread-review",
                 turnID: "turn-review",
-                item: .init(type: "agentMessage", id: "final", text: "Canonical review")
+                item: .init(
+                    type: "agentMessage",
+                    id: "final",
+                    text: "Canonical review",
+                    phase: "final_answer"
+                )
             )
         )
         try await transport.emitServerNotification(
@@ -2282,7 +2333,12 @@ struct CurrentV2ReviewRoutingIntegrationTests {
             params: V2ItemNotification(
                 threadID: "thread-review",
                 turnID: "turn-review",
-                item: .init(type: "agentMessage", id: "final", text: "Canonical review")
+                item: .init(
+                    type: "agentMessage",
+                    id: "final",
+                    text: "Canonical review",
+                    phase: "final_answer"
+                )
             )
         )
         let terminalNotification = V2TurnNotification(
@@ -2291,7 +2347,12 @@ struct CurrentV2ReviewRoutingIntegrationTests {
                 id: "turn-review",
                 items: [
                     .init(type: "futureItem", id: "future-summary"),
-                    .init(type: "agentMessage", id: "final", text: "Canonical review"),
+                    .init(
+                        type: "agentMessage",
+                        id: "final",
+                        text: "Canonical review",
+                        phase: "final_answer"
+                    ),
                 ],
                 itemsView: "summary",
                 status: "completed"
@@ -2346,13 +2407,23 @@ struct CurrentV2ReviewRoutingIntegrationTests {
                 kind: .agentMessage,
                 text: "Canonical review",
                 groupID: "final",
-                replacesGroup: true
+                replacesGroup: true,
+                metadata: .init(
+                    sourceType: "agentMessage",
+                    detail: "final_answer",
+                    itemID: "final"
+                )
             ),
             .logEntry(
                 kind: .agentMessage,
                 text: "Canonical review",
                 groupID: "final",
-                replacesGroup: true
+                replacesGroup: true,
+                metadata: .init(
+                    sourceType: "agentMessage",
+                    detail: "final_answer",
+                    itemID: "final"
+                )
             ),
             .logEntry(
                 kind: .agentMessage,
@@ -2749,6 +2820,7 @@ private struct V2Item: Encodable, Sendable {
     var agentThreadID: String?
     var agentPath: String?
     var durationMs: Int?
+    var phase: String?
 
     init(
         type: String,
@@ -2764,7 +2836,8 @@ private struct V2Item: Encodable, Sendable {
         activityKind: String? = nil,
         agentThreadID: String? = nil,
         agentPath: String? = nil,
-        durationMs: Int? = nil
+        durationMs: Int? = nil,
+        phase: String? = nil
     ) {
         self.type = type
         self.id = id
@@ -2782,6 +2855,7 @@ private struct V2Item: Encodable, Sendable {
         self.agentThreadID = agentThreadID
         self.agentPath = agentPath
         self.durationMs = durationMs
+        self.phase = phase
     }
 
     enum CodingKeys: String, CodingKey {
@@ -2801,6 +2875,7 @@ private struct V2Item: Encodable, Sendable {
         case agentThreadID = "agentThreadId"
         case agentPath
         case durationMs
+        case phase
     }
 }
 

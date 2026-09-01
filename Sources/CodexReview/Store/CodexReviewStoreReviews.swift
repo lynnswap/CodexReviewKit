@@ -1904,6 +1904,23 @@ extension CodexReviewStore {
                 text: text,
                 timestamp: clock.now()
             ))
+        case .agentMessageDelta(let text, let itemID, let phase):
+            guard let updatedMessage = job.appendAgentMessageDelta(itemID: itemID, delta: text) else {
+                return updatedRun
+            }
+            job.core.output.lastAgentMessage = updatedMessage
+            job.core.output.summary = updatedMessage
+            job.appendLogEntry(.init(
+                kind: .agentMessage,
+                groupID: itemID,
+                text: text,
+                metadata: .init(
+                    sourceType: "agentMessage",
+                    detail: phase?.rawValue,
+                    itemID: itemID
+                ),
+                timestamp: clock.now()
+            ))
         case .log(let text):
             job.appendLogEntry(.init(kind: .progress, text: text, timestamp: clock.now()))
         case .logEntry(let kind, let text, let groupID, let replacesGroup, let metadata, let audience):
@@ -2603,7 +2620,7 @@ private func reviewTerminalRecord(
     case .completed: .completed
     case .failed(let message): .failed(message: message)
     case .cancelled(let message): .interrupted(.server(message: message?.nilIfEmpty))
-    case .started, .message, .messageDelta, .log, .logEntry: nil
+    case .started, .message, .messageDelta, .agentMessageDelta, .log, .logEntry: nil
     }
 }
 

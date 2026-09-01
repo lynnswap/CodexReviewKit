@@ -15,6 +15,10 @@ private func makeAppServerReviewAttemptID() -> String {
     UUID().uuidString
 }
 
+private struct AppServerAgentMessageIdentity: Equatable, Sendable {
+    var phase: ReviewAgentMessagePhase?
+}
+
 private struct AppServerCleanupRequestTimeout: LocalizedError, Sendable {
     let method: String
     let timeout: Duration
@@ -462,7 +466,11 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         let operationID = try admitReviewOperation()
         defer { finishReviewOperation(operationID) }
 
-        _ = try await client.initialize()
+        let initialization = try await client.initialize()
+        let invocation = try AppServerReviewTurnInvocation(
+            codexHome: initialization.codexHome,
+            target: request.request.target
+        )
         await ensureNotificationRouterStarted(for: operationID)
         let control = AppServerReviewControl(client: client)
 
@@ -511,23 +519,17 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         registerReviewEventSession(session, for: provisionalRun)
         control.recordThreadStarted(threadID: thread.threadID)
 
-        let review: AppServerAPI.Review.Start.Response
+        let review: AppServerAPI.Turn.Start.Response
         reviewStartRoutingAttemptIDs.insert(provisionalRun.attemptID)
         reviewStartRequestsInFlight += 1
         do {
-            review = try await client.sendStartRequest(AppServerAPI.Review.Start.Request(
-                params: .init(threadID: thread.threadID, target: request.request.target)
-            ), overloadRetryAdmission: { event in
-                switch event {
-                case .rejected(let error):
-                    try await admission.recordReviewStartRejectedForRetry(
-                        Self.startRequestFailure(for: error),
-                        for: provisionalRun
-                    )
-                case .willDispatch:
-                    try await admission.admitReviewStartDispatch(for: provisionalRun)
-                }
-            })
+            review = try await startReviewTurn(
+                threadID: thread.threadID,
+                request: request,
+                invocation: invocation,
+                provisionalRun: provisionalRun,
+                admission: admission
+            )
         } catch {
             let failure = Self.startRequestFailure(for: error)
             if case .rejected = failure {
@@ -554,12 +556,11 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             }
             throw error
         }
-        let reviewThreadID = review.reviewThreadID ?? thread.threadID
         let run = CodexReviewBackendModel.Review.Run(
             attemptID: attemptID,
             threadID: thread.threadID,
             turnID: review.turnID,
-            reviewThreadID: reviewThreadID,
+            reviewThreadID: thread.threadID,
             model: thread.model ?? request.model
         )
         do {
@@ -587,6 +588,33 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         discardUnmatchedReviewNotificationsIfIdle()
 
         return await session.attempt()
+    }
+
+    private func startReviewTurn(
+        threadID: String,
+        request: CodexReviewBackendModel.Review.Start,
+        invocation: AppServerReviewTurnInvocation,
+        provisionalRun: CodexReviewBackendModel.Review.Run,
+        admission: ReviewStartAdmission
+    ) async throws -> AppServerAPI.Turn.Start.Response {
+        return try await client.sendStartRequest(
+            AppServerAPI.Turn.Start.Request(params: .init(
+                threadID: threadID,
+                prompt: invocation.prompt,
+                cwd: request.request.cwd
+            )),
+            overloadRetryAdmission: { event in
+                switch event {
+                case .rejected(let error):
+                    try await admission.recordReviewStartRejectedForRetry(
+                        Self.startRequestFailure(for: error),
+                        for: provisionalRun
+                    )
+                case .willDispatch:
+                    try await admission.admitReviewStartDispatch(for: provisionalRun)
+                }
+            }
+        )
     }
 
     private func startReviewThread(
@@ -992,7 +1020,11 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         let operationID = try admitReviewOperation()
         defer { finishReviewOperation(operationID) }
 
-        _ = try await client.initialize()
+        let initialization = try await client.initialize()
+        let invocation = try AppServerReviewTurnInvocation(
+            codexHome: initialization.codexHome,
+            target: request.request.target
+        )
         await ensureNotificationRouterStarted(for: operationID)
         let consumedHandoff = try await handoff.consume()
         let token = consumedHandoff.token
@@ -1044,28 +1076,14 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         reviewStartRoutingAttemptIDs.insert(provisionalRun.attemptID)
         reviewStartRequestsInFlight += 1
 
-        let review: AppServerAPI.Review.Start.Response
+        let review: AppServerAPI.Turn.Start.Response
         do {
-            review = try await client.sendStartRequest(
-                AppServerAPI.Review.Start.Request(
-                    params: .init(
-                        threadID: interruptedRun.threadID,
-                        target: request.request.target
-                    )
-                ),
-                overloadRetryAdmission: { event in
-                    switch event {
-                    case .rejected(let error):
-                        try await admission.recordReviewStartRejectedForRetry(
-                            Self.startRequestFailure(for: error),
-                            for: provisionalRun
-                        )
-                    case .willDispatch:
-                        try await admission.admitReviewStartDispatch(
-                            for: provisionalRun
-                        )
-                    }
-                }
+            review = try await startReviewTurn(
+                threadID: interruptedRun.threadID,
+                request: request,
+                invocation: invocation,
+                provisionalRun: provisionalRun,
+                admission: admission
             )
         } catch {
             let failure = Self.startRequestFailure(for: error)
@@ -1093,7 +1111,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             attemptID: attemptID,
             threadID: interruptedRun.threadID,
             turnID: review.turnID,
-            reviewThreadID: review.reviewThreadID ?? interruptedRun.threadID,
+            reviewThreadID: interruptedRun.threadID,
             model: interruptedRun.model ?? request.model
         )
         do {
@@ -2308,6 +2326,7 @@ private actor AppServerReviewEventSession {
     private var emittedCanonicalStart = false
     private var reviewThreadIDsForCleanup: [String] = []
     private var commandLifecycleByItemID: [String: AppServerCommandLifecycle] = [:]
+    private var agentMessageIdentitiesByItemID: [String: AppServerAgentMessageIdentity] = [:]
     private var pendingStreamedLogEntries: [PendingStreamedLogEntry] = []
     private var pendingStreamedLogIndexByKey: [PendingStreamedLogEntry.Key: Int] = [:]
     private var streamedLogFlushTask: Task<Void, Never>?
@@ -2453,6 +2472,7 @@ private actor AppServerReviewEventSession {
             + drainRequestedCancellationProductEvents()
         cancelPendingStreamedLogFlush()
         commandLifecycleByItemID.removeAll(keepingCapacity: true)
+        agentMessageIdentitiesByItemID.removeAll(keepingCapacity: true)
         pendingStartupNotifications.removeAll(keepingCapacity: true)
         await emitPrecedingEvents(precedingEvents)
         if let failure {
@@ -2470,6 +2490,7 @@ private actor AppServerReviewEventSession {
         terminalCommitState = .finished
         cancelPendingStreamedLogFlush()
         commandLifecycleByItemID.removeAll(keepingCapacity: true)
+        agentMessageIdentitiesByItemID.removeAll(keepingCapacity: true)
         pendingStreamedLogEntries.removeAll(keepingCapacity: true)
         pendingStreamedLogIndexByKey.removeAll(keepingCapacity: true)
         pendingStartupNotifications.removeAll(keepingCapacity: true)
@@ -2535,6 +2556,18 @@ private actor AppServerReviewEventSession {
             return
         }
         recordActiveInterruptTurn(from: notification)
+        do {
+            try validateTerminalAgentMessageIdentities(in: notification)
+        } catch let error as ReviewIngestionError {
+            await failAttempt(error, diagnosticFor: notification)
+            return
+        } catch {
+            await failAttempt(.malformedKnownEvent(
+                method: notification.method,
+                message: error.localizedDescription
+            ), diagnosticFor: notification)
+            return
+        }
         guard var terminalReducer else {
             await failAttempt(
                 .missingRoutingIdentity(method: notification.method),
@@ -2544,7 +2577,10 @@ private actor AppServerReviewEventSession {
         }
         let ingestion: CurrentV2ReviewAttemptIngestion
         do {
-            ingestion = try terminalReducer.ingest(notification.envelope)
+            ingestion = try terminalReducer.ingest(
+                notification.envelope,
+                agentMessagePhasesByItemID: agentMessageIdentitiesByItemID.compactMapValues(\.phase)
+            )
             self.terminalReducer = terminalReducer
         } catch let error as ReviewIngestionError {
             await failAttempt(error, diagnosticFor: notification)
@@ -2566,11 +2602,13 @@ private actor AppServerReviewEventSession {
         }
 
         var decodedCommandLifecycleByItemID = commandLifecycleByItemID
+        var decodedAgentMessageIdentitiesByItemID = agentMessageIdentitiesByItemID
         let decoded: DecodedReviewNotification
         do {
             decoded = try normalizeReviewNotification(
                 notification,
-                commandLifecycleByItemID: &decodedCommandLifecycleByItemID
+                commandLifecycleByItemID: &decodedCommandLifecycleByItemID,
+                agentMessageIdentitiesByItemID: &decodedAgentMessageIdentitiesByItemID
             )
         } catch let error as ReviewIngestionError {
             _ = await failAttempt(error)
@@ -2615,6 +2653,7 @@ private actor AppServerReviewEventSession {
             }
         }
         commandLifecycleByItemID = decodedCommandLifecycleByItemID
+        agentMessageIdentitiesByItemID = decodedAgentMessageIdentitiesByItemID
 
         if decoded.finishesReviewMode {
             if await flushPendingStreamedLog() {
@@ -2870,6 +2909,7 @@ private actor AppServerReviewEventSession {
             _ = await emit(commandEvent)
         }
         commandLifecycleByItemID.removeAll(keepingCapacity: true)
+        agentMessageIdentitiesByItemID.removeAll(keepingCapacity: true)
         pendingStartupNotifications.removeAll(keepingCapacity: true)
         await emitTerminal(resolved.terminal)
         terminalCommitState = .finished
@@ -2894,10 +2934,12 @@ private actor AppServerReviewEventSession {
             return
         }
         var lifecycle = commandLifecycleByItemID
+        var agentMessageIdentities = agentMessageIdentitiesByItemID
         do {
             let decoded = try normalizeReviewNotification(
                 notification,
-                commandLifecycleByItemID: &lifecycle
+                commandLifecycleByItemID: &lifecycle,
+                agentMessageIdentitiesByItemID: &agentMessageIdentities
             )
             metrics.decoded += 1
             for event in decoded.events {
@@ -2953,9 +2995,35 @@ private actor AppServerReviewEventSession {
         cancelPendingStreamedLogFlush()
         pendingStartupNotifications.removeAll(keepingCapacity: true)
         await emitPrecedingEvents(precedingEvents)
+        agentMessageIdentitiesByItemID.removeAll(keepingCapacity: true)
         await emitTerminal(.failed(message: error.localizedDescription))
         terminalCommitState = .finished
         return true
+    }
+
+    private func validateTerminalAgentMessageIdentities(
+        in notification: AppServerRoutedReviewNotification
+    ) throws {
+        guard notification.method == "turn/completed",
+              notification.envelope.threadID == run.reviewThreadID,
+              notification.envelope.turnID == run.turnID,
+              notification.payload.turn?.itemsView == "summary"
+        else {
+            return
+        }
+        for item in notification.payload.turn?.items ?? [] where item.type == "agentMessage" {
+            guard let recorded = agentMessageIdentitiesByItemID[item.id] else {
+                throw ReviewIngestionError.malformedKnownEvent(
+                    method: notification.method,
+                    message: "agent message summary requires a prior lifecycle identity for \(item.id)"
+                )
+            }
+            _ = try resolveAgentMessageIdentity(
+                item: item,
+                recorded: recorded,
+                method: notification.method
+            )
+        }
     }
 
     private func noteReviewThreadIDForCleanup(_ reviewThreadID: String?) {
@@ -2999,7 +3067,11 @@ private actor AppServerReviewEventSession {
                         text: result.text,
                         groupID: itemID,
                         replacesGroup: true,
-                        metadata: .init(sourceType: "canonicalReviewResult")
+                        metadata: .init(
+                            sourceType: "canonicalReviewResult",
+                            detail: ReviewAgentMessagePhase.finalAnswer.rawValue,
+                            itemID: itemID
+                        )
                     )
                 )
             }
@@ -3045,7 +3117,7 @@ private actor AppServerReviewEventSession {
 
     private static func isCommandProgressBoundary(_ event: CodexReviewBackendModel.Review.Event) -> Bool {
         switch event {
-        case .started, .message, .messageDelta, .log:
+        case .started, .message, .messageDelta, .agentMessageDelta, .log:
             return true
         case .logEntry(let kind, _, _, _, _, _):
             return kind != .command && kind != .commandOutput
@@ -3156,7 +3228,7 @@ private actor AppServerReviewEventSession {
             appServerBackendLogger.debug(
                 "Review event session finished for \(self.run.threadID, privacy: .public): emitted=\(self.metrics.emitted, privacy: .public) buffered=\(self.metrics.buffered, privacy: .public) ignored=\(self.metrics.ignored, privacy: .public) timeoutWarnings=\(self.metrics.commandTimeoutWarnings, privacy: .public)"
             )
-        case .message, .messageDelta, .log, .logEntry:
+        case .message, .messageDelta, .agentMessageDelta, .log, .logEntry:
             break
         }
     }
@@ -3222,7 +3294,7 @@ private extension CodexReviewBackendModel.Review.Event {
         switch self {
         case .completed, .failed, .cancelled:
             true
-        case .started, .message, .messageDelta, .log, .logEntry:
+        case .started, .message, .messageDelta, .agentMessageDelta, .log, .logEntry:
             false
         }
     }
@@ -3235,7 +3307,7 @@ private extension CodexReviewBackendModel.Review.Event {
             return "failed"
         case .cancelled:
             return "canceled"
-        case .started, .message, .messageDelta, .log, .logEntry:
+        case .started, .message, .messageDelta, .agentMessageDelta, .log, .logEntry:
             return nil
         }
     }
@@ -3338,7 +3410,6 @@ private struct TurnNotificationPayload: Decodable, Sendable {
     var item: AppServerThreadItem?
     var startedAtMs: Int64?
     var completedAtMs: Int64?
-    var reviewThreadID: String?
     var model: String?
     var fromModel: String?
     var toModel: String?
@@ -3366,7 +3437,6 @@ private struct TurnNotificationPayload: Decodable, Sendable {
         case item
         case startedAtMs
         case completedAtMs
-        case reviewThreadID = "reviewThreadId"
         case model
         case fromModel
         case toModel
@@ -3396,7 +3466,6 @@ private struct TurnNotificationPayload: Decodable, Sendable {
         self.item = try container.decodeIfPresent(AppServerThreadItem.self, forKey: .item)
         self.startedAtMs = try container.decodeIfPresent(Int64.self, forKey: .startedAtMs)
         self.completedAtMs = try container.decodeIfPresent(Int64.self, forKey: .completedAtMs)
-        self.reviewThreadID = try container.decodeStringIfPresent(forKey: .reviewThreadID)
         self.model = try container.decodeStringIfPresent(forKey: .model)
         self.fromModel = try container.decodeStringIfPresent(forKey: .fromModel)
         self.toModel = try container.decodeStringIfPresent(forKey: .toModel)
@@ -3435,11 +3504,15 @@ private struct TurnNotificationPayload: Decodable, Sendable {
 
 private struct AppServerNotificationTurn: Decodable, Sendable {
     var id: String
+    var items: [AppServerThreadItem]
+    var itemsView: String?
     var status: String?
     var error: AppServerNotificationTurnError?
 
     enum CodingKeys: String, CodingKey {
         case id
+        case items
+        case itemsView
         case status
         case error
     }
@@ -3447,6 +3520,8 @@ private struct AppServerNotificationTurn: Decodable, Sendable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.id = try container.decode(String.self, forKey: .id)
+        self.items = try container.decodeIfPresent([AppServerThreadItem].self, forKey: .items) ?? []
+        self.itemsView = try container.decodeStringIfPresent(forKey: .itemsView)
         self.status = try container.decodeStringIfPresent(forKey: .status)
         self.error = try container.decodeIfPresent(AppServerNotificationTurnError.self, forKey: .error)
     }
@@ -3476,7 +3551,8 @@ private let appServerContextCompactionCancelledText = "Context compaction cancel
 
 private func normalizeReviewNotification(
     _ notification: AppServerRoutedReviewNotification,
-    commandLifecycleByItemID: inout [String: AppServerCommandLifecycle]
+    commandLifecycleByItemID: inout [String: AppServerCommandLifecycle],
+    agentMessageIdentitiesByItemID: inout [String: AppServerAgentMessageIdentity]
 ) throws -> DecodedReviewNotification {
     let payload = notification.payload
     let events: [CodexReviewBackendModel.Review.Event]
@@ -3498,6 +3574,18 @@ private func normalizeReviewNotification(
             )
             commandLifecycleByItemID[item.id] = lifecycle
             events = try item.startedEvents(startedAt: payload.startedAt, lifecycle: lifecycle)
+        } else if item.type == "agentMessage" {
+            let identity = try resolveAgentMessageIdentity(
+                item: item,
+                recorded: agentMessageIdentitiesByItemID[item.id],
+                method: notification.method
+            )
+            agentMessageIdentitiesByItemID[item.id] = identity
+            events = try item.startedEvents(
+                startedAt: payload.startedAt,
+                lifecycle: nil,
+                agentMessagePhase: identity.phase
+            )
         } else {
             events = try item.startedEvents(startedAt: payload.startedAt, lifecycle: nil)
         }
@@ -3518,6 +3606,18 @@ private func normalizeReviewNotification(
             )
             events = try item.completedEvents(completedAt: payload.completedAt, lifecycle: lifecycle)
             commandLifecycleByItemID.removeValue(forKey: item.id)
+        } else if item.type == "agentMessage" {
+            let identity = try resolveAgentMessageIdentity(
+                item: item,
+                recorded: agentMessageIdentitiesByItemID[item.id],
+                method: notification.method
+            )
+            events = try item.completedEvents(
+                completedAt: payload.completedAt,
+                lifecycle: nil,
+                agentMessagePhase: identity.phase
+            )
+            agentMessageIdentitiesByItemID[item.id] = identity
         } else {
             events = try item.completedEvents(completedAt: payload.completedAt, lifecycle: nil)
         }
@@ -3531,7 +3631,17 @@ private func normalizeReviewNotification(
         guard let itemID = payload.itemID else {
             throw ReviewIngestionError.missingRoutingIdentity(method: notification.method)
         }
-        events = [.messageDelta(delta, itemID: itemID)]
+        guard let identity = agentMessageIdentitiesByItemID[itemID] else {
+            throw ReviewIngestionError.malformedKnownEvent(
+                method: notification.method,
+                message: "agent message delta requires a prior item/started identity for \(itemID)"
+            )
+        }
+        events = [.agentMessageDelta(
+            delta,
+            itemID: itemID,
+            phase: identity.phase
+        )]
     case "item/plan/delta":
         events = payload.deltaLog(kind: .plan).map { [$0] } ?? []
     case "item/reasoning/summaryTextDelta":
@@ -3694,6 +3804,23 @@ private func normalizeReviewNotification(
         events: events,
         finishesReviewMode: notification.method == "item/completed" && payload.item?.type == "exitedReviewMode"
     )
+}
+
+private func resolveAgentMessageIdentity(
+    item: AppServerThreadItem,
+    recorded: AppServerAgentMessageIdentity?,
+    method: String
+) throws -> AppServerAgentMessageIdentity {
+    if let recorded,
+       let recordedPhase = recorded.phase,
+       let itemPhase = item.agentMessagePhase,
+       recordedPhase != itemPhase {
+        throw ReviewIngestionError.malformedKnownEvent(
+            method: method,
+            message: "agent message \(item.id) changed phase from \(recordedPhase.rawValue) to \(itemPhase.rawValue)"
+        )
+    }
+    return .init(phase: item.agentMessagePhase ?? recorded?.phase)
 }
 
 private func reasoningSummaryGroupID(itemID: String, summaryIndex: Int) -> String {
@@ -3982,6 +4109,7 @@ private struct AppServerThreadItem: Decodable, Sendable {
     var activityKind: String?
     var agentThreadID: String?
     var agentPath: String?
+    var agentMessagePhase: ReviewAgentMessagePhase?
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -4011,6 +4139,7 @@ private struct AppServerThreadItem: Decodable, Sendable {
         case activityKind = "kind"
         case agentThreadID = "agentThreadId"
         case agentPath
+        case agentMessagePhase = "phase"
     }
 
     init(from decoder: Decoder) throws {
@@ -4047,11 +4176,16 @@ private struct AppServerThreadItem: Decodable, Sendable {
         self.activityKind = try container.decodeStringIfPresent(forKey: .activityKind)
         self.agentThreadID = try container.decodeStringIfPresent(forKey: .agentThreadID)
         self.agentPath = try container.decodeStringIfPresent(forKey: .agentPath)
+        self.agentMessagePhase = try container.decodeIfPresent(
+            ReviewAgentMessagePhase.self,
+            forKey: .agentMessagePhase
+        )
     }
 
     func startedEvents(
         startedAt: Date?,
-        lifecycle: AppServerCommandLifecycle?
+        lifecycle: AppServerCommandLifecycle?,
+        agentMessagePhase: ReviewAgentMessagePhase? = nil
     ) throws -> [CodexReviewBackendModel.Review.Event] {
         switch type {
         case "userMessage":
@@ -4107,9 +4241,7 @@ private struct AppServerThreadItem: Decodable, Sendable {
         case "hookPrompt":
             return [logEntry(kind: .event, text: "Hook prompt started.", replacesGroup: true, title: "Hook prompt", status: "started", detail: prompt)]
         case "agentMessage":
-            return text?.nilIfEmpty.map {
-                [.logEntry(kind: .agentMessage, text: $0, groupID: id, replacesGroup: true)]
-            } ?? []
+            return agentMessageEvents(text: text, phase: agentMessagePhase)
         default:
             throw ReviewIngestionError.unsupportedItemType(
                 method: "item/started",
@@ -4120,15 +4252,14 @@ private struct AppServerThreadItem: Decodable, Sendable {
 
     func completedEvents(
         completedAt: Date?,
-        lifecycle: AppServerCommandLifecycle?
+        lifecycle: AppServerCommandLifecycle?,
+        agentMessagePhase: ReviewAgentMessagePhase? = nil
     ) throws -> [CodexReviewBackendModel.Review.Event] {
         switch type {
         case "userMessage":
             return []
         case "agentMessage":
-            return text.map {
-                [.logEntry(kind: .agentMessage, text: $0, groupID: id, replacesGroup: true)]
-            } ?? []
+            return agentMessageEvents(text: text, phase: agentMessagePhase)
         case "exitedReviewMode":
             return exitedReviewModeEvents()
         case "commandExecution":
@@ -4225,6 +4356,26 @@ private struct AppServerThreadItem: Decodable, Sendable {
                 metadata: .init(sourceType: "exitedReviewMode")
             )]
         } ?? []
+    }
+
+    private func agentMessageEvents(
+        text: String?,
+        phase: ReviewAgentMessagePhase?
+    ) -> [CodexReviewBackendModel.Review.Event] {
+        guard let text = text?.nilIfEmpty else {
+            return []
+        }
+        return [.logEntry(
+            kind: .agentMessage,
+            text: text,
+            groupID: id,
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "agentMessage",
+                detail: phase?.rawValue,
+                itemID: id
+            )
+        )]
     }
 
     private func logEntry(

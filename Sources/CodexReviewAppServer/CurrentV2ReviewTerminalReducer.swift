@@ -101,6 +101,7 @@ struct CurrentV2ReviewTerminalReducer: Sendable {
         var text: String?
         var review: String?
         var delivery: String?
+        var phase: ReviewAgentMessagePhase?
     }
 
     private let identity: CurrentV2ReviewAttemptIdentity
@@ -117,7 +118,8 @@ struct CurrentV2ReviewTerminalReducer: Sendable {
     }
 
     mutating func ingest(
-        _ notification: CurrentV2ReviewNotificationEnvelope
+        _ notification: CurrentV2ReviewNotificationEnvelope,
+        agentMessagePhasesByItemID: [String: ReviewAgentMessagePhase] = [:]
     ) throws -> CurrentV2ReviewAttemptIngestion {
         guard notification.threadID == identity.threadID,
               notification.turnID == nil || notification.turnID == identity.turnID
@@ -157,7 +159,10 @@ struct CurrentV2ReviewTerminalReducer: Sendable {
                 from: notification,
                 method: notification.method
             )
-            let resolved = resolveTerminal(payload.turn)
+            let resolved = resolveTerminal(
+                payload.turn,
+                agentMessagePhasesByItemID: agentMessagePhasesByItemID
+            )
             return .accepted(resolved)
         default:
             return .accepted(nil)
@@ -165,12 +170,16 @@ struct CurrentV2ReviewTerminalReducer: Sendable {
     }
 
     private func resolveTerminal(
-        _ turn: TerminalPayload.Turn
+        _ turn: TerminalPayload.Turn,
+        agentMessagePhasesByItemID: [String: ReviewAgentMessagePhase]
     ) -> CurrentV2ReviewTerminalResolution {
         switch turn.status {
         case "completed":
             do {
-                return .init(terminal: .completed(try finalResult(from: turn)))
+                return .init(terminal: .completed(try finalResult(
+                    from: turn,
+                    agentMessagePhasesByItemID: agentMessagePhasesByItemID
+                )))
             } catch let error as ReviewIngestionError {
                 return .init(
                     terminal: .failed(message: error.localizedDescription),
@@ -205,7 +214,10 @@ struct CurrentV2ReviewTerminalReducer: Sendable {
         }
     }
 
-    private func finalResult(from turn: TerminalPayload.Turn) throws -> ReviewFinalResult {
+    private func finalResult(
+        from turn: TerminalPayload.Turn,
+        agentMessagePhasesByItemID: [String: ReviewAgentMessagePhase]
+    ) throws -> ReviewFinalResult {
         switch outputStrategy {
         case .currentV2:
             if let reviewMarker {
@@ -215,6 +227,10 @@ struct CurrentV2ReviewTerminalReducer: Sendable {
                    let item = turn.items.first,
                    item.type == "agentMessage",
                    item.delivery == nil,
+                   effectivePhase(
+                       for: item,
+                       agentMessagePhasesByItemID: agentMessagePhasesByItemID
+                   ) != .commentary,
                    item.text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
                     companionItemIDs = [item.id]
                 } else {
@@ -231,6 +247,10 @@ struct CurrentV2ReviewTerminalReducer: Sendable {
                   let item = turn.items.first,
                   item.type == "agentMessage",
                   item.delivery == nil,
+                  effectivePhase(
+                    for: item,
+                    agentMessagePhasesByItemID: agentMessagePhasesByItemID
+                  ) != .commentary,
                   let text = item.text
             else {
                 throw ReviewIngestionError.missingFinalReview
@@ -240,6 +260,13 @@ struct CurrentV2ReviewTerminalReducer: Sendable {
                 source: .turnSummary(itemID: item.id)
             )
         }
+    }
+
+    private func effectivePhase(
+        for item: TerminalItem,
+        agentMessagePhasesByItemID: [String: ReviewAgentMessagePhase]
+    ) -> ReviewAgentMessagePhase? {
+        item.phase ?? agentMessagePhasesByItemID[item.id]
     }
 
     private func decode<Value: Decodable>(
