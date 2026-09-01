@@ -6,6 +6,7 @@ func reviewMonitorLogText(for job: CodexReviewJob) -> String {
     var projection = ReviewMonitorLog.Projection()
     return projection.render(
         entries: job.logEntries,
-        terminal: job.core.lifecycle.terminal
+        terminal: job.core.lifecycle.terminal,
+        fallbackSummary: job.core.output.summary
     ).text
 }

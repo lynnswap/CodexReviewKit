@@ -171,6 +171,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         selectedJobObservation = withPortableContinuousObservation { [weak self] event in
             _ = selectedJob.logRevision
             _ = selectedJob.core.lifecycle.terminal
+            _ = selectedJob.core.output.summary
             guard let self,
                   self.boundJob === selectedJob
             else {
@@ -367,6 +368,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private func renderSelectedJobLog(
         entries: [ReviewLogEntry],
         terminal: ReviewTerminalRecord?,
+        fallbackSummary: String,
         targetSignatures: [LogEntryRenderSignature],
         restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget,
         allowIncrementalUpdate: Bool
@@ -383,7 +385,8 @@ final class ReviewMonitorTransportViewController: NSViewController {
         logRenderTask = Task.detached(priority: .userInitiated) { [weak self] in
             let renderedDocument = await renderer.render(
                 entries: entries,
-                terminal: terminal
+                terminal: terminal,
+                fallbackSummary: fallbackSummary
             )
             await MainActor.run { [weak self] in
                 guard Task.isCancelled == false,
@@ -483,6 +486,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         }
         let entries = job.logEntries
         let terminal = job.core.lifecycle.terminal
+        let fallbackSummary = job.core.output.summary
         let targetSignatures = entries.map(LogEntryRenderSignature.init)
         if allowIncrementalUpdate,
            hasAppliedBoundJobLog,
@@ -503,6 +507,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         return renderSelectedJobLog(
             entries: entries,
             terminal: terminal,
+            fallbackSummary: fallbackSummary,
             targetSignatures: targetSignatures,
             restorationTarget: restorationTarget,
             allowIncrementalUpdate: allowIncrementalUpdate
@@ -980,7 +985,8 @@ extension ReviewMonitorTransportViewController {
                     var projection = ReviewMonitorLog.Projection()
                     let document = projection.render(
                         entries: job.logEntries,
-                        terminal: job.core.lifecycle.terminal
+                        terminal: job.core.lifecycle.terminal,
+                        fallbackSummary: job.core.output.summary
                     )
                     return logScrollView.displayTextForTesting(sourceDocument: document)
                 }(),

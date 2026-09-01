@@ -1464,15 +1464,19 @@ struct Projection: Sendable {
     }
 
     mutating func render(entries: [ReviewLogEntry]) -> ReviewMonitorLog.Document {
-        render(entries: entries, terminal: nil)
+        render(entries: entries, terminal: nil, fallbackSummary: nil)
     }
 
     mutating func render(
         entries: [ReviewLogEntry],
-        terminal: ReviewTerminalRecord?
+        terminal: ReviewTerminalRecord?,
+        fallbackSummary: String? = nil
     ) -> ReviewMonitorLog.Document {
         let entrySignatures = entries.map(EntrySignature.init)
-        let terminalPresentation = Self.terminalPresentation(for: terminal)
+        let terminalPresentation = Self.terminalPresentation(
+            for: terminal,
+            fallbackSummary: fallbackSummary
+        )
         guard entrySignatures != state.entrySignatures
                 || terminalPresentation != state.terminalPresentation
         else {
@@ -1585,9 +1589,13 @@ struct Projection: Sendable {
     }
 
     private static func terminalPresentation(
-        for terminal: ReviewTerminalRecord?
+        for terminal: ReviewTerminalRecord?,
+        fallbackSummary: String?
     ) -> ReviewMonitorTerminalPresentation? {
-        guard let presentation = ReviewMonitorTerminalPresentation(terminal: terminal),
+        guard let presentation = ReviewMonitorTerminalPresentation(
+            terminal: terminal,
+            fallbackSummary: fallbackSummary
+        ),
               presentation.requestedCancellationSource != nil
         else {
             return nil

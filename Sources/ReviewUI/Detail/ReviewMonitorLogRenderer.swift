@@ -20,11 +20,13 @@ actor ReviewMonitorLogRenderer {
 
     func render(
         entries: [ReviewLogEntry],
-        terminal: ReviewTerminalRecord?
+        terminal: ReviewTerminalRecord?,
+        fallbackSummary: String?
     ) -> ReviewMonitorRenderedLogDocument {
         renderedDocument(from: projection.render(
             entries: entries,
-            terminal: terminal
+            terminal: terminal,
+            fallbackSummary: fallbackSummary
         ))
     }
 

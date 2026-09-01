@@ -11,6 +11,9 @@ struct ReviewMonitorLogProjectionTests {
             terminal: .interrupted(.requested(.mcpClient(message: "Stop review."))),
             fallbackSummary: "Fallback"
         ))
+        let requestedDefault = try #require(ReviewMonitorTerminalPresentation(
+            terminal: .interrupted(.requested(.userInterface(message: " \n")))
+        ))
         let server = try #require(ReviewMonitorTerminalPresentation(
             terminal: .interrupted(.server(message: nil)),
             fallbackSummary: "Server summary"
@@ -30,6 +33,8 @@ struct ReviewMonitorLogProjectionTests {
 
         #expect(requested.kind == .requested(.mcpClient))
         #expect(requested.text == "Stop review.")
+        #expect(requestedDefault.kind == .requested(.userInterface))
+        #expect(requestedDefault.text == "Cancelled by user from Review Monitor.")
         #expect(server.kind == .server)
         #expect(server.text == "Server summary")
         #expect(transport.kind == .transport)
@@ -129,7 +134,8 @@ struct ReviewMonitorLogProjectionTests {
     }
 
     @Test func restoredRequestedCancellationUsesTypedTerminalWithoutHydratedLog() throws {
-        let cancellation = ReviewCancellation.sessionClosed(message: "Session closed.")
+        let cancellation = ReviewCancellation.sessionClosed(message: " \t")
+        let summary = "Session closed."
         let restored = try RestoredReviewRecord(
             started: StartedReviewRecord(
                 id: "review-1",
@@ -145,7 +151,7 @@ struct ReviewMonitorLogProjectionTests {
                 model: "gpt-5",
                 terminal: .interrupted(.requested(cancellation)),
                 endedAt: Date(timeIntervalSince1970: 2),
-                summary: cancellation.message,
+                summary: summary,
                 canonicalReview: nil,
                 parsedResult: nil
             )
@@ -156,7 +162,8 @@ struct ReviewMonitorLogProjectionTests {
 
         #expect(job.logEntries.isEmpty)
         #expect(job.core.lifecycle.terminal == .interrupted(.requested(cancellation)))
-        #expect(document.text == "Session closed.")
+        #expect(job.core.lifecycle.cancellation?.message == " \t")
+        #expect(document.text == summary)
         #expect(document.blocks.map(\.id) == [
             ReviewMonitorLog.BlockID("reviewTerminal:requested"),
         ])
@@ -1880,7 +1887,8 @@ struct ReviewMonitorLogProjectionTests {
         var projection = ReviewMonitorLog.Projection()
         return projection.render(
             entries: job.logEntries,
-            terminal: job.core.lifecycle.terminal
+            terminal: job.core.lifecycle.terminal,
+            fallbackSummary: job.core.output.summary
         )
     }
 }

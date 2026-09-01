@@ -22,7 +22,9 @@ struct ReviewMonitorTerminalPresentation: Equatable, Sendable {
             return nil
         case .interrupted(.requested(let cancellation)):
             kind = .requested(cancellation.source)
-            text = cancellation.message
+            text = cancellation.message.nilIfEmpty
+                ?? fallbackSummary
+                ?? Self.defaultCancellationMessage(for: cancellation.source)
         case .interrupted(.server(let message)):
             kind = .server
             text = message?.nilIfEmpty
@@ -49,5 +51,20 @@ struct ReviewMonitorTerminalPresentation: Equatable, Sendable {
             return nil
         }
         return source
+    }
+
+    private static func defaultCancellationMessage(
+        for source: ReviewCancellation.Source
+    ) -> String {
+        switch source {
+        case .userInterface:
+            "Cancelled by user from Review Monitor."
+        case .mcpClient:
+            "Cancellation requested by MCP client."
+        case .sessionClosed:
+            "Cancellation requested because the MCP session closed."
+        case .system:
+            "Cancellation requested."
+        }
     }
 }

@@ -3761,7 +3761,8 @@ struct ReviewUITests {
     }
 
     @Test func restoredRequestedCancellationRendersTypedTerminalInSelectedDetail() async throws {
-        let cancellation = ReviewCancellation.sessionClosed(message: "Session closed.")
+        let cancellation = ReviewCancellation.sessionClosed(message: " \t")
+        let summary = "Session closed."
         let restored = try RestoredReviewRecord(
             started: StartedReviewRecord(
                 id: "job-restored-cancellation",
@@ -3777,7 +3778,7 @@ struct ReviewUITests {
                 model: "gpt-5",
                 terminal: .interrupted(.requested(cancellation)),
                 endedAt: Date(timeIntervalSince1970: 201),
-                summary: cancellation.message,
+                summary: summary,
                 canonicalReview: nil,
                 parsedResult: nil
             )
@@ -3798,9 +3799,10 @@ struct ReviewUITests {
 
         #expect(job.logEntries.isEmpty)
         #expect(job.core.lifecycle.terminal == .interrupted(.requested(cancellation)))
-        #expect(rendered.log == cancellation.message)
+        #expect(job.core.lifecycle.cancellation?.message == " \t")
+        #expect(rendered.log == summary)
         #expect(transport.logTerminalDecorationRectCountForTesting == 1)
-        #expect(ReviewMonitorJobRowView(job: job).subtitleText == cancellation.message)
+        #expect(ReviewMonitorJobRowView(job: job).subtitleText == summary)
     }
 
     @Test func detailPaneHidesDeveloperDiagnosticsWithoutHidingProductFailures() async throws {
