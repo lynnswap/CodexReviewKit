@@ -423,6 +423,7 @@ enum CurrentV2ReviewNotificationDecoder {
         case "agentMessage":
             _ = try requiredString("text", in: item)
             try validateOptionalNullableEnum("delivery", in: item, allowed: agentMessageDeliveries)
+            try validateOptionalNullableEnum("phase", in: item, allowed: agentMessagePhases)
         case "plan":
             _ = try requiredString("text", in: item)
         case "reasoning":
@@ -819,6 +820,7 @@ enum CurrentV2ReviewNotificationDecoder {
         "http", "https", "socks5Tcp", "socks5Udp",
     ]
     private static let agentMessageDeliveries: Set<String> = ["async"]
+    private static let agentMessagePhases: Set<String> = ["commentary", "final_answer"]
     private static let commandStatuses: Set<String> = [
         "inProgress", "completed", "failed", "declined",
     ]

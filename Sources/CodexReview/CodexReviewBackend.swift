@@ -258,7 +258,7 @@ package actor BackendReviewEventMailbox {
         switch event {
         case .completed, .failed, .cancelled:
             return true
-        case .started, .message, .messageDelta, .log, .logEntry:
+        case .started, .message, .messageDelta, .agentMessageDelta, .log, .logEntry:
             return false
         }
     }

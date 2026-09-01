@@ -12,17 +12,17 @@ extension ReviewUITests {
     @Test func unsupportedAppServerItemsStayOutOfRenderedReview() async throws {
         let transport = FakeJSONRPCTransport()
         let diagnostics = ReviewUIIngestionDiagnosticCapture()
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(
+            AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"),
+            for: "initialize"
+        )
         try await transport.enqueue(
             AppServerAPI.Thread.Start.Response(threadID: "thread-review", model: "gpt-5"),
             for: "thread/start"
         )
         try await transport.enqueue(
-            AppServerAPI.Review.Start.Response(
-                turnID: "turn-review",
-                reviewThreadID: "thread-review"
-            ),
-            for: "review/start"
+            AppServerAPI.Turn.Start.Response(turnID: "turn-review"),
+            for: "turn/start"
         )
         try await transport.enqueue(
             AppServerAPI.Thread.Unsubscribe.Response(status: .unsubscribed),
@@ -191,19 +191,257 @@ extension ReviewUITests {
         #expect(await backend.notificationRouterIsRunningForTesting() == false)
     }
 
-    @Test func appServerUIHarnessCleansUpAfterThrownTestBody() async throws {
+    @Test func normalReviewTurnRendersCommentaryCommandsAndFinalAnswer() async throws {
         let transport = FakeJSONRPCTransport()
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(
+            AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"),
+            for: "initialize"
+        )
         try await transport.enqueue(
             AppServerAPI.Thread.Start.Response(threadID: "thread-review", model: "gpt-5"),
             for: "thread/start"
         )
         try await transport.enqueue(
-            AppServerAPI.Review.Start.Response(
-                turnID: "turn-review",
-                reviewThreadID: "thread-review"
-            ),
-            for: "review/start"
+            AppServerAPI.Turn.Start.Response(turnID: "turn-review"),
+            for: "turn/start"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Thread.Unsubscribe.Response(status: .unsubscribed),
+            for: "thread/unsubscribe"
+        )
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let store = CodexReviewStore.makeTestingStore(
+            backend: ReviewUIAppServerStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        let review = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+
+        try await withReviewUIAppServerCleanup(
+            store: store,
+            backend: backend,
+            transport: transport,
+            reviewTask: review
+        ) {
+            try #require(await StoreSnapshotProbe(store: store).waitUntil { snapshot in
+                snapshot.job("job-1")?.activeRun?.turnID == "turn-review"
+            } != nil)
+            let job = try #require(store.job(id: "job-1"))
+            let harness = makeWindowHarness(store: store)
+            defer { harness.window.close() }
+            let contentPane = harness.viewController.transportViewControllerForTesting
+            harness.viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+            _ = try await awaitTransportRender(contentPane)
+
+            try await transport.emitServerNotification(
+                method: "item/started",
+                params: ReviewUIV2ItemNotification(
+                    threadID: "thread-review",
+                    turnID: "turn-review",
+                    item: .init(
+                        type: "agentMessage",
+                        id: "commentary",
+                        text: "",
+                        phase: "commentary"
+                    )
+                )
+            )
+            try await transport.emitServerNotification(
+                method: "item/agentMessage/delta",
+                params: ReviewUIV2DeltaNotification(
+                    threadID: "thread-review",
+                    turnID: "turn-review",
+                    itemID: "commentary",
+                    delta: "Inspecting repository "
+                )
+            )
+            try await transport.emitServerNotification(
+                method: "item/agentMessage/delta",
+                params: ReviewUIV2DeltaNotification(
+                    threadID: "thread-review",
+                    turnID: "turn-review",
+                    itemID: "commentary",
+                    delta: "instructions and diff."
+                )
+            )
+            let streamedCommentary = try await awaitTransportRender(contentPane) { snapshot in
+                snapshot.log.contains("Inspecting repository instructions and diff.")
+            }
+            #expect(streamedCommentary.log.contains(
+                "Inspecting repository instructions and diff."
+            ))
+            #expect(job.core.output.lastAgentMessage ==
+                "Inspecting repository instructions and diff.")
+            try await transport.emitServerNotification(
+                method: "item/completed",
+                params: ReviewUIV2ItemNotification(
+                    threadID: "thread-review",
+                    turnID: "turn-review",
+                    item: .init(
+                        type: "agentMessage",
+                        id: "commentary",
+                        text: "Inspecting repository instructions and diff.",
+                        phase: "commentary"
+                    )
+                )
+            )
+            try await transport.emitServerNotification(
+                method: "item/started",
+                params: ReviewUIV2ItemNotification(
+                    threadID: "thread-review",
+                    turnID: "turn-review",
+                    item: .init(
+                        type: "reasoning",
+                        id: "reasoning-1",
+                        summary: [],
+                        content: []
+                    )
+                )
+            )
+            try await transport.emitServerNotification(
+                method: "item/reasoning/summaryTextDelta",
+                params: ReviewUIV2DeltaNotification(
+                    threadID: "thread-review",
+                    turnID: "turn-review",
+                    itemID: "reasoning-1",
+                    delta: "Analyzing review contracts.",
+                    summaryIndex: 0
+                )
+            )
+            try await transport.emitServerNotification(
+                method: "item/completed",
+                params: ReviewUIV2ItemNotification(
+                    threadID: "thread-review",
+                    turnID: "turn-review",
+                    item: .init(
+                        type: "reasoning",
+                        id: "reasoning-1",
+                        summary: ["Analyzing review contracts."],
+                        content: []
+                    )
+                )
+            )
+            try await transport.emitServerNotification(
+                method: "item/started",
+                params: ReviewUIV2ItemNotification(
+                    threadID: "thread-review",
+                    turnID: "turn-review",
+                    item: .command(id: "command-1", status: "inProgress")
+                )
+            )
+            try await transport.emitServerNotification(
+                method: "item/commandExecution/outputDelta",
+                params: ReviewUIV2DeltaNotification(
+                    threadID: "thread-review",
+                    turnID: "turn-review",
+                    itemID: "command-1",
+                    delta: "All tests passed."
+                )
+            )
+            try await transport.emitServerNotification(
+                method: "item/completed",
+                params: ReviewUIV2ItemNotification(
+                    threadID: "thread-review",
+                    turnID: "turn-review",
+                    item: .command(id: "command-1", status: "completed", exitCode: 0)
+                )
+            )
+            for method in ["item/started", "item/completed"] {
+                try await transport.emitServerNotification(
+                    method: method,
+                    params: ReviewUIV2ItemNotification(
+                        threadID: "thread-review",
+                        turnID: "turn-review",
+                        item: .init(
+                            type: "agentMessage",
+                            id: "final",
+                            text: "No findings.",
+                            phase: "final_answer"
+                        )
+                    )
+                )
+            }
+            try await transport.emitServerNotification(
+                method: "turn/completed",
+                params: ReviewUIV2TurnNotification(
+                    threadID: "thread-review",
+                    turn: .init(
+                        id: "turn-review",
+                        items: [.init(
+                            type: "agentMessage",
+                            id: "final",
+                            text: "No findings.",
+                            phase: "final_answer"
+                        )],
+                        itemsView: "summary",
+                        status: "completed"
+                    )
+                )
+            )
+
+            let result = try await review.value
+            let rendered = try await awaitTransportRender(contentPane)
+
+            #expect(result.core.lifecycle.status == .succeeded)
+            #expect(result.core.output.lastAgentMessage == "No findings.")
+            #expect(rendered.log.contains("Inspecting repository instructions and diff."))
+            #expect(rendered.log.contains("Analyzing review contracts."))
+            #expect(rendered.log.contains("Ran swift test"))
+            #expect(rendered.log.contains("No findings."))
+            #expect(job.logEntries.contains {
+                $0.kind == .commandOutput && $0.text.contains("All tests passed.")
+            })
+            #expect(job.logEntries.contains {
+                $0.text == "Inspecting repository instructions and diff."
+                    && $0.metadata?.agentMessagePhase == .commentary
+            })
+            #expect(job.logEntries.contains {
+                $0.text == "No findings."
+                    && $0.metadata?.sourceType == "canonicalReviewResult"
+                    && $0.metadata?.agentMessagePhase == .finalAnswer
+            })
+            #expect(job.logEntries.filter {
+                $0.groupID == "final"
+                    && $0.metadata?.sourceType == "canonicalReviewResult"
+            }.count == 1)
+
+            let turnStart = try #require(
+                await transport.recordedRequests().first { $0.method == "turn/start" }
+            )
+            let turnStartParams = try JSONDecoder().decode(
+                AppServerAPI.Turn.Start.Params.self,
+                from: turnStart.params
+            )
+            #expect(turnStartParams.cwd == "/tmp/project")
+            #expect(turnStartParams.input[0].text.contains("$review-agent"))
+
+            #expect(contentPane.logCommandOutputPanelCountForTesting == 1)
+            #expect(contentPane.clickFirstLogCommandOutputPanelHeaderForTesting())
+            await awaitNativeLayoutTurn()
+            #expect(contentPane.logCommandOutputPanelTerminalTextForTesting?
+                .contains("All tests passed.") == true)
+        }
+        #expect(await transport.isClosedForTesting())
+        #expect(await backend.reviewEventSessionCountForTesting() == 0)
+    }
+
+    @Test func appServerUIHarnessCleansUpAfterThrownTestBody() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(
+            AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"),
+            for: "initialize"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Thread.Start.Response(threadID: "thread-review", model: "gpt-5"),
+            for: "thread/start"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Turn.Start.Response(turnID: "turn-review"),
+            for: "turn/start"
         )
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         try await transport.enqueue(
@@ -259,17 +497,17 @@ extension ReviewUITests {
     @Test func sidebarCancellationHidesCompletedUpstreamArtifactsAndRendersTerminalState() async throws {
         let transport = FakeJSONRPCTransport()
         let interruptResponseGate = AsyncGate()
-        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(
+            AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"),
+            for: "initialize"
+        )
         try await transport.enqueue(
             AppServerAPI.Thread.Start.Response(threadID: "thread-review", model: "gpt-5"),
             for: "thread/start"
         )
         try await transport.enqueue(
-            AppServerAPI.Review.Start.Response(
-                turnID: "turn-review",
-                reviewThreadID: "thread-review"
-            ),
-            for: "review/start"
+            AppServerAPI.Turn.Start.Response(turnID: "turn-review"),
+            for: "turn/start"
         )
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         await transport.hold(method: "turn/interrupt", gate: interruptResponseGate)
@@ -652,6 +890,9 @@ private struct ReviewUIV2ItemNotification: Encodable, Sendable {
         var commandActions: [[String: String]]?
         var aggregatedOutput: String?
         var exitCode: Int?
+        var phase: String?
+        var summary: [String]?
+        var content: [String]?
 
         init(
             type: String,
@@ -664,7 +905,10 @@ private struct ReviewUIV2ItemNotification: Encodable, Sendable {
             status: String? = nil,
             commandActions: [[String: String]]? = nil,
             aggregatedOutput: String? = nil,
-            exitCode: Int? = nil
+            exitCode: Int? = nil,
+            phase: String? = nil,
+            summary: [String]? = nil,
+            content: [String]? = nil
         ) {
             self.type = type
             self.id = id
@@ -677,6 +921,9 @@ private struct ReviewUIV2ItemNotification: Encodable, Sendable {
             self.commandActions = commandActions
             self.aggregatedOutput = aggregatedOutput
             self.exitCode = exitCode
+            self.phase = phase
+            self.summary = summary
+            self.content = content
         }
 
         static func command(
@@ -704,12 +951,16 @@ private struct ReviewUIV2DeltaNotification: Encodable, Sendable {
     var turnID: String
     var itemID: String
     var delta: String
+    var summaryIndex: Int?
+    var contentIndex: Int?
 
     enum CodingKeys: String, CodingKey {
         case threadID = "threadId"
         case turnID = "turnId"
         case itemID = "itemId"
         case delta
+        case summaryIndex
+        case contentIndex
     }
 }
 

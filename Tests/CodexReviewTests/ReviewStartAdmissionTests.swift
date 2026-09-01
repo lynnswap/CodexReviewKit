@@ -82,7 +82,7 @@ struct ReviewStartAdmissionTests {
 
         do {
             try await admission.admitReviewStartDispatch(for: staleRun)
-            Issue.record("A stale provisional run admitted review/start.")
+            Issue.record("A stale provisional run admitted review turn dispatch.")
         } catch let failure as ReviewStartAdmissionContractFailure {
             #expect(failure.violation == .staleRun(
                 operation: .admitReviewStartDispatch,

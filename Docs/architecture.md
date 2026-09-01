@@ -56,8 +56,12 @@ the store.
 - Same-thread mutating requests are serialized.
 - Different-thread requests may run concurrently.
 - `turn/interrupt` is a control request and is not queued behind an in-flight
-  same-thread `review/start`.
-- Notifications are subscribed before `review/start` so terminal events emitted
+  same-thread `turn/start`.
+- Reviews run as a normal `turn/start` on the thread created for that review.
+  One adapter renders the typed review target and references the server-reported
+  `$review-agent` skill provisioned during app-server initialization; the
+  request carries the review working directory.
+- Notifications are subscribed before `turn/start` so terminal events emitted
   with the response are not lost.
 - Cancellation is represented by typed control/cleanup requests, not by closing
   the transport.

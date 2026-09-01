@@ -32,7 +32,7 @@ struct AppServerInterruptAdmissionTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: CancellationArtifactMalformedItemNotification(
-                threadID: "review-thread",
+                threadID: "parent-thread",
                 turnID: "turn-1",
                 item: .init(type: "agentMessage", text: "Malformed late event")
             )
@@ -40,13 +40,13 @@ struct AppServerInterruptAdmissionTests {
         try await transport.emitServerNotification(
             method: "thread/status/changed",
             params: CancellationArtifactThreadStatusNotification(
-                threadID: "review-thread",
+                threadID: "parent-thread",
                 status: .init(type: "notLoaded")
             )
         )
         try await transport.emitServerNotification(
             method: "thread/closed",
-            params: CancellationArtifactThreadNotification(threadID: "review-thread")
+            params: CancellationArtifactThreadNotification(threadID: "parent-thread")
         )
         await fixture.backend.waitForReviewNotificationCompletionForTesting(8)
         await responseGate.open()
@@ -60,7 +60,7 @@ struct AppServerInterruptAdmissionTests {
 
         #expect(resolution.terminal == .canonical(.interrupted(.requested(cancellation))))
         #expect(events == [
-            .started(turnID: "turn-1", reviewThreadID: "review-thread", model: nil),
+            .started(turnID: "turn-1", reviewThreadID: "parent-thread", model: nil),
             .logEntry(
                 kind: .diagnostic,
                 text: cancellationReviewFallback,
@@ -74,6 +74,10 @@ struct AppServerInterruptAdmissionTests {
                 text: cancellationCompanionMessage,
                 groupID: "cancellation-companion",
                 replacesGroup: false,
+                metadata: .init(
+                    sourceType: "agentMessage",
+                    itemID: "cancellation-companion"
+                ),
                 audience: .developer
             ),
             .cancelled("Upstream interrupted"),
@@ -238,14 +242,14 @@ struct AppServerInterruptAdmissionTests {
         try await transport.emitServerNotification(
             method: "item/completed",
             params: CancellationArtifactMalformedItemNotification(
-                threadID: "review-thread",
+                threadID: "parent-thread",
                 turnID: "turn-1",
                 item: .init(type: "agentMessage", text: "Malformed interposed event")
             )
         )
         try await transport.emitServerNotification(
             method: "thread/closed",
-            params: CancellationArtifactThreadNotification(threadID: "review-thread")
+            params: CancellationArtifactThreadNotification(threadID: "parent-thread")
         )
         await fixture.backend.waitForReviewNotificationCompletionForTesting(7)
         #expect(await fixture.attempt.events.isFinished() == false)
@@ -386,7 +390,7 @@ struct AppServerInterruptAdmissionTests {
         #expect(events.last == .cancelled("Server interrupted"))
     }
 
-    @Test func admissionAwareInterruptUsesStartedChildTurnAndWaitsForCanonicalTerminal() async throws {
+    @Test func admissionAwareInterruptUsesLatestStartedTurnAndWaitsForCanonicalTerminal() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInterruptInitialize(transport)
         try await transport.enqueue(
@@ -394,11 +398,10 @@ struct AppServerInterruptAdmissionTests {
             for: "thread/start"
         )
         try await transport.enqueue(
-            AppServerAPI.Review.Start.Response(
-                turnID: "turn-1",
-                reviewThreadID: "review-thread"
+            AppServerAPI.Turn.Start.Response(
+                turnID: "turn-1"
             ),
-            for: "review/start"
+            for: "turn/start"
         )
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
@@ -417,7 +420,7 @@ struct AppServerInterruptAdmissionTests {
         try await transport.emitServerNotification(
             method: "turn/started",
             params: InterruptTurnNotification(
-                threadID: "review-thread",
+                threadID: "parent-thread",
                 turnID: "child-turn"
             )
         )
@@ -465,7 +468,7 @@ struct AppServerInterruptAdmissionTests {
         #expect(requests.map(\.method) == [
             "initialize",
             "thread/start",
-            "review/start",
+            "turn/start",
             "turn/interrupt",
         ])
         let interruptions = try requests
@@ -476,7 +479,7 @@ struct AppServerInterruptAdmissionTests {
                     from: $0.params
                 )
             }
-        #expect(interruptions.map(\.threadID) == ["review-thread"])
+        #expect(interruptions.map(\.threadID) == ["parent-thread"])
         #expect(interruptions.map(\.turnID) == ["child-turn"])
     }
 
@@ -488,11 +491,10 @@ struct AppServerInterruptAdmissionTests {
             for: "thread/start"
         )
         try await transport.enqueue(
-            AppServerAPI.Review.Start.Response(
-                turnID: "turn-1",
-                reviewThreadID: "review-thread"
+            AppServerAPI.Turn.Start.Response(
+                turnID: "turn-1"
             ),
-            for: "review/start"
+            for: "turn/start"
         )
         await transport.enqueueFailure(
             .responseError(
@@ -547,7 +549,7 @@ struct AppServerInterruptAdmissionTests {
                     from: $0.params
                 )
             }
-        #expect(interruptions.map(\.threadID) == ["review-thread", "review-thread"])
+        #expect(interruptions.map(\.threadID) == ["parent-thread", "parent-thread"])
         #expect(interruptions.map(\.turnID) == ["turn-1", "child-turn"])
     }
 
@@ -680,7 +682,6 @@ struct AppServerInterruptAdmissionTests {
             attemptID: "typed-stream-attempt",
             threadID: "parent-thread",
             turnID: "turn-1",
-            reviewThreadID: "review-thread",
             model: "gpt-5"
         )
         let attempt = await backend.reviewAttemptForTesting(run)
@@ -715,7 +716,6 @@ struct AppServerInterruptAdmissionTests {
             attemptID: "process-stream-attempt",
             threadID: "parent-thread",
             turnID: "turn-1",
-            reviewThreadID: "review-thread",
             model: "gpt-5"
         )
         let attempt = await backend.reviewAttemptForTesting(run)
@@ -764,7 +764,6 @@ struct AppServerInterruptAdmissionTests {
             attemptID: "connection-source-attempt",
             threadID: "parent-thread",
             turnID: "turn-1",
-            reviewThreadID: "review-thread",
             model: "gpt-5"
         )
         let attempt = await backend.reviewAttemptForTesting(run)
@@ -843,7 +842,7 @@ struct AppServerInterruptAdmissionTests {
         }
         let methods = await transport.recordedRequests().map(\.method)
         #expect(methods.filter { $0 == "thread/rollback" }.count == 1)
-        #expect(methods.contains("review/start") == false)
+        #expect(methods.contains("turn/start") == false)
         await transport.close()
     }
 
@@ -865,16 +864,36 @@ struct AppServerInterruptAdmissionTests {
         await transport.close()
     }
 
+    @Test func typedRecoveryPreflightsInvocationBeforeConsumingHandoffOrRollback() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let (handoff, _) = try await makePreparedRecoveryHandoff(backend)
+        let admission = ReviewStartAdmission()
+
+        await #expect(throws: ReviewAttemptContractFailure.self) {
+            try await backend.resumeReviewRecovery(
+                handoff,
+                request: makeRecoveryStartRequest(),
+                admission: admission
+            )
+        }
+
+        #expect(await admission.currentPhase() == .preparingThread(.notSent))
+        #expect(await transport.recordedRequests().map(\.method) == ["initialize"])
+        try await handoff.discard()
+        await transport.close()
+    }
+
     @Test func typedRecoveryResumeUsesFreshAdmissionWithoutThreadStart() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInterruptInitialize(transport)
         try await transport.enqueue(EmptyResponse(), for: "thread/rollback")
         try await transport.enqueue(
-            AppServerAPI.Review.Start.Response(
-                turnID: "replacement-turn",
-                reviewThreadID: "review-thread"
+            AppServerAPI.Turn.Start.Response(
+                turnID: "replacement-turn"
             ),
-            for: "review/start"
+            for: "turn/start"
         )
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
         let (handoff, _) = try await makePreparedRecoveryHandoff(backend)
@@ -890,7 +909,7 @@ struct AppServerInterruptAdmissionTests {
         #expect(await transport.recordedRequests().map(\.method) == [
             "initialize",
             "thread/rollback",
-            "review/start",
+            "turn/start",
         ])
         await transport.close()
     }
@@ -955,11 +974,10 @@ private func makeCancellationArtifactFixture(
         for: "thread/start"
     )
     try await transport.enqueue(
-        AppServerAPI.Review.Start.Response(
-            turnID: "turn-1",
-            reviewThreadID: "review-thread"
+        AppServerAPI.Turn.Start.Response(
+            turnID: "turn-1"
         ),
-        for: "review/start"
+        for: "turn/start"
     )
     let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
     let admission = ReviewStartAdmission()
@@ -1007,7 +1025,7 @@ private func emitCancellationArtifactItems(
         try await transport.emitServerNotification(
             method: method,
             params: CancellationArtifactItemNotification(
-                threadID: "review-thread",
+                threadID: "parent-thread",
                 turnID: "turn-1",
                 item: .init(
                     type: "exitedReviewMode",
@@ -1023,7 +1041,7 @@ private func emitCancellationArtifactItems(
         try await transport.emitServerNotification(
             method: method,
             params: CancellationArtifactItemNotification(
-                threadID: "review-thread",
+                threadID: "parent-thread",
                 turnID: "turn-1",
                 item: .init(
                     type: "agentMessage",
@@ -1070,7 +1088,7 @@ private func emitCancellationTerminal(
     try await transport.emitServerNotification(
         method: "turn/completed",
         params: CancellationArtifactTurnNotification(
-            threadID: "review-thread",
+            threadID: "parent-thread",
             turn: .init(
                 id: "turn-1",
                 items: items,
@@ -1254,7 +1272,7 @@ private func makeAppServerInterruptAdmission() async throws -> (
         attemptID: provisionalRun.attemptID,
         threadID: provisionalRun.threadID,
         turnID: "turn-1",
-        reviewThreadID: "review-thread",
+        reviewThreadID: provisionalRun.threadID,
         model: provisionalRun.model
     )
     try await admission.admitThreadStartDispatch()
