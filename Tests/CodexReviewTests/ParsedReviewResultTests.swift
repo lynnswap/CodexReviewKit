@@ -9,13 +9,91 @@ struct ParsedReviewResultTests {
         #expect(result == .notAvailable())
     }
 
-    @Test func finalReviewWithoutFindingHeaderReportsNoFindings() {
-        let result = ParsedReviewResult.parse(finalReviewText: "No correctness issues found.")
+    @Test(arguments: [
+        "No findings.",
+        "No correctness issues found.",
+        "No correctness issues found in the touched files.",
+        "No findings.\n\nOverall assessment: the changed code is correct.",
+    ])
+    func explicitNoFindingResultReportsNoFindings(text: String) {
+        let result = ParsedReviewResult.parse(finalReviewText: text)
 
         #expect(result.state == .noFindings)
         #expect(result.findingCount == 0)
         #expect(result.findings.isEmpty)
         #expect(result.source == .parsedFinalReviewText)
+    }
+
+    @Test func arbitraryFinalReviewDoesNotClaimNoFindings() {
+        let result = ParsedReviewResult.parse(finalReviewText: "Review completed with an unrecognized result.")
+
+        #expect(result.state == .unknown)
+        #expect(result.findingCount == nil)
+        #expect(result.findings.isEmpty)
+        #expect(result.source == .unrecognizedFindingBlock)
+    }
+
+    @Test func currentReviewAgentFormatParsesCapturedLocalizedFinding() throws {
+        let result = ParsedReviewResult.parse(finalReviewText: """
+        [P0] トークン比較を復元してアクセス許可を判定する — AccessGate.swift:3
+
+        `permits` が常に `true` を返すため、`suppliedToken` が `expectedToken` と異なっていても許可され、アクセス制御が完全に無効化されます。`suppliedToken == expectedToken` に戻してください。
+
+        総評: staged 差分と untracked ファイルはなく、unstaged 変更はこの1行です。認証バイパスのためマージ不可です。
+        """)
+
+        #expect(result.state == .hasFindings)
+        #expect(result.findingCount == 1)
+        #expect(result.parserVersion == ParsedReviewResult.currentParserVersion)
+        let finding = try #require(result.findings.first)
+        #expect(finding.title == "[P0] トークン比較を復元してアクセス許可を判定する")
+        #expect(finding.priority == 0)
+        #expect(finding.location == .init(path: "AccessGate.swift", startLine: 3, endLine: 3))
+        #expect(finding.body == "`permits` が常に `true` を返すため、`suppliedToken` が `expectedToken` と異なっていても許可され、アクセス制御が完全に無効化されます。`suppliedToken == expectedToken` に戻してください。")
+        #expect(finding.rawText.contains("総評:") == false)
+    }
+
+    @Test func currentReviewAgentFormatParsesMultipleFindingsAndRanges() throws {
+        let result = ParsedReviewResult.parse(finalReviewText: """
+        Review summary before findings.
+
+        [P1] Preserve the terminal owner — Sources/Store.swift:10-12
+        Keep the canonical terminal bound to the selected run.
+
+        [P3] Retain exact file identity — Tests/StoreTests.swift:44
+        Assert the single-line location without inventing a range.
+
+        Overall assessment: two actionable findings.
+        """)
+
+        #expect(result.state == .hasFindings)
+        #expect(result.findingCount == 2)
+        #expect(result.findings[0].location == .init(
+            path: "Sources/Store.swift",
+            startLine: 10,
+            endLine: 12
+        ))
+        #expect(result.findings[1].location == .init(
+            path: "Tests/StoreTests.swift",
+            startLine: 44,
+            endLine: 44
+        ))
+        #expect(result.findings[1].body == "Assert the single-line location without inventing a range.")
+    }
+
+    @Test func malformedCurrentFindingReportsUnknown() {
+        let result = ParsedReviewResult.parse(finalReviewText: """
+        [P1] Valid first finding — Sources/Store.swift:10
+        Body.
+
+        [P2] Missing location range — Sources/Other.swift:not-a-line
+        Body.
+        """)
+
+        #expect(result.state == .unknown)
+        #expect(result.findingCount == nil)
+        #expect(result.findings.isEmpty)
+        #expect(result.source == .unrecognizedFindingBlock)
     }
 
     @Test func fullReviewCommentsParseStructuredFindings() throws {
@@ -48,6 +126,69 @@ struct ParsedReviewResultTests {
         #expect(second.title == "[P3] Trim diagnostic text")
         #expect(second.priority == 3)
         #expect(second.location == .init(path: "Tests/ReviewTests.swift", startLine: 5, endLine: 5))
+    }
+
+    @Test func legacyIndentedBulletLikeBodyRemainsInTheCurrentFinding() throws {
+        let result = ParsedReviewResult.parse(finalReviewText: """
+        Full review comments:
+        - [P1] Preserve the legacy body — Sources/Parser.swift:10-12
+          Recheck both examples:
+          - Recheck the guide — Docs/Guide.md:20-22
+        """)
+
+        #expect(result.state == .hasFindings)
+        #expect(result.findingCount == 1)
+        let finding = try #require(result.findings.first)
+        #expect(finding.body == """
+        Recheck both examples:
+        - Recheck the guide — Docs/Guide.md:20-22
+        """)
+    }
+
+    @Test func priorityPrefixedCurrentBodyLineIsNotPromotedToAFinding() throws {
+        let result = ParsedReviewResult.parse(finalReviewText: """
+        [P1] Document priority semantics — Sources/Parser.swift:10
+        The severity mapping is:
+        [P2] means an ordinary actionable defect — Docs/Guide.md:20
+        """)
+
+        #expect(result.state == .hasFindings)
+        #expect(result.findingCount == 1)
+        let finding = try #require(result.findings.first)
+        #expect(finding.body == """
+        The severity mapping is:
+        [P2] means an ordinary actionable defect — Docs/Guide.md:20
+        """)
+    }
+
+    @Test func indentedPriorityExampleAfterBlankLineIsNotPromotedToAFinding() throws {
+        let result = ParsedReviewResult.parse(finalReviewText: """
+        [P1] Document priority semantics — Sources/Parser.swift:10
+
+        Describe the top-level finding.
+
+          - [P2] Example only — Docs/Guide.md:20
+        """)
+
+        #expect(result.state == .hasFindings)
+        #expect(result.findingCount == 1)
+        #expect(result.findings.first?.title == "[P1] Document priority semantics")
+    }
+
+    @Test func quotedLegacyBlockAfterCurrentFindingDoesNotReplaceCurrentFormat() throws {
+        let result = ParsedReviewResult.parse(finalReviewText: """
+        [P1] Keep the current finding — Sources/Parser.swift:10
+
+        Parse this finding before the assessment.
+
+        Full review comments:
+        - [P3] Quoted legacy example — Docs/Guide.md:20-22
+          This block documents the former output contract.
+        """)
+
+        #expect(result.state == .hasFindings)
+        #expect(result.findingCount == 1)
+        #expect(result.findings.first?.title == "[P1] Keep the current finding")
     }
 
     @Test func malformedFindingBlockReportsUnknown() {

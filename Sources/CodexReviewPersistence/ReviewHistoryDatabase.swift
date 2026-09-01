@@ -37,6 +37,7 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
         let timestamp = now()
         return try write(database) { db in
             _ = try Self.decodeAll(in: db)
+            try Self.upgradeParsedResults(in: db)
             try Self.backfillWorkspaceMetadata(in: db)
             try Self.finalizeOrphanedReviews(in: db, committedAt: timestamp)
             _ = try ReviewHistoryRetention.prune(
@@ -280,6 +281,61 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
                 updatedAt: committedAt
             )
             try updateTerminal(encoded.review, in: db)
+        }
+    }
+
+    private static func upgradeParsedResults(in db: Database) throws {
+        for row in try ReviewRecordRow.fetchAll(db) {
+            guard row.phase == "terminal",
+                  row.terminalKind == ReviewTerminalKind.completed.rawValue,
+                  let parserVersion = row.parserVersion,
+                  parserVersion < ParsedReviewResult.currentParserVersion,
+                  let canonicalReview = row.canonicalReview,
+                  let endedAt = row.endedAt,
+                  let summary = row.summary,
+                  let terminalCommittedAt = row.terminalCommittedAt
+            else {
+                continue
+            }
+
+            // The canonical review is the durable source of truth. Parser versioning exists so
+            // a newer parser can replace a stale projection instead of preserving a false result.
+            let terminal = try TerminalReviewRecord(
+                id: row.id,
+                model: row.terminalModel,
+                terminal: .completed,
+                endedAt: ReviewHistoryTimestamp.decode(endedAt),
+                summary: summary,
+                canonicalReview: canonicalReview,
+                parsedResult: PersistedParsedReviewResult(
+                    ParsedReviewResult.parse(finalReviewText: canonicalReview)
+                )
+            )
+            let encoded = try ReviewHistoryRecordCodec.encodeTerminal(
+                terminal,
+                replacing: row,
+                terminalCommittedAt: ReviewHistoryTimestamp.decode(terminalCommittedAt),
+                updatedAt: ReviewHistoryTimestamp.decode(row.updatedAt)
+            )
+            try ReviewRecordRow.find(row.id)
+                .where { $0.phase.eq("terminal") }
+                .update {
+                    $0.parsedState = #bind(encoded.review.parsedState)
+                    $0.parsedFindingCount = #bind(encoded.review.parsedFindingCount)
+                    $0.parsedSource = #bind(encoded.review.parsedSource)
+                    $0.parserVersion = #bind(encoded.review.parserVersion)
+                }
+                .execute(db)
+            guard db.changesCount == 1 else {
+                throw ReviewHistoryDatabaseError.invalidRecord(
+                    id: row.id,
+                    reason: "parsed-result upgrade lost its terminal row"
+                )
+            }
+            try ReviewFindingRow.where { $0.reviewID.eq(row.id) }.delete().execute(db)
+            if encoded.findings.isEmpty == false {
+                try ReviewFindingRow.insert { encoded.findings }.execute(db)
+            }
         }
     }
 

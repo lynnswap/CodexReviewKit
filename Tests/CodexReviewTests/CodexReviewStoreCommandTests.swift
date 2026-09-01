@@ -644,7 +644,7 @@ struct CodexReviewStoreCommandTests {
         #expect(read.logsPage.total == 8)
     }
 
-    @Test func reviewStartParsesFinalReviewFindings() async throws {
+    @Test func reviewStartParsesCurrentReviewAgentFindings() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -656,9 +656,9 @@ struct CodexReviewStoreCommandTests {
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
             await backend.yield(.completed(summary: "Succeeded.", result: """
-            Full review comments:
-            - [P2] Add parser tests — Sources/Parser.swift:12-15
-              The final review parser should be covered at the model layer.
+            [P2] Add parser tests — Sources/Parser.swift:12
+
+            The final review parser should be covered at the model layer.
             """))
             let read = try await result
 
@@ -666,6 +666,11 @@ struct CodexReviewStoreCommandTests {
             #expect(read.core.output.reviewResult?.state == .hasFindings)
             #expect(read.core.output.reviewResult?.findingCount == 1)
             #expect(read.core.output.reviewResult?.findings.first?.title == "[P2] Add parser tests")
+            #expect(read.core.output.reviewResult?.findings.first?.location == .init(
+                path: "Sources/Parser.swift",
+                startLine: 12,
+                endLine: 12
+            ))
         }
     }
 
