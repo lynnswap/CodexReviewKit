@@ -235,6 +235,163 @@ struct ReviewHistorySchemaTests {
         ])
     }
 
+    @Test("allows known process-exit time without losing v3 records or findings")
+    func previousProcessExitEndTimeMigration() async throws {
+        let writer = try DatabaseQueue()
+        try ReviewHistorySchema.makeMigrator().migrate(
+            writer,
+            upTo: "v3_share_review_order_across_workspaces"
+        )
+        try await writer.write { db in
+            try #sql(
+                """
+                INSERT INTO "review_workspaces" (
+                  "cwd", "sortOrder", "repositoryIdentity", "displayTitle", "kind"
+                ) VALUES (
+                  '/tmp/migration', 4,
+                  'git-common:/tmp/migration/.git', 'Migration Fixture', 'primaryCheckout'
+                )
+                """
+            )
+            .execute(db)
+            try #sql(
+                """
+                INSERT INTO "review_records" (
+                  "id", "cwd", "sortOrder",
+                  "targetKind", "targetBranch", "targetCommitSHA", "targetCommitTitle",
+                  "targetInstructions", "startedModel", "startedAt", "phase",
+                  "terminalModel", "terminalKind", "interruptionKind",
+                  "cancellationSource", "cancellationMessage", "terminalMessage", "endedAt",
+                  "summary", "canonicalReview", "parsedState", "parsedFindingCount",
+                  "parsedSource", "parserVersion", "terminalCommittedAt", "createdAt", "updatedAt"
+                ) VALUES
+                  (
+                    'completed', '/tmp/migration', 3,
+                    'commit', NULL, 'abc123', 'Preserve migration state',
+                    NULL, 'started-model', 10, 'terminal',
+                    'terminal-model', 'completed', NULL,
+                    NULL, NULL, NULL, 20,
+                    'Done', 'Review finding.', 'hasFindings', 1,
+                    'parsedFinalReviewText', 1, 30, 10, 30
+                  ),
+                  (
+                    'unknown-process-exit', '/tmp/migration', 2,
+                    'uncommittedChanges', NULL, NULL, NULL,
+                    NULL, 'started-model', 11, 'terminal',
+                    'terminal-model', 'interrupted', 'previousProcessExit',
+                    NULL, NULL, NULL, NULL,
+                    'Interrupted', NULL, NULL, NULL,
+                    NULL, NULL, 31, 11, 31
+                  ),
+                  (
+                    'active', '/tmp/migration', 1,
+                    'baseBranch', 'main', NULL, NULL,
+                    NULL, 'started-model', 12, 'active',
+                    NULL, NULL, NULL,
+                    NULL, NULL, NULL, NULL,
+                    NULL, NULL, NULL, NULL,
+                    NULL, NULL, NULL, 12, 12
+                  )
+                """
+            )
+            .execute(db)
+            try #sql(
+                """
+                INSERT INTO "review_findings" (
+                  "id", "reviewID", "ordinal", "priority", "title", "body",
+                  "path", "startLine", "endLine"
+                ) VALUES (
+                  'finding-1', 'completed', 0, 2, 'Preserve this finding',
+                  'The migration must not rebuild the child table.',
+                  'Sources/Store.swift', 10, 12
+                )
+                """
+            )
+            .execute(db)
+        }
+
+        let recordsBefore = try await writer.read { db in
+            try ReviewRecordRow.fetchAll(db).sorted { $0.id < $1.id }
+        }
+        let findingsBefore = try await writer.read { db in
+            try ReviewFindingRow.fetchAll(db).sorted { $0.id < $1.id }
+        }
+
+        try ReviewHistorySchema.migrate(writer)
+        try ReviewHistorySchema.migrate(writer)
+
+        let recordsAfter = try await writer.read { db in
+            try ReviewRecordRow.fetchAll(db).sorted { $0.id < $1.id }
+        }
+        let findingsAfter = try await writer.read { db in
+            try ReviewFindingRow.fetchAll(db).sorted { $0.id < $1.id }
+        }
+        #expect(recordsAfter == recordsBefore)
+        #expect(findingsAfter == findingsBefore)
+
+        try await writer.write { db in
+            try #sql(
+                """
+                UPDATE "review_records"
+                SET "endedAt" = 60
+                WHERE "id" = 'unknown-process-exit'
+                """
+            )
+            .execute(db)
+        }
+        await #expect(throws: (any Error).self) {
+            try await writer.write { db in
+                try #sql(
+                    """
+                    UPDATE "review_records"
+                    SET "endedAt" = 60
+                    WHERE "id" = 'active'
+                    """
+                )
+                .execute(db)
+            }
+        }
+
+        let integrity = try await writer.read { db in
+            let foreignKeyViolations = try #sql(
+                "SELECT count(*) FROM pragma_foreign_key_check",
+                as: Int.self
+            )
+            .fetchOne(db)
+            let findingParent = try #sql(
+                "SELECT \"table\" FROM pragma_foreign_key_list('review_findings')",
+                as: String.self
+            )
+            .fetchOne(db)
+            let temporaryTableCount = try #sql(
+                "SELECT count(*) FROM pragma_table_list WHERE name = 'review_records_v4'",
+                as: Int.self
+            )
+            .fetchOne(db)
+            let strict = try #sql(
+                "SELECT strict FROM pragma_table_list WHERE name = 'review_records'",
+                as: Int.self
+            )
+            .fetchOne(db)
+            let indexes = try #sql(
+                """
+                SELECT name
+                FROM pragma_index_list('review_records')
+                WHERE name LIKE 'review_records_%'
+                ORDER BY name
+                """,
+                as: String.self
+            )
+            .fetchAll(db)
+            return (foreignKeyViolations, findingParent, temporaryTableCount, strict, indexes)
+        }
+        #expect(integrity.0 == 0)
+        #expect(integrity.1 == "review_records")
+        #expect(integrity.2 == 0)
+        #expect(integrity.3 == 1)
+        #expect(integrity.4 == ["review_records_order", "review_records_retention"])
+    }
+
     @Test("rejects NULL required variant fields instead of accepting UNKNOWN checks")
     func nullableRequiredVariantConstraints() async throws {
         let (database, writer) = try ReviewHistoryTestSupport.database()
@@ -549,6 +706,40 @@ struct ReviewHistorySchemaTests {
             == "/tmp/file-primary")
         #expect(restored.first(where: { $0.started.id == "file-worktree" })?.started.cwd
             == "/tmp/file-worktree")
+        try await second.close()
+    }
+
+    @Test("preserves a known process-exit time across a file-backed relaunch")
+    func knownProcessExitFileRoundTrip() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(
+                path: "CodexReviewKnownProcessExitTests-\(UUID().uuidString)",
+                directoryHint: .isDirectory
+            )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appending(path: "review-history.sqlite")
+        let endedAt = ReviewHistoryTestSupport.startedAt.addingTimeInterval(20)
+
+        let first = ReviewHistoryDatabase(databaseURL: url)
+        _ = try await ReviewHistoryTestSupport.record(
+            started: ReviewHistoryTestSupport.started(id: "known-process-exit"),
+            terminal: ReviewHistoryTestSupport.nonCompleted(
+                id: "known-process-exit",
+                terminal: .interrupted(.previousProcessExit),
+                endedAt: endedAt,
+                summary: "The review process exited."
+            ),
+            in: first
+        )
+        try await first.close()
+
+        let second = ReviewHistoryDatabase(databaseURL: url)
+        let restored = try #require(
+            try await second.load(retentionPolicy: .default).first
+        )
+        #expect(restored.terminal.terminal == .interrupted(.previousProcessExit))
+        #expect(restored.terminal.endedAt == endedAt)
         try await second.close()
     }
 

@@ -93,6 +93,17 @@ struct ReviewHistoryDatabaseTests {
                 terminal: .interrupted(.requested(cancellation)),
                 summary: cancellation.message
             ),
+            try ReviewHistoryTestSupport.nonCompleted(
+                id: "known-process-exit",
+                terminal: .interrupted(.previousProcessExit),
+                endedAt: ReviewHistoryTestSupport.startedAt.addingTimeInterval(20),
+                summary: "The review process exited."
+            ),
+            try ReviewHistoryTestSupport.nonCompleted(
+                id: "unknown-process-exit",
+                terminal: .interrupted(.previousProcessExit),
+                summary: "The previous review process exited."
+            ),
         ]
 
         for (index, terminal) in terminals.enumerated() {
@@ -119,6 +130,11 @@ struct ReviewHistoryDatabaseTests {
             byID["cancelled"]?.terminal.terminal
                 == .interrupted(.requested(cancellation))
         )
+        #expect(
+            byID["known-process-exit"]?.terminal.endedAt
+                == ReviewHistoryTestSupport.startedAt.addingTimeInterval(20)
+        )
+        #expect(byID["unknown-process-exit"]?.terminal.endedAt == nil)
         #expect(byID["completed"]?.terminal.parsedResult?.parserVersion == 7)
         #expect(byID["completed"]?.terminal.parsedResult?.findings.count == 2)
         #expect(byID["completed"]?.terminal.parsedResult?.findings[0].ordinal == 0)

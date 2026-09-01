@@ -152,6 +152,68 @@ struct CodexReviewStoreHistoryTests {
         #expect(terminalRecord.parsedResult?.state == .noFindings)
     }
 
+    @Test func liveProcessExitPersistsItsKnownEndWithoutDisablingHistory() async throws {
+        let endedAt = Date(timeIntervalSince1970: 200)
+        let history = ReviewHistoryPersistenceProbe()
+        let initialRun = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1",
+            model: "gpt-5"
+        )
+        let backend = FakeCodexReviewBackend(nextRun: initialRun)
+        let interruptGate = AsyncGate()
+        await backend.holdInterruptReview(with: interruptGate)
+        let networkMonitor = ManualCodexReviewNetworkMonitor()
+        let storeBackend = TestingCodexReviewStoreBackend(reviewBackend: backend)
+        let store = CodexReviewStore.makeTestingStore(
+            backend: storeBackend,
+            clock: .init(now: { endedAt }),
+            idGenerator: .init(next: { "job-1" }),
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: .init(sleep: { _ in }),
+            historyPersistence: history
+        )
+        await store.start()
+        let generation = ReviewRuntimeGeneration(rawValue: store.runtimeLifecycleAdmissionGeneration)
+        try storeBackend.scriptReviewRecoveryRoute(
+            sourceGeneration: generation,
+            destinationGeneration: generation
+        )
+        async let review = store.startReview(
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        )
+
+        try await backend.waitForStartReview(timeout: .seconds(2))
+        networkMonitor.yield(.init(status: .unsatisfied))
+        try await backend.waitForInterruptReview(timeout: .seconds(2))
+        guard case .recovering(let receipt) = store.reviewAttemptOwnerships["job-1"] else {
+            Issue.record("Review did not publish its exact recovery receipt.")
+            return
+        }
+        await backend.finishEvents(
+            throwing: ReviewAttemptStreamFailure.process(.process("Process exited.")),
+            for: initialRun
+        )
+        try #require(await waitForHistoryTestCondition {
+            if case .finishingRecovery = await receipt.source.admission.currentPhase() {
+                true
+            } else {
+                false
+            }
+        })
+        await interruptGate.open()
+        let read = try await review
+
+        #expect(read.core.lifecycle.terminal == .interrupted(.previousProcessExit))
+        #expect(read.core.lifecycle.endedAt == endedAt)
+        #expect(store.historyAvailability == .available)
+        let terminal = try #require(await history.terminalRecords().first)
+        #expect(terminal.terminal == .interrupted(.previousProcessExit))
+        #expect(terminal.endedAt == endedAt)
+    }
+
     @Test func reusedWorkspaceUpdatesMetadataInPlaceFromTheLatestAdmission() async throws {
         let rootURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("CodexReviewWorkspaceReuse-\(UUID().uuidString)", isDirectory: true)
