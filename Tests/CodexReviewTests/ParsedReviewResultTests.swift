@@ -88,6 +88,11 @@ struct ParsedReviewResultTests {
 
         Keep one terminal owner.
         """)
+        let encodedPath = ParsedReviewResult.parse(finalReviewText: """
+        [P2] Preserve a path containing spaces — [My File.swift](/tmp/My%20Project/My%20File.swift:4)
+
+        Decode the local file destination.
+        """)
 
         #expect(singleLine.findings.first?.location == .init(
             path: "/tmp/review/AccessGate.swift",
@@ -99,6 +104,25 @@ struct ParsedReviewResultTests {
             startLine: 10,
             endLine: 12
         ))
+        #expect(encodedPath.findings.first?.location == .init(
+            path: "/tmp/My Project/My File.swift",
+            startLine: 4,
+            endLine: 4
+        ))
+    }
+
+    @Test func plainLocationContainingMarkdownLikeBracketsStillParses() {
+        let result = ParsedReviewResult.parse(finalReviewText: """
+        [P1] Preserve generated output — [generated]/Page.swift:12
+
+        Keep the existing plain-path contract.
+        """)
+
+        #expect(result.findings.first?.location == .init(
+            path: "[generated]/Page.swift",
+            startLine: 12,
+            endLine: 12
+        ))
     }
 
     @Test(arguments: [
@@ -106,7 +130,9 @@ struct ParsedReviewResultTests {
         "[Gate.swift](/tmp/review/AccessGate.swift:3)",
         "[AccessGate.swift](https://example.com/AccessGate.swift:3)",
         "[AccessGate.swift](file:///tmp/review/AccessGate.swift:3)",
+        "[AccessGate.swift](file:/tmp/review/AccessGate.swift:3)",
         "[AccessGate.swift](mailto:AccessGate.swift:3)",
+        "[AccessGate.swift](/tmp/review%ZZ/AccessGate.swift:3)",
         "[AccessGate.swift](/tmp/review/AccessGate.swift:not-a-line)",
         "[AccessGate.swift(/tmp/review/AccessGate.swift:3)",
         "[Access[Gate.swift]](/tmp/review/AccessGate.swift:3)",

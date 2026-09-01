@@ -324,7 +324,7 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
 
     private static func parseLocation(_ text: String) -> ParsedReviewResult.Finding.Location? {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if isMarkdownLinkCandidate(text) {
+        if hasMarkdownLinkShape(text) {
             return parseMarkdownLinkLocation(text)
         }
 
@@ -379,8 +379,8 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         }
     }
 
-    private static func isMarkdownLinkCandidate(_ text: String) -> Bool {
-        text.first == "[" || text.contains("](")
+    private static func hasMarkdownLinkShape(_ text: String) -> Bool {
+        text.first == "[" && text.contains("](")
     }
 
     private static func parseMarkdownLinkLocation(
@@ -407,14 +407,40 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
               label.rangeOfCharacter(from: markupCharacters) == nil,
               destination.rangeOfCharacter(from: markupCharacters) == nil,
               let destinationLocation = parseBareLocation(destination),
-              destinationLocation.path.contains("://") == false,
-              destinationLocation.path == label
-                || destinationLocation.path.hasSuffix("/\(label)")
+              let destinationPath = destinationLocation.path.removingPercentEncoding,
+              hasURIScheme(destinationPath) == false,
+              destinationPath == label
+                || destinationPath.hasSuffix("/\(label)")
         else {
             return nil
         }
 
-        return destinationLocation
+        return ParsedReviewResult.Finding.Location(
+            path: destinationPath,
+            startLine: destinationLocation.startLine,
+            endLine: destinationLocation.endLine
+        )
+    }
+
+    private static func hasURIScheme(_ path: String) -> Bool {
+        guard let colonIndex = path.firstIndex(of: ":") else {
+            return false
+        }
+        let scheme = path[..<colonIndex].unicodeScalars
+        guard let first = scheme.first, isASCIILetter(first) else {
+            return false
+        }
+        return scheme.dropFirst().allSatisfy { scalar in
+            isASCIILetter(scalar)
+                || (48...57).contains(scalar.value)
+                || scalar.value == 43
+                || scalar.value == 45
+                || scalar.value == 46
+        }
+    }
+
+    private static func isASCIILetter(_ scalar: Unicode.Scalar) -> Bool {
+        (65...90).contains(scalar.value) || (97...122).contains(scalar.value)
     }
 
     private static func parsePriority(_ title: String) -> Int? {
