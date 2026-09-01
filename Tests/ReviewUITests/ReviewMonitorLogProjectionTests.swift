@@ -80,6 +80,36 @@ struct ReviewMonitorLogProjectionTests {
         }.count == 1)
     }
 
+    @Test func lateActivityRebuildsBeforeRequestedCancellationTerminal() throws {
+        let cancellation = ReviewCancellation.mcpClient(message: "Stop review.")
+        let first = ReviewLogEntry(kind: .progress, text: "Closing active review work.")
+        let late = ReviewLogEntry(kind: .diagnostic, text: "Late cleanup detail.")
+        var projection = ReviewMonitorLog.Projection()
+
+        _ = projection.render(
+            entries: [first],
+            terminal: .interrupted(.requested(cancellation))
+        )
+        let rebuilt = projection.render(
+            entries: [first, late],
+            terminal: .interrupted(.requested(cancellation))
+        )
+
+        #expect(rebuilt.text == """
+        Closing active review work.
+        Late cleanup detail.
+        Stop review.
+        """)
+        #expect(rebuilt.blocks.map(\.id) == [
+            ReviewMonitorLog.BlockID(first.id.uuidString),
+            ReviewMonitorLog.BlockID(late.id.uuidString),
+            ReviewMonitorLog.BlockID("reviewTerminal:requested"),
+        ])
+        #expect(rebuilt.blocks.filter {
+            $0.id == ReviewMonitorLog.BlockID("reviewTerminal:requested")
+        }.count == 1)
+    }
+
     @Test func onlyRequestedInterruptionsCreateTerminalBlocks() {
         let terminals: [ReviewTerminalRecord?] = [
             nil,

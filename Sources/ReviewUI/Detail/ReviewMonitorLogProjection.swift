@@ -1481,7 +1481,8 @@ struct Projection: Sendable {
 
         let previousDocument = document
         let preferredChange: ReviewMonitorLog.Change?
-        if terminalPresentation == state.terminalPresentation,
+        if terminalPresentation == nil,
+           state.terminalPresentation == nil,
            entrySignatures.count == state.entrySignatures.count + 1,
            entrySignatures.dropLast().elementsEqual(state.entrySignatures),
            let entry = entries.last {
