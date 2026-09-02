@@ -47,7 +47,7 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         }
     }
 
-    public static let currentParserVersion = 3
+    public static let currentParserVersion = 4
 
     public var state: State
     public var findingCount: Int?
@@ -323,18 +323,32 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
     }
 
     private static func parseLocation(_ text: String) -> ParsedReviewResult.Finding.Location? {
-        guard let text = locationText(from: text),
-              let colonIndex = text.lastIndex(of: ":")
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if hasCompleteMarkdownLinkShape(text) {
+            return parseMarkdownLinkLocation(text)
+        }
+
+        guard let text = inlineCodeOrPlainLocationText(from: text) else {
+            return nil
+        }
+        return parseBareLocation(text)
+    }
+
+    private static func parseBareLocation(
+        _ text: String
+    ) -> ParsedReviewResult.Finding.Location? {
+        guard let colonIndex = text.lastIndex(of: ":")
         else {
             return nil
         }
         let path = String(text[..<colonIndex])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         let rangeText = String(text[text.index(after: colonIndex)...])
         let parts = rangeText.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
         guard let startText = parts.first,
               let startLine = Int(startText),
               let endLine = parts.count == 1 ? startLine : Int(parts[1]),
-              path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+              path.isEmpty == false,
               startLine > 0,
               endLine >= startLine
         else {
@@ -342,13 +356,13 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         }
 
         return ParsedReviewResult.Finding.Location(
-            path: path.trimmingCharacters(in: .whitespacesAndNewlines),
+            path: path,
             startLine: startLine,
             endLine: endLine
         )
     }
 
-    private static func locationText(from text: String) -> String? {
+    private static func inlineCodeOrPlainLocationText(from text: String) -> String? {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let startsWithBacktick = text.first == "`"
         let endsWithBacktick = text.last == "`"
@@ -364,6 +378,182 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         case (true, false), (false, true):
             return nil
         }
+    }
+
+    private static func hasCompleteMarkdownLinkShape(_ text: String) -> Bool {
+        text.first == "[" && text.last == ")" && text.contains("](")
+    }
+
+    private static func parseMarkdownLinkLocation(
+        _ text: String
+    ) -> ParsedReviewResult.Finding.Location? {
+        guard let link = parseSimpleMarkdownLink(text),
+              let destinationLocation = parseBareLocation(link.destination),
+              let destinationPath = parseLocalFilePath(destinationLocation.path),
+              hasURIScheme(destinationPath) == false,
+              markdownLinkLabel(
+                link.label,
+                matchesDestinationPath: destinationPath,
+                location: destinationLocation
+              )
+        else {
+            return nil
+        }
+
+        return ParsedReviewResult.Finding.Location(
+            path: destinationPath,
+            startLine: destinationLocation.startLine,
+            endLine: destinationLocation.endLine
+        )
+    }
+
+    private static func markdownLinkLabel(
+        _ label: String,
+        matchesDestinationPath destinationPath: String,
+        location destinationLocation: ParsedReviewResult.Finding.Location
+    ) -> Bool {
+        if labelPathMatchesDestination(label, destinationPath: destinationPath) {
+            return true
+        }
+        guard let labelLocation = parseBareLocation(label),
+              labelLocation.startLine == destinationLocation.startLine,
+              labelLocation.endLine == destinationLocation.endLine
+        else {
+            return false
+        }
+        return labelPathMatchesDestination(
+            labelLocation.path,
+            destinationPath: destinationPath
+        )
+    }
+
+    private static func labelPathMatchesDestination(
+        _ labelPath: String,
+        destinationPath: String
+    ) -> Bool {
+        destinationPath == labelPath || destinationPath.hasSuffix("/\(labelPath)")
+    }
+
+    private static func parseSimpleMarkdownLink(
+        _ text: String
+    ) -> (label: String, destination: String)? {
+        guard text.first == "[",
+              text.last == ")",
+              let delimiterRange = text.range(of: "]("),
+              text[delimiterRange.upperBound..<text.index(before: text.endIndex)]
+                .contains("](") == false
+        else {
+            return nil
+        }
+
+        let labelStart = text.index(after: text.startIndex)
+        let label = String(text[labelStart..<delimiterRange.lowerBound])
+        let destination = String(
+            text[delimiterRange.upperBound..<text.index(before: text.endIndex)]
+        )
+        let unsupportedLabelSyntax = CharacterSet(charactersIn: "[]`\\<>")
+        let unsupportedDestinationSyntax = CharacterSet(charactersIn: "[]()`\\<>\"'")
+        guard label.isEmpty == false,
+              label == label.trimmingCharacters(in: .whitespacesAndNewlines),
+              containsASCIIControl(label) == false,
+              label.rangeOfCharacter(from: unsupportedLabelSyntax) == nil,
+              markdownChangesVisibleText(label) == false,
+              destination.isEmpty == false,
+              destination.rangeOfCharacter(from: .whitespacesAndNewlines) == nil,
+              containsASCIIControl(destination) == false,
+              destination.rangeOfCharacter(from: unsupportedDestinationSyntax) == nil,
+              containsMarkdownEntityReference(destination) == false
+        else {
+            return nil
+        }
+        return (label, destination)
+    }
+
+    private static func markdownChangesVisibleText(_ text: String) -> Bool {
+        guard let rendered = try? AttributedString(
+            markdown: text,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        ) else {
+            return true
+        }
+        return String(rendered.characters) != text
+    }
+
+    private static func containsMarkdownEntityReference(_ text: String) -> Bool {
+        var searchStart = text.startIndex
+        while let ampersandIndex = text[searchStart...].firstIndex(of: "&"),
+              let semicolonIndex = text[ampersandIndex...].firstIndex(of: ";")
+        {
+            let candidate = text[ampersandIndex...semicolonIndex]
+            if candidate.dropFirst().contains("&") {
+                searchStart = text.index(after: ampersandIndex)
+                continue
+            }
+
+            let body = candidate.dropFirst().dropLast()
+            let hasEntityLexicalShape = body.isEmpty == false
+                && body.unicodeScalars.allSatisfy { scalar in
+                    isASCIILetter(scalar)
+                        || (48...57).contains(scalar.value)
+                        || scalar.value == 35
+                }
+            if hasEntityLexicalShape,
+               markdownChangesVisibleText(String(candidate))
+            {
+                return true
+            }
+            searchStart = text.index(after: semicolonIndex)
+        }
+        return false
+    }
+
+    private static func parseLocalFilePath(_ encodedPath: String) -> String? {
+        // Keep default URLComponents parsing for raw Unicode. The wrapper grammar and
+        // removingPercentEncoding reject the invalid input that default parsing repairs.
+        guard let decodedPath = encodedPath.removingPercentEncoding,
+              let components = URLComponents(string: encodedPath),
+              components.scheme == nil,
+              components.user == nil,
+              components.password == nil,
+              components.host == nil,
+              components.port == nil,
+              components.query == nil,
+              components.fragment == nil,
+              components.path == decodedPath,
+              decodedPath.isEmpty == false,
+              decodedPath.hasPrefix("//") == false,
+              containsASCIIControl(decodedPath) == false
+        else {
+            return nil
+        }
+        return decodedPath
+    }
+
+    private static func containsASCIIControl(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            scalar.value < 32 || scalar.value == 127
+        }
+    }
+
+    private static func hasURIScheme(_ path: String) -> Bool {
+        guard let colonIndex = path.firstIndex(of: ":") else {
+            return false
+        }
+        let scheme = path[..<colonIndex].unicodeScalars
+        guard let first = scheme.first, isASCIILetter(first) else {
+            return false
+        }
+        return scheme.dropFirst().allSatisfy { scalar in
+            isASCIILetter(scalar)
+                || (48...57).contains(scalar.value)
+                || scalar.value == 43
+                || scalar.value == 45
+                || scalar.value == 46
+        }
+    }
+
+    private static func isASCIILetter(_ scalar: Unicode.Scalar) -> Bool {
+        (65...90).contains(scalar.value) || (97...122).contains(scalar.value)
     }
 
     private static func parsePriority(_ title: String) -> Int? {
