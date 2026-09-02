@@ -273,6 +273,8 @@ struct ParsedReviewResultTests {
         "[Access&amp;Gate.swift](/tmp/review/Access%26Gate.swift:3)",
         "[Access&#38;Gate.swift](/tmp/review/Access%26Gate.swift:3)",
         "[Access&#x26;Gate.swift](/tmp/review/Access%26Gate.swift:3)",
+        "[*AccessGate*.swift](/tmp/review/%2AAccessGate%2A.swift:3)",
+        "[_AccessGate_.swift](/tmp/review/_AccessGate_.swift:3)",
     ])
     func malformedMarkdownLinkLocationReportsUnknown(location: String) {
         let result = ParsedReviewResult.parse(finalReviewText: """

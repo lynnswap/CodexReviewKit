@@ -427,7 +427,7 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
               label == label.trimmingCharacters(in: .whitespacesAndNewlines),
               containsASCIIControl(label) == false,
               label.rangeOfCharacter(from: unsupportedLabelSyntax) == nil,
-              containsMarkdownEntityReference(label) == false,
+              markdownChangesVisibleText(label) == false,
               destination.isEmpty == false,
               destination.rangeOfCharacter(from: .whitespacesAndNewlines) == nil,
               containsASCIIControl(destination) == false,
@@ -438,10 +438,7 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         return (label, destination)
     }
 
-    private static func containsMarkdownEntityReference(_ text: String) -> Bool {
-        guard text.contains("&") else {
-            return false
-        }
+    private static func markdownChangesVisibleText(_ text: String) -> Bool {
         guard let rendered = try? AttributedString(
             markdown: text,
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
