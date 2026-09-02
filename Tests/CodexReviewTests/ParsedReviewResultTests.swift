@@ -119,7 +119,7 @@ struct ParsedReviewResultTests {
         Keep literal filename punctuation when the destination matches it exactly.
         """)
         let ampersandLabel = ParsedReviewResult.parse(finalReviewText: """
-        [P2] Preserve a literal ampersand — [R&D.swift](/tmp/R%26D.swift:10)
+        [P2] Preserve a literal ampersand — [R&D.swift](/tmp/R&D.swift:10)
 
         Keep a literal ampersand that is not an entity reference.
         """)
@@ -273,6 +273,8 @@ struct ParsedReviewResultTests {
         "[Access&amp;Gate.swift](/tmp/review/Access%26Gate.swift:3)",
         "[Access&#38;Gate.swift](/tmp/review/Access%26Gate.swift:3)",
         "[Access&#x26;Gate.swift](/tmp/review/Access%26Gate.swift:3)",
+        "[Access&Gate.swift](/tmp/review/Access&amp;Gate.swift:3)",
+        "[Access&Gate.swift](/tmp/review/Access&#38;Gate.swift:3)",
         "[*AccessGate*.swift](/tmp/review/%2AAccessGate%2A.swift:3)",
         "[_AccessGate_.swift](/tmp/review/_AccessGate_.swift:3)",
     ])
