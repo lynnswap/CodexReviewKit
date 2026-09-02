@@ -569,12 +569,8 @@ Completion remeasurement before publication:
   local Xcode macro trust. CI/release/E2E use the committed workspace lock with
   automatic resolution disabled and `-skipMacroValidation`; the same app tests
   pass through that non-interactive path.
-- A pre-existing fixed two-second `thread/delete` cleanup timeout can classify a
-  slow cleanup as transport invalidation, replace the runtime, and retire a
-  long-lived MCP SSE session after the review has already committed. The E2E
-  accepts curl status 18 only when the replacement server is running and the
-  exact completed semantic row is present, then still verifies the database and
-  restarted UI. Upstream Codex confirms review completion itself does not
-  terminate app-server and does not promise a two-second delete; this transport
-  lifecycle is separate from durable-history ownership. Remove the narrow E2E
-  branch when that cleanup owner is corrected.
+- Runtime shutdown closes MCP admission first and drains every admitted finite
+  JSON-RPC response through the HTTP response-end acknowledgement before it
+  disconnects semantic sessions or shuts down the event-loop group. The E2E
+  therefore requires curl status 0 and a complete JSON-RPC/SSE response; durable
+  history remains recovery evidence rather than a fallback transport result.
