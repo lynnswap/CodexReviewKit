@@ -421,12 +421,13 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         let destination = String(
             text[delimiterRange.upperBound..<text.index(before: text.endIndex)]
         )
-        let unsupportedLabelSyntax = CharacterSet(charactersIn: "[]`\\&<>")
+        let unsupportedLabelSyntax = CharacterSet(charactersIn: "[]`\\<>")
         let unsupportedDestinationSyntax = CharacterSet(charactersIn: "[]()`\\&<>\"'")
         guard label.isEmpty == false,
               label == label.trimmingCharacters(in: .whitespacesAndNewlines),
               containsASCIIControl(label) == false,
               label.rangeOfCharacter(from: unsupportedLabelSyntax) == nil,
+              containsMarkdownEntityReference(label) == false,
               destination.isEmpty == false,
               destination.rangeOfCharacter(from: .whitespacesAndNewlines) == nil,
               containsASCIIControl(destination) == false,
@@ -435,6 +436,19 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
             return nil
         }
         return (label, destination)
+    }
+
+    private static func containsMarkdownEntityReference(_ text: String) -> Bool {
+        guard text.contains("&") else {
+            return false
+        }
+        guard let rendered = try? AttributedString(
+            markdown: text,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        ) else {
+            return true
+        }
+        return String(rendered.characters) != text
     }
 
     private static func parseLocalFilePath(_ encodedPath: String) -> String? {

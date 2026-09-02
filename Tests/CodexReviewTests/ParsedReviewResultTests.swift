@@ -118,6 +118,16 @@ struct ParsedReviewResultTests {
 
         Keep literal filename punctuation when the destination matches it exactly.
         """)
+        let ampersandLabel = ParsedReviewResult.parse(finalReviewText: """
+        [P2] Preserve a literal ampersand — [R&D.swift](/tmp/R%26D.swift:10)
+
+        Keep a literal ampersand that is not an entity reference.
+        """)
+        let invalidEntityName = ParsedReviewResult.parse(finalReviewText: """
+        [P2] Preserve an ampersand sequence — [R&D;.swift](/tmp/R%26D%3B.swift:11)
+
+        Keep a sequence that CommonMark does not decode as an entity.
+        """)
 
         #expect(singleLine.findings.first?.location == .init(
             path: "/tmp/review/AccessGate.swift",
@@ -158,6 +168,16 @@ struct ParsedReviewResultTests {
             path: "/tmp/My_File~*.swift",
             startLine: 9,
             endLine: 9
+        ))
+        #expect(ampersandLabel.findings.first?.location == .init(
+            path: "/tmp/R&D.swift",
+            startLine: 10,
+            endLine: 10
+        ))
+        #expect(invalidEntityName.findings.first?.location == .init(
+            path: "/tmp/R&D;.swift",
+            startLine: 11,
+            endLine: 11
         ))
     }
 
@@ -251,6 +271,8 @@ struct ParsedReviewResultTests {
         "[AccessGate.swift](/tmp/review/(debug)/AccessGate.swift:3)",
         "[`AccessGate.swift`](/tmp/review/AccessGate.swift:3)",
         "[Access&amp;Gate.swift](/tmp/review/Access%26Gate.swift:3)",
+        "[Access&#38;Gate.swift](/tmp/review/Access%26Gate.swift:3)",
+        "[Access&#x26;Gate.swift](/tmp/review/Access%26Gate.swift:3)",
     ])
     func malformedMarkdownLinkLocationReportsUnknown(location: String) {
         let result = ParsedReviewResult.parse(finalReviewText: """
