@@ -413,7 +413,7 @@ assert_database_contract() {
     "review_records",
     "review_workspaces"
   ]' "$table_names_path" >/dev/null || die "history database table inventory changed"
-  /usr/bin/jq -e '[.[].name] == ["cwd", "sortOrder"]' \
+  /usr/bin/jq -e '[.[].name] == ["cwd", "sortOrder", "repositoryIdentity", "displayTitle", "kind"]' \
     "$workspace_columns_path" >/dev/null || die "workspace schema inventory changed"
   /usr/bin/jq -e '[.[].name] == [
     "id", "cwd", "sortOrder", "targetKind", "targetBranch",
