@@ -88,7 +88,12 @@ Returns:
 
 Notes:
 
-- `review_start` is the primary client flow. Codex clients wait for terminal completion. Claude Code clients wait up to 540 seconds; if the job is still running, call `review_await` with the returned `jobId`.
+- `review_start` is the primary client flow. Every client waits up to 540
+  seconds; if the job is still running, call `review_await` with the returned
+  `jobId`.
+- A terminal result is returned after its history commit is durable. Backend
+  cleanup continues independently, and a later cleanup failure is available as
+  a developer diagnostic through `review_read` with `logFilter: "all"`.
 - ReviewMonitor starts a job with its effective settings model. After thread
   creation, it reports `thread/start.model` when available and otherwise keeps
   that requested model.
@@ -115,7 +120,8 @@ with the same `jobId`.
 ### `review_read`
 
 Reads the current or final state of a review job owned by the current MCP session.
-This is optional for normal clients because `review_start` already returns the final summary.
+Use this to fetch log pages or to refresh a job snapshot independently of the
+bounded `review_start` / `review_await` flow.
 
 Inputs:
 

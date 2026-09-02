@@ -806,7 +806,57 @@ struct CodexReviewStoreHistoryTests {
         #expect(await completion.isComplete())
     }
 
-    @Test func cancelledAwaitKeepsTerminalResultBehindHistoryFinality() async throws {
+    @Test func boundedStartReturnsTerminalAfterHistoryReceiptWhileCleanupContinues() async throws {
+        let terminalWriteEntered = AsyncGate()
+        let terminalWriteRelease = AsyncGate()
+        let cleanupRelease = AsyncGate()
+        let completion = HistoryTestCompletion()
+        let history = ReviewHistoryPersistenceProbe(
+            terminalWriteEntered: terminalWriteEntered,
+            terminalWriteRelease: terminalWriteRelease
+        )
+        let backend = FakeCodexReviewBackend()
+        await backend.holdCleanupReview(with: cleanupRelease)
+        let store = makeStore(
+            history: history,
+            backend: backend,
+            idGenerator: .init(next: { "job-1" })
+        )
+        let starting = Task { @MainActor in
+            let result = try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .seconds(30)
+            )
+            await completion.complete()
+            return result
+        }
+        await backend.waitForStartReview()
+
+        await backend.yield(.completed(summary: "Done", result: "No findings."))
+        try await terminalWriteEntered.wait(
+            timeout: .seconds(2),
+            operation: "bounded start terminal history write"
+        )
+        await backend.waitForCleanupReview()
+        #expect(await completion.isComplete() == false)
+        #expect(store.reviewWorkerTasks["job-1"] != nil)
+
+        await terminalWriteRelease.open()
+        try #require(await waitForHistoryTestCondition {
+            await completion.isComplete()
+        })
+        #expect(try await starting.value.core.lifecycle.status == .succeeded)
+        #expect(store.historyResultLeaseIDs["job-1"] == nil)
+        #expect(store.reviewWorkerTasks["job-1"] != nil)
+
+        await cleanupRelease.open()
+        try #require(await waitForHistoryTestCondition {
+            store.reviewWorkerTasks["job-1"] == nil
+        })
+    }
+
+    @Test func cancelledAwaitReturnsTerminalAfterHistoryFinalityWhileCleanupContinues() async throws {
         let terminalWriteEntered = AsyncGate()
         let terminalWriteRelease = AsyncGate()
         let cleanupRelease = AsyncGate()
@@ -860,16 +910,18 @@ struct CodexReviewStoreHistoryTests {
         try #require(await waitForHistoryTestCondition {
             store.persistedTerminalReviewIDs.contains(running.jobID)
         })
-        #expect(await completion.isComplete() == false)
-        #expect(store.reviewTerminalWaiters[running.jobID]?.count == 1)
+        try #require(await waitForHistoryTestCondition {
+            await completion.isComplete()
+        })
+        #expect(try await awaiting.value.core.lifecycle.status == .succeeded)
+        #expect(store.reviewTerminalWaiters[running.jobID] == nil)
+        #expect(store.historyResultLeaseIDs[running.jobID] == nil)
         #expect(store.reviewWorkerTasks[running.jobID] != nil)
 
         await cleanupRelease.open()
-        #expect(try await awaiting.value.core.lifecycle.status == .succeeded)
-        #expect(await completion.isComplete())
-        #expect(store.reviewTerminalWaiters[running.jobID] == nil)
-        #expect(store.historyResultLeaseIDs[running.jobID] == nil)
-        #expect(store.reviewWorkerTasks[running.jobID] == nil)
+        try #require(await waitForHistoryTestCondition {
+            store.reviewWorkerTasks[running.jobID] == nil
+        })
     }
 
     @Test func cancelledAwaitStillReturnsANonterminalSnapshot() async throws {
@@ -993,7 +1045,7 @@ struct CodexReviewStoreHistoryTests {
         #expect(store.jobs.count == 1)
     }
 
-    @Test func retentionDefersLiveTerminalRemovalUntilWorkerAndAwaitResponseFinish() async throws {
+    @Test func retentionDefersLiveTerminalRemovalUntilWorkerFinishesAfterAwaitResponse() async throws {
         let cleanupRelease = AsyncGate()
         let history = ReviewHistoryPersistenceProbe(
             terminalMutations: [
@@ -1034,6 +1086,12 @@ struct CodexReviewStoreHistoryTests {
             await firstAwaitCompletion.complete()
             return result
         }
+        try #require(await waitForHistoryTestCondition {
+            await firstAwaitCompletion.isComplete()
+        })
+        let firstResult = try await firstAwait.value
+        #expect(firstResult.core.reviewText == "First result")
+        #expect(store.reviewWorkerTasks[first.jobID] != nil)
 
         let secondRun = CodexReviewBackendModel.Review.Run(
             attemptID: "attempt-2",
@@ -1060,10 +1118,9 @@ struct CodexReviewStoreHistoryTests {
 
         #expect(try store.readReview(jobID: first.jobID).core.reviewText == "First result")
         #expect(store.job(id: first.jobID) != nil)
-        #expect(await firstAwaitCompletion.isComplete() == false)
+        #expect(await firstAwaitCompletion.isComplete())
 
         await cleanupRelease.open()
-        #expect(try await firstAwait.value.core.reviewText == "First result")
         try #require(await waitForHistoryTestCondition {
             store.job(id: first.jobID) == nil
         })
@@ -1071,6 +1128,70 @@ struct CodexReviewStoreHistoryTests {
             sessionID: "session-1",
             jobID: second.jobID
         )
+    }
+
+    @Test func retentionDefersLiveTerminalRemovalWhileResultLeaseExists() async throws {
+        let history = ReviewHistoryPersistenceProbe(
+            terminalMutations: [
+                .init(),
+                .init(removedReviewIDs: ["job-1"]),
+            ]
+        )
+        let backend = FakeCodexReviewBackend()
+        let ids = SequentialHistoryTestIDs(["job-1", "job-2"])
+        let store = makeStore(
+            history: history,
+            backend: backend,
+            idGenerator: .init(next: { ids.next() })
+        )
+
+        let first = try await store.startReview(
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/first", target: .uncommittedChanges),
+            waitTimeout: .zero
+        )
+        await backend.waitForStartReview()
+        let firstRun = try #require(store.reviewAttemptOwnerships[first.jobID]?.run)
+        await backend.yield(
+            .completed(summary: "First", result: "First result"),
+            for: firstRun
+        )
+        _ = try await store.awaitReview(sessionID: "session-1", jobID: first.jobID)
+        try #require(await waitForHistoryTestCondition {
+            store.reviewWorkerTasks[first.jobID] == nil
+        })
+        let resultLease = store.acquireHistoryResultLease(jobID: first.jobID)
+
+        let secondRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-2",
+            threadID: "thread-2",
+            turnID: "turn-2",
+            reviewThreadID: "review-thread-2"
+        )
+        await backend.setNextRun(secondRun)
+        let second = try await store.startReview(
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/second", target: .uncommittedChanges),
+            waitTimeout: .zero
+        )
+        try #require(await waitForHistoryTestCondition {
+            store.reviewAttemptOwnerships[second.jobID]?.run == secondRun
+        })
+        await backend.yield(
+            .completed(summary: "Second", result: "Second result"),
+            for: secondRun
+        )
+        try #require(await waitForHistoryTestCondition {
+            store.deferredHistoryRemovalIDs.contains(first.jobID)
+        })
+
+        #expect(store.reviewWorkerTasks[first.jobID] == nil)
+        #expect(store.historyResultLeaseIDs[first.jobID] == [resultLease.id])
+        #expect(try store.readReview(jobID: first.jobID).core.reviewText == "First result")
+
+        store.releaseHistoryResultLease(resultLease)
+        #expect(store.job(id: first.jobID) == nil)
+        _ = try await store.awaitReview(sessionID: "session-1", jobID: second.jobID)
     }
 
     @Test func selectedDeleteRemovesExactTerminalSetInOneHistoryMutation() async throws {

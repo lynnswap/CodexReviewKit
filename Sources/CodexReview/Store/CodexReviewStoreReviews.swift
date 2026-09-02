@@ -112,7 +112,7 @@ extension CodexReviewStore {
         defer {
             releaseHistoryResultLease(historyResultLease)
         }
-        if isReviewResultFinalized(jobID: jobID) == false {
+        if isReviewResultReady(jobID: jobID) == false {
             await waitForReviewTerminal(jobID: jobID, timeout: timeout)
         }
         return try readReview(sessionID: sessionID, jobID: jobID)
@@ -2043,7 +2043,7 @@ extension CodexReviewStore {
     }
 
     private func waitForReviewTerminal(jobID: String, timeout: Duration?) async {
-        guard isReviewResultFinalized(jobID: jobID) == false else {
+        guard isReviewResultReady(jobID: jobID) == false else {
             return
         }
         let waiterID = UUID()
@@ -2062,7 +2062,7 @@ extension CodexReviewStore {
 
         await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
-                if isReviewResultFinalized(jobID: jobID) {
+                if isReviewResultReady(jobID: jobID) {
                     timeoutTask?.cancel()
                     continuation.resume()
                     return
@@ -2081,13 +2081,13 @@ extension CodexReviewStore {
         }
         timeoutTask?.cancel()
         if job(id: jobID)?.isTerminal == true,
-           isReviewResultFinalized(jobID: jobID) == false {
+           isReviewResultReady(jobID: jobID) == false {
             await waitForReviewTerminal(jobID: jobID, timeout: nil)
         }
     }
 
     package func resumeReviewWaiters(for jobID: String) {
-        guard isReviewResultFinalized(jobID: jobID) else {
+        guard isReviewResultReady(jobID: jobID) else {
             return
         }
         let waiters = reviewTerminalWaiters.removeValue(forKey: jobID) ?? []
@@ -2097,18 +2097,14 @@ extension CodexReviewStore {
         }
     }
 
-    private func isReviewResultFinalized(jobID: String) -> Bool {
+    private func isReviewResultReady(jobID: String) -> Bool {
         guard let job = job(id: jobID) else {
             return true
         }
         guard job.isTerminal else {
             return false
         }
-        // Terminal state is published before backend cleanup. The live worker remains the
-        // result owner until cleanup and any secondary diagnostic are finalized. Runtime-stop
-        // detachment is the explicit boundary that transfers only lifecycle cleanup ownership.
-        return reviewWorkerTasks[jobID] == nil
-            && historyTerminalCommitIsResolved(jobID: jobID)
+        return historyTerminalCommitIsResolved(jobID: jobID)
     }
 
     private func resumeReviewWaiter(jobID: String, waiterID: UUID) {

@@ -1235,7 +1235,8 @@ struct CodexReviewMCPHTTPServerTests {
         }
     }
 
-    @Test func streamableHTTPBoundsClaudeReviewStartAndContinuesWithReviewAwait() async throws {
+    @Test(arguments: ["manual-test", "Claude Code"])
+    func streamableHTTPBoundsReviewStartAndContinuesWithReviewAwait(clientName: String) async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -1249,7 +1250,7 @@ struct CodexReviewMCPHTTPServerTests {
 
         try await withHTTPServer(store: store, configuration: configuration) { server in
             let endpoint = await server.url
-            let sessionID = try await initializeSession(endpoint: endpoint, clientName: "Claude Code")
+            let sessionID = try await initializeSession(endpoint: endpoint, clientName: clientName)
             let requestBody = try makeJSONBody([
                 "jsonrpc": "2.0",
                 "id": 2,
@@ -1265,7 +1266,8 @@ struct CodexReviewMCPHTTPServerTests {
             async let responseData = postJSONRPCData(
                 endpoint: endpoint,
                 sessionID: sessionID,
-                bodyData: requestBody
+                bodyData: requestBody,
+                timeoutInterval: 2
             )
             let running = try decodeSSEJSON(from: try await responseData)
 
@@ -2664,6 +2666,7 @@ struct CodexReviewMCPHTTPServerTests {
         sessionID: String?,
         bodyData: Data,
         headers: [String: String] = [:],
+        timeoutInterval: TimeInterval? = nil,
         expectedStatusCode: Int = 200
     ) async throws -> Data {
         var request = URLRequest(url: endpoint)
@@ -2675,6 +2678,9 @@ struct CodexReviewMCPHTTPServerTests {
         }
         for (name, value) in headers {
             request.setValue(value, forHTTPHeaderField: name)
+        }
+        if let timeoutInterval {
+            request.timeoutInterval = timeoutInterval
         }
         request.httpBody = bodyData
         let (data, response) = try await URLSession.shared.data(for: request)
