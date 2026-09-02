@@ -391,8 +391,11 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
               let destinationLocation = parseBareLocation(link.destination),
               let destinationPath = parseLocalFilePath(destinationLocation.path),
               hasURIScheme(destinationPath) == false,
-              destinationPath == link.label
-                || destinationPath.hasSuffix("/\(link.label)")
+              markdownLinkLabel(
+                link.label,
+                matchesDestinationPath: destinationPath,
+                location: destinationLocation
+              )
         else {
             return nil
         }
@@ -402,6 +405,33 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
             startLine: destinationLocation.startLine,
             endLine: destinationLocation.endLine
         )
+    }
+
+    private static func markdownLinkLabel(
+        _ label: String,
+        matchesDestinationPath destinationPath: String,
+        location destinationLocation: ParsedReviewResult.Finding.Location
+    ) -> Bool {
+        if labelPathMatchesDestination(label, destinationPath: destinationPath) {
+            return true
+        }
+        guard let labelLocation = parseBareLocation(label),
+              labelLocation.startLine == destinationLocation.startLine,
+              labelLocation.endLine == destinationLocation.endLine
+        else {
+            return false
+        }
+        return labelPathMatchesDestination(
+            labelLocation.path,
+            destinationPath: destinationPath
+        )
+    }
+
+    private static func labelPathMatchesDestination(
+        _ labelPath: String,
+        destinationPath: String
+    ) -> Bool {
+        destinationPath == labelPath || destinationPath.hasSuffix("/\(labelPath)")
     }
 
     private static func parseSimpleMarkdownLink(

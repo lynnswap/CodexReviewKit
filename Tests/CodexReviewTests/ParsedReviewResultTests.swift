@@ -88,6 +88,16 @@ struct ParsedReviewResultTests {
 
         Keep one terminal owner.
         """)
+        let singleLineInLabel = ParsedReviewResult.parse(finalReviewText: """
+        [P0] Restore token validation — [AccessGate.swift:3](/tmp/review/AccessGate.swift:3)
+
+        Preserve a rendered line number in the link label.
+        """)
+        let rangeInLabel = ParsedReviewResult.parse(finalReviewText: """
+        [P1] Preserve terminal ownership — [Store.swift:10-12](Sources/Store.swift:10-12)
+
+        Preserve a rendered line range in the link label.
+        """)
         let encodedPath = ParsedReviewResult.parse(finalReviewText: """
         [P2] Preserve a path containing spaces — [My File.swift](/tmp/My%20Project/My%20File.swift:4)
 
@@ -133,6 +143,11 @@ struct ParsedReviewResultTests {
 
         Do not classify an unrelated path ampersand as an entity reference.
         """)
+        let numericColonFilename = ParsedReviewResult.parse(finalReviewText: """
+        [P2] Preserve a numeric filename suffix — [Foo:3](/tmp/Foo%3A3:13)
+
+        Prefer an exact path label before interpreting its suffix as a line number.
+        """)
 
         #expect(singleLine.findings.first?.location == .init(
             path: "/tmp/review/AccessGate.swift",
@@ -140,6 +155,16 @@ struct ParsedReviewResultTests {
             endLine: 3
         ))
         #expect(range.findings.first?.location == .init(
+            path: "Sources/Store.swift",
+            startLine: 10,
+            endLine: 12
+        ))
+        #expect(singleLineInLabel.findings.first?.location == .init(
+            path: "/tmp/review/AccessGate.swift",
+            startLine: 3,
+            endLine: 3
+        ))
+        #expect(rangeInLabel.findings.first?.location == .init(
             path: "Sources/Store.swift",
             startLine: 10,
             endLine: 12
@@ -188,6 +213,11 @@ struct ParsedReviewResultTests {
             path: "/tmp/R&D/*archive*/Foo.swift",
             startLine: 12,
             endLine: 12
+        ))
+        #expect(numericColonFilename.findings.first?.location == .init(
+            path: "/tmp/Foo:3",
+            startLine: 13,
+            endLine: 13
         ))
     }
 
@@ -248,6 +278,9 @@ struct ParsedReviewResultTests {
     @Test(arguments: [
         "[AccessGate.swift](/tmp/review/Other.swift:3)",
         "[Gate.swift](/tmp/review/AccessGate.swift:3)",
+        "[Other.swift:3](/tmp/review/AccessGate.swift:3)",
+        "[AccessGate.swift:4](/tmp/review/AccessGate.swift:3)",
+        "[AccessGate.swift:3-4](/tmp/review/AccessGate.swift:3)",
         "[AccessGate.swift](https://example.com/AccessGate.swift:3)",
         "[AccessGate.swift](file:///tmp/review/AccessGate.swift:3)",
         "[AccessGate.swift](file:/tmp/review/AccessGate.swift:3)",
