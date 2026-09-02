@@ -917,8 +917,7 @@ struct CodexReviewMCPHTTPServerTests {
 
     @Test func sanitizedIdentityJoinsCancelledFiniteDomainWorkBeforeShutdown() async throws {
         let backend = FakeCodexReviewBackend()
-        let domainRelease = AsyncGate()
-        await backend.holdStartReviewIgnoringCancellation(with: domainRelease)
+        let cleanupRelease = AsyncGate()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "job-domain" })
@@ -930,6 +929,13 @@ struct CodexReviewMCPHTTPServerTests {
         try await server.start()
         let endpoint = await server.url
         let sessionID = try await initializeSession(endpoint: endpoint)
+        let running = try await store.startReview(
+            sessionID: sessionID,
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+            waitTimeout: .zero
+        )
+        await backend.waitForStartReview()
+        await backend.holdCleanupReview(with: cleanupRelease)
 
         let tools = try decodeSSEJSON(from: try await postJSONRPCData(
             endpoint: endpoint,
@@ -943,10 +949,20 @@ struct CodexReviewMCPHTTPServerTests {
             try await postJSONRPCData(
                 endpoint: endpoint,
                 sessionID: sessionID,
-                bodyData: makeReviewStartBody(id: 41)
+                bodyData: try makeJSONBody([
+                    "jsonrpc": "2.0",
+                    "id": 41,
+                    "method": "tools/call",
+                    "params": [
+                        "name": "review_cancel",
+                        "arguments": ["jobId": running.jobID],
+                    ],
+                ])
             )
         }
-        await backend.waitForStartReview()
+        try await backend.waitForInterruptReview(timeout: .seconds(2))
+        await backend.yield(.cancelled("cancel finite POST"))
+        await backend.waitForCleanupReview()
         _ = try await postJSONRPCData(
             endpoint: endpoint,
             sessionID: sessionID,
@@ -970,10 +986,7 @@ struct CodexReviewMCPHTTPServerTests {
         #expect(await server.eventLoopGroupShutdownCountForTesting() == 0)
 
         await server.releaseSessionCloseCompletionForTesting()
-        await domainRelease.open()
-        await backend.yield(.cancelled(
-            "Cancellation requested because the MCP session closed."
-        ))
+        await cleanupRelease.open()
         _ = try? await response.value
         try await stop.value
         #expect(await server.eventLoopGroupShutdownCountForTesting() == 1)
