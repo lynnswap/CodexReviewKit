@@ -450,7 +450,31 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
     }
 
     private static func containsMarkdownEntityReference(_ text: String) -> Bool {
-        text.contains("&") && markdownChangesVisibleText(text)
+        var searchStart = text.startIndex
+        while let ampersandIndex = text[searchStart...].firstIndex(of: "&"),
+              let semicolonIndex = text[ampersandIndex...].firstIndex(of: ";")
+        {
+            let candidate = text[ampersandIndex...semicolonIndex]
+            if candidate.dropFirst().contains("&") {
+                searchStart = text.index(after: ampersandIndex)
+                continue
+            }
+
+            let body = candidate.dropFirst().dropLast()
+            let hasEntityLexicalShape = body.isEmpty == false
+                && body.unicodeScalars.allSatisfy { scalar in
+                    isASCIILetter(scalar)
+                        || (48...57).contains(scalar.value)
+                        || scalar.value == 35
+                }
+            if hasEntityLexicalShape,
+               markdownChangesVisibleText(String(candidate))
+            {
+                return true
+            }
+            searchStart = text.index(after: semicolonIndex)
+        }
+        return false
     }
 
     private static func parseLocalFilePath(_ encodedPath: String) -> String? {

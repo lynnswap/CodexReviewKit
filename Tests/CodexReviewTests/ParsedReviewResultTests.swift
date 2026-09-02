@@ -128,6 +128,11 @@ struct ParsedReviewResultTests {
 
         Keep a sequence that CommonMark does not decode as an entity.
         """)
+        let unrelatedDestinationMarkup = ParsedReviewResult.parse(finalReviewText: """
+        [P2] Preserve destination punctuation — [Foo.swift](/tmp/R&D/*archive*/Foo.swift:12)
+
+        Do not classify an unrelated path ampersand as an entity reference.
+        """)
 
         #expect(singleLine.findings.first?.location == .init(
             path: "/tmp/review/AccessGate.swift",
@@ -178,6 +183,11 @@ struct ParsedReviewResultTests {
             path: "/tmp/R&D;.swift",
             startLine: 11,
             endLine: 11
+        ))
+        #expect(unrelatedDestinationMarkup.findings.first?.location == .init(
+            path: "/tmp/R&D/*archive*/Foo.swift",
+            startLine: 12,
+            endLine: 12
         ))
     }
 
