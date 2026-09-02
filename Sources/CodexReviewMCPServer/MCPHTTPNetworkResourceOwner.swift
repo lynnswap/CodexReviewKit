@@ -699,6 +699,16 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         }
 
         package func admitRequest(finalForConnection: Bool = false) -> AdmittedRequest? {
+            guard let owner else { return nil }
+            return owner.admitRequest(
+                on: self,
+                finalForConnection: finalForConnection
+            )
+        }
+
+        fileprivate func admitRequestWhileGenerationIsAccepting(
+            finalForConnection: Bool
+        ) -> AdmittedRequest? {
             lock.lock()
             guard phase == .accepting else {
                 lock.unlock()
@@ -1149,6 +1159,24 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         for connection in connections {
             connection.closeAdmission()
         }
+    }
+
+    fileprivate func admitRequest(
+        on connection: Connection,
+        finalForConnection: Bool
+    ) -> Connection.AdmittedRequest? {
+        lock.lock()
+        guard case .accepting(let current) = state,
+              let ownedConnection = current.connections[connection.id],
+              ownedConnection === connection else {
+            lock.unlock()
+            return nil
+        }
+        let admitted = connection.admitRequestWhileGenerationIsAccepting(
+            finalForConnection: finalForConnection
+        )
+        lock.unlock()
+        return admitted
     }
 
     fileprivate func promoteToFiniteResponse(

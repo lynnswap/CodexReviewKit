@@ -84,6 +84,7 @@ struct MCPHTTPNetworkResourceOwnerTests {
         }
 
         let closing = owner.beginServerStopDrain()
+        #expect(connection.admitRequest() == nil)
         #expect(admitted.operation.promoteToFiniteResponse() == false)
         admitted.lease.install(task)
         await task.value
