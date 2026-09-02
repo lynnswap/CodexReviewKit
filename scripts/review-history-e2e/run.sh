@@ -680,7 +680,7 @@ wait_for_diagnostics \
   "$live_diagnostics_path" \
   ".historyAvailability == \"available\" and ([.jobs[] | select(.id == \"$job_id\" and .status == \"succeeded\" and .terminal.kind == \"completed\" and .parsedResult.state == \"hasFindings\" and (.parsedResult.findings | length > 0))] | length == 1)" \
   30 \
-  'the live terminal semantic history row'
+  'the live structured finding projection'
 assert_no_diagnostic_transcript_fields "$live_diagnostics_path"
 /usr/bin/jq -e --arg job_id "$job_id" --arg cwd "$fixture_path" '
   .historyAvailability == "available"
