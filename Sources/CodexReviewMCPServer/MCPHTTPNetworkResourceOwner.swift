@@ -60,15 +60,23 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
     package enum GenerationPhase: Equatable, Sendable {
         case accepting
         case admissionClosed
+        case draining(TerminalCause)
         case closing(TerminalCause)
         case closed
     }
 
     package enum ConnectionPhase: Equatable, Sendable {
         case accepting
+        case finalRequestAdmitted
         case admissionClosed
+        case draining(TerminalCause)
         case closing(TerminalCause)
         case closed
+    }
+
+    package enum RequestShutdownDisposition: Equatable, Sendable {
+        case closeable
+        case finiteResponse
     }
 
     package enum RequestWorkPhase: Equatable, Sendable {
@@ -95,6 +103,7 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         package let id: UUID
         package let admissionOrdinal: UInt64
         package let phase: RequestWorkPhase
+        package let shutdownDisposition: RequestShutdownDisposition
         package let responseEnd: ResponseEndPhase
         package let pendingDomainWorkCount: Int
 
@@ -211,6 +220,7 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         private let lock = NSLock()
         private let leaseID: UUID
         private var workState: WorkState = .reserved
+        private var shutdownDisposition: RequestShutdownDisposition = .closeable
         private var terminalCause: TerminalCause?
         private var responseEnd: ResponseEndPhase = .notExpected
         private var didClose = false
@@ -235,11 +245,26 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             WorkLease(operation: self, id: leaseID)
         }
 
+        fileprivate func beginDraining(_ cause: TerminalCause) {
+            beginDestructiveClose(cause, preservingFiniteResponse: true)
+        }
+
         fileprivate func beginClosing(_ cause: TerminalCause) {
+            beginDestructiveClose(cause, preservingFiniteResponse: false)
+        }
+
+        private func beginDestructiveClose(
+            _ cause: TerminalCause,
+            preservingFiniteResponse: Bool
+        ) {
             var cancellations: [@Sendable () -> Void] = []
             var waiters: [CheckedContinuation<Bool, Never>] = []
             var terminalCauseWaiters: [CheckedContinuation<TerminalCause?, Never>] = []
             lock.lock()
+            if preservingFiniteResponse, shutdownDisposition == .finiteResponse {
+                lock.unlock()
+                return
+            }
             for id in Array(domainWork.keys) {
                 domainWork[id]?.cancellationWasRequested = true
                 if let cancellation = domainWork[id]?.cancellation {
@@ -271,6 +296,34 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             finishIfPossible()
         }
 
+        package func promoteToFiniteResponse() -> Bool {
+            guard let connection else { return false }
+            return connection.promoteToFiniteResponse(self)
+        }
+
+        fileprivate func promoteToFiniteResponseWhileOwned() -> Bool {
+            lock.lock()
+            guard terminalCause == nil, didClose == false else {
+                lock.unlock()
+                return false
+            }
+            guard shutdownDisposition == .closeable else {
+                lock.unlock()
+                preconditionFailure("A request can be promoted to finite response ownership exactly once.")
+            }
+            shutdownDisposition = .finiteResponse
+            lock.unlock()
+            return true
+        }
+
+        package var ownsFiniteResponse: Bool {
+            lock.withLock {
+                shutdownDisposition == .finiteResponse
+                    && terminalCause == nil
+                    && didClose == false
+            }
+        }
+
         package func startDomainWork<Success: Sendable>(
             _ work: @escaping @Sendable () async throws -> Success
         ) -> Task<Success, any Error>? {
@@ -299,11 +352,13 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             connection?.resourceOwner
         }
 
-        fileprivate func startDomainWorkWhileAdmissionIsOpen<Success: Sendable>(
+        fileprivate func startDomainWorkWhilePermitted<Success: Sendable>(
+            requiresFiniteResponse: Bool,
             _ work: @escaping @Sendable () async throws -> Success
         ) -> Task<Success, any Error>? {
             lock.lock()
             guard case .accepting = sessionDomainPhase,
+                  requiresFiniteResponse == false || shutdownDisposition == .finiteResponse,
                   terminalCause == nil,
                   didClose == false else {
                 lock.unlock()
@@ -324,10 +379,15 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             return task
         }
 
-        fileprivate func bindSessionWhileAdmissionIsOpen(_ sessionID: String) -> Bool {
+        fileprivate func bindSessionWhilePermitted(
+            _ sessionID: String,
+            requiresFiniteResponse: Bool
+        ) -> Bool {
             lock.lock()
             defer { lock.unlock() }
-            guard terminalCause == nil, didClose == false else { return false }
+            guard requiresFiniteResponse == false || shutdownDisposition == .finiteResponse,
+                  terminalCause == nil,
+                  didClose == false else { return false }
             switch sessionDomainPhase {
             case .unbound:
                 sessionDomainPhase = .accepting(sessionID)
@@ -337,13 +397,15 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             }
         }
 
-        fileprivate func performWhileSessionAdmissionIsOpen(
+        fileprivate func performWhileSessionAdmissionIsPermitted(
             sessionID: String,
+            requiresFiniteResponse: Bool,
             _ body: () -> Void
         ) -> Bool {
             lock.lock()
             guard case .accepting(let ownedSessionID) = sessionDomainPhase,
                   ownedSessionID == sessionID,
+                  requiresFiniteResponse == false || shutdownDisposition == .finiteResponse,
                   terminalCause == nil,
                   didClose == false else {
                 lock.unlock()
@@ -560,12 +622,14 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
                 }
             }
             let responseEnd = responseEnd
+            let shutdownDisposition = shutdownDisposition
             let pendingDomainWorkCount = domainWork.count
             lock.unlock()
             return .init(
                 id: id,
                 admissionOrdinal: admissionOrdinal,
                 phase: phase,
+                shutdownDisposition: shutdownDisposition,
                 responseEnd: responseEnd,
                 pendingDomainWorkCount: pendingDomainWorkCount
             )
@@ -614,7 +678,6 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         private var phase: ConnectionPhase = .accepting
         private var nextRequestOrdinal: UInt64 = 0
         private var requests: [UUID: RequestOperation] = [:]
-        private var domainAdmissionClosed = false
         private var closeAcknowledged = false
         private var closeAcknowledgementWaiters: [CheckedContinuation<Void, Never>] = []
         private var closeWaiters: [CheckedContinuation<Void, Never>] = []
@@ -649,22 +712,22 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             let lease = operation.makeLease()
             requests[operation.id] = operation
             if finalForConnection {
-                phase = .admissionClosed
+                phase = .finalRequestAdmitted
             }
             lock.unlock()
             return .init(operation: operation, lease: lease)
         }
 
         package func peerClosed() {
-            beginClosing(.peerClosed, signalResourceClose: false)
+            beginDestructiveClose(.peerClosed, signalResourceClose: false)
         }
 
         package func transportFailed(_ message: String) {
-            beginClosing(.transportFailure(message), signalResourceClose: true)
+            beginDestructiveClose(.transportFailure(message), signalResourceClose: true)
         }
 
         package func closeAfterResponse() async {
-            beginClosing(.responseComplete, signalResourceClose: true)
+            beginDestructiveClose(.responseComplete, signalResourceClose: true)
             await withCheckedContinuation { continuation in
                 lock.lock()
                 if closeAcknowledged {
@@ -700,25 +763,57 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
 
         fileprivate var resourceOwner: MCPHTTPNetworkResourceOwner? { owner }
 
-        fileprivate func startDomainWorkWhileGenerationIsAccepting<Success: Sendable>(
+        fileprivate func promoteToFiniteResponse(_ operation: RequestOperation) -> Bool {
+            guard let owner else { return false }
+            return owner.promoteToFiniteResponse(on: self, operation: operation)
+        }
+
+        fileprivate func promoteToFiniteResponseWhileGenerationIsAccepting(
+            _ operation: RequestOperation
+        ) -> Bool {
+            lock.lock()
+            switch phase {
+            case .accepting, .finalRequestAdmitted:
+                break
+            case .admissionClosed, .draining, .closing, .closed:
+                lock.unlock()
+                return false
+            }
+            guard let ownedOperation = requests[operation.id],
+                  ownedOperation === operation else {
+                lock.unlock()
+                return false
+            }
+            let didPromote = operation.promoteToFiniteResponseWhileOwned()
+            lock.unlock()
+            return didPromote
+        }
+
+        fileprivate func startDomainWorkWhileGenerationPermits<Success: Sendable>(
             for operation: RequestOperation,
+            requiresFiniteResponse: Bool,
             _ work: @escaping @Sendable () async throws -> Success
         ) -> Task<Success, any Error>? {
             lock.lock()
+            let connectionRequiresFiniteResponse: Bool
             switch phase {
-            case .accepting, .admissionClosed:
-                break
+            case .accepting, .finalRequestAdmitted:
+                connectionRequiresFiniteResponse = false
+            case .admissionClosed, .draining:
+                connectionRequiresFiniteResponse = true
             case .closing, .closed:
                 lock.unlock()
                 return nil
             }
-            guard domainAdmissionClosed == false,
-                  let ownedOperation = requests[operation.id],
+            guard let ownedOperation = requests[operation.id],
                   ownedOperation === operation else {
                 lock.unlock()
                 return nil
             }
-            let task = operation.startDomainWorkWhileAdmissionIsOpen(work)
+            let task = operation.startDomainWorkWhilePermitted(
+                requiresFiniteResponse: requiresFiniteResponse || connectionRequiresFiniteResponse,
+                work
+            )
             lock.unlock()
             return task
         }
@@ -745,50 +840,60 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             )
         }
 
-        fileprivate func bindSessionWhileDomainAdmissionIsOpen(
+        fileprivate func bindSessionWhileGenerationPermits(
             _ sessionID: String,
-            to operation: RequestOperation
+            to operation: RequestOperation,
+            requiresFiniteResponse: Bool
         ) -> Bool {
             lock.lock()
+            let connectionRequiresFiniteResponse: Bool
             switch phase {
-            case .accepting, .admissionClosed:
-                break
+            case .accepting, .finalRequestAdmitted:
+                connectionRequiresFiniteResponse = false
+            case .admissionClosed, .draining:
+                connectionRequiresFiniteResponse = true
             case .closing, .closed:
                 lock.unlock()
                 return false
             }
-            guard domainAdmissionClosed == false,
-                  let ownedOperation = requests[operation.id],
+            guard let ownedOperation = requests[operation.id],
                   ownedOperation === operation else {
                 lock.unlock()
                 return false
             }
-            let didBind = operation.bindSessionWhileAdmissionIsOpen(sessionID)
+            let didBind = operation.bindSessionWhilePermitted(
+                sessionID,
+                requiresFiniteResponse: requiresFiniteResponse || connectionRequiresFiniteResponse
+            )
             lock.unlock()
             return didBind
         }
 
-        fileprivate func performWhileDomainAdmissionIsOpen(
+        fileprivate func performWhileGenerationPermits(
             for operation: RequestOperation,
             sessionID: String,
+            requiresFiniteResponse: Bool,
             _ body: () -> Void
         ) -> Bool {
             lock.lock()
+            let connectionRequiresFiniteResponse: Bool
             switch phase {
-            case .accepting, .admissionClosed:
-                break
+            case .accepting, .finalRequestAdmitted:
+                connectionRequiresFiniteResponse = false
+            case .admissionClosed, .draining:
+                connectionRequiresFiniteResponse = true
             case .closing, .closed:
                 lock.unlock()
                 return false
             }
-            guard domainAdmissionClosed == false,
-                  let ownedOperation = requests[operation.id],
+            guard let ownedOperation = requests[operation.id],
                   ownedOperation === operation else {
                 lock.unlock()
                 return false
             }
-            let didPerform = operation.performWhileSessionAdmissionIsOpen(
+            let didPerform = operation.performWhileSessionAdmissionIsPermitted(
                 sessionID: sessionID,
+                requiresFiniteResponse: requiresFiniteResponse || connectionRequiresFiniteResponse,
                 body
             )
             lock.unlock()
@@ -796,35 +901,26 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         }
         package func closeAdmission() {
             lock.lock()
-            domainAdmissionClosed = true
-            if phase == .accepting {
+            if phase == .accepting || phase == .finalRequestAdmitted {
                 phase = .admissionClosed
             }
             lock.unlock()
         }
 
+        fileprivate func beginServerStopDrain() {
+            beginDraining(.serverStop)
+        }
+
         fileprivate func beginClosing(_ cause: TerminalCause) {
-            beginClosing(cause, signalResourceClose: true)
+            beginDestructiveClose(cause, signalResourceClose: true)
         }
 
         fileprivate func requestDidClose(_ operation: RequestOperation) {
-            var didClose = false
-            var waiters: [CheckedContinuation<Void, Never>] = []
             lock.lock()
             requests.removeValue(forKey: operation.id)
-            if case .closing = phase, closeAcknowledged, requests.isEmpty {
-                phase = .closed
-                waiters = closeWaiters
-                closeWaiters.removeAll(keepingCapacity: false)
-                didClose = true
-            }
             lock.unlock()
-            for waiter in waiters {
-                waiter.resume()
-            }
-            if didClose {
-                owner?.connectionDidClose(self)
-            }
+            finishDrainIfPossible()
+            finishIfQuiescent()
         }
 
         fileprivate func resolve(requestID: UUID) -> RequestOperation? {
@@ -851,23 +947,44 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             )
         }
 
-        private func beginClosing(
+        private func beginDraining(_ cause: TerminalCause) {
+            let requests: [RequestOperation]
+            lock.lock()
+            switch phase {
+            case .accepting, .finalRequestAdmitted, .admissionClosed:
+                phase = .draining(cause)
+                requests = Array(self.requests.values)
+            case .draining, .closing, .closed:
+                requests = []
+            }
+            lock.unlock()
+            for request in requests {
+                request.beginDraining(cause)
+            }
+            finishDrainIfPossible()
+        }
+
+        private func beginDestructiveClose(
             _ cause: TerminalCause,
             signalResourceClose: Bool
         ) {
             let requests: [RequestOperation]
             var shouldSignalClose = false
+            var didBeginClosing = false
             lock.lock()
-            domainAdmissionClosed = true
             switch phase {
-            case .accepting, .admissionClosed:
+            case .accepting, .finalRequestAdmitted, .admissionClosed, .draining:
                 phase = .closing(cause)
                 requests = Array(self.requests.values)
-                shouldSignalClose = signalResourceClose
+                shouldSignalClose = signalResourceClose && closeAcknowledged == false
+                didBeginClosing = true
             case .closing, .closed:
                 requests = []
             }
             lock.unlock()
+            if didBeginClosing {
+                owner?.connectionDidFinishDraining(self)
+            }
             for request in requests {
                 request.beginClosing(cause)
             }
@@ -880,19 +997,23 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         private func acknowledgePeerClose() {
             let requests: [RequestOperation]
             let acknowledgementWaiters: [CheckedContinuation<Void, Never>]
+            var didBeginClosing = false
             lock.lock()
-            domainAdmissionClosed = true
             closeAcknowledged = true
             acknowledgementWaiters = closeAcknowledgementWaiters
             closeAcknowledgementWaiters.removeAll(keepingCapacity: false)
             switch phase {
-            case .accepting, .admissionClosed:
+            case .accepting, .finalRequestAdmitted, .admissionClosed, .draining:
                 phase = .closing(.peerClosed)
                 requests = Array(self.requests.values)
+                didBeginClosing = true
             case .closing, .closed:
                 requests = []
             }
             lock.unlock()
+            if didBeginClosing {
+                owner?.connectionDidFinishDraining(self)
+            }
             for waiter in acknowledgementWaiters {
                 waiter.resume()
             }
@@ -900,6 +1021,32 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
                 request.beginClosing(.peerClosed)
             }
             finishIfQuiescent()
+        }
+
+        fileprivate var hasFinishedDraining: Bool {
+            lock.withLock {
+                switch phase {
+                case .closing, .closed:
+                    true
+                case .accepting, .finalRequestAdmitted, .admissionClosed, .draining:
+                    false
+                }
+            }
+        }
+
+        private func finishDrainIfPossible() {
+            let cause: TerminalCause?
+            lock.lock()
+            if case .draining(let drainingCause) = phase, requests.isEmpty {
+                phase = .closing(drainingCause)
+                cause = drainingCause
+            } else {
+                cause = nil
+            }
+            lock.unlock()
+            guard cause != nil else { return }
+            owner?.connectionDidFinishDraining(self)
+            resource.signalClose()
         }
 
         private func finishIfQuiescent() {
@@ -941,6 +1088,7 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
     private enum State {
         case accepting(GenerationState)
         case admissionClosed(GenerationState)
+        case draining(GenerationState, TerminalCause)
         case closing(GenerationState, TerminalCause)
         case closed
     }
@@ -990,7 +1138,9 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         case .accepting(let accepting):
             state = .admissionClosed(accepting)
             connections = Array(accepting.connections.values)
-        case .admissionClosed(let current), .closing(let current, _):
+        case .admissionClosed(let current),
+             .draining(let current, _),
+             .closing(let current, _):
             connections = Array(current.connections.values)
         case .closed:
             connections = []
@@ -1001,20 +1151,49 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         }
     }
 
+    fileprivate func promoteToFiniteResponse(
+        on connection: Connection,
+        operation: RequestOperation
+    ) -> Bool {
+        lock.lock()
+        guard case .accepting(let current) = state,
+              let ownedConnection = current.connections[connection.id],
+              ownedConnection === connection else {
+            lock.unlock()
+            return false
+        }
+        let didPromote = connection.promoteToFiniteResponseWhileGenerationIsAccepting(operation)
+        lock.unlock()
+        return didPromote
+    }
+
     fileprivate func startDomainWork<Success: Sendable>(
         on connection: Connection,
         for operation: RequestOperation,
         _ work: @escaping @Sendable () async throws -> Success
     ) -> Task<Success, any Error>? {
         lock.lock()
-        guard case .accepting(let current) = state,
-              let ownedConnection = current.connections[connection.id],
+        let current: GenerationState
+        let requiresFiniteResponse: Bool
+        switch state {
+        case .accepting(let accepting):
+            current = accepting
+            requiresFiniteResponse = false
+        case .admissionClosed(let admissionClosed), .draining(let admissionClosed, _):
+            current = admissionClosed
+            requiresFiniteResponse = true
+        case .closing, .closed:
+            lock.unlock()
+            return nil
+        }
+        guard let ownedConnection = current.connections[connection.id],
               ownedConnection === connection else {
             lock.unlock()
             return nil
         }
-        let task = connection.startDomainWorkWhileGenerationIsAccepting(
+        let task = connection.startDomainWorkWhileGenerationPermits(
             for: operation,
+            requiresFiniteResponse: requiresFiniteResponse,
             work
         )
         lock.unlock()
@@ -1027,15 +1206,28 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         to operation: RequestOperation
     ) -> Bool {
         lock.lock()
-        guard case .accepting(let current) = state,
-              let ownedConnection = current.connections[connection.id],
+        let current: GenerationState
+        let requiresFiniteResponse: Bool
+        switch state {
+        case .accepting(let accepting):
+            current = accepting
+            requiresFiniteResponse = false
+        case .admissionClosed(let admissionClosed), .draining(let admissionClosed, _):
+            current = admissionClosed
+            requiresFiniteResponse = true
+        case .closing, .closed:
+            lock.unlock()
+            return false
+        }
+        guard let ownedConnection = current.connections[connection.id],
               ownedConnection === connection else {
             lock.unlock()
             return false
         }
-        let didBind = connection.bindSessionWhileDomainAdmissionIsOpen(
+        let didBind = connection.bindSessionWhileGenerationPermits(
             sessionID,
-            to: operation
+            to: operation,
+            requiresFiniteResponse: requiresFiniteResponse
         )
         lock.unlock()
         return didBind
@@ -1048,28 +1240,87 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         _ body: () -> Void
     ) -> Bool {
         lock.lock()
-        guard case .accepting(let current) = state,
-              let ownedConnection = current.connections[connection.id],
+        let current: GenerationState
+        let requiresFiniteResponse: Bool
+        switch state {
+        case .accepting(let accepting):
+            current = accepting
+            requiresFiniteResponse = false
+        case .admissionClosed(let admissionClosed), .draining(let admissionClosed, _):
+            current = admissionClosed
+            requiresFiniteResponse = true
+        case .closing, .closed:
+            lock.unlock()
+            return false
+        }
+        guard let ownedConnection = current.connections[connection.id],
               ownedConnection === connection else {
             lock.unlock()
             return false
         }
-        let didPerform = connection.performWhileDomainAdmissionIsOpen(
+        let didPerform = connection.performWhileGenerationPermits(
             for: operation,
             sessionID: sessionID,
+            requiresFiniteResponse: requiresFiniteResponse,
             body
         )
         lock.unlock()
         return didPerform
     }
+    package func beginServerStopDrain() -> ClosingGeneration {
+        beginDraining(.serverStop)
+        return ClosingGeneration(owner: self)
+    }
+
     package func beginClosing(_ cause: TerminalCause) -> ClosingGeneration {
+        beginDestructiveClose(cause)
+        return ClosingGeneration(owner: self)
+    }
+
+    private func beginDraining(_ cause: TerminalCause) {
         let connections: [Connection]
-        let effectiveCause: TerminalCause
         var waiters: [CheckedContinuation<Void, Never>] = []
         lock.lock()
         switch state {
         case .accepting(let current), .admissionClosed(let current):
-            effectiveCause = cause
+            if current.connections.isEmpty {
+                state = .closed
+                connections = []
+                waiters = closeWaiters
+                closeWaiters.removeAll(keepingCapacity: false)
+            } else {
+                state = .draining(current, cause)
+                connections = current.connections.values.sorted {
+                    $0.admissionOrdinal < $1.admissionOrdinal
+                }
+            }
+        case .draining(let current, _):
+            connections = current.connections.values.sorted {
+                $0.admissionOrdinal < $1.admissionOrdinal
+            }
+        case .closing:
+            connections = []
+        case .closed:
+            connections = []
+        }
+        lock.unlock()
+        for connection in connections {
+            connection.beginServerStopDrain()
+        }
+        for waiter in waiters {
+            waiter.resume()
+        }
+        finishDrainIfPossible()
+    }
+
+    private func beginDestructiveClose(_ cause: TerminalCause) {
+        let connections: [Connection]
+        var waiters: [CheckedContinuation<Void, Never>] = []
+        lock.lock()
+        switch state {
+        case .accepting(let current),
+             .admissionClosed(let current),
+             .draining(let current, _):
             if current.connections.isEmpty {
                 state = .closed
                 connections = []
@@ -1081,23 +1332,16 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
                     $0.admissionOrdinal < $1.admissionOrdinal
                 }
             }
-        case .closing(let current, let firstCause):
-            effectiveCause = firstCause
-            connections = current.connections.values.sorted {
-                $0.admissionOrdinal < $1.admissionOrdinal
-            }
-        case .closed:
-            effectiveCause = cause
+        case .closing, .closed:
             connections = []
         }
         lock.unlock()
         for connection in connections {
-            connection.beginClosing(effectiveCause)
+            connection.beginClosing(cause)
         }
         for waiter in waiters {
             waiter.resume()
         }
-        return ClosingGeneration(owner: self)
     }
 
     package func snapshot() -> Snapshot {
@@ -1110,6 +1354,9 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
             connections = Array(current.connections.values)
         case .admissionClosed(let current):
             phase = .admissionClosed
+            connections = Array(current.connections.values)
+        case .draining(let current, let cause):
+            phase = .draining(cause)
             connections = Array(current.connections.values)
         case .closing(let current, let cause):
             phase = .closing(cause)
@@ -1147,7 +1394,10 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
     package func waitUntilRequestTerminalForTesting(requestID: UUID) async -> TerminalCause? {
         let connections: [Connection] = lock.withLock {
             switch state {
-            case .accepting(let current), .admissionClosed(let current), .closing(let current, _):
+            case .accepting(let current),
+                 .admissionClosed(let current),
+                 .draining(let current, _),
+                 .closing(let current, _):
                 Array(current.connections.values)
             case .closed:
                 []
@@ -1161,7 +1411,10 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         lock.lock()
         let connection: Connection?
         switch state {
-        case .accepting(let state), .admissionClosed(let state), .closing(let state, _):
+        case .accepting(let state),
+             .admissionClosed(let state),
+             .draining(let state, _),
+             .closing(let state, _):
             connection = state.connections[token.connectionID]
         case .closed:
             connection = nil
@@ -1182,6 +1435,17 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         case .admissionClosed(var current):
             current.connections.removeValue(forKey: connection.id)
             state = .admissionClosed(current)
+        case .draining(var current, let cause):
+            current.connections.removeValue(forKey: connection.id)
+            if current.connections.isEmpty {
+                state = .closed
+                waiters = closeWaiters
+                closeWaiters.removeAll(keepingCapacity: false)
+            } else if current.connections.values.allSatisfy(\.hasFinishedDraining) {
+                state = .closing(current, cause)
+            } else {
+                state = .draining(current, cause)
+            }
         case .closing(var current, let cause):
             current.connections.removeValue(forKey: connection.id)
             if current.connections.isEmpty {
@@ -1198,6 +1462,29 @@ package final class MCPHTTPNetworkResourceOwner: @unchecked Sendable {
         for waiter in waiters {
             waiter.resume()
         }
+    }
+
+    fileprivate func connectionDidFinishDraining(_ connection: Connection) {
+        lock.lock()
+        guard case .draining(let current, let cause) = state,
+              current.connections[connection.id] === connection,
+              current.connections.values.allSatisfy(\.hasFinishedDraining) else {
+            lock.unlock()
+            return
+        }
+        state = .closing(current, cause)
+        lock.unlock()
+    }
+
+    private func finishDrainIfPossible() {
+        lock.lock()
+        guard case .draining(let current, let currentCause) = state,
+              current.connections.values.allSatisfy(\.hasFinishedDraining) else {
+            lock.unlock()
+            return
+        }
+        state = .closing(current, currentCause)
+        lock.unlock()
     }
 
     private func waitUntilClosed() async {

@@ -142,7 +142,7 @@ private func unavailableMCPDomainWork<Success>(
     case .accepting:
         protocolServerLogger.error("An accepting MCP request had no valid internal operation identity.")
         throw MCPError.internalError("MCP request ownership could not be resolved.")
-    case .admissionClosed, .closing, .closed:
+    case .admissionClosed, .draining, .closing, .closed:
         throw CancellationError()
     }
 }

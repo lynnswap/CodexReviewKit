@@ -195,7 +195,7 @@ struct CodexReviewMCPHTTPServerTests {
         try await server.stop()
     }
 
-    @Test func initializingSessionCannotPublishAfterItsGenerationStartsStopping() async throws {
+    @Test func initializingSessionPublishesBeforeItsStoppingGenerationClosesIt() async throws {
         let server = makeHTTPServer()
         try await server.start()
         let endpoint = await server.url
@@ -233,11 +233,13 @@ struct CodexReviewMCPHTTPServerTests {
         await server.waitUntilSessionStartCompletionIsHeldForTesting()
         #expect(await server.sessionCountForTesting() == 1)
         let stop = Task { try await server.stop() }
-        await server.waitUntilInitializingSessionCloseBeginsForTesting()
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            await server.networkResourceSnapshotForTesting()?.phase == .draining(.serverStop)
+        })
         #expect(await server.eventLoopGroupShutdownCountForTesting() == 0)
 
         await server.releaseSessionStartCompletionForTesting()
-        _ = await initialization.value
+        #expect(await initialization.value == 200)
         try await stop.value
         #expect(await server.sessionCountForTesting() == 0)
         #expect(await server.currentGenerationIDForTesting() == nil)
@@ -247,7 +249,7 @@ struct CodexReviewMCPHTTPServerTests {
         try await server.stop()
     }
 
-    @Test func initializingSessionCannotPublishAfterRunningAdmissionCloses() async throws {
+    @Test func promotedInitializingSessionPublishesAfterRunningAdmissionCloses() async throws {
         let server = makeHTTPServer()
         try await server.start()
         let endpoint = await server.url
@@ -263,13 +265,13 @@ struct CodexReviewMCPHTTPServerTests {
 
         await server.closeAdmission()
         await server.releaseSessionStartCompletionForTesting()
-        await server.waitUntilInitializingSessionCloseBeginsForTesting()
-        #expect(try await connection.readResponseHead().contains(" 503 "))
+        #expect(try await connection.readResponseHead().contains(" 200 "))
         connection.close()
 
-        #expect(await server.sessionCountForTesting() == 0)
+        #expect(await server.sessionCountForTesting() == 1)
         #expect(await server.currentGenerationIDForTesting() != nil)
         try await server.stop()
+        #expect(await server.sessionCountForTesting() == 0)
     }
 
     @Test func listenerGenerationConcurrentStopAndRestartJoinOneTeardown() async throws {
@@ -473,12 +475,7 @@ struct CodexReviewMCPHTTPServerTests {
             idGenerator: .init(next: { "job-1" })
         )
 
-        try await withHTTPServer(
-            store: store,
-            afterStopStarted: {
-                try await finishAcceptedReviewCancellation(using: backend)
-            }
-        ) { server in
+        try await withHTTPServer(store: store) { server in
             let endpoint = await server.url
             let sessionID = try await initializeSession(endpoint: endpoint)
             let connection = try await RawHTTPConnection.connect(to: endpoint)
@@ -487,7 +484,12 @@ struct CodexReviewMCPHTTPServerTests {
             let second = try makeReviewStartBody(id: 3)
 
             try await connection.send(
-                rawHTTPRequest(endpoint: endpoint, sessionID: sessionID, body: first)
+                rawHTTPRequest(
+                    endpoint: endpoint,
+                    sessionID: sessionID,
+                    headers: [("Connection", "close")],
+                    body: first
+                )
                     + rawHTTPRequest(endpoint: endpoint, sessionID: sessionID, body: second)
             )
             try await backend.waitForStartReview(timeout: .seconds(2))
@@ -498,8 +500,11 @@ struct CodexReviewMCPHTTPServerTests {
                 if case .startReview = $0 { true } else { false }
             }.count == 1)
 
-            connection.close()
             await startGate.open()
+            await backend.yield(.completed(summary: "Done", result: "review text"))
+            #expect(try await connection.readResponseHead().contains(" 200 "))
+            let responseBody = try await connection.readUntilEOF()
+            #expect(try decodeSSEJSON(from: responseBody)["id"] as? Int == 2)
         }
     }
 
@@ -766,12 +771,14 @@ struct CodexReviewMCPHTTPServerTests {
                 headers: [
                     ("Content-Length", "\(body.count)"),
                     ("Expect", "100-continue"),
+                    ("Connection", "close"),
                 ]
             ))
 
             #expect(try await connection.readResponseHead().contains(" 100 "))
             try await connection.send(body)
             #expect(try await connection.readResponseHead().contains(" 200 "))
+            _ = try await connection.readUntilEOF()
 
             let unsupported = try await RawHTTPConnection.connect(to: endpoint)
             try await unsupported.send(rawHTTPRequest(
@@ -800,6 +807,7 @@ struct CodexReviewMCPHTTPServerTests {
             let http10Head = try await http10.readResponseHead()
             #expect(http10Head.contains(" 200 "))
             #expect(http10Head.contains(" 100 ") == false)
+            _ = try await http10.readUntilEOF()
             http10.close()
         }
     }
@@ -905,17 +913,110 @@ struct CodexReviewMCPHTTPServerTests {
             .connections.flatMap(\.requests).count == 1)
 
         let stop = Task { try await server.stop() }
-        #expect(await waitUntil(timeout: .seconds(2)) {
-            await server.networkResourceSnapshotForTesting()?.phase == .closing(.serverStop)
-        })
+        #expect(await server.waitForNetworkCloseWaiterRegistrationForTesting() == .registered)
+        #expect(await server.networkResourceSnapshotForTesting()?.phase == .draining(.serverStop))
         #expect(await server.eventLoopGroupShutdownCountForTesting() == 0)
         await server.releaseFiniteSourceCompletionForTesting()
-        _ = try? await response.value
+        #expect(try decodeSSEJSON(from: try await response.value)["id"] as? Int == 30)
         try await stop.value
         #expect(await server.eventLoopGroupShutdownCountForTesting() == 1)
     }
 
-    @Test func sanitizedIdentityJoinsCancelledFiniteDomainWorkBeforeShutdown() async throws {
+    @Test func finiteRequestBeginsItsSessionDomainWorkAfterDrainStarts() async throws {
+        let server = makeHTTPServer()
+        try await server.start()
+        do {
+            let endpoint = await server.url
+            let sessionID = try await initializeSession(endpoint: endpoint)
+            await server.waitUntilSessionRequestsDrainForTesting(sessionID: sessionID)
+            await server.holdNextSessionRequestHandoffForTesting()
+            let response = Task {
+                try await postJSONRPCData(
+                    endpoint: endpoint,
+                    sessionID: sessionID,
+                    bodyData: makeToolsListBody(id: 71)
+                )
+            }
+            await server.waitUntilSessionRequestHandoffIsHeldForTesting()
+
+            let stop = Task { try await server.stop() }
+            #expect(await server.waitForNetworkCloseWaiterRegistrationForTesting() == .registered)
+            let draining = try #require(await server.networkResourceSnapshotForTesting()?
+                .connections.flatMap(\.requests).first)
+            #expect(draining.shutdownDisposition == .finiteResponse)
+            #expect(draining.pendingDomainWorkCount == 0)
+            #expect(await server.eventLoopGroupShutdownCountForTesting() == 0)
+
+            await server.releaseSessionRequestHandoffForTesting()
+            #expect(try decodeSSEJSON(from: try await response.value)["id"] as? Int == 71)
+            try await stop.value
+            #expect(await server.eventLoopGroupShutdownCountForTesting() == 1)
+        } catch {
+            await server.releaseSessionRequestHandoffForTesting()
+            try? await server.stop()
+            throw error
+        }
+    }
+
+    @Test func finiteResponseEndWriteBlocksStopUntilCompleteResult() async throws {
+        let server = makeHTTPServer()
+        try await server.start()
+        let endpoint = await server.url
+        let sessionID = try await initializeSession(endpoint: endpoint)
+        await server.holdNextResponseEndWriteForTesting()
+        let response = Task {
+            try await postJSONRPCData(
+                endpoint: endpoint,
+                sessionID: sessionID,
+                bodyData: makeToolsListBody(id: 72)
+            )
+        }
+        await server.waitUntilResponseEndWriteIsHeldForTesting()
+
+        let stop = Task { try await server.stop() }
+        #expect(await server.waitForNetworkCloseWaiterRegistrationForTesting() == .registered)
+        let pending = try #require(await server.networkResourceSnapshotForTesting()?
+            .connections.flatMap(\.requests).first)
+        #expect(pending.shutdownDisposition == .finiteResponse)
+        #expect(pending.responseEnd == .pending)
+        #expect(await server.eventLoopGroupShutdownCountForTesting() == 0)
+
+        await server.releaseResponseEndWriteForTesting()
+        #expect(try decodeSSEJSON(from: try await response.value)["id"] as? Int == 72)
+        try await stop.value
+        #expect(await server.eventLoopGroupShutdownCountForTesting() == 1)
+    }
+
+    @Test func finiteWriterFinalizationBlocksStopUntilResponseEndAcknowledgement() async throws {
+        let server = makeHTTPServer()
+        try await server.start()
+        let endpoint = await server.url
+        let sessionID = try await initializeSession(endpoint: endpoint)
+        await server.holdNextWriterFinalizationForTesting()
+        let response = Task {
+            try await postJSONRPCData(
+                endpoint: endpoint,
+                sessionID: sessionID,
+                bodyData: makeToolsListBody(id: 73)
+            )
+        }
+        await server.waitUntilWriterFinalizationIsHeldForTesting()
+
+        let stop = Task { try await server.stop() }
+        #expect(await server.waitForNetworkCloseWaiterRegistrationForTesting() == .registered)
+        let pending = try #require(await server.networkResourceSnapshotForTesting()?
+            .connections.flatMap(\.requests).first)
+        #expect(pending.shutdownDisposition == .finiteResponse)
+        #expect(pending.responseEnd == .pending)
+        #expect(await server.eventLoopGroupShutdownCountForTesting() == 0)
+
+        await server.releaseWriterFinalizationForTesting()
+        #expect(try decodeSSEJSON(from: try await response.value)["id"] as? Int == 73)
+        try await stop.value
+        #expect(await server.eventLoopGroupShutdownCountForTesting() == 1)
+    }
+
+    @Test func sanitizedIdentityFiniteDomainWorkCompletesBeforeShutdown() async throws {
         let backend = FakeCodexReviewBackend()
         let cleanupRelease = AsyncGate()
         let store = CodexReviewStore.makeTestingStore(
@@ -963,31 +1064,18 @@ struct CodexReviewMCPHTTPServerTests {
         try await backend.waitForInterruptReview(timeout: .seconds(2))
         await backend.yield(.cancelled("cancel finite POST"))
         await backend.waitForCleanupReview()
-        _ = try await postJSONRPCData(
-            endpoint: endpoint,
-            sessionID: sessionID,
-            bodyData: try makeJSONBody([
-                "jsonrpc": "2.0",
-                "method": "notifications/cancelled",
-                "params": ["requestId": 41, "reason": "cancel finite POST"],
-            ]),
-            expectedStatusCode: 202
-        )
 
-        await server.holdNextSessionCloseCompletionForTesting()
         let stop = Task { try await server.stop() }
-        let closeReceipt = try #require(
-            await server.waitUntilSessionCloseCompletionIsHeldForTesting()
-        )
-        await closeReceipt.waitUntilCancellationPublished()
+        #expect(await server.waitForNetworkCloseWaiterRegistrationForTesting() == .registered)
         let pending = try #require(await server.networkResourceSnapshotForTesting()?
             .connections.flatMap(\.requests).first { $0.pendingDomainWorkCount == 1 })
-        #expect(pending.responseEnd == .closed)
+        #expect(pending.shutdownDisposition == .finiteResponse)
+        #expect(pending.responseEnd == .pending)
+        #expect(pending.terminalCause == nil)
         #expect(await server.eventLoopGroupShutdownCountForTesting() == 0)
 
-        await server.releaseSessionCloseCompletionForTesting()
         await cleanupRelease.open()
-        _ = try? await response.value
+        #expect(try decodeSSEJSON(from: try await response.value)["id"] as? Int == 41)
         try await stop.value
         #expect(await server.eventLoopGroupShutdownCountForTesting() == 1)
     }
@@ -1104,9 +1192,8 @@ struct CodexReviewMCPHTTPServerTests {
         #expect(before.terminalCause == nil)
 
         let stop = Task { try await server.stop() }
-        #expect(await waitUntil(timeout: .seconds(2)) {
-            await server.networkResourceSnapshotForTesting()?.phase == .closing(.serverStop)
-        })
+        #expect(await server.waitForNetworkCloseWaiterRegistrationForTesting() == .registered)
+        #expect(await server.networkResourceSnapshotForTesting()?.phase == .draining(.serverStop))
         let after = try #require(await server.networkResourceSnapshotForTesting()?
             .connections.flatMap(\.requests).first)
         #expect(after.responseEnd == .acknowledged)
@@ -2264,7 +2351,7 @@ struct CodexReviewMCPHTTPServerTests {
         }
     }
 
-    @Test func deleteAndServerStopJoinStoreBackedSemanticSessionClose() async throws {
+    @Test func deleteOwnedSessionCloseCompletesBeforeServerStopTeardown() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -2294,15 +2381,13 @@ struct CodexReviewMCPHTTPServerTests {
             let stop = Task {
                 try await server.stop()
             }
-            let didJoin = await waitUntil(timeout: .seconds(2)) {
-                await server.sessionCloseJoinCountForTesting() == initialJoinCount + 1
-            }
+            #expect(await server.waitForNetworkCloseWaiterRegistrationForTesting() == .registered)
 
-            #expect(didJoin)
             #expect(receiptIdentity != nil)
             #expect(await server.sessionCloseReceiptIdentityForTesting(sessionID: sessionID) == receiptIdentity)
             #expect(storeReceipt != nil)
             #expect(store.sessionCloseReceipts[sessionID] === storeReceipt)
+            #expect(await server.sessionCloseJoinCountForTesting() == initialJoinCount)
             #expect(await server.eventLoopGroupShutdownCountForTesting() == 0)
             await backend.yield(.cancelled(
                 "Cancellation requested because the MCP session closed."
@@ -2395,11 +2480,9 @@ struct CodexReviewMCPHTTPServerTests {
                 try await server.stop()
             }
         }
-        let didJoin = await waitUntil(timeout: .seconds(2)) {
-            await server.sessionCloseJoinCountForTesting() == initialJoinCount + 1
-        }
+        #expect(await server.waitForNetworkCloseWaiterRegistrationForTesting() == .registered)
 
-        #expect(didJoin)
+        #expect(await server.sessionCloseJoinCountForTesting() == initialJoinCount)
         await server.releaseSessionCloseCompletionForTesting()
         let stopError = await stop.value
 
@@ -2507,7 +2590,6 @@ struct CodexReviewMCPHTTPServerTests {
             host: "127.0.0.1",
             port: 0
         ),
-        afterStopStarted: (() async throws -> Void)? = nil,
         operation: (CodexReviewMCPHTTPServer) async throws -> T
     ) async throws -> T {
         let adapter = CodexReviewMCPServer(store: store)
@@ -2519,32 +2601,12 @@ struct CodexReviewMCPHTTPServerTests {
         try await server.start()
         do {
             let result = try await operation(server)
-            if let afterStopStarted {
-                let stop = Task { try await server.stop() }
-                do {
-                    try await afterStopStarted()
-                    try await stop.value
-                } catch {
-                    stop.cancel()
-                    _ = try? await stop.value
-                    throw error
-                }
-            } else {
-                try await server.stop()
-            }
+            try await server.stop()
             return result
         } catch {
             try? await server.stop()
             throw error
         }
-    }
-
-    private func finishAcceptedReviewCancellation(
-        using backend: FakeCodexReviewBackend,
-        message: String = "Cancellation requested."
-    ) async throws {
-        try await backend.waitForInterruptReview(timeout: .seconds(2))
-        await backend.yield(.cancelled(message))
     }
 
     private func initializeSession(

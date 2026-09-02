@@ -678,8 +678,7 @@ package actor CodexReviewMCPHTTPServer {
             ))
         } catch {
             var failures: [LifecycleError.Failure] = []
-            networkResources.closeAdmission()
-            let closingNetworkResources = networkResources.beginClosing(.serverStop)
+            let closingNetworkResources = networkResources.beginServerStopDrain()
             if let listener {
                 do {
                     try await listener.close()
@@ -762,8 +761,7 @@ package actor CodexReviewMCPHTTPServer {
 
         case .running(let resources):
             resources.admissionClosed = true
-            resources.networkResources.closeAdmission()
-            let closingNetworkResources = resources.networkResources.beginClosing(.serverStop)
+            let closingNetworkResources = resources.networkResources.beginServerStopDrain()
             id = resources.id
             let groupFailure = consumeEventLoopGroupShutdownFailureForTesting()
             let newTask = Task<StoppingGenerationResult, Never> { [self] in
@@ -841,9 +839,9 @@ package actor CodexReviewMCPHTTPServer {
     private func closeStartingAdmission(
         _ operation: StartingGeneration
     ) -> MCPHTTPNetworkResourceOwner.ClosingGeneration {
+        let closingNetworkResources = operation.networkResources.beginServerStopDrain()
         if operation.admissionClosed == false {
             operation.admissionClosed = true
-            operation.networkResources.closeAdmission()
             operation.task.cancel()
             lastStartingAdmissionClosedGenerationID = operation.id
             let waiters = startingAdmissionCloseWaiters
@@ -852,7 +850,7 @@ package actor CodexReviewMCPHTTPServer {
                 waiter.resume()
             }
         }
-        return operation.networkResources.beginClosing(.serverStop)
+        return closingNetworkResources
     }
 
     private func performStopGeneration(
@@ -862,10 +860,10 @@ package actor CodexReviewMCPHTTPServer {
     ) async -> StoppingGenerationResult {
         let listenerCloseTask = listenerCloseTask(for: resources)
         resources.cleanupTask.cancel()
-        await closeAllSessions()
         let listenerResult = await listenerCloseTask.value
         await resources.cleanupTask.value
         await closingNetworkResources.waitUntilClosed()
+        await closeAllSessions()
         await stopCompletionGate.waitIfNeeded()
 
         var failures: [LifecycleError.Failure] = []
@@ -1458,10 +1456,10 @@ package actor CodexReviewMCPHTTPServer {
                 .internalError("MCP request ownership conflict.")
             ))
         }
-        guard case .running(let generation) = lifecycleState,
-              generation.admissionClosed == false,
-              generation.id == networkResources.generationID,
-              generation.networkResources === networkResources else {
+        guard let generation = runningGeneration(
+            owning: networkResources,
+            for: operation
+        ) else {
             return .init(response: .error(
                 statusCode: 503,
                 .internalError("MCP server generation is not accepting sessions.")
@@ -1577,9 +1575,7 @@ package actor CodexReviewMCPHTTPServer {
               session.closeReceipt == nil,
               case .initializing(let currentStart) = session.phase,
               currentStart === starting,
-              case .running(let currentGeneration) = lifecycleState,
-              currentGeneration === generation,
-              generation.admissionClosed == false,
+              runningGeneration(owning: generation.networkResources, for: operation) === generation,
               generation.networkResources.generationID == session.identity.generationID else {
             return false
         }
@@ -1588,6 +1584,28 @@ package actor CodexReviewMCPHTTPServer {
         ) {
             session.phase = .active(.init(server: server, transport: session.transport))
         }
+    }
+
+    private func runningGeneration(
+        owning networkResources: MCPHTTPNetworkResourceOwner,
+        for operation: MCPHTTPNetworkResourceOwner.RequestOperation
+    ) -> RunningGeneration? {
+        let generation: RunningGeneration?
+        switch lifecycleState {
+        case .running(let running):
+            generation = running
+        case .stopping(_, let running?, _):
+            generation = running
+        case .stopped, .starting, .stopping:
+            generation = nil
+        }
+        guard let generation,
+              generation.id == networkResources.generationID,
+              generation.networkResources === networkResources,
+              generation.admissionClosed == false || operation.ownsFiniteResponse else {
+            return nil
+        }
+        return generation
     }
 
     private func authorizeSDKHandoff(
@@ -1825,7 +1843,7 @@ package actor CodexReviewMCPHTTPServer {
         return json["method"] as? String == "initialize" && json["id"] != nil
     }
 
-    private static func responseSourceKind(for request: HTTPRequest) -> MCPHTTPResponseSourceKind {
+    fileprivate static func responseSourceKind(for request: HTTPRequest) -> MCPHTTPResponseSourceKind {
         guard let body = request.body,
               let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
               json["method"] is String,
@@ -2474,6 +2492,11 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
         operation: MCPHTTPNetworkResourceOwner.RequestOperation,
         context: ChannelHandlerContext
     ) async {
+        let request = makeHTTPRequest(head: head, body: body)
+        if CodexReviewMCPHTTPServer.responseSourceKind(for: request) == .finite,
+           operation.promoteToFiniteResponse() == false {
+            return
+        }
         let path = head.uri.split(separator: "?").first.map(String.init) ?? head.uri
         let endpoint = await server.endpoint
         guard path == endpoint else {
@@ -2487,7 +2510,6 @@ private final class CodexReviewMCPHTTPHandler: ChannelInboundHandler, @unchecked
             return
         }
 
-        let request = makeHTTPRequest(head: head, body: body)
         let response = await server.handleTrackedHTTPRequest(request, operation: operation)
         await writeResponse(
             response,
