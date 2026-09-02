@@ -18,9 +18,10 @@ The application composition root must implement all four explicit test inputs:
 The script fails when that integration is absent. It never changes `HOME`, never
 uses port `9417`, and never falls back to the production history location. The
 fixture is a new temporary Git repository with one intentionally unsafe
-uncommitted change so the real review produces a structured finding. The current
-user's standard Codex CLI home (`~/.codex`) must already be authenticated for
-`/opt/homebrew/bin/codex`; the gate does not perform login or redirect `HOME`.
+uncommitted change so the real review produces a structured finding. The
+effective ReviewMonitor Codex home (default `~/.codex_review`) must already be
+authenticated for `/opt/homebrew/bin/codex`; the gate does not perform login or
+redirect `HOME`.
 
 Run the gate from the repository root:
 

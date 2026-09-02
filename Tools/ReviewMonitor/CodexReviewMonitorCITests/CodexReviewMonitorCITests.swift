@@ -329,14 +329,17 @@ struct CodexReviewMonitorCITests {
         #expect(didRequestPresentationAnchor)
     }
 
-    @Test func liveCompositionAppliesIsolatedE2EOverridesAtCompositionRoot() {
+    @Test(arguments: ["/tmp/e2e-codex-home", nil] as [String?])
+    func liveCompositionAppliesIsolatedE2EOverridesAtCompositionRoot(
+        codexHomePath: String?
+    ) {
         let expectedStore = CodexReviewStore.makePreviewStore()
         var capturedRuntimePreferences: CodexReviewRuntime.Preferences?
         var capturedStoreMode: ReviewMonitorLiveStoreMode?
         let composition = ReviewMonitorAppComposition.live(
             runtimePreferencesStore: RuntimePreferencesStoreStub(
                 preferences: .init(
-                    codexHomePath: "/tmp/e2e-codex-home",
+                    codexHomePath: codexHomePath,
                     mcpHost: "custom.example.test",
                     mcpPort: 12345,
                     mcpPath: "/custom-mcp",
@@ -362,10 +365,7 @@ struct CodexReviewMonitorCITests {
 
         #expect(composition.makeStore(context) { nil } === expectedStore)
         #expect(context.shouldStartEmbeddedServer)
-        #expect(capturedRuntimePreferences?.codexHomePath == FileManager.default
-            .homeDirectoryForCurrentUser
-            .appendingPathComponent(".codex", isDirectory: true)
-            .path)
+        #expect(capturedRuntimePreferences?.codexHomePath == codexHomePath)
         #expect(capturedRuntimePreferences?.mcpHost == "127.0.0.1")
         #expect(capturedRuntimePreferences?.mcpPort == 39417)
         #expect(capturedRuntimePreferences?.mcpPath == "/mcp")
