@@ -7956,26 +7956,35 @@ struct AppServerClientTests {
         }
         #expect(cleanupStarted)
         #expect(try store.readReview(jobID: "job-1").core.lifecycle.status == .failed)
+        let resultCompletion = CompletionProbe()
         let result = Task { @MainActor in
-            try await store.awaitReview(
+            let read = try await store.awaitReview(
                 sessionID: "session-1",
                 jobID: "job-1",
                 timeout: .seconds(5)
             )
+            await resultCompletion.recordCompletion()
+            return read
         }
-        let waiterRegistered = await waitUntilOnMainActor {
-            store.reviewTerminalWaiters["job-1"]?.count == 1
+        let terminalReady = await waitUntilOnMainActor {
+            await resultCompletion.hasCompleted()
         }
-        #expect(waiterRegistered)
-        #expect(store.reviewTerminalWaiters["job-1"]?.count == 1)
-
-        await cleanupGate.open()
+        #expect(terminalReady)
         let read = try await result.value
-
+        #expect(store.reviewTerminalWaiters["job-1"] == nil)
+        #expect(store.reviewWorkerTasks["job-1"] != nil)
         #expect(read.core.lifecycle.status == .failed)
         #expect(read.core.lifecycle.errorMessage == "primary review failed")
         #expect(read.logs.allSatisfy { $0.audience == .product })
+
+        await cleanupGate.open()
+        let cleanupFinished = await waitUntilOnMainActor {
+            store.reviewWorkerTasks["job-1"] == nil
+        }
+        #expect(cleanupFinished)
+
         let allRead = try store.readReview(jobID: "job-1", logFilter: .all)
+        #expect(allRead.core == read.core)
         let cleanupEntry = try #require(allRead.logs.first { $0.audience == .developer })
         #expect(cleanupEntry.kind == .diagnostic)
         #expect(cleanupEntry.text == "Review cleanup failed: cleanup failed")

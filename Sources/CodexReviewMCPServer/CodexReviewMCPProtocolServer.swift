@@ -5,38 +5,10 @@ import CodexReview
 
 private let protocolServerLogger = Logger(subsystem: "CodexReviewKit", category: "mcp-protocol")
 
-package actor MCPClientSessionState {
-    private var clientInfo: Client.Info?
-
-    package init() {}
-
-    package func update(clientInfo: Client.Info) {
-        self.clientInfo = clientInfo
-    }
-
-    package func usesBoundedReviewStart(httpContext: HTTPRequest?) -> Bool {
-        if Self.isClaudeClientName(clientInfo?.name)
-            || Self.isClaudeClientName(clientInfo?.title)
-            || Self.isClaudeClientName(httpContext?.header("User-Agent"))
-        {
-            return true
-        }
-        return false
-    }
-
-    private static func isClaudeClientName(_ value: String?) -> Bool {
-        guard let value else {
-            return false
-        }
-        return value.localizedCaseInsensitiveContains("claude")
-    }
-}
-
 @MainActor
 package func makeMCPProtocolServer(
     adapter: CodexReviewMCPServer,
     defaultSessionID: String,
-    clientSession: MCPClientSessionState = .init(),
     boundedReviewWaitDuration: Duration = .seconds(540),
     networkResources: MCPHTTPNetworkResourceOwner
 ) async -> Server {
@@ -75,14 +47,11 @@ package func makeMCPProtocolServer(
         }
 
         do {
-            let httpContext = Server.currentHandlerContext?.httpContext
-            let useBoundedReviewStart = await clientSession.usesBoundedReviewStart(httpContext: httpContext)
             let request = try toolRequest(
                 tool: tool,
                 arguments: params.arguments ?? [:],
                 defaultSessionID: defaultSessionID,
-                boundedReviewWaitDuration: boundedReviewWaitDuration,
-                useBoundedReviewStart: useBoundedReviewStart
+                boundedReviewWaitDuration: boundedReviewWaitDuration
             )
             let response = try await adapter.handle(request)
             return try toolResult(tool: tool, response: response)
@@ -267,8 +236,7 @@ private func toolRequest(
     tool: CodexReviewMCP.Tool.Name,
     arguments: [String: Value],
     defaultSessionID: String?,
-    boundedReviewWaitDuration: Duration,
-    useBoundedReviewStart: Bool
+    boundedReviewWaitDuration: Duration
 ) throws -> CodexReviewMCP.Tool.Request {
     switch tool {
     case .reviewStart:
@@ -277,7 +245,7 @@ private func toolRequest(
         return .reviewStart(
             sessionID: sessionID(in: arguments, defaultSessionID: defaultSessionID) ?? "default",
             request: .init(cwd: cwd, target: target),
-            waitTimeout: useBoundedReviewStart ? boundedReviewWaitDuration : nil
+            waitTimeout: boundedReviewWaitDuration
         )
     case .reviewAwait:
         return .reviewAwait(
@@ -465,6 +433,8 @@ private let helpResources: [HelpResource] = [
         Required arguments: `cwd` and `target`.
 
         Supported target types: `uncommittedChanges`, `baseBranch`, `commit`, and `custom`.
+
+        The call waits for up to the server's bounded review interval. If the job is still running, call `review_await` with the returned `jobId`.
         """
     ),
     .init(
@@ -476,7 +446,7 @@ private let helpResources: [HelpResource] = [
 
         Required argument: `jobId`.
 
-        Use this after `review_start` returns a running job. The tool waits for the job to finish and returns the final review when available.
+        Use this after `review_start` returns a running job. The tool waits for the same bounded review interval and returns the final review when available.
         """
     ),
     .init(

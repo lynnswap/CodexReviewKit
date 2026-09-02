@@ -1467,7 +1467,6 @@ package actor CodexReviewMCPHTTPServer {
                 .internalError("MCP server generation is not accepting sessions.")
             ))
         }
-        let clientSession = MCPClientSessionState()
         let transport = StatefulHTTPServerTransport(
             sessionIDGenerator: FixedSessionIDGenerator(sessionID: sessionID),
             validationPipeline: makeValidationPipeline(),
@@ -1481,15 +1480,12 @@ package actor CodexReviewMCPHTTPServer {
             let server = await makeMCPProtocolServer(
                 adapter: adapter,
                 defaultSessionID: sessionID,
-                clientSession: clientSession,
                 boundedReviewWaitDuration: boundedReviewWaitDuration,
                 networkResources: networkResources
             )
             do {
                 try Task.checkCancellation()
-                try await server.start(transport: transport) { clientInfo, _ in
-                    await clientSession.update(clientInfo: clientInfo)
-                }
+                try await server.start(transport: transport)
                 await sessionStartCompletionGate.waitIfNeeded()
                 try Task.checkCancellation()
                 return .success(server)
