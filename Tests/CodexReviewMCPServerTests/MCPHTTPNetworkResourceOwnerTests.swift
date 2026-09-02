@@ -171,6 +171,112 @@ struct MCPHTTPNetworkResourceOwnerTests {
         #expect(owner.snapshot().isClosed)
     }
 
+    @Test func transportFailureEscalatesADrainingFiniteResponseAndSignalsCloseOnce() async throws {
+        let owner = MCPHTTPNetworkResourceOwner(generationID: 30)
+        let resource = TestingConnectionResource()
+        let connection = try #require(owner.admitConnection(resource))
+        let admitted = try #require(connection.admitRequest())
+        #expect(admitted.operation.beginResponse())
+        #expect(admitted.operation.promoteToFiniteResponse())
+        let started = AsyncGate()
+        let release = AsyncGate()
+        let cancellation = StartObservation()
+        let task = Task {
+            defer { admitted.lease.acknowledgeCompletion() }
+            guard await admitted.lease.waitUntilStartIsAllowed() else { return }
+            await started.open()
+            await release.waitIgnoringCancellation()
+            await cancellation.record(wasAllowed: true, wasCancelled: Task.isCancelled)
+        }
+        admitted.lease.install(task)
+        await started.wait()
+
+        let closing = owner.beginServerStopDrain()
+        let didClose = CompletionFlag()
+        let waiter = Task {
+            await closing.waitUntilClosed()
+            await didClose.complete()
+        }
+        #expect(await owner.waitForCloseWaiterRegistrationForTesting() == .registered)
+
+        connection.transportFailed("broken pipe")
+        await resource.waitUntilCloseIsSignalled()
+
+        let escalated = try #require(owner.snapshot().connections.first?.requests.first)
+        #expect(escalated.phase == .closing(.transportFailure("broken pipe")))
+        #expect(escalated.responseEnd == .closed)
+        #expect(resource.closeSignalCount() == 1)
+        await release.open()
+        await task.value
+        #expect(await cancellation.value() == .init(wasAllowed: true, wasCancelled: true))
+        #expect(await didClose.isCompleted() == false)
+
+        resource.acknowledgeClose()
+        await waiter.value
+        #expect(resource.closeSignalCount() == 1)
+        #expect(await didClose.isCompleted())
+        #expect(owner.snapshot().isClosed)
+    }
+
+    @Test func generationDrainWaitsForEveryFiniteConnection() async throws {
+        let owner = MCPHTTPNetworkResourceOwner(generationID: 31)
+        let firstResource = TestingConnectionResource()
+        let secondResource = TestingConnectionResource()
+        let firstConnection = try #require(owner.admitConnection(firstResource))
+        let secondConnection = try #require(owner.admitConnection(secondResource))
+        let first = try #require(firstConnection.admitRequest())
+        let second = try #require(secondConnection.admitRequest())
+        #expect(first.operation.beginResponse())
+        #expect(first.operation.promoteToFiniteResponse())
+        #expect(second.operation.beginResponse())
+        #expect(second.operation.promoteToFiniteResponse())
+
+        let firstHTTPTask = Task {
+            defer { first.lease.acknowledgeCompletion() }
+            _ = await first.lease.waitUntilStartIsAllowed()
+        }
+        let secondHTTPTask = Task {
+            defer { second.lease.acknowledgeCompletion() }
+            _ = await second.lease.waitUntilStartIsAllowed()
+        }
+        first.lease.install(firstHTTPTask)
+        second.lease.install(secondHTTPTask)
+        await firstHTTPTask.value
+        await secondHTTPTask.value
+
+        let closing = owner.beginServerStopDrain()
+        let didClose = CompletionFlag()
+        let waiter = Task {
+            await closing.waitUntilClosed()
+            await didClose.complete()
+        }
+        #expect(await owner.waitForCloseWaiterRegistrationForTesting() == .registered)
+        #expect(owner.snapshot().phase == .draining(.serverStop))
+        #expect(firstResource.closeSignalCount() == 0)
+        #expect(secondResource.closeSignalCount() == 0)
+
+        first.operation.acknowledgeResponseEnd()
+        await firstResource.waitUntilCloseIsSignalled()
+        firstResource.acknowledgeClose()
+
+        let afterFirstClose = owner.snapshot()
+        #expect(afterFirstClose.phase == .draining(.serverStop))
+        #expect(afterFirstClose.connections.map(\.id) == [secondConnection.id])
+        #expect(afterFirstClose.connections[0].requests[0].id == second.operation.id)
+        #expect(await didClose.isCompleted() == false)
+
+        second.operation.acknowledgeResponseEnd()
+        await secondResource.waitUntilCloseIsSignalled()
+        #expect(await didClose.isCompleted() == false)
+        secondResource.acknowledgeClose()
+        await waiter.value
+
+        #expect(firstResource.closeSignalCount() == 1)
+        #expect(secondResource.closeSignalCount() == 1)
+        #expect(await didClose.isCompleted())
+        #expect(owner.snapshot().isClosed)
+    }
+
     @Test func domainWorkCreationIsRejectedAfterAdmissionClose() async throws {
         let owner = MCPHTTPNetworkResourceOwner(generationID: 10)
         let resource = TestingConnectionResource()
