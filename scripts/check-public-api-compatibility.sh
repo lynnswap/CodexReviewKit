@@ -3,9 +3,8 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 baseline_dir="$repo_root/scripts/compatibility-baselines/v0.6.2"
-baseline_path="$baseline_dir/public-api.json"
 metadata_path="$baseline_dir/metadata.json"
-scratch_path="$repo_root/.build/compatibility-api"
+artifact_dir="$repo_root/.build/compatibility-api"
 modules=(CodexReview CodexReviewHost ReviewUI TextTransitions)
 
 fail() {
@@ -13,27 +12,30 @@ fail() {
   exit 1
 }
 
-for command in python3 shasum swift xcodebuild xcrun; do
+for command in awk cmp diff find git mktemp python3 shasum swift tar uname xcodebuild xcrun; do
   command -v "$command" >/dev/null 2>&1 || fail "required command '$command' is unavailable."
 done
 
-[[ -f "$baseline_path" ]] || fail "missing baseline: $baseline_path"
 [[ -f "$metadata_path" ]] || fail "missing metadata: $metadata_path"
 
 metadata_values="$(python3 - "$metadata_path" <<'PY'
 import json
+import re
 import sys
 
 with open(sys.argv[1], encoding="utf-8") as file:
     metadata = json.load(file)
 
 required = [
-    "swiftVersion",
-    "xcodeVersion",
-    "macOSSDKVersion",
-    "architecture",
-    "swiftAPIDigesterSHA256",
-    "baselineSHA256",
+    "baseline",
+    "captureRevision",
+    "digesterInvocation",
+    "modules",
+    "publishedReleaseRevision",
+    "recoveryDesignRevision",
+    "swiftPMBuildSystem",
+    "targetTriple",
+    "swiftLanguageVersion",
 ]
 missing = [key for key in required if not metadata.get(key)]
 if missing:
@@ -43,47 +45,81 @@ expected_modules = ["CodexReview", "CodexReviewHost", "ReviewUI", "TextTransitio
 if metadata.get("modules") != expected_modules:
     raise SystemExit(f"metadata modules must be exactly {expected_modules}")
 
-print("\t".join(str(metadata[key]) for key in required))
+for key in ["captureRevision", "publishedReleaseRevision", "recoveryDesignRevision"]:
+    if re.fullmatch(r"[0-9a-f]{40}", str(metadata[key])) is None:
+        raise SystemExit(f"metadata {key} must be a full lowercase commit SHA")
+
+capture_revision = str(metadata["captureRevision"])
+
+print("\t".join([
+    capture_revision,
+    str(metadata["swiftPMBuildSystem"]),
+    str(metadata["targetTriple"]),
+    str(metadata["swiftLanguageVersion"]),
+]))
 PY
 )" || fail "could not validate $metadata_path"
 
-IFS=$'\t' read -r expected_swift expected_xcode expected_sdk expected_arch expected_digester_sha expected_baseline_sha <<<"$metadata_values"
+IFS=$'\t' read -r capture_revision build_system target_triple swift_language_version <<<"$metadata_values"
+[[ "$build_system" == "swiftbuild" ]] || fail "unsupported SwiftPM build system '$build_system'."
 
-current_swift="$(swift --version 2>&1 | sed '/^Target:/d' | paste -sd '|' -)"
-current_xcode="$(xcodebuild -version | paste -sd '|' -)"
-current_sdk="$(xcrun --sdk macosx --show-sdk-version)"
-current_arch="$(uname -m)"
+git -C "$repo_root" cat-file -e "${capture_revision}^{commit}" 2>/dev/null \
+  || fail "capture revision $capture_revision is unavailable; check out full Git history before running this gate."
+git -C "$repo_root" merge-base --is-ancestor "$capture_revision" HEAD \
+  || fail "capture revision $capture_revision is not an ancestor of the current checkout."
+
+temporary_dir="$(mktemp -d "${TMPDIR:-/tmp}/codex-review-public-api.XXXXXX")"
+trap 'rm -rf "$temporary_dir"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+baseline_source="$temporary_dir/baseline-source"
+mkdir -p "$baseline_source"
+git -C "$repo_root" archive --format=tar "$capture_revision" | tar -xf - -C "$baseline_source"
+
+sdk_path="$(xcrun --sdk macosx --show-sdk-path)"
 digester_path="$(xcrun --find swift-api-digester)"
-current_digester_sha="$(shasum -a 256 "$digester_path" | awk '{print $1}')"
-current_baseline_sha="$(shasum -a 256 "$baseline_path" | awk '{print $1}')"
-
-[[ "$current_swift" == "$expected_swift" ]] || fail "Swift toolchain mismatch. Expected '$expected_swift'; found '$current_swift'."
-[[ "$current_xcode" == "$expected_xcode" ]] || fail "Xcode mismatch. Expected '$expected_xcode'; found '$current_xcode'."
-[[ "$current_sdk" == "$expected_sdk" ]] || fail "macOS SDK mismatch. Expected '$expected_sdk'; found '$current_sdk'."
-[[ "$current_arch" == "$expected_arch" ]] || fail "architecture mismatch. Expected '$expected_arch'; found '$current_arch'."
-[[ "$current_digester_sha" == "$expected_digester_sha" ]] || fail "swift-api-digester binary differs from the recorded toolchain."
-[[ "$current_baseline_sha" == "$expected_baseline_sha" ]] || fail "tracked baseline checksum differs from metadata."
-
-echo "Building public products for API inspection..."
-swift build \
-  --build-system swiftbuild \
-  --disable-automatic-resolution \
-  --scratch-path "$scratch_path"
-
-intermediates_dir="$scratch_path/out/Intermediates.noindex"
-
+echo "Public API comparison environment:"
+swift --version
+xcodebuild -version
+echo "macOS SDK: $(xcrun --sdk macosx --show-sdk-version)"
+echo "Architecture: $(uname -m)"
+echo "swift-api-digester SHA-256: $(shasum -a 256 "$digester_path" | awk '{print $1}')"
+module_args=()
 for module in "${modules[@]}"; do
-  module_path="$(find "$intermediates_dir" -type f -name "$module.swiftmodule" -print -quit)"
-  [[ -n "$module_path" ]] || fail "missing built module $module below $intermediates_dir."
+  module_args+=(-module "$module")
 done
+diagnostic_search_args=()
 
-search_args=()
-while IFS= read -r module_path; do
-  search_args+=(-I "$(dirname "$module_path")")
-done < <(find "$intermediates_dir" -type f -name '*.swiftmodule' | LC_ALL=C sort)
-while IFS= read -r module_map; do
-  search_args+=(-Xcc "-fmodule-map-file=$module_map")
-done < <(python3 - "$intermediates_dir/GeneratedModuleMaps" "$scratch_path/checkouts" <<'PY'
+capture_api() {
+  local label="$1"
+  local source_root="$2"
+  local scratch_path="$3"
+  local raw_path="$4"
+  local canonical_path="$5"
+  local retain_search_args="$6"
+  local intermediates_dir="$scratch_path/out/Intermediates.noindex"
+
+  echo "Building public products for $label..."
+  swift build \
+    --package-path "$source_root" \
+    --build-system "$build_system" \
+    --disable-automatic-resolution \
+    --scratch-path "$scratch_path"
+
+  for module in "${modules[@]}"; do
+    local module_path
+    module_path="$(find "$intermediates_dir" -type f -name "$module.swiftmodule" -print -quit)"
+    [[ -n "$module_path" ]] || fail "missing built module $module below $intermediates_dir."
+  done
+
+  local search_args=()
+  while IFS= read -r module_path; do
+    search_args+=(-I "$(dirname "$module_path")")
+  done < <(find "$intermediates_dir" -type f -name '*.swiftmodule' | LC_ALL=C sort)
+  while IFS= read -r module_map; do
+    search_args+=(-Xcc "-fmodule-map-file=$module_map")
+  done < <(python3 - "$intermediates_dir/GeneratedModuleMaps" "$scratch_path/checkouts" <<'PY'
 import os
 import re
 import sys
@@ -115,33 +151,23 @@ for root in sys.argv[1:]:
 for module in sorted(module_maps):
     print(module_maps[module][1])
 PY
-)
+  )
 
-temporary_dir="$(mktemp -d "${TMPDIR:-/tmp}/codex-review-public-api.XXXXXX")"
-trap 'rm -rf "$temporary_dir"' EXIT
-raw_path="$temporary_dir/raw.json"
-current_path="$temporary_dir/public-api.json"
-sdk_path="$(xcrun --sdk macosx --show-sdk-path)"
-module_args=()
-for module in "${modules[@]}"; do
-  module_args+=(-module "$module")
-done
+  echo "Capturing public API for $label with swift-api-digester..."
+  xcrun swift-api-digester \
+    -dump-sdk \
+    "${module_args[@]}" \
+    -swift-only \
+    -avoid-location \
+    -avoid-tool-args \
+    -abort-on-module-fail \
+    -sdk "$sdk_path" \
+    -target "$target_triple" \
+    -swift-version "$swift_language_version" \
+    "${search_args[@]}" \
+    -o "$raw_path"
 
-echo "Capturing public API with swift-api-digester..."
-xcrun swift-api-digester \
-  -dump-sdk \
-  "${module_args[@]}" \
-  -swift-only \
-  -avoid-location \
-  -avoid-tool-args \
-  -abort-on-module-fail \
-  -sdk "$sdk_path" \
-  -target arm64-apple-macosx26.0 \
-  -swift-version 6 \
-  "${search_args[@]}" \
-  -o "$raw_path"
-
-python3 - "$raw_path" "$current_path" "${modules[@]}" <<'PY'
+  python3 - "$raw_path" "$canonical_path" "${modules[@]}" <<'PY'
 import json
 import sys
 
@@ -203,14 +229,45 @@ with open(output_path, "w", encoding="utf-8") as file:
     file.write("\n")
 PY
 
+  if [[ "$retain_search_args" == true ]]; then
+    diagnostic_search_args=("${search_args[@]}")
+  fi
+}
+
+baseline_scratch="$temporary_dir/baseline-build"
+current_scratch="$artifact_dir/current-build"
+baseline_raw="$temporary_dir/baseline-raw.json"
+current_raw="$temporary_dir/current-raw.json"
+baseline_path="$temporary_dir/baseline-public-api.json"
+current_path="$temporary_dir/current-public-api.json"
+
+capture_api \
+  "approved capture $capture_revision" \
+  "$baseline_source" \
+  "$baseline_scratch" \
+  "$baseline_raw" \
+  "$baseline_path" \
+  false
+capture_api \
+  "current checkout" \
+  "$repo_root" \
+  "$current_scratch" \
+  "$current_raw" \
+  "$current_path" \
+  true
+
 if cmp -s "$baseline_path" "$current_path"; then
-  rm -f "$scratch_path/current-public-api.json"
+  rm -f "$artifact_dir/baseline-public-api.json" "$artifact_dir/current-public-api.json"
   echo "Public API compatibility passed for: ${modules[*]}"
   exit 0
 fi
 
-cp "$current_path" "$scratch_path/current-public-api.json"
-echo "Public API drift detected. Current canonical dump: $scratch_path/current-public-api.json" >&2
+mkdir -p "$artifact_dir"
+cp "$baseline_path" "$artifact_dir/baseline-public-api.json"
+cp "$current_path" "$artifact_dir/current-public-api.json"
+echo "Public API drift detected." >&2
+echo "Approved capture dump: $artifact_dir/baseline-public-api.json" >&2
+echo "Current canonical dump: $artifact_dir/current-public-api.json" >&2
 echo "swift-api-digester diagnostics:" >&2
 xcrun swift-api-digester \
   -diagnose-sdk \
@@ -221,8 +278,8 @@ xcrun swift-api-digester \
   -avoid-tool-args \
   -abort-on-module-fail \
   -sdk "$sdk_path" \
-  -target arm64-apple-macosx26.0 \
-  -swift-version 6 \
-  "${search_args[@]}" || true
+  -target "$target_triple" \
+  -swift-version "$swift_language_version" \
+  "${diagnostic_search_args[@]}" || true
 diff -u "$baseline_path" "$current_path" | sed -n '1,240p' >&2 || true
-fail "the canonical v0.6.2 public surface changed. An accepted change requires one reviewed PR that updates the baseline, metadata, and checksum together."
+fail "the canonical public surface differs from approved capture revision $capture_revision."
