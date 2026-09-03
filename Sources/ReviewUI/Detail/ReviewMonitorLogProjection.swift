@@ -192,7 +192,7 @@ struct Append: Equatable, Sendable {
         absoluteRange: NSRange,
         appendBaseLocation: Int
     ) -> [ReviewMonitorLog.AnimationSpan] {
-        guard Self.wordFadeKinds.contains(kind),
+        guard Self.supportsWordFade(kind),
               absoluteRange.length > 0,
               absoluteRange.location >= appendBaseLocation
         else {
@@ -205,6 +205,10 @@ struct Append: Equatable, Sendable {
                 length: absoluteRange.length
             )
         )]
+    }
+
+    static func supportsWordFade(_ kind: ReviewLogEntry.Kind) -> Bool {
+        wordFadeKinds.contains(kind)
     }
 
     private static let wordFadeKinds: Set<ReviewLogEntry.Kind> = [
@@ -1285,11 +1289,30 @@ struct Projection: Sendable {
 
             if let key = ReviewMonitorLog.Projection.mergeKey(for: entry) {
                 if let blockIndex = indexByGroup[key] {
-                    let oldText = blocks[blockIndex].text
-                    if entry.replacesGroup || blockIndex != blocks.indices.last {
+                    let previousBlock = blocks[blockIndex]
+                    let oldText = previousBlock.text
+                    if entry.replacesGroup {
+                        blocks[blockIndex].text = entry.text
+                        blocks[blockIndex].metadata = entry.metadata
+                        if ReviewMonitorLog.Projection.hasIdenticalUTF16(
+                            previousBlock.text,
+                            blocks[blockIndex].text
+                        ),
+                           previousBlock.metadata == blocks[blockIndex].metadata {
+                            return .noVisibleChange
+                        }
+                        if let append = appendWordFadeReplacementSuffix(
+                            replacing: previousBlock,
+                            at: blockIndex
+                        ) {
+                            return .changed(.append(append))
+                        }
                         return .needsReload(
-                            replacementBlockID: entry.replacesGroup ? blocks[blockIndex].id : nil
+                            replacementBlockID: blocks[blockIndex].id
                         )
+                    }
+                    if blockIndex != blocks.indices.last {
+                        return .needsReload(replacementBlockID: nil)
                     }
 
                     blocks[blockIndex].text.append(entry.text)
@@ -1375,6 +1398,50 @@ struct Projection: Sendable {
                 return .changed(.append(append))
             }
             return .noVisibleChange
+        }
+
+        private mutating func appendWordFadeReplacementSuffix(
+            replacing previousBlock: RenderedBlock,
+            at blockIndex: Int
+        ) -> ReviewMonitorLog.Append? {
+            let block = blocks[blockIndex]
+            guard blockIndex == blocks.indices.last,
+                  block.metadata == previousBlock.metadata,
+                  ReviewMonitorLog.Append.supportsWordFade(block.kind),
+                  let sourceDelta = ReviewMonitorLog.Projection.suffix(
+                    in: block.text,
+                    afterPrefix: previousBlock.text
+                  ),
+                  sourceDelta.isEmpty == false
+            else {
+                return nil
+            }
+
+            let oldRendered = ReviewMonitorLogStyler.renderedText(
+                for: block.kind,
+                source: previousBlock.text,
+                blockID: block.id
+            )
+            let newRendered = ReviewMonitorLogStyler.renderedText(
+                for: block.kind,
+                source: block.text,
+                blockID: block.id
+            )
+            guard let renderedDelta = ReviewMonitorLog.Projection.suffix(
+                in: newRendered,
+                afterPrefix: oldRendered
+            ),
+                  renderedDelta.isEmpty == false
+            else {
+                return nil
+            }
+
+            return projection.appendToCurrentBlock(
+                block,
+                at: blockIndex,
+                sourceDelta: sourceDelta,
+                renderedDelta: renderedDelta
+            )
         }
 
         mutating func rebuildResolvingReplacement(
@@ -1694,7 +1761,8 @@ struct Projection: Sendable {
         if previous.decorations != current.decorations {
             return true
         }
-        return previous.text != current.text || previous.sourceText != current.sourceText
+        return Self.hasIdenticalUTF16(previous.text, current.text) == false
+            || Self.hasIdenticalUTF16(previous.sourceText, current.sourceText) == false
     }
 
     private static func isContiguousAppend(
@@ -1760,10 +1828,23 @@ struct Projection: Sendable {
     }
 
     private static func suffix(in text: String, afterPrefix prefix: String) -> String? {
-        guard text.hasPrefix(prefix) else {
+        let prefixUTF16 = prefix.utf16
+        let textUTF16 = text.utf16
+        guard textUTF16.starts(with: prefixUTF16) else {
             return nil
         }
-        return String(text.dropFirst(prefix.count))
+        let suffixUTF16Index = textUTF16.index(
+            textUTF16.startIndex,
+            offsetBy: prefixUTF16.count
+        )
+        guard let suffixIndex = String.Index(suffixUTF16Index, within: text) else {
+            return nil
+        }
+        return String(text[suffixIndex...])
+    }
+
+    private static func hasIdenticalUTF16(_ lhs: String, _ rhs: String) -> Bool {
+        lhs.utf16.elementsEqual(rhs.utf16)
     }
 
     private static func blockID(for entry: ReviewLogEntry) -> ReviewMonitorLog.BlockID {

@@ -1697,6 +1697,10 @@ extension ReviewMonitorLogScrollView {
         logDocumentView.wordGlowCountForTesting
     }
 
+    var wordGlowRangesForTesting: [NSRange] {
+        logDocumentView.wordGlowRangesForTesting
+    }
+
     var wordFadeRenderingAttributeRangeCountForTesting: Int {
         logDocumentView.wordFadeRenderingAttributeRangeCountForTesting
     }

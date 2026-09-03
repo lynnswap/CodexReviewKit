@@ -670,6 +670,10 @@ extension ReviewMonitorTransportViewController {
         logScrollView.wordGlowCountForTesting
     }
 
+    var logWordGlowRangesForTesting: [NSRange] {
+        logScrollView.wordGlowRangesForTesting
+    }
+
     var logWordFadeRenderingAttributeRangeCountForTesting: Int {
         logScrollView.wordFadeRenderingAttributeRangeCountForTesting
     }

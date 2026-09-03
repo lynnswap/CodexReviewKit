@@ -282,6 +282,180 @@ struct ReviewMonitorLogProjectionTests {
         ])
     }
 
+    @Test func reasoningSummaryCompletionExtendingStreamRemainsAnimatedAppend() throws {
+        var projection = ReviewMonitorLog.Projection()
+        let metadata = ReviewLogEntry.Metadata(
+            sourceType: "reasoning",
+            status: "inProgress"
+        )
+        let streamedEntries = [
+            ReviewLogEntry(
+                kind: .reasoningSummary,
+                groupID: "reasoning-1:summary:0",
+                text: "**Analyzing** review",
+                metadata: metadata
+            ),
+        ]
+        let streamedDocument = projection.render(entries: streamedEntries)
+        let completionEntry = ReviewLogEntry(
+            kind: .reasoningSummary,
+            groupID: "reasoning-1:summary:0",
+            replacesGroup: true,
+            text: "**Analyzing** review contracts.",
+            metadata: metadata
+        )
+        let maybeCompletedDocument = projection.append(
+            entries: [completionEntry],
+            sourceRange: streamedEntries.count..<(streamedEntries.count + 1)
+        )
+        let completedDocument = try #require(maybeCompletedDocument)
+
+        guard case .append(let append) = completedDocument.lastChange else {
+            Issue.record("Expected the completion suffix to remain an append.")
+            return
+        }
+
+        let suffix = " contracts."
+        #expect(completedDocument.text == "Analyzing review contracts.")
+        #expect(completedDocument.sourceText == "**Analyzing** review contracts.")
+        #expect(append.text == suffix)
+        #expect(append.range == NSRange(
+            location: streamedDocument.textUTF16Length,
+            length: (suffix as NSString).length
+        ))
+        #expect(append.animationSpans == [
+            .init(
+                kind: .wordFade,
+                range: NSRange(location: 0, length: (suffix as NSString).length)
+            ),
+        ])
+
+        let block = try #require(completedDocument.blocks.first)
+        #expect(block.range == NSRange(
+            location: 0,
+            length: completedDocument.textUTF16Length
+        ))
+        #expect(block.sourceRange == NSRange(
+            location: 0,
+            length: completedDocument.sourceTextUTF16Length
+        ))
+        #expect(block.metadata == metadata)
+
+        var rebuiltProjection = ReviewMonitorLog.Projection()
+        let rebuiltDocument = rebuiltProjection.render(
+            entries: streamedEntries + [completionEntry]
+        )
+        #expect(completedDocument.blocks == rebuiltDocument.blocks)
+        #expect(completedDocument.styleRuns == rebuiltDocument.styleRuns)
+        #expect(completedDocument.decorations == rebuiltDocument.decorations)
+    }
+
+    @Test func reasoningSummaryCompletionChangingStreamRemainsReplacement() throws {
+        var projection = ReviewMonitorLog.Projection()
+        let streamedEntries = [
+            ReviewLogEntry(
+                kind: .reasoningSummary,
+                groupID: "reasoning-1:summary:0",
+                text: "Checking the first contract"
+            ),
+        ]
+        let streamedDocument = projection.render(entries: streamedEntries)
+        let maybeCompletedDocument = projection.append(
+            entries: [
+                .init(
+                    kind: .reasoningSummary,
+                    groupID: "reasoning-1:summary:0",
+                    replacesGroup: true,
+                    text: "Rechecking a different contract"
+                ),
+            ],
+            sourceRange: streamedEntries.count..<(streamedEntries.count + 1)
+        )
+        let completedDocument = try #require(maybeCompletedDocument)
+
+        guard case .replace(let replacement) = completedDocument.lastChange else {
+            Issue.record("Expected a non-prefix completion to remain a replacement.")
+            return
+        }
+
+        #expect(completedDocument.text == "Rechecking a different contract")
+        #expect(replacement.range == NSRange(
+            location: 0,
+            length: streamedDocument.textUTF16Length
+        ))
+        #expect(replacement.text == "Rechecking a different contract")
+    }
+
+    @Test func reasoningSummaryCanonicalEquivalentCompletionRemainsReplacement() throws {
+        var projection = ReviewMonitorLog.Projection()
+        let streamedEntries = [
+            ReviewLogEntry(
+                kind: .reasoningSummary,
+                groupID: "reasoning-1:summary:0",
+                text: "\u{00E9} review"
+            ),
+        ]
+        let streamedDocument = projection.render(entries: streamedEntries)
+        let completedText = "e\u{0301} review contracts."
+        let maybeCompletedDocument = projection.append(
+            entries: [
+                .init(
+                    kind: .reasoningSummary,
+                    groupID: "reasoning-1:summary:0",
+                    replacesGroup: true,
+                    text: completedText
+                ),
+            ],
+            sourceRange: streamedEntries.count..<(streamedEntries.count + 1)
+        )
+        let completedDocument = try #require(maybeCompletedDocument)
+
+        guard case .replace(let replacement) = completedDocument.lastChange else {
+            Issue.record("Expected a canonically equivalent non-literal prefix to remain a replacement.")
+            return
+        }
+
+        #expect(completedDocument.sourceText == completedText)
+        #expect(replacement.range == NSRange(
+            location: 0,
+            length: streamedDocument.textUTF16Length
+        ))
+    }
+
+    @Test func reasoningSummaryCanonicalEquivalentWholeTextAdoptsCompletionEncoding() throws {
+        var projection = ReviewMonitorLog.Projection()
+        let streamedEntries = [
+            ReviewLogEntry(
+                kind: .reasoningSummary,
+                groupID: "reasoning-1:summary:0",
+                text: "caf\u{00E9}"
+            ),
+        ]
+        let streamedDocument = projection.render(entries: streamedEntries)
+        let completedText = "cafe\u{0301}"
+        let maybeCompletedDocument = projection.append(
+            entries: [
+                .init(
+                    kind: .reasoningSummary,
+                    groupID: "reasoning-1:summary:0",
+                    replacesGroup: true,
+                    text: completedText
+                ),
+            ],
+            sourceRange: streamedEntries.count..<(streamedEntries.count + 1)
+        )
+        let completedDocument = try #require(maybeCompletedDocument)
+
+        guard case .replace(let replacement) = completedDocument.lastChange else {
+            Issue.record("Expected canonically equivalent whole text with different code units to replace.")
+            return
+        }
+
+        #expect(streamedDocument.sourceText.utf16.count != completedText.utf16.count)
+        #expect(completedDocument.sourceText.utf16.elementsEqual(completedText.utf16))
+        #expect(replacement.text.utf16.elementsEqual(completedText.utf16))
+    }
+
     @Test func progressAppendDoesNotProduceAnimationSpans() throws {
         var projection = ReviewMonitorLog.Projection()
         let initialEntries = [
