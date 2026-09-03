@@ -1294,7 +1294,10 @@ struct Projection: Sendable {
                     if entry.replacesGroup {
                         blocks[blockIndex].text = entry.text
                         blocks[blockIndex].metadata = entry.metadata
-                        if previousBlock.text == blocks[blockIndex].text,
+                        if ReviewMonitorLog.Projection.hasIdenticalUTF16(
+                            previousBlock.text,
+                            blocks[blockIndex].text
+                        ),
                            previousBlock.metadata == blocks[blockIndex].metadata {
                             return .noVisibleChange
                         }
@@ -1758,7 +1761,8 @@ struct Projection: Sendable {
         if previous.decorations != current.decorations {
             return true
         }
-        return previous.text != current.text || previous.sourceText != current.sourceText
+        return Self.hasIdenticalUTF16(previous.text, current.text) == false
+            || Self.hasIdenticalUTF16(previous.sourceText, current.sourceText) == false
     }
 
     private static func isContiguousAppend(
@@ -1837,6 +1841,10 @@ struct Projection: Sendable {
             return nil
         }
         return String(text[suffixIndex...])
+    }
+
+    private static func hasIdenticalUTF16(_ lhs: String, _ rhs: String) -> Bool {
+        lhs.utf16.elementsEqual(rhs.utf16)
     }
 
     private static func blockID(for entry: ReviewLogEntry) -> ReviewMonitorLog.BlockID {

@@ -422,6 +422,40 @@ struct ReviewMonitorLogProjectionTests {
         ))
     }
 
+    @Test func reasoningSummaryCanonicalEquivalentWholeTextAdoptsCompletionEncoding() throws {
+        var projection = ReviewMonitorLog.Projection()
+        let streamedEntries = [
+            ReviewLogEntry(
+                kind: .reasoningSummary,
+                groupID: "reasoning-1:summary:0",
+                text: "caf\u{00E9}"
+            ),
+        ]
+        let streamedDocument = projection.render(entries: streamedEntries)
+        let completedText = "cafe\u{0301}"
+        let maybeCompletedDocument = projection.append(
+            entries: [
+                .init(
+                    kind: .reasoningSummary,
+                    groupID: "reasoning-1:summary:0",
+                    replacesGroup: true,
+                    text: completedText
+                ),
+            ],
+            sourceRange: streamedEntries.count..<(streamedEntries.count + 1)
+        )
+        let completedDocument = try #require(maybeCompletedDocument)
+
+        guard case .replace(let replacement) = completedDocument.lastChange else {
+            Issue.record("Expected canonically equivalent whole text with different code units to replace.")
+            return
+        }
+
+        #expect(streamedDocument.sourceText.utf16.count != completedText.utf16.count)
+        #expect(completedDocument.sourceText.utf16.elementsEqual(completedText.utf16))
+        #expect(replacement.text.utf16.elementsEqual(completedText.utf16))
+    }
+
     @Test func progressAppendDoesNotProduceAnimationSpans() throws {
         var projection = ReviewMonitorLog.Projection()
         let initialEntries = [
