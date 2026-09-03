@@ -239,7 +239,7 @@ extension ReviewUITests {
             let contentPane = harness.viewController.transportViewControllerForTesting
             harness.viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
             _ = try await awaitTransportRender(contentPane)
-            contentPane.setLogReduceMotionForTesting(true)
+            contentPane.setLogReduceMotionForTesting(false)
 
             try await transport.emitServerNotification(
                 method: "item/started",
@@ -312,7 +312,7 @@ extension ReviewUITests {
                     threadID: "thread-review",
                     turnID: "turn-review",
                     itemID: "reasoning-1",
-                    delta: "Analyzing review contracts.",
+                    delta: "Analyzing review ",
                     summaryIndex: 0
                 )
             )
@@ -329,6 +329,21 @@ extension ReviewUITests {
                     )
                 )
             )
+            let streamedReasoning = try await awaitTransportRender(contentPane) { snapshot in
+                snapshot.log.contains("Analyzing review contracts.")
+            }
+            #expect(streamedReasoning.log.contains("Analyzing review contracts."))
+            #expect(contentPane.logWordGlowCountForTesting > 0)
+            let completionSuffixRange = (streamedReasoning.log as NSString).range(
+                of: "contracts."
+            )
+            #expect(completionSuffixRange.location != NSNotFound)
+            #expect(contentPane.logWordGlowRangesForTesting.contains {
+                NSIntersectionRange($0, completionSuffixRange).length
+                    == completionSuffixRange.length
+            })
+            contentPane.completeLogWordGlowAnimationsForTesting()
+            #expect(contentPane.logWordGlowCountForTesting == 0)
             try await transport.emitServerNotification(
                 method: "item/started",
                 params: ReviewUIV2ItemNotification(

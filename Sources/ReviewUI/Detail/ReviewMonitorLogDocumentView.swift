@@ -2870,6 +2870,10 @@ extension ReviewMonitorLogDocumentView {
         wordFadeAnimations.count
     }
 
+    var wordGlowRangesForTesting: [NSRange] {
+        wordFadeAnimations.map(\.range)
+    }
+
     var wordFadeRenderingAttributeRangeCountForTesting: Int {
         var count = 0
         textLayoutManager.enumerateRenderingAttributes(
