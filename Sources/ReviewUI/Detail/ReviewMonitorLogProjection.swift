@@ -1824,10 +1824,19 @@ struct Projection: Sendable {
     }
 
     private static func suffix(in text: String, afterPrefix prefix: String) -> String? {
-        guard text.hasPrefix(prefix) else {
+        let prefixUTF16 = prefix.utf16
+        let textUTF16 = text.utf16
+        guard textUTF16.starts(with: prefixUTF16) else {
             return nil
         }
-        return String(text.dropFirst(prefix.count))
+        let suffixUTF16Index = textUTF16.index(
+            textUTF16.startIndex,
+            offsetBy: prefixUTF16.count
+        )
+        guard let suffixIndex = String.Index(suffixUTF16Index, within: text) else {
+            return nil
+        }
+        return String(text[suffixIndex...])
     }
 
     private static func blockID(for entry: ReviewLogEntry) -> ReviewMonitorLog.BlockID {

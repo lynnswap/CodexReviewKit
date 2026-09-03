@@ -386,6 +386,42 @@ struct ReviewMonitorLogProjectionTests {
         #expect(replacement.text == "Rechecking a different contract")
     }
 
+    @Test func reasoningSummaryCanonicalEquivalentCompletionRemainsReplacement() throws {
+        var projection = ReviewMonitorLog.Projection()
+        let streamedEntries = [
+            ReviewLogEntry(
+                kind: .reasoningSummary,
+                groupID: "reasoning-1:summary:0",
+                text: "\u{00E9} review"
+            ),
+        ]
+        let streamedDocument = projection.render(entries: streamedEntries)
+        let completedText = "e\u{0301} review contracts."
+        let maybeCompletedDocument = projection.append(
+            entries: [
+                .init(
+                    kind: .reasoningSummary,
+                    groupID: "reasoning-1:summary:0",
+                    replacesGroup: true,
+                    text: completedText
+                ),
+            ],
+            sourceRange: streamedEntries.count..<(streamedEntries.count + 1)
+        )
+        let completedDocument = try #require(maybeCompletedDocument)
+
+        guard case .replace(let replacement) = completedDocument.lastChange else {
+            Issue.record("Expected a canonically equivalent non-literal prefix to remain a replacement.")
+            return
+        }
+
+        #expect(completedDocument.sourceText == completedText)
+        #expect(replacement.range == NSRange(
+            location: 0,
+            length: streamedDocument.textUTF16Length
+        ))
+    }
+
     @Test func progressAppendDoesNotProduceAnimationSpans() throws {
         var projection = ReviewMonitorLog.Projection()
         let initialEntries = [
