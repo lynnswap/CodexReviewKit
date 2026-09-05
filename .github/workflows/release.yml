@@ -1,166 +1,146 @@
-name: Release Verification
+name: Prepare Release
 
-# Release assets are built, Developer ID signed, notarized, and uploaded by
-# scripts/publish-local-release.sh before the release tag is pushed. The local
-# script explicitly dispatches this workflow after the draft release asset
-# exists, so tag pushes do not implicitly build unsigned release assets.
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: Release tag to verify
+        description: New release tag, for example v1.2.3
         required: true
         type: string
+      prerelease:
+        description: Mark the draft as a prerelease
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-verification-${{ inputs.version }}
+  group: prepare-release-${{ inputs.version }}
   cancel-in-progress: false
 
 jobs:
-  package-tests:
-    name: Package Tests
-    runs-on: macos-26
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Verify release ref
-        env:
-          RELEASE_VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-          if [[ ! "${RELEASE_VERSION}" =~ ^v[0-9]+[.][0-9]+[.][0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
-            echo "Release tag must look like v1.2.3." >&2
-            exit 1
-          fi
-          if [[ "${GITHUB_REF_TYPE}" != "tag" || "${GITHUB_REF_NAME}" != "${RELEASE_VERSION}" ]]; then
-            echo "Release verification must be dispatched against the release tag ref." >&2
-            echo "Expected tag: ${RELEASE_VERSION}" >&2
-            echo "Actual ref: ${GITHUB_REF_TYPE} ${GITHUB_REF_NAME}" >&2
-            exit 1
-          fi
-
-      - name: Resolve latest stable Xcode
-        run: |
-          xcode_app="$(ruby <<'RUBY'
-          xcode_major = "26"
-          candidates = Dir["/Applications/Xcode_#{xcode_major}*.app"].select { |path| File.directory?(path) }
-
-          def pre_release_xcode_path?(path)
-            labels = [path, File.realpath(path)].map { |candidate| File.basename(candidate).downcase }
-            labels.any? do |label|
-              label.match?(/beta|release[ _-]?candidate|(?:^|[_. -])rc(?:$|[_. -])/)
-            end
-          end
-
-          candidates = candidates.reject do |path|
-            pre_release_xcode_path?(path)
-          end
-
-          def version_components(path)
-            version = File.basename(path)[/Xcode_(\d+(?:\.\d+)*)/, 1]
-            version.to_s.split(".").map(&:to_i)
-          end
-
-          selected = candidates.max_by { |path| version_components(path) }
-          abort("No stable Xcode #{xcode_major} installation found") unless selected
-          puts selected
-          RUBY
-          )"
-          echo "DEVELOPER_DIR=${xcode_app}/Contents/Developer" >> "$GITHUB_ENV"
-          echo "Resolved Xcode: ${xcode_app}"
-
-      - name: Show Xcode environment
-        run: |
-          xcodebuild -version
-          xcodebuild -showsdks
-
-      - name: Run Swift package tests
-        run: swift test --build-system swiftbuild --no-parallel
-
-      - name: Run monitor app tests
-        run: |
-          xcodebuild test \
-            -project Tools/ReviewMonitor/CodexReviewMonitor.xcodeproj \
-            -scheme CodexReviewMonitor \
-            -destination 'platform=macOS,arch=arm64' \
-            -disableAutomaticPackageResolution \
-            -onlyUsePackageVersionsFromResolvedFile \
-            -skipMacroValidation \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO
-
-  publish-release:
-    name: Publish Verified Release
-    needs: package-tests
+  validate:
+    name: Validate Release Request
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    steps:
+      - name: Check out release scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate main ref and version
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: python3 scripts/prepare_release.py validate --version "$RELEASE_VERSION" --source-sha "$GITHUB_SHA"
+
+  checks:
+    name: Release Checks
+    needs: validate
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: Build Release Input
+    needs: validate
+    uses: ./.github/workflows/release-build.yml
+    with:
+      version: ${{ inputs.version }}
+
+  sign:
+    name: Sign and Notarize DMG
+    needs: [checks, build]
+    runs-on: macos-26
+    timeout-minutes: 50
+    environment: release-signing
+    outputs:
+      artifact-id: ${{ steps.artifact.outputs.artifact-id }}
+      dmg-sha256: ${{ steps.sign.outputs.dmg-sha256 }}
+      dmg-filename: ${{ steps.sign.outputs.dmg-filename }}
+    steps:
+      - name: Check out trusted signing scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download this run's validated DMG
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: ${{ runner.temp }}/release-input
+          digest-mismatch: error
+
+      - name: Sign and notarize with an ephemeral keychain
+        id: sign
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          INPUT_FILENAME: ${{ needs.build.outputs.dmg-filename }}
+          INPUT_SHA256: ${{ needs.build.outputs.dmg-sha256 }}
+          DEVELOPER_ID_P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+          NOTARY_API_PRIVATE_KEY: ${{ secrets.NOTARY_API_PRIVATE_KEY }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          NOTARY_API_KEY_ID: ${{ vars.NOTARY_API_KEY_ID }}
+          NOTARY_API_ISSUER_ID: ${{ vars.NOTARY_API_ISSUER_ID }}
+          RELEASE_DIAGNOSTICS_DIRECTORY: ${{ runner.temp }}/notary-diagnostics
+        run: |
+          python3 scripts/sign_release.py \
+            --input-dmg "$RUNNER_TEMP/release-input/$INPUT_FILENAME" \
+            --input-sha256 "$INPUT_SHA256" \
+            --output-directory "$RUNNER_TEMP/signed-release" \
+            --version "$RELEASE_VERSION" \
+            --source-sha "$GITHUB_SHA"
+
+      - name: Upload signed release artifacts
+        id: artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: CodexReviewMonitor-signed-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/signed-release/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload notarization diagnostics
+        if: ${{ always() && steps.sign.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: CodexReviewMonitor-notary-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/notary-diagnostics/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  draft:
+    name: Create Draft Release
+    needs: sign
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
-      - name: Verify release ref
-        env:
-          RELEASE_VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-          if [[ ! "${RELEASE_VERSION}" =~ ^v[0-9]+[.][0-9]+[.][0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
-            echo "Release tag must look like v1.2.3." >&2
-            exit 1
-          fi
-          if [[ "${GITHUB_REF_TYPE}" != "tag" || "${GITHUB_REF_NAME}" != "${RELEASE_VERSION}" ]]; then
-            echo "Release publishing must be dispatched against the release tag ref." >&2
-            echo "Expected tag: ${RELEASE_VERSION}" >&2
-            echo "Actual ref: ${GITHUB_REF_TYPE} ${GITHUB_REF_NAME}" >&2
-            exit 1
-          fi
+      - name: Check out trusted release scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: Publish verified draft release
+      - name: Download this run's signed DMG
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.sign.outputs.artifact-id }}
+          path: ${{ runner.temp }}/signed-release
+          digest-mismatch: error
+
+      - name: Create draft with immutable source commit
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_PRERELEASE: ${{ inputs.prerelease }}
+          DMG_SHA256: ${{ needs.sign.outputs.dmg-sha256 }}
         run: |
-          set -euo pipefail
-
-          tag_name="$(gh release view "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" --json tagName --jq '.tagName')"
-          if [[ "${tag_name}" != "${RELEASE_VERSION}" ]]; then
-            echo "Release tag mismatch." >&2
-            echo "Expected tag: ${RELEASE_VERSION}" >&2
-            echo "Actual tag:   ${tag_name}" >&2
-            exit 1
-          fi
-
-          expected_asset="CodexReviewMonitor_${RELEASE_VERSION#v}.dmg"
-          asset_state="$(
-            EXPECTED_ASSET="${expected_asset}" \
-              gh release view "${RELEASE_VERSION}" \
-                --repo "${GITHUB_REPOSITORY}" \
-                --json assets \
-                --jq '.assets[] | select(.name == env.EXPECTED_ASSET) | .state' \
-              | head -n 1
-          )"
-          if [[ "${asset_state}" != "uploaded" ]]; then
-            echo "Expected uploaded release asset was not found: ${expected_asset}" >&2
-            exit 1
-          fi
-
-          is_draft="$(gh release view "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq '.isDraft')"
-          is_prerelease="$(gh release view "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" --json isPrerelease --jq '.isPrerelease')"
-          if [[ "${is_draft}" != "true" ]]; then
-            if [[ "${is_prerelease}" == "false" ]]; then
-              echo "Release ${RELEASE_VERSION} is already published."
-              exit 0
-            fi
-            echo "Release ${RELEASE_VERSION} is already public but marked as a prerelease." >&2
-            exit 1
-          fi
-
-          gh release edit "${RELEASE_VERSION}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --draft=false \
-            --prerelease=false
+          python3 scripts/prepare_release.py draft \
+            --version "$RELEASE_VERSION" \
+            --source-sha "$GITHUB_SHA" \
+            --directory "$RUNNER_TEMP/signed-release" \
+            --dmg-sha256 "$DMG_SHA256" \
+            --prerelease "$RELEASE_PRERELEASE"

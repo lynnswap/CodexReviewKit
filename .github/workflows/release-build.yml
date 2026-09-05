@@ -12,12 +12,24 @@ on:
         required: true
         default: v0.0.0-validation
         type: string
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+    outputs:
+      artifact-id:
+        value: ${{ jobs.unsigned-dmg.outputs.artifact-id }}
+      dmg-sha256:
+        value: ${{ jobs.unsigned-dmg.outputs.dmg-sha256 }}
+      dmg-filename:
+        value: ${{ jobs.unsigned-dmg.outputs.dmg-filename }}
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-build-${{ github.event.pull_request.number || github.ref }}
+  group: release-build-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -25,6 +37,10 @@ jobs:
     name: Unsigned Release DMG
     runs-on: macos-26
     timeout-minutes: 30
+    outputs:
+      artifact-id: ${{ steps.artifact.outputs.artifact-id }}
+      dmg-sha256: ${{ steps.provenance.outputs.dmg-sha256 }}
+      dmg-filename: ${{ steps.provenance.outputs.dmg-filename }}
     env:
       CODE_SIGN_IDENTITY: ''
       NOTARYTOOL_KEYCHAIN_PROFILE: ''
@@ -83,6 +99,7 @@ jobs:
         run: |
           scripts/build-release.sh \
             --version "$BUILD_VERSION" \
+            --build-number "$GITHUB_RUN_NUMBER" \
             --dist-root "$RUNNER_TEMP/release-dist"
 
       - name: Create and validate the DMG
@@ -95,6 +112,7 @@ jobs:
             --output-dir "$RUNNER_TEMP/release-artifacts"
 
       - name: Record build provenance and checksums
+        id: provenance
         env:
           BUILD_VERSION: ${{ steps.inputs.outputs.version }}
         run: |
@@ -112,6 +130,7 @@ jobs:
               "source_sha": os.environ["GITHUB_SHA"],
               "repository": os.environ["GITHUB_REPOSITORY"],
               "run_id": os.environ["GITHUB_RUN_ID"],
+              "build_number": os.environ["GITHUB_RUN_NUMBER"],
               "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
               "xcode": subprocess.check_output(["xcodebuild", "-version"], text=True).strip(),
               "distribution": "validation-only",
@@ -123,6 +142,8 @@ jobs:
           cd "$RUNNER_TEMP/release-artifacts"
           shasum -a 256 "CodexReviewMonitor_${BUILD_VERSION#v}.dmg" build-info.json > SHA256SUMS
           shasum -a 256 -c SHA256SUMS
+          echo "dmg-sha256=$(shasum -a 256 "CodexReviewMonitor_${BUILD_VERSION#v}.dmg" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+          echo "dmg-filename=CodexReviewMonitor_${BUILD_VERSION#v}.dmg" >> "$GITHUB_OUTPUT"
 
       - name: Upload validation artifacts
         id: artifact
