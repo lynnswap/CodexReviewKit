@@ -5711,6 +5711,35 @@ struct CodexReviewHostTests {
         #expect(message.contains("No usable Codex executable was found."))
     }
 
+    @Test func liveStoreCreationDoesNotWaitForAutomaticVersionProbe() async throws {
+        let homeURL = try temporaryHome()
+        let executableURL = URL(fileURLWithPath: "/resolved/codex")
+        let probeGate = AsyncGate()
+        let resolver = makeResolver(
+            executables: [executableURL.path],
+            versionProbe: .init { _, _ in
+                await probeGate.wait()
+                return .success("codex-cli 0.153.4")
+            }
+        )
+        var runtimeExecutableURL: URL?
+
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path, "PATH": "/resolved"],
+            codexExecutableResolver: resolver,
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            resolvedTransportFactory: { _, executableURL in
+                runtimeExecutableURL = executableURL
+                throw JSONRPC.Error.closed
+            }
+        )
+
+        await probeGate.open()
+        await store.start(forceRestartIfNeeded: true)
+
+        #expect(runtimeExecutableURL == executableURL)
+    }
+
     @Test func liveStoreUsesOneExecutableForPrimaryAndStagingAndCleansLoginOnFailure() async throws {
         let homeURL = try temporaryHome()
         let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
@@ -5743,11 +5772,16 @@ struct CodexReviewHostTests {
         let sessions = FakeWebAuthenticationSessions()
         var isolatedCodexHomeURL: URL?
         let executableURL = URL(fileURLWithPath: "/resolved/codex")
+        let versionProbeRecorder = CodexExecutableVersionProbeRecorder()
         var runtimeExecutables: [URL] = []
         let store = CodexReviewStore.makeLiveStoreForTesting(
-            environment: ["HOME": homeURL.path],
-            runtimePreferences: .init(codexExecutablePath: executableURL.path),
-            codexExecutableResolver: makeResolver(executables: [executableURL.path]),
+            environment: ["HOME": homeURL.path, "PATH": "/resolved"],
+            codexExecutableResolver: makeResolver(
+                executables: [executableURL.path],
+                versionProbe: .init { executableURL, _ in
+                    await versionProbeRecorder.record(executableURL)
+                }
+            ),
             nativeAuthenticationConfiguration: .init(
                 callbackScheme: "lynnpd.CodexReviewMonitor.auth",
                 browserSessionPolicy: .ephemeral,
@@ -5771,6 +5805,7 @@ struct CodexReviewHostTests {
         let session = await sessions.waitForSession()
         await session.waitUntilWaitingForCallback()
         #expect(runtimeExecutables == [executableURL, executableURL])
+        #expect(await versionProbeRecorder.recordedPaths() == [executableURL.path])
         let resolvedIsolatedCodexHomeURL = try #require(isolatedCodexHomeURL)
         #expect(FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path))
 
