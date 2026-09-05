@@ -102,7 +102,7 @@ class PrepareReleaseTests(unittest.TestCase):
                 self.create()
 
     def test_invalid_version_and_missing_digest_are_rejected(self):
-        for value in ("../../v1.2.3", "v1.2.3\n--draft=false", "main"):
+        for value in ("../../v1.2.3", "v1.2.3\n--draft=false", "v01.2.3", "main"):
             with self.assertRaises(release.ReleaseError):
                 release.validate_request(value, self.sha)
         with self.assertRaisesRegex(release.ReleaseError, "Missing or malformed digest"):

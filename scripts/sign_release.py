@@ -283,7 +283,11 @@ def temporary_credentials(tools: NativeTools, parent: Path, configuration: dict[
                 values[name] = value
                 tools.redactions.append(value)
             try:
-                p12_bytes = base64.b64decode(values["DEVELOPER_ID_P12_BASE64"], validate=True)
+                encoded_p12 = "".join(values["DEVELOPER_ID_P12_BASE64"].split())
+                if not encoded_p12:
+                    raise ReleaseError("DEVELOPER_ID_P12_BASE64 is empty.")
+                tools.redactions.append(encoded_p12)
+                p12_bytes = base64.b64decode(encoded_p12, validate=True)
             except (ValueError, binascii.Error):
                 raise ReleaseError("DEVELOPER_ID_P12_BASE64 must contain valid base64.") from None
             pem = values["NOTARY_API_PRIVATE_KEY"].strip()

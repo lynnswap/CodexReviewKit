@@ -213,6 +213,22 @@ class SigningTests(unittest.TestCase):
                 self.assertFalse(list(self.root.glob("credentials-*")))
                 self.assertTrue(all(name not in os.environ for name in release.SECRET_NAMES))
 
+    def test_base64_from_a_file_encoder_accepts_line_breaks(self):
+        encoded = TEST_SECRETS["DEVELOPER_ID_P12_BASE64"]
+        wrapped = "\n".join(encoded[index:index + 12] for index in range(0, len(encoded), 12)) + "\n"
+        tools = self.credential_runner()
+        original_run = tools.run.side_effect
+
+        def verify_import(arguments, operation, **kwargs):
+            if operation == "Import release signing identity":
+                self.assertEqual(Path(arguments[2]).read_bytes(), b"test-owned fake identity")
+            return original_run(arguments, operation, **kwargs)
+
+        tools.run.side_effect = verify_import
+        with mock.patch.dict(os.environ, {"DEVELOPER_ID_P12_BASE64": wrapped}):
+            with release.temporary_credentials(tools, self.root, CONFIGURATION):
+                pass
+
     def test_partial_keychain_creation_is_deleted(self):
         tools = self.credential_runner()
 
@@ -239,7 +255,7 @@ class SigningTests(unittest.TestCase):
         self.assertFalse(list(self.root.glob("credentials-*")))
 
     def test_bad_secret_encoding_never_creates_keychain(self):
-        for name, value in (("DEVELOPER_ID_P12_BASE64", "not base64"), ("NOTARY_API_PRIVATE_KEY", "not PEM")):
+        for name, value in (("DEVELOPER_ID_P12_BASE64", "not base64"), ("DEVELOPER_ID_P12_BASE64", " \n"), ("NOTARY_API_PRIVATE_KEY", "not PEM")):
             with self.subTest(name=name), mock.patch.dict(os.environ, {**TEST_SECRETS, name: value}):
                 tools = self.credential_runner()
                 with self.assertRaises(release.ReleaseError):
