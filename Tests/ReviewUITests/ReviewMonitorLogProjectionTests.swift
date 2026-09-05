@@ -456,7 +456,21 @@ struct ReviewMonitorLogProjectionTests {
         #expect(replacement.text.utf16.elementsEqual(completedText.utf16))
     }
 
-    @Test func progressAppendDoesNotProduceAnimationSpans() throws {
+    @Test(arguments: [
+        ReviewLogEntry.Kind.agentMessage,
+        .plan,
+        .todoList,
+        .reasoning,
+        .reasoningSummary,
+        .rawReasoning,
+        .toolCall,
+        .diagnostic,
+        .error,
+        .progress,
+        .event,
+        .contextCompaction,
+    ])
+    func nonCommandAppendKindsProduceAnimationSpans(_ kind: ReviewLogEntry.Kind) throws {
         var projection = ReviewMonitorLog.Projection()
         let initialEntries = [
             ReviewLogEntry(kind: .agentMessage, groupID: "msg-1", text: "Initial"),
@@ -465,18 +479,93 @@ struct ReviewMonitorLogProjectionTests {
 
         let maybeAppendedDocument = projection.append(
             entries: [
-                .init(kind: .progress, groupID: "progress-1", text: "stream.tick 001"),
+                .init(kind: kind, groupID: "new-\(kind.rawValue)", text: "Animated output"),
             ],
             sourceRange: initialEntries.count..<(initialEntries.count + 1)
         )
         let appendedDocument = try #require(maybeAppendedDocument)
         guard case .append(let append) = appendedDocument.lastChange else {
-            Issue.record("Expected progress update to append.")
+            Issue.record("Expected \(kind.rawValue) update to append.")
             return
         }
 
-        #expect(append.text.hasSuffix("stream.tick 001"))
+        #expect(append.text.hasSuffix("Animated output"))
+        #expect(append.animationSpans == [
+            .init(
+                kind: .wordFade,
+                range: NSRange(
+                    location: append.range.location - ("Initial" as NSString).length,
+                    length: append.range.length
+                )
+            ),
+        ])
+    }
+
+    @Test(arguments: [
+        ReviewLogEntry.Kind.command,
+        .commandOutput,
+    ])
+    func commandLogAppendKindsDoNotProduceAnimationSpans(_ kind: ReviewLogEntry.Kind) throws {
+        var projection = ReviewMonitorLog.Projection()
+        let initialEntries = [
+            ReviewLogEntry(kind: .agentMessage, groupID: "msg-1", text: "Initial"),
+        ]
+        _ = projection.render(entries: initialEntries)
+
+        let maybeAppendedDocument = projection.append(
+            entries: [
+                .init(kind: kind, groupID: "command-1", text: "Command log"),
+            ],
+            sourceRange: initialEntries.count..<(initialEntries.count + 1)
+        )
+        let appendedDocument = try #require(maybeAppendedDocument)
+        guard case .append(let append) = appendedDocument.lastChange else {
+            Issue.record("Expected \(kind.rawValue) update to append.")
+            return
+        }
+
         #expect(append.animationSpans.isEmpty)
+    }
+
+    @Test func contextCompactionAppendFadesTowardFinalTextColor() throws {
+        let initialEntries = [
+            ReviewLogEntry(kind: .agentMessage, groupID: "msg-1", text: "Initial"),
+        ]
+        var projection = ReviewMonitorLog.Projection()
+        let initialDocument = projection.render(entries: initialEntries)
+        let view = ReviewMonitorLogScrollView()
+        view.setReduceMotionForTesting(false)
+        _ = view.render(
+            document: initialDocument,
+            restoring: .top,
+            allowIncrementalUpdate: false
+        )
+
+        let maybeAppendedDocument = projection.append(
+            entries: [
+                .init(
+                    kind: .contextCompaction,
+                    groupID: "compact-1",
+                    replacesGroup: true,
+                    text: "Automatically compacting context",
+                    metadata: .init(
+                        sourceType: "contextCompaction",
+                        status: "inProgress",
+                        itemID: "compact-1"
+                    )
+                ),
+            ],
+            sourceRange: initialEntries.count..<(initialEntries.count + 1)
+        )
+        let appendedDocument = try #require(maybeAppendedDocument)
+        #expect(view.render(
+            document: appendedDocument,
+            restoring: .top,
+            allowIncrementalUpdate: true
+        ))
+
+        #expect(view.wordGlowCountForTesting > 0)
+        #expect(view.wordFadeBaseColorsMatchFinalTextStylesForTesting)
     }
 
     @Test func rendererMapsCommandCompletionThenReasoningAppendWithoutReload() async throws {
@@ -2125,7 +2214,13 @@ struct ReviewMonitorLogProjectionTests {
                 location: ("Initial" as NSString).length,
                 length: (" log" as NSString).length
             ),
-            text: " log"
+            text: " log",
+            animationSpans: [
+                .init(
+                    kind: .wordFade,
+                    range: NSRange(location: 0, length: (" log" as NSString).length)
+                ),
+            ]
         )))
     }
 

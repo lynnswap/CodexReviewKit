@@ -452,6 +452,13 @@ extension ReviewUITests {
                     item: .command(id: "command-1", status: "completed", exitCode: 0)
                 )
             )
+            _ = try await awaitTransportRender(contentPane) { snapshot in
+                snapshot.log.contains("codex_review.review_read completed.")
+                    && snapshot.log.contains("Ran git diff")
+            }
+            contentPane.completeLogWordGlowAnimationsForTesting()
+            let wordFadeInvalidationCountBeforeFinalAnswer =
+                contentPane.logWordFadeDisplayInvalidationCountForTesting
             for method in ["item/started", "item/completed"] {
                 try await transport.emitServerNotification(
                     method: method,
@@ -467,6 +474,14 @@ extension ReviewUITests {
                     )
                 )
             }
+            let renderedFinalAnswer = try await awaitTransportRender(contentPane) { snapshot in
+                snapshot.log.contains("No findings.")
+            }
+            let finalAnswerRange = (renderedFinalAnswer.log as NSString).range(of: "No findings.")
+            #expect(finalAnswerRange.location != NSNotFound)
+            #expect(contentPane.logWordFadeDisplayInvalidationCountForTesting
+                > wordFadeInvalidationCountBeforeFinalAnswer)
+            contentPane.completeLogWordGlowAnimationsForTesting()
             try await transport.emitServerNotification(
                 method: "turn/completed",
                 params: ReviewUIV2TurnNotification(

@@ -454,10 +454,9 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             to: finderSupplementSignature
         )
         let shouldClearFindSelection = prepareFindSessionForLogMutation(.appendPreservingPrefix)
-        logDocumentView.appendText(append.text, animation: append)
+        logDocumentView.append(append, applying: document)
         displayedText += append.text
         displayedUTF16Length += append.textUTF16Length
-        logDocumentView.applyPresentation(document, appended: append)
         displayedPresentationSignature = presentationSignature(
             forPrefixUTF16Length: displayedUTF16Length,
             in: document
@@ -1699,6 +1698,10 @@ extension ReviewMonitorLogScrollView {
 
     var wordGlowRangesForTesting: [NSRange] {
         logDocumentView.wordGlowRangesForTesting
+    }
+
+    var wordFadeBaseColorsMatchFinalTextStylesForTesting: Bool {
+        logDocumentView.wordFadeBaseColorsMatchFinalTextStylesForTesting
     }
 
     var wordFadeRenderingAttributeRangeCountForTesting: Int {
