@@ -6,6 +6,7 @@ on:
       - main
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -204,6 +205,14 @@ jobs:
           --start-directory scripts/tests
           --pattern 'test_install_review_monitor.py'
           --verbose
+
+      - name: Test remote release contracts
+        timeout-minutes: 3
+        run: |
+          python3 -m venv "$RUNNER_TEMP/release-tests"
+          "$RUNNER_TEMP/release-tests/bin/python3" -m pip install --require-hashes --only-binary=:all: -r scripts/release-requirements.txt
+          "$RUNNER_TEMP/release-tests/bin/python3" -m unittest discover --start-directory scripts/tests --pattern 'test_prepare_release.py' --verbose
+          "$RUNNER_TEMP/release-tests/bin/python3" -m unittest discover --start-directory scripts/tests --pattern 'test_sign_release.py' --verbose
 
   monitor-tests:
     name: ReviewMonitor Tests (Xcode 27)

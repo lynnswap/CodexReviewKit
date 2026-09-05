@@ -44,6 +44,12 @@ if [[ -z "$version" ]]; then
   exit 1
 fi
 
+if [[ ! "$version" =~ ^v?([0-9]+[.][0-9]+[.][0-9]+)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+  echo "--version must look like v1.2.3 or v1.2.3-beta.1." >&2
+  exit 1
+fi
+bundle_version="${BASH_REMATCH[1]}"
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ "$dist_root" = /* ]]; then
   dist_base="$dist_root"
@@ -72,6 +78,8 @@ xcodebuild build \
   -skipMacroValidation \
   ARCHS="$arch" \
   ONLY_ACTIVE_ARCH=NO \
+  MARKETING_VERSION="$bundle_version" \
+  CURRENT_PROJECT_VERSION="$bundle_version" \
   CODE_SIGNING_ALLOWED=NO \
   CODE_SIGNING_REQUIRED=NO \
   CODE_SIGN_IDENTITY=""
