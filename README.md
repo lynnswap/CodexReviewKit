@@ -108,7 +108,7 @@ choose **Run workflow** on `main`, and enter a version label such as
 `v0.0.0-validation`. The same build also runs for pull requests and pushes to
 `main`.
 
-The workflow builds the selected commit with Xcode 26.6, creates the DMG without
+The workflow builds the selected commit with the runner's default Xcode, creates the DMG without
 Finder or Apple credentials, and verifies the mounted app. Download the DMG,
 `build-info.json`, and `SHA256SUMS` from the run's artifact. The metadata records
 the source commit, version label, Xcode version, and workflow run. Artifacts are
