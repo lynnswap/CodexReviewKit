@@ -527,6 +527,47 @@ struct ReviewMonitorLogProjectionTests {
         #expect(append.animationSpans.isEmpty)
     }
 
+    @Test func contextCompactionAppendFadesTowardFinalTextColor() throws {
+        let initialEntries = [
+            ReviewLogEntry(kind: .agentMessage, groupID: "msg-1", text: "Initial"),
+        ]
+        var projection = ReviewMonitorLog.Projection()
+        let initialDocument = projection.render(entries: initialEntries)
+        let view = ReviewMonitorLogScrollView()
+        view.setReduceMotionForTesting(false)
+        _ = view.render(
+            document: initialDocument,
+            restoring: .top,
+            allowIncrementalUpdate: false
+        )
+
+        let maybeAppendedDocument = projection.append(
+            entries: [
+                .init(
+                    kind: .contextCompaction,
+                    groupID: "compact-1",
+                    replacesGroup: true,
+                    text: "Automatically compacting context",
+                    metadata: .init(
+                        sourceType: "contextCompaction",
+                        status: "inProgress",
+                        itemID: "compact-1"
+                    )
+                ),
+            ],
+            sourceRange: initialEntries.count..<(initialEntries.count + 1)
+        )
+        let appendedDocument = try #require(maybeAppendedDocument)
+        #expect(view.render(
+            document: appendedDocument,
+            restoring: .top,
+            allowIncrementalUpdate: true
+        ))
+
+        #expect(view.wordGlowCountForTesting > 0)
+        #expect(view.wordFadeBaseColorsMatchFinalTextStylesForTesting)
+    }
+
     @Test func rendererMapsCommandCompletionThenReasoningAppendWithoutReload() async throws {
         let startedAt = Date(timeIntervalSince1970: 200)
         let completedAt = Date(timeIntervalSince1970: 203)

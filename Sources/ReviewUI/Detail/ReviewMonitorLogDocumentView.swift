@@ -247,7 +247,11 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         return true
     }
 
-    func appendText(_ suffix: String, animation: ReviewMonitorLog.Append?) {
+    func append(
+        _ append: ReviewMonitorLog.Append,
+        applying document: ReviewMonitorLog.Document
+    ) {
+        let suffix = append.text
         guard suffix.isEmpty == false else {
             return
         }
@@ -256,7 +260,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         let fadeRanges = wordFadeRanges(
             in: suffix,
             baseLocation: appendBaseLocation,
-            animationSpans: animation?.animationSpans ?? []
+            animationSpans: append.animationSpans
         )
         textContentStorage.performEditingTransaction {
             textStorage.append(NSAttributedString(string: suffix, attributes: baseAttributes))
@@ -264,6 +268,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         invalidateFinderStringMapping()
         clampSelectedRange()
         increaseEstimatedDocumentHeightForAppend(suffix)
+        applyPresentation(document, appended: append)
         if shouldAnimateGlow, fadeRanges.isEmpty == false {
             enqueueWordFadeAnimations(ranges: fadeRanges)
         }
@@ -2872,6 +2877,12 @@ extension ReviewMonitorLogDocumentView {
 
     var wordGlowRangesForTesting: [NSRange] {
         wordFadeAnimations.map(\.range)
+    }
+
+    var wordFadeBaseColorsMatchFinalTextStylesForTesting: Bool {
+        wordFadeAnimations.allSatisfy { animation in
+            animation.baseColor.isEqual(foregroundColor(at: animation.range.location))
+        }
     }
 
     var wordFadeRenderingAttributeRangeCountForTesting: Int {
