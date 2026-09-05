@@ -74,6 +74,7 @@ def validate_artifacts(directory: Path, version: str, source_sha: str, repositor
         "source_sha": source_sha,
         "repository": repository,
         "run_id": os.environ["GITHUB_RUN_ID"],
+        "build_number": os.environ["GITHUB_RUN_NUMBER"],
         "developer_id_signed": True,
         "notarized": True,
     }

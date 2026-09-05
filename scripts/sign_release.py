@@ -118,7 +118,7 @@ def preflight(arguments: argparse.Namespace) -> dict[str, str]:
     configuration = {}
     for name, pattern in {
         "GITHUB_REPOSITORY": r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",
-        "GITHUB_RUN_ID": r"[1-9][0-9]*", "GITHUB_RUN_ATTEMPT": r"[1-9][0-9]*",
+        "GITHUB_RUN_ID": r"[1-9][0-9]*", "GITHUB_RUN_ATTEMPT": r"[1-9][0-9]*", "GITHUB_RUN_NUMBER": r"[1-9][0-9]*",
         "APPLE_TEAM_ID": r"[A-Z0-9]{10}", "NOTARY_API_KEY_ID": r"[A-Z0-9]{10,}",
         "NOTARY_API_ISSUER_ID": r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}",
     }.items():
@@ -191,7 +191,7 @@ def layout_contents(mount: Path) -> dict[str, bytes | str]:
     return layout
 
 
-def validate_app(tools: NativeTools, mount: Path, version: str) -> Path:
+def validate_app(tools: NativeTools, mount: Path, version: str, build_number: str) -> Path:
     app = mount / APP_BUNDLE
     executable = app / "Contents" / "MacOS" / APP_NAME
     info_path = app / "Contents" / "Info.plist"
@@ -201,7 +201,7 @@ def validate_app(tools: NativeTools, mount: Path, version: str) -> Path:
     numeric_version = version[1:].split("-", 1)[0]
     for name, expected in {
         "CFBundleIdentifier": APP_IDENTIFIER, "CFBundleExecutable": APP_NAME, "CFBundlePackageType": "APPL",
-        "CFBundleShortVersionString": numeric_version, "CFBundleVersion": numeric_version,
+        "CFBundleShortVersionString": numeric_version, "CFBundleVersion": build_number,
     }.items():
         if info.get(name) != expected:
             raise ReleaseError(f"The app {name} does not match the release contract.")
@@ -422,14 +422,14 @@ def prepare_release(arguments: argparse.Namespace) -> Path:
             tools.run(["/usr/bin/hdiutil", "verify", str(arguments.input_dmg)], "Verify input image")
             capacity = image_information(tools, arguments.input_dmg, "UDZO")
             with mounted_image(tools, arguments.input_dmg, scratch / "input-mount", readonly=True) as mount:
-                app = validate_app(tools, mount, arguments.version)
+                app = validate_app(tools, mount, arguments.version, configuration["GITHUB_RUN_NUMBER"])
                 layout = layout_contents(mount)
                 executable_size = (app / "Contents" / "MacOS" / APP_NAME).stat().st_size
             writable = scratch / "writable.dmg"
             make_writable_image(tools, arguments.input_dmg, writable, capacity, executable_size)
             with temporary_credentials(tools, scratch, configuration) as credentials:
                 with mounted_image(tools, writable, scratch / "signing-mount", readonly=False) as mount:
-                    app = validate_app(tools, mount, arguments.version)
+                    app = validate_app(tools, mount, arguments.version, configuration["GITHUB_RUN_NUMBER"])
                     sign(tools, app, credentials, app=True)
                     verify_developer_id(tools, app, configuration["APPLE_TEAM_ID"], app=True)
                     if layout_contents(mount) != layout:
@@ -441,7 +441,7 @@ def prepare_release(arguments: argparse.Namespace) -> Path:
                 verify_developer_id(tools, final_image, configuration["APPLE_TEAM_ID"], app=False)
                 tools.run(["/usr/bin/hdiutil", "verify", str(final_image)], "Verify notarized image integrity")
                 with mounted_image(tools, final_image, scratch / "final-mount", readonly=True) as mount:
-                    app = validate_app(tools, mount, arguments.version)
+                    app = validate_app(tools, mount, arguments.version, configuration["GITHUB_RUN_NUMBER"])
                     verify_developer_id(tools, app, configuration["APPLE_TEAM_ID"], app=True)
                     if layout_contents(mount) != layout:
                         raise ReleaseError("The final image did not preserve the original DMG layout.")
@@ -454,6 +454,7 @@ def prepare_release(arguments: argparse.Namespace) -> Path:
             "version": arguments.version, "source_sha": arguments.source_sha,
             "repository": configuration["GITHUB_REPOSITORY"], "run_id": configuration["GITHUB_RUN_ID"],
             "run_attempt": configuration["GITHUB_RUN_ATTEMPT"], "apple_team_id": configuration["APPLE_TEAM_ID"],
+            "build_number": configuration["GITHUB_RUN_NUMBER"],
             "signing_certificate_sha1": certificate, "notary_submission_id": submission,
             "developer_id_signed": True, "notarized": True,
         }

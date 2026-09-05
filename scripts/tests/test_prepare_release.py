@@ -28,6 +28,7 @@ class PrepareReleaseTests(unittest.TestCase):
             "source_sha": self.sha,
             "repository": self.repository,
             "run_id": "123",
+            "build_number": "23",
             "run_attempt": "1",
             "developer_id_signed": True,
             "notarized": True,
@@ -42,6 +43,7 @@ class PrepareReleaseTests(unittest.TestCase):
             "GITHUB_SHA": self.sha,
             "GITHUB_REPOSITORY": self.repository,
             "GITHUB_RUN_ID": "123",
+            "GITHUB_RUN_NUMBER": "23",
             "GITHUB_RUN_ATTEMPT": "2",
         }
         self.environment_patch = mock.patch.dict(os.environ, self.environment, clear=True)
@@ -116,7 +118,7 @@ class PrepareReleaseTests(unittest.TestCase):
             api.assert_not_called()
 
     def test_metadata_must_match_run_source_and_notarization(self):
-        for key, value in (("source_sha", "c" * 40), ("run_id", "another-run"), ("notarized", False), ("developer_id_signed", 1)):
+        for key, value in (("source_sha", "c" * 40), ("run_id", "another-run"), ("build_number", "22"), ("notarized", False), ("developer_id_signed", 1)):
             with self.subTest(key=key):
                 original = self.info[key]
                 self.info[key] = value

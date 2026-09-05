@@ -99,6 +99,7 @@ jobs:
         run: |
           scripts/build-release.sh \
             --version "$BUILD_VERSION" \
+            --build-number "$GITHUB_RUN_NUMBER" \
             --dist-root "$RUNNER_TEMP/release-dist"
 
       - name: Create and validate the DMG
@@ -129,6 +130,7 @@ jobs:
               "source_sha": os.environ["GITHUB_SHA"],
               "repository": os.environ["GITHUB_REPOSITORY"],
               "run_id": os.environ["GITHUB_RUN_ID"],
+              "build_number": os.environ["GITHUB_RUN_NUMBER"],
               "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
               "xcode": subprocess.check_output(["xcodebuild", "-version"], text=True).strip(),
               "distribution": "validation-only",

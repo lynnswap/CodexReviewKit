@@ -26,7 +26,7 @@ TEAM = "ABCDE12345"
 FINGERPRINT = "A" * 40
 SUBMISSION = "5e301e35-a541-4b57-898f-c3c0b1d4aa23"
 CONFIGURATION = {
-    "GITHUB_REPOSITORY": "lynnswap/CodexReviewKit", "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2",
+    "GITHUB_REPOSITORY": "lynnswap/CodexReviewKit", "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2", "GITHUB_RUN_NUMBER": "23",
     "APPLE_TEAM_ID": TEAM, "NOTARY_API_KEY_ID": "KEY1234567",
     "NOTARY_API_ISSUER_ID": "65ff086e-1830-4f0c-bbf8-3ca6f1eb5c84",
 }
@@ -56,7 +56,7 @@ def app_fixture(root: Path) -> Path:
     (contents / "MacOS" / release.APP_NAME).write_bytes(bytes.fromhex("cffaedfe") + b"fake Mach-O")
     (contents / "Info.plist").write_bytes(plistlib.dumps({
         "CFBundleExecutable": release.APP_NAME, "CFBundleIdentifier": release.APP_IDENTIFIER,
-        "CFBundlePackageType": "APPL", "CFBundleShortVersionString": "1.2.3", "CFBundleVersion": "1.2.3",
+        "CFBundlePackageType": "APPL", "CFBundleShortVersionString": "1.2.3", "CFBundleVersion": "23",
     }))
     return app
 
@@ -308,17 +308,19 @@ class SigningTests(unittest.TestCase):
         app = app_fixture(self.root)
         tools = release.NativeTools()
         tools.run = mock.Mock(side_effect=lambda args, operation: success(b"arm64\n") if "lipo" in args[0] else success())
-        self.assertEqual(release.validate_app(tools, self.root, "v1.2.3"), app)
+        self.assertEqual(release.validate_app(tools, self.root, "v1.2.3", "23"), app)
+        with self.assertRaisesRegex(release.ReleaseError, "CFBundleVersion"):
+            release.validate_app(tools, self.root, "v1.2.3", "24")
         nested = app / "Contents" / "Resources" / "nested"
         nested.write_bytes(bytes.fromhex("cffaedfe") + b"new nested code")
         with self.assertRaisesRegex(release.ReleaseError, "nested code"):
-            release.validate_app(tools, self.root, "v1.2.3")
+            release.validate_app(tools, self.root, "v1.2.3", "23")
         nested.unlink()
         with self.assertRaisesRegex(release.ReleaseError, "CFBundleShortVersionString"):
-            release.validate_app(tools, self.root, "v1.2.4")
+            release.validate_app(tools, self.root, "v1.2.4", "23")
         tools.run.side_effect = [success(b"arm64\n"), success(), success(plistlib.dumps({"com.apple.security.get-task-allow": True}))]
         with self.assertRaisesRegex(release.ReleaseError, "Nonempty app entitlements"):
-            release.validate_app(tools, self.root, "v1.2.3")
+            release.validate_app(tools, self.root, "v1.2.3", "23")
 
     def notary_runner(self, status="Accepted", returncode=0, log_override=None):
         tools = release.NativeTools()
@@ -428,6 +430,7 @@ class SigningTests(unittest.TestCase):
                         self.assertEqual(sorted(path.name for path in output.iterdir()), [image.name, "SHA256SUMS", "release-info.json"])
                         info = json.loads((output / "release-info.json").read_text())
                         self.assertEqual(info["source_sha"], self.arguments.source_sha)
+                        self.assertEqual(info["build_number"], "23")
                         self.assertEqual(info["notary_submission_id"], SUBMISSION)
                         self.assertIs(info["notarized"], True)
                         for line in (output / "SHA256SUMS").read_text().splitlines():
@@ -463,22 +466,22 @@ class NativeImageTests(unittest.TestCase):
         original_digest = release.digest(self.image)
         capacity = release.image_information(self.tools, self.image, "UDZO")
         with release.mounted_image(self.tools, self.image, self.root / "input-mount", readonly=True) as mount:
-            app = release.validate_app(self.tools, mount, "v1.2.3-beta.1")
+            app = release.validate_app(self.tools, mount, "v1.2.3-beta.1", "23")
             self.assertEqual(release.layout_contents(mount), self.layout)
             executable_size = (app / "Contents" / "MacOS" / release.APP_NAME).stat().st_size
         writable = self.root / "writable.dmg"
         release.make_writable_image(self.tools, self.image, writable, capacity, executable_size)
         self.assertGreaterEqual(release.image_information(self.tools, writable, "UDRW"), capacity * 2)
         with release.mounted_image(self.tools, writable, self.root / "writable-mount", readonly=False) as mount:
-            app = release.validate_app(self.tools, mount, "v1.2.3")
+            app = release.validate_app(self.tools, mount, "v1.2.3", "23")
             self.assertGreater(shutil.disk_usage(mount).free, executable_size + 64 * 1024 * 1024)
             self.tools.run(["/usr/bin/codesign", "--force", "--sign", "-", "--options", "runtime", str(app)], "Resign test fixture")
-            release.validate_app(self.tools, mount, "v1.2.3")
+            release.validate_app(self.tools, mount, "v1.2.3", "23")
             self.assertEqual(release.layout_contents(mount), self.layout)
         final = self.root / "final.dmg"
         release.compress_image(self.tools, writable, final)
         with release.mounted_image(self.tools, final, self.root / "final-mount", readonly=True) as mount:
-            release.validate_app(self.tools, mount, "v1.2.3")
+            release.validate_app(self.tools, mount, "v1.2.3", "23")
             self.assertEqual(release.layout_contents(mount), self.layout)
         self.assertEqual(release.digest(self.image), original_digest)
         attached = plistlib.loads(self.tools.run(["/usr/bin/hdiutil", "info", "-plist"], "Inspect test mounts").stdout)

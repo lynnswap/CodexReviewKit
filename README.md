@@ -120,9 +120,11 @@ targets the full tested commit SHA. Edit its generated release notes, review the
 assets, then choose **Publish release** in GitHub. The workflow never publishes
 the draft or creates the tag; GitHub creates the tag when you publish it.
 
-The numeric part of the version sets both app bundle versions: `v1.2.3-beta.1`
-produces bundle version `1.2.3`, with the full tag retained in the filename and
-release metadata. An existing tag or release, including a draft, stops creation
+The numeric part of the tag sets the app's marketing version: `v1.2.3-beta.1`
+produces version `1.2.3`, with the full tag retained in the filename and metadata.
+The workflow's run number sets the build version, so a new beta or release gets
+a later build number even when the marketing version stays the same. Retrying
+the same run keeps its build number. An existing tag or release, including a draft, stops creation
 without replacing notes or assets. After a partial failure, inspect the existing
 draft before retrying. Notarization diagnostics include the submission ID;
 a submission can continue at Apple after the workflow times out.
@@ -186,7 +188,7 @@ the DMG without Finder or Apple credentials, and verifies the mounted app. Downl
 `build-info.json`, and `SHA256SUMS` from the run's artifact. The metadata records
 the source commit, version label, Xcode version, and workflow run. Artifacts are
 retained for seven days. The numeric part of the version label sets the app's
-bundle versions.
+marketing version; the workflow run number sets its build version.
 
 These artifacts are for build and packaging validation. The app is ad-hoc signed;
 the DMG is not Developer ID signed or notarized. The workflow creates no tag or
@@ -203,6 +205,9 @@ python3 -m pip install --require-hashes --only-binary=:all: \
 scripts/build-release.sh --version v0.0.0-validation
 scripts/package-release.sh --version v0.0.0-validation
 ```
+
+Local validation defaults to build number `1`; pass `--build-number` to the build
+script to use another positive integer.
 
 ### Repository protection
 

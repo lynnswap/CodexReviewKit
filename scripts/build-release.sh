@@ -3,11 +3,12 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/build-release.sh --version <tag> [--dist-root <dir>] [--signing-identity <identity>]
+Usage: scripts/build-release.sh --version <tag> [--build-number <positive-integer>] [--dist-root <dir>] [--signing-identity <identity>]
 EOF
 }
 
 version=""
+build_number="1"
 dist_root="dist"
 signing_identity="${CODE_SIGN_IDENTITY:-}"
 app_name="CodexReviewMonitor"
@@ -20,6 +21,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --dist-root)
       dist_root="${2:-}"
+      shift 2
+      ;;
+    --build-number)
+      build_number="${2:-}"
       shift 2
       ;;
     --signing-identity)
@@ -49,6 +54,10 @@ if [[ ! "$version" =~ ^v?([0-9]+[.][0-9]+[.][0-9]+)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za
   exit 1
 fi
 bundle_version="${BASH_REMATCH[1]}"
+if [[ ! "$build_number" =~ ^[1-9][0-9]*$ ]]; then
+  echo "--build-number must be a positive integer." >&2
+  exit 1
+fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ "$dist_root" = /* ]]; then
@@ -79,7 +88,7 @@ xcodebuild build \
   ARCHS="$arch" \
   ONLY_ACTIVE_ARCH=NO \
   MARKETING_VERSION="$bundle_version" \
-  CURRENT_PROJECT_VERSION="$bundle_version" \
+  CURRENT_PROJECT_VERSION="$build_number" \
   CODE_SIGNING_ALLOWED=NO \
   CODE_SIGNING_REQUIRED=NO \
   CODE_SIGN_IDENTITY=""
