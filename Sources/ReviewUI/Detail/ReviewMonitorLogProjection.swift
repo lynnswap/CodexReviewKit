@@ -192,7 +192,7 @@ struct Append: Equatable, Sendable {
         absoluteRange: NSRange,
         appendBaseLocation: Int
     ) -> [ReviewMonitorLog.AnimationSpan] {
-        guard Self.supportsWordFade(kind),
+        guard Self.animatesWordFade(kind),
               absoluteRange.length > 0,
               absoluteRange.location >= appendBaseLocation
         else {
@@ -207,15 +207,27 @@ struct Append: Equatable, Sendable {
         )]
     }
 
-    static func supportsWordFade(_ kind: ReviewLogEntry.Kind) -> Bool {
-        wordFadeKinds.contains(kind)
+    static func animatesWordFade(_ kind: ReviewLogEntry.Kind) -> Bool {
+        switch kind {
+        case .command, .commandOutput:
+            false
+        case .agentMessage, .plan, .todoList, .reasoning, .reasoningSummary,
+             .rawReasoning, .toolCall, .diagnostic, .error, .progress, .event,
+             .contextCompaction:
+            true
+        }
     }
 
-    private static let wordFadeKinds: Set<ReviewLogEntry.Kind> = [
-        .reasoning,
-        .reasoningSummary,
-        .rawReasoning,
-    ]
+    static func supportsReplacementSuffixAppend(_ kind: ReviewLogEntry.Kind) -> Bool {
+        // Do not derive this from fade eligibility: it changes replacement snapshots into append mutations.
+        switch kind {
+        case .reasoning, .reasoningSummary, .rawReasoning:
+            true
+        case .agentMessage, .command, .commandOutput, .plan, .todoList, .toolCall,
+             .diagnostic, .error, .progress, .event, .contextCompaction:
+            false
+        }
+    }
 }
 
 struct Replacement: Equatable, Sendable {
@@ -1301,7 +1313,7 @@ struct Projection: Sendable {
                            previousBlock.metadata == blocks[blockIndex].metadata {
                             return .noVisibleChange
                         }
-                        if let append = appendWordFadeReplacementSuffix(
+                        if let append = appendReplacementSuffix(
                             replacing: previousBlock,
                             at: blockIndex
                         ) {
@@ -1400,14 +1412,14 @@ struct Projection: Sendable {
             return .noVisibleChange
         }
 
-        private mutating func appendWordFadeReplacementSuffix(
+        private mutating func appendReplacementSuffix(
             replacing previousBlock: RenderedBlock,
             at blockIndex: Int
         ) -> ReviewMonitorLog.Append? {
             let block = blocks[blockIndex]
             guard blockIndex == blocks.indices.last,
                   block.metadata == previousBlock.metadata,
-                  ReviewMonitorLog.Append.supportsWordFade(block.kind),
+                  ReviewMonitorLog.Append.supportsReplacementSuffixAppend(block.kind),
                   let sourceDelta = ReviewMonitorLog.Projection.suffix(
                     in: block.text,
                     afterPrefix: previousBlock.text

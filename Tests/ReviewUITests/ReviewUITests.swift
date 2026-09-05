@@ -4800,7 +4800,7 @@ struct ReviewUITests {
         #expect(updatedSnapshot.log == "Updated log")
     }
 
-    @Test func selectedJobLogAppendUsesAppendPath() async throws {
+    @Test func selectedJobLogAppendUsesAnimatedAppendPath() async throws {
         let job = CodexReviewJob.makeForTesting(
             id: "job-append",
             cwd: "/tmp/workspace-alpha",
@@ -4834,10 +4834,14 @@ struct ReviewUITests {
         #expect(snapshot.log == "Initial log")
         #expect(transport.logAppendCountForTesting == appendCount + 1)
         #expect(transport.logReloadCountForTesting == reloadCount)
-        #expect(transport.logWordGlowCountForTesting == 0)
+        let appendedRange = (snapshot.log as NSString).range(of: "log")
+        #expect(appendedRange.location != NSNotFound)
+        #expect(transport.logWordGlowRangesForTesting.contains {
+            NSIntersectionRange($0, appendedRange).length == appendedRange.length
+        })
     }
 
-    @Test func separatorPrefixedProgressAppendDoesNotUseGenericWordGlow() async throws {
+    @Test func separatorPrefixedProgressAppendUsesWordGlow() async throws {
         let job = CodexReviewJob.makeForTesting(
             id: "job-progress-separator-append",
             cwd: "/tmp/workspace-alpha",
@@ -4858,12 +4862,16 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport)
-        let wordGlowCount = transport.logWordGlowCountForTesting
+        transport.setLogReduceMotionForTesting(false)
         job.appendLogEntry(.init(kind: .progress, groupID: "progress_1", text: "stream.tick 001"))
 
         let snapshot = try await awaitTransportRender(transport)
         #expect(snapshot.log.hasSuffix("stream.tick 001"))
-        #expect(transport.logWordGlowCountForTesting == wordGlowCount)
+        let progressRange = (snapshot.log as NSString).range(of: "stream.tick 001")
+        #expect(progressRange.location != NSNotFound)
+        #expect(transport.logWordGlowRangesForTesting.contains {
+            NSIntersectionRange($0, progressRange).length > 0
+        })
     }
 
     @Test func logCanonicalEquivalentPrefixReloadsWhenUTF16LengthChanges() async throws {
@@ -4955,7 +4963,7 @@ struct ReviewUITests {
         #expect(snapshot.log.hasSuffix("stream.tick 002"))
     }
 
-    @Test func coalescedMixedReasoningAndProgressSuffixAnimatesOnlyReasoningRange() async throws {
+    @Test func coalescedMixedReasoningAndProgressSuffixAnimatesBothRanges() async throws {
         let job = CodexReviewJob.makeForTesting(
             id: "job-coalesced-mixed-reasoning-progress",
             cwd: "/tmp/workspace-alpha",
@@ -4977,7 +4985,6 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport)
         transport.setLogReduceMotionForTesting(false)
-        let wordGlowCount = transport.logWordGlowCountForTesting
         job.appendLogEntry(.init(kind: .rawReasoning, groupID: "reasoning_1", text: " ok"))
         job.appendLogEntry(.init(
             kind: .progress,
@@ -4988,7 +4995,16 @@ struct ReviewUITests {
         let snapshot = try await awaitTransportRender(transport)
         #expect(snapshot.log.contains("progress progress"))
         #expect(transport.logAppendCountForTesting > 0)
-        #expect(transport.logWordGlowCountForTesting == wordGlowCount + 1)
+        let reasoningRange = (snapshot.log as NSString).range(of: "ok")
+        let progressRange = (snapshot.log as NSString).range(of: "progress progress")
+        #expect(reasoningRange.location != NSNotFound)
+        #expect(progressRange.location != NSNotFound)
+        #expect(transport.logWordGlowRangesForTesting.contains {
+            NSIntersectionRange($0, reasoningRange).length > 0
+        })
+        #expect(transport.logWordGlowRangesForTesting.contains {
+            NSIntersectionRange($0, progressRange).length > 0
+        })
     }
 
     @Test func shortLogAppendDoesNotGrowDocumentFrameBeforeContentIsScrollable() async throws {
