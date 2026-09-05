@@ -3,12 +3,13 @@ from __future__ import annotations
 import argparse
 import base64
 from contextlib import contextmanager
-import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import plistlib
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -128,12 +129,14 @@ class SigningTests(unittest.TestCase):
     def test_native_boundary_never_exposes_secret_arguments_or_child_environment(self):
         tools = release.NativeTools()
         sensitive = TEST_SECRETS["DEVELOPER_ID_P12_PASSWORD"]
+        tools.redactions = list(TEST_SECRETS.values())
         with mock.patch.object(subprocess, "run", return_value=subprocess.CompletedProcess(
             ["security", sensitive], 42, sensitive.encode(), sensitive.encode(),
         )) as run:
             with self.assertRaisesRegex(release.ReleaseError, "Import identity: failed with exit code 42") as caught:
                 tools.run(["security", sensitive], "Import identity")
             self.assertNotIn(sensitive, str(caught.exception))
+            self.assertIn("[REDACTED]", str(caught.exception))
             self.assertTrue(all(name not in run.call_args.kwargs["env"] for name in release.SECRET_NAMES))
             self.assertNotIn("check", run.call_args.kwargs)
         for failure in (OSError(sensitive), subprocess.TimeoutExpired(["security", sensitive], 1)):
@@ -142,6 +145,24 @@ class SigningTests(unittest.TestCase):
                     tools.run(["security", sensitive], "Import identity")
                 self.assertNotIn(sensitive, str(caught.exception))
                 self.assertTrue(caught.exception.__suppress_context__)
+
+    def test_native_errors_preserve_safe_stderr_and_identify_invalid_layout_file(self):
+        tools = release.NativeTools()
+        with mock.patch.object(subprocess, "run", return_value=subprocess.CompletedProcess(
+            ["hdiutil"], 1, b"", b"hdiutil: image is corrupt\n  checksum mismatch\n",
+        )):
+            with self.assertRaisesRegex(release.ReleaseError, "hdiutil: image is corrupt checksum mismatch"):
+                tools.run(["hdiutil"], "Validate image")
+        with self.assertRaisesRegex(release.ReleaseError, r"regular \.DS_Store file"):
+            release.layout_contents(self.root)
+        (self.root / ".DS_Store").write_bytes(b"test metadata")
+        with self.assertRaisesRegex(release.ReleaseError, r"regular \.background.png file"):
+            release.layout_contents(self.root)
+
+    def test_old_python_is_rejected_before_parsing_arguments(self):
+        with mock.patch.object(sys, "version_info", (3, 9)), mock.patch.object(sys, "stderr", new_callable=io.StringIO) as stderr:
+            self.assertEqual(release.main(), 1)
+        self.assertIn("requires Python 3.10", stderr.getvalue())
 
     def credential_runner(self, failure_operation=None):
         tools = release.NativeTools()
@@ -205,6 +226,15 @@ class SigningTests(unittest.TestCase):
         with self.assertRaisesRegex(release.ReleaseError, "partial create failure"):
             with release.temporary_credentials(tools, self.root, CONFIGURATION):
                 pass
+        self.assertEqual(tools.run.call_args.args[0][1], "delete-keychain")
+        self.assertFalse(list(self.root.glob("credentials-*")))
+
+    def test_cooperative_termination_unwinds_credential_cleanup(self):
+        tools = self.credential_runner()
+        with self.assertRaises(SystemExit) as caught:
+            with release.temporary_credentials(tools, self.root, CONFIGURATION):
+                release.handle_termination(signal.SIGTERM, None)
+        self.assertEqual(caught.exception.code, 143)
         self.assertEqual(tools.run.call_args.args[0][1], "delete-keychain")
         self.assertFalse(list(self.root.glob("credentials-*")))
 
@@ -274,10 +304,10 @@ class SigningTests(unittest.TestCase):
         with self.assertRaisesRegex(release.ReleaseError, "Nonempty app entitlements"):
             release.validate_app(tools, self.root, "v1.2.3")
 
-    def notary_runner(self, status="Accepted", returncode=0, timed_out=False, log_override=None):
+    def notary_runner(self, status="Accepted", returncode=0, log_override=None):
         tools = release.NativeTools()
         tools.redactions = list(TEST_SECRETS.values())
-        result = release.NativeResult(json.dumps({"id": SUBMISSION, "status": status}).encode(), b"", returncode, timed_out)
+        result = release.NativeResult(json.dumps({"id": SUBMISSION, "status": status}).encode(), b"", returncode)
         log = {"jobId": SUBMISSION, "status": status, "sha256": release.digest(self.input), "issues": None}
         if log_override:
             log.update(log_override)
@@ -297,12 +327,12 @@ class SigningTests(unittest.TestCase):
         self.assertEqual(commands[3][1:3], ["stapler", "validate"])
 
     def test_nonaccepted_nonzero_and_timeout_never_staple_or_resubmit(self):
-        for status, code, timed_out in (("Invalid", 0, False), ("In Progress", 75, False), ("In Progress", None, True),
-                                      ("Accepted", 1, False), ("Unexpected", 0, False)):
+        for status, code in (("Invalid", 0), ("In Progress", 75), ("In Progress", None),
+                             ("Accepted", 1), ("Unexpected", 0)):
             with self.subTest(status=status, code=code), mock.patch.dict(os.environ, {
                 "RELEASE_DIAGNOSTICS_DIRECTORY": str(self.root / "diagnostics"),
             }):
-                tools, credentials = self.notary_runner(status, code, timed_out)
+                tools, credentials = self.notary_runner(status, code)
                 with self.assertRaisesRegex(release.ReleaseError, "not successfully Accepted"):
                     release.notarize(tools, self.input, credentials, CONFIGURATION)
                 commands = [call.args[0] for call in tools.run.call_args_list]
@@ -325,11 +355,16 @@ class SigningTests(unittest.TestCase):
     def test_malformed_notary_response_is_retained_without_retry(self):
         with mock.patch.dict(os.environ, {"RELEASE_DIAGNOSTICS_DIRECTORY": str(self.root / "diagnostics")}):
             tools, credentials = self.notary_runner()
-            tools.run.side_effect = [release.NativeResult(b"partial output", b"", 1)]
+            tools.run.side_effect = [release.NativeResult(
+                f"partial output with submission {SUBMISSION}".encode(),
+                TEST_SECRETS["DEVELOPER_ID_P12_PASSWORD"].encode() + b": connection failed", 1,
+            )]
             with self.assertRaisesRegex(release.ReleaseError, "submission ID"):
                 release.notarize(tools, self.input, credentials, CONFIGURATION)
             self.assertEqual(tools.run.call_count, 1)
-            self.assertTrue((self.root / "diagnostics" / "notary-submission.json").is_file())
+            saved = json.loads((self.root / "diagnostics" / "notary-submission.json").read_text())
+            self.assertIn(SUBMISSION, saved["unparsed_stdout"])
+            self.assertEqual(saved["stderr"], "[REDACTED]: connection failed")
 
     def test_ready_assets_appear_only_after_successful_cleanup(self):
         for cleanup_fails in (True, False):
@@ -402,22 +437,11 @@ class NativeImageTests(unittest.TestCase):
                        input=b"int main(void) { return 0; }\n", capture_output=True, check=True)
         cls.tools = release.NativeTools()
         cls.tools.run(["/usr/bin/codesign", "--force", "--sign", "-", "--options", "runtime", str(cls.app)], "Sign test fixture")
-        (source / ".DS_Store").write_bytes(b"test-owned layout bytes")
-        (source / ".background.png").write_bytes(b"test-owned background bytes")
-        (source / release.APPLICATIONS_LINK).symlink_to("/Applications")
-        cls.layout = release.layout_contents(source)
         cls.image = cls.root / "input.dmg"
-        fixture_image = cls.root / "fixture.dmg"
-        cls.tools.run([
-            "/usr/bin/hdiutil", "create", "-size", "32m", "-fs", "HFS+",
-            "-layout", "GPTSPUD", "-type", "UDIF", str(fixture_image),
-        ], "Create test fixture image")
-        with release.mounted_image(cls.tools, fixture_image, cls.root / "fixture-mount", readonly=False) as mount:
-            cls.tools.run(["/usr/bin/ditto", str(cls.app), str(mount / release.APP_BUNDLE)], "Copy test fixture app")
-            for name in (".DS_Store", ".background.png"):
-                (mount / name).write_bytes((source / name).read_bytes())
-            (mount / release.APPLICATIONS_LINK).symlink_to("/Applications")
-        release.compress_image(cls.tools, fixture_image, cls.image)
+        import build_dmg
+        build_dmg.build_image(cls.app, cls.image)
+        with release.mounted_image(cls.tools, cls.image, cls.root / "layout-mount", readonly=True) as mount:
+            cls.layout = release.layout_contents(mount)
 
     def test_native_conversion_resize_adhoc_resign_and_finalization(self):
         original_digest = release.digest(self.image)

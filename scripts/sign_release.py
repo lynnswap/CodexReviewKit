@@ -16,6 +16,7 @@ import plistlib
 import re
 import secrets
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -43,7 +44,6 @@ class NativeResult:
     stdout: bytes
     stderr: bytes
     returncode: int | None
-    timed_out: bool = False
 
 
 class NativeTools:
@@ -58,18 +58,20 @@ class NativeTools:
             completed = subprocess.run(arguments, capture_output=True, env=environment, timeout=timeout)
             result = NativeResult(completed.stdout, completed.stderr, completed.returncode)
         except subprocess.TimeoutExpired as error:
-            result = NativeResult(error.stdout or b"", error.stderr or b"", None, True)
+            result = NativeResult(error.stdout or b"", error.stderr or b"", None)
         except OSError:
             raise ReleaseError(f"{operation}: could not start the native tool.") from None
-        if not allow_failure and (result.timed_out or result.returncode != 0):
-            reason = "timed out" if result.timed_out else f"failed with exit code {result.returncode}"
-            raise ReleaseError(f"{operation}: {reason}.") from None
+        if not allow_failure and result.returncode != 0:
+            reason = "timed out" if result.returncode is None else f"failed with exit code {result.returncode}"
+            detail = " ".join(self.redact(result.stderr.decode("utf-8", errors="replace")).split())[:4000]
+            raise ReleaseError(f"{operation}: {reason}." + (f" {detail}" if detail else "")) from None
         return result
 
     def redact(self, value):
         if isinstance(value, str):
             for secret in self.redactions:
                 value = value.replace(secret, "[REDACTED]")
+                value = value.replace(json.dumps(secret)[1:-1], "[REDACTED]")
             return value
         if isinstance(value, list):
             return [self.redact(item) for item in value]
@@ -180,7 +182,7 @@ def layout_contents(mount: Path) -> dict[str, bytes | str]:
     for name in (".DS_Store", ".background.png"):
         path = mount / name
         if path.is_symlink() or not path.is_file():
-            raise ReleaseError("The DMG layout is missing a regular metadata or background file.")
+            raise ReleaseError(f"The DMG layout requires a regular {name} file.")
         layout[name] = path.read_bytes()
     link = mount / APPLICATIONS_LINK
     if not link.is_symlink() or os.readlink(link) != "/Applications":
@@ -287,6 +289,7 @@ def temporary_credentials(tools: NativeTools, parent: Path, configuration: dict[
             pem = values["NOTARY_API_PRIVATE_KEY"].strip()
             if not (pem.startswith("-----BEGIN PRIVATE KEY-----\n") and pem.endswith("\n-----END PRIVATE KEY-----")):
                 raise ReleaseError("NOTARY_API_PRIVATE_KEY must contain a PKCS#8 PEM private key.")
+            tools.redactions.append(pem)
             p12 = root / "identity.p12"
             notary_key = root / "notary.p8"
             for path, data in ((p12, p12_bytes), (notary_key, (pem + "\n").encode())):
@@ -339,7 +342,7 @@ def verify_developer_id(tools: NativeTools, path: Path, team: str, *, app: bool)
     if (f"Identifier={identifier}" not in fields or f"TeamIdentifier={team}" not in fields
             or not authorities or not authorities[0].startswith("Developer ID Application: ")
             or not authorities[0].endswith(f" ({team})")
-            or not any(line.startswith("Timestamp=") and line != "Timestamp=none" for line in fields)
+            or not any(line.startswith("Timestamp=") and line.removeprefix("Timestamp=") not in ("", "none") for line in fields)
             or (app and (not flags or not int(flags[1], 16) & 0x10000))):
         raise ReleaseError("The signed product lacks the required identifier, Developer ID team, secure timestamp, or runtime flag.")
 
@@ -369,7 +372,9 @@ def notarize(tools: NativeTools, image: Path, credentials: SigningCredentials, c
     ], "Submit image for notarization", allow_failure=True, timeout=2100)
     response = parse_json(submitted.stdout)
     diagnostic(tools, "notary-submission.json", {
-        "exit_code": submitted.returncode, "timed_out": submitted.timed_out, "response": response,
+        "exit_code": submitted.returncode, "response": response,
+        "stderr": submitted.stderr.decode("utf-8", errors="replace"),
+        "unparsed_stdout": submitted.stdout.decode("utf-8", errors="replace") if response is None else None,
     })
     submission_id = response.get("id") if response else None
     try:
@@ -383,12 +388,16 @@ def notarize(tools: NativeTools, image: Path, credentials: SigningCredentials, c
             "/usr/bin/xcrun", "notarytool", "log", submission_id, *authentication,
         ], "Retrieve notarization log", allow_failure=True)
         log = parse_json(logged.stdout)
-        diagnostic(tools, "notary-log.json", {"exit_code": logged.returncode, "timed_out": logged.timed_out, "log": log})
-        if logged.returncode != 0 or logged.timed_out or not log:
+        diagnostic(tools, "notary-log.json", {
+            "exit_code": logged.returncode, "log": log,
+            "stderr": logged.stderr.decode("utf-8", errors="replace"),
+            "unparsed_stdout": logged.stdout.decode("utf-8", errors="replace") if log is None else None,
+        })
+        if logged.returncode != 0 or not log:
             raise ReleaseError(f"Could not retrieve the notarization log for submission {submission_id}.")
         if log.get("jobId") != submission_id or log.get("status") != status or log.get("sha256") != digest(image):
             raise ReleaseError("The notarization log does not match the submitted image and result.")
-    if submitted.returncode != 0 or submitted.timed_out or status != "Accepted":
+    if submitted.returncode != 0 or status != "Accepted":
         raise ReleaseError(f"Notarization was not successfully Accepted for submission {submission_id}. No automatic resubmission was attempted.")
     tools.run(["/usr/bin/xcrun", "stapler", "staple", str(image)], "Staple notarization ticket")
     tools.run(["/usr/bin/xcrun", "stapler", "validate", str(image)], "Validate notarization ticket")
@@ -460,7 +469,14 @@ def prepare_release(arguments: argparse.Namespace) -> Path:
     return output / filename
 
 
+def handle_termination(signum, frame):
+    raise SystemExit(128 + signum)
+
+
 def main() -> int:
+    if sys.version_info < (3, 10):
+        print("Release signing requires Python 3.10 or newer.", file=sys.stderr)
+        return 1
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-dmg", required=True, type=Path)
     parser.add_argument("--input-sha256", required=True)
@@ -468,6 +484,7 @@ def main() -> int:
     parser.add_argument("--version", required=True)
     parser.add_argument("--source-sha", required=True)
     arguments = parser.parse_args()
+    previous_handler = signal.signal(signal.SIGTERM, handle_termination)
     try:
         result = prepare_release(arguments)
     except (ReleaseError, OSError) as error:
@@ -476,6 +493,8 @@ def main() -> int:
         message = str(error) if isinstance(error, ReleaseError) else "Release preparation failed during a filesystem operation."
         print(message, file=sys.stderr)
         return 1
+    finally:
+        signal.signal(signal.SIGTERM, previous_handler)
     print(f"Prepared signed and notarized release asset: {result.name}")
     return 0
 
