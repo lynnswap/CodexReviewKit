@@ -767,32 +767,28 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         self.mcpPortOwnerResolver = mcpPortOwnerResolver ?? Self.defaultMCPPortOwnerResolver
         self.mcpHTTPServerBindChecker = mcpHTTPServerBindChecker ?? Self.defaultMCPHTTPServerBindChecker
         self.shutdownCleanupTimeout = shutdownCleanupTimeout
-        let executableResolution: Result<URL, CodexExecutableResolutionError>
+        let executableResolution: Task<URL, any Error>
         switch codexExecutableDependencyForTesting {
         case .resolvedForTesting(let url):
-            executableResolution = .success(url)
+            executableResolution = Task.detached { () throws -> URL in url }
         case .resolver(let resolver):
-            do {
-                executableResolution = .success(try resolver.resolve(
+            executableResolution = Task.detached(priority: .userInitiated) {
+                try await resolver.resolve(
                     configuredPath: runtimePreferences.codexExecutablePath,
                     environment: environment
-                ))
-            } catch {
-                executableResolution = .failure(error)
+                )
             }
         case nil:
-            do {
-                executableResolution = .success(try CodexExecutableResolver(configuration: .live()).resolve(
+            executableResolution = Task.detached(priority: .userInitiated) {
+                try await CodexExecutableResolver(configuration: .live()).resolve(
                     configuredPath: runtimePreferences.codexExecutablePath,
                     environment: environment
-                ))
-            } catch {
-                executableResolution = .failure(error)
+                )
             }
         }
         let resolvedFactory = appServerRuntimeFactory ?? Self.makeAppServerRuntimeFactory()
         self.appServerRuntimeFactory = { codexHomeURL in
-            try await resolvedFactory(codexHomeURL, executableResolution.get())
+            try await resolvedFactory(codexHomeURL, executableResolution.value)
         }
         let registry = CodexReviewAccountRegistry.load(
             codexHomeURL: codexHomeURL

@@ -377,7 +377,7 @@ struct ReviewMonitorRuntimeSettingsForm: View {
             TextField(
                 "Codex executable",
                 text: $state.codexExecutablePath,
-                prompt: Text("Default: auto-detected")
+                prompt: Text("Default: newest detected")
             )
 
             Button("Restore Defaults") {
