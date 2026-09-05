@@ -326,10 +326,38 @@ enum Event: Equatable, Sendable {
 
 package extension CodexReviewBackendModel {
 struct CancellationReason: Codable, Equatable, Sendable {
-    package var message: String
+    package enum Purpose: String, Codable, Equatable, Sendable {
+        case cancellation
+        case recovery
+    }
 
-    package init(message: String = "Cancellation requested.") {
+    package var message: String
+    package var purpose: Purpose
+
+    private enum CodingKeys: String, CodingKey {
+        case message
+        case purpose
+    }
+
+    package init(
+        message: String = "Cancellation requested.",
+        purpose: Purpose = .cancellation
+    ) {
         self.message = message
+        self.purpose = purpose
+    }
+
+    package init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.message = try container.decode(String.self, forKey: .message)
+        self.purpose = try container.decodeIfPresent(Purpose.self, forKey: .purpose)
+            ?? .cancellation
+    }
+
+    package func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(message, forKey: .message)
+        try container.encode(purpose, forKey: .purpose)
     }
 }
 }

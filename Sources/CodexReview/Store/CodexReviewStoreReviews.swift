@@ -640,6 +640,7 @@ extension CodexReviewStore {
                 throw ReviewWorkerInputQueueError(failure: .workerContract(.init(message: message)))
             case .reviewEvent, .reviewStreamTerminal, .networkSnapshot,
                  .networkOutageConfirmed, .networkRecoverySettled,
+                 .modelCapacityBackoffElapsed, .modelCapacityBackoffFailed,
                  .recoveryDispositionCompleted:
                 continue
             }
@@ -833,6 +834,19 @@ extension CodexReviewStore {
         appendRecoveryProgress(networkRecoveryUnavailableMessage, to: job)
     }
 
+    private func markReviewWaitingForModelCapacityRecovery(
+        _ job: CodexReviewJob,
+        retryDelay: Duration
+    ) {
+        let now = clock.now()
+        job.closeActiveCommandLogEntries(status: "canceled", completedAt: now)
+        job.resetReviewAttemptOutputForRecovery()
+        appendRecoveryProgress(
+            "Selected model is at capacity. Retrying in \(retryDelay).",
+            to: job
+        )
+    }
+
     private func reviewWorkerInputs(
         for active: StoreReviewActiveAttempt
     ) async -> ReviewWorkerInputs {
@@ -847,6 +861,10 @@ extension CodexReviewStore {
             queue: queue
         )
         let eventSource = ReviewWorkerEventSource(queue: queue)
+        let modelCapacityBackoffCoordinator = ReviewModelCapacityBackoffCoordinator(
+            policy: modelCapacityRecoveryPolicy,
+            queue: queue
+        )
         let networkTask = Task {
             for await snapshot in snapshots {
                 await signalCoordinator.observe(snapshot)
@@ -861,7 +879,8 @@ extension CodexReviewStore {
             eventSource: eventSource,
             initialEventSubscriptionID: initialEventSubscriptionID,
             networkTask: networkTask,
-            signalCoordinator: signalCoordinator
+            signalCoordinator: signalCoordinator,
+            modelCapacityBackoffCoordinator: modelCapacityBackoffCoordinator
         )
     }
 
@@ -1412,6 +1431,8 @@ extension CodexReviewStore {
     ) {
         guard job.isTerminal == false else { return }
         switch failure {
+        case .modelCapacity(let message):
+            markReviewFailed(job, message: message)
         case .protocolViolation, .workerContract:
             markReviewFailed(job, message: failure.localizedDescription)
         case .recoverableNetwork, .ownerForcedConnectionClose, .unexpectedConnection, .process:
@@ -1443,7 +1464,8 @@ extension CodexReviewStore {
         job: CodexReviewJob,
         startRequest: CodexReviewBackendModel.Review.Start
     ) async throws {
-        var recoveryState = ReviewNetworkRecoveryLoopState()
+        var recoveryState = ReviewRecoveryLoopState()
+        var modelCapacityRetryState = ReviewModelCapacityRetryState()
         var activeEventSubscriptionID: Int? = inputs.initialEventSubscriptionID
         while let input = await inputs.next() {
             if Task.isCancelled { throw CancellationError() }
@@ -1453,6 +1475,9 @@ extension CodexReviewStore {
             switch input {
             case .reviewEvent(let event):
                 guard activeEventSubscriptionID == event.subscriptionID else { continue }
+                if event.event.confirmsModelCapacityRecovery {
+                    modelCapacityRetryState.reset()
+                }
                 let terminal = reviewTerminalRecord(for: event.event)
                 let terminalCancellationRequest = terminal == nil
                     ? nil
@@ -1524,7 +1549,7 @@ extension CodexReviewStore {
                 let terminalCancellationRequest: ReviewCancellationRequestReceipt? = switch failure {
                 case .ownerForcedConnectionClose:
                     job.pendingCancellationRequest
-                case .recoverableNetwork, .unexpectedConnection, .process,
+                case .recoverableNetwork, .modelCapacity, .unexpectedConnection, .process,
                      .protocolViolation, .workerContract, .ownerCancellation:
                     nil
                 }
@@ -1556,6 +1581,17 @@ extension CodexReviewStore {
                         )
                         return
                     }
+                    if case .modelCapacity = failure {
+                        activeEventSubscriptionID = nil
+                        try await prepareReviewAfterModelCapacityFailure(
+                            source: active,
+                            job: job,
+                            inputs: inputs,
+                            recoveryState: &recoveryState,
+                            retryState: &modelCapacityRetryState
+                        )
+                        continue
+                    }
                     if await inputs.networkStatusTracker.currentStatus() != .satisfied,
                        failure != .ownerCancellation {
                         recoveryState.recordPendingOutageStreamFailure(failure)
@@ -1575,6 +1611,19 @@ extension CodexReviewStore {
                         inputs: inputs
                     )
                     if effect == .finished { return }
+                    if case .modelCapacity = failure {
+                        guard recoveryState.attachModelCapacityBackoff() else {
+                            throw recoveryOwnershipFailure(
+                                "attach model-capacity backoff to network recovery"
+                            )
+                        }
+                        try await scheduleModelCapacityBackoff(
+                            receipt: receipt,
+                            job: job,
+                            inputs: inputs,
+                            retryState: &modelCapacityRetryState
+                        )
+                    }
                 case .starting, .active, .recovering, nil:
                     continue
                 }
@@ -1592,7 +1641,7 @@ extension CodexReviewStore {
                     appendRecoveryProgress(networkRecoveryRestoredMessage, to: job)
                 }
             case .networkRecoverySettled(let recoveryGeneration):
-                guard recoveryState.markRecoverySettled(
+                guard recoveryState.markNetworkRecoverySettled(
                     recoveryGeneration: recoveryGeneration
                 ), case .recovering(let receipt) = reviewAttemptOwnerships[job.id],
                       receipt.isPreparedForStaging else { continue }
@@ -1605,6 +1654,31 @@ extension CodexReviewStore {
                 ) {
                     activeEventSubscriptionID = subscriptionID
                 }
+            case .modelCapacityBackoffElapsed(let receipt):
+                guard case .recovering(let current) = reviewAttemptOwnerships[job.id],
+                      current === receipt,
+                      receipt.isPreparedForStaging,
+                      recoveryState.markModelCapacityBackoffElapsed()
+                else {
+                    continue
+                }
+                if let subscriptionID = try await stagePreparedRecovery(
+                    receipt,
+                    job: job,
+                    startRequest: startRequest,
+                    inputs: inputs,
+                    recoveryState: &recoveryState
+                ) {
+                    activeEventSubscriptionID = subscriptionID
+                }
+            case .modelCapacityBackoffFailed(let receipt, let message):
+                guard case .recovering(let current) = reviewAttemptOwnerships[job.id],
+                      current === receipt else {
+                    continue
+                }
+                throw ReviewWorkerInputQueueError(failure: .workerContract(.init(
+                    message: "Model-capacity backoff failed: \(message)"
+                )))
             case .networkOutageConfirmed:
                 guard job.isTerminal == false,
                       job.cancellationRequested == false,
@@ -1613,7 +1687,7 @@ extension CodexReviewStore {
                 else {
                     continue
                 }
-                let hadPendingTerminal = recoveryState.resetForRecoveryStart()
+                let hadPendingTerminal = recoveryState.beginNetworkRecovery()
                 let receipt = StoreReviewRecoveryReceipt(source: active)
                 reviewAttemptOwnerships[job.id] = .recovering(receipt)
                 markReviewWaitingForNetworkRecovery(job)
@@ -1748,6 +1822,65 @@ extension CodexReviewStore {
         }
     }
 
+    private func prepareReviewAfterModelCapacityFailure(
+        source: StoreReviewActiveAttempt,
+        job: CodexReviewJob,
+        inputs: ReviewWorkerInputs,
+        recoveryState: inout ReviewRecoveryLoopState,
+        retryState: inout ReviewModelCapacityRetryState
+    ) async throws {
+        if Task.isCancelled || job.isTerminal || job.cancellationRequested {
+            throw CancellationError()
+        }
+
+        let receipt = StoreReviewRecoveryReceipt(source: source)
+        reviewAttemptOwnerships[job.id] = .recovering(receipt)
+
+        try receipt.startDisposition { [backend] in
+            try await source.admission.beginRecovery(
+                source.run,
+                trigger: .modelCapacity
+            ) { requestAdmission, reason in
+                try await backend.interruptReview(requestAdmission, reason: reason)
+            }
+        }
+        guard let dispositionJoin = try receipt.reserveDispositionJoinIfPresent() else {
+            throw recoveryOwnershipFailure("reserve model-capacity disposition")
+        }
+        let effect = try await finishRecoveryDisposition(
+            receipt,
+            dispositionJoin: dispositionJoin,
+            terminalEvent: nil,
+            terminalResolution: nil,
+            job: job,
+            inputs: inputs
+        )
+        guard effect == .prepared else {
+            return
+        }
+
+        recoveryState.beginModelCapacityRecovery(
+            networkStatus: await inputs.networkStatusTracker.currentStatus()
+        )
+        try await scheduleModelCapacityBackoff(
+            receipt: receipt,
+            job: job,
+            inputs: inputs,
+            retryState: &retryState
+        )
+    }
+
+    private func scheduleModelCapacityBackoff(
+        receipt: StoreReviewRecoveryReceipt,
+        job: CodexReviewJob,
+        inputs: ReviewWorkerInputs,
+        retryState: inout ReviewModelCapacityRetryState
+    ) async throws {
+        let delay = retryState.nextDelay(using: modelCapacityRecoveryPolicy)
+        markReviewWaitingForModelCapacityRecovery(job, retryDelay: delay)
+        try await inputs.scheduleModelCapacityBackoff(delay, receipt: receipt)
+    }
+
     private func productTerminalResolution(
         _ disposition: ReviewProductTerminalDisposition,
         source: ReviewInterruptResolution?
@@ -1775,11 +1908,29 @@ extension CodexReviewStore {
         job: CodexReviewJob,
         startRequest: CodexReviewBackendModel.Review.Start,
         inputs: ReviewWorkerInputs,
-        recoveryState: inout ReviewNetworkRecoveryLoopState
+        recoveryState: inout ReviewRecoveryLoopState
     ) async throws -> Int? {
         guard recoveryState.isReadyToStageRecovery,
               await inputs.networkStatusTracker.currentStatus() == .satisfied,
               case .running(let destinationGeneration, _, _) = runtimeState else { return nil }
+        let subscriptionID = try await stagePreparedRecovery(
+            receipt,
+            destinationGeneration: destinationGeneration,
+            job: job,
+            startRequest: startRequest,
+            inputs: inputs
+        )
+        recoveryState.markRecovered()
+        return subscriptionID
+    }
+
+    private func stagePreparedRecovery(
+        _ receipt: StoreReviewRecoveryReceipt,
+        destinationGeneration: ReviewRuntimeGeneration,
+        job: CodexReviewJob,
+        startRequest: CodexReviewBackendModel.Review.Start,
+        inputs: ReviewWorkerInputs
+    ) async throws -> Int {
         try requireRecoveryMutation(receipt, job: job, operation: "start staging")
         let admission = ReviewStartAdmission()
         try receipt.startStaging(admission: admission) {
@@ -1815,7 +1966,6 @@ extension CodexReviewStore {
         }
         reviewAttemptOwnerships[job.id] = .active(active)
         applyBackendRun(active.run, to: job)
-        recoveryState.markRecovered()
         if Task.isCancelled || job.isTerminal || job.cancellationRequested {
             throw CancellationError()
         }
@@ -2273,79 +2423,15 @@ private enum ReviewWorkerInput: Sendable {
     case networkSnapshot(CodexReviewNetworkSnapshot, recoveryGeneration: Int)
     case networkOutageConfirmed
     case networkRecoverySettled(recoveryGeneration: Int)
+    case modelCapacityBackoffElapsed(StoreReviewRecoveryReceipt)
+    case modelCapacityBackoffFailed(StoreReviewRecoveryReceipt, String)
     case recoveryDispositionCompleted(StoreReviewRecoveryReceipt)
     case cleanupInterruptFailed(String)
-}
-
-private enum ReviewNetworkSnapshotEffect {
-    case none
-    case restartSettling
 }
 
 private enum RecoveryDispositionEffect {
     case finished
     case prepared
-}
-
-private struct ReviewNetworkRecoveryLoopState {
-    private(set) var isReadyToStageRecovery = false
-    private var isSettlingForNetworkRecovery = false
-    private var recoverySettleGeneration: Int?
-    private var pendingOutageStreamFailure: ReviewAttemptStreamFailure?
-
-    mutating func resetForRecoveryStart() -> Bool {
-        let hadPendingTerminal = pendingOutageStreamFailure != nil
-        isReadyToStageRecovery = false
-        isSettlingForNetworkRecovery = false
-        recoverySettleGeneration = nil
-        pendingOutageStreamFailure = nil
-        return hadPendingTerminal
-    }
-
-    mutating func markRecovered() {
-        isReadyToStageRecovery = false
-        isSettlingForNetworkRecovery = false
-        recoverySettleGeneration = nil
-        pendingOutageStreamFailure = nil
-    }
-
-    mutating func recordPendingOutageStreamFailure(_ failure: ReviewAttemptStreamFailure) {
-        pendingOutageStreamFailure = failure
-    }
-
-    mutating func takePendingOutageStreamFailureAfterTransientRecovery(
-        _ snapshot: CodexReviewNetworkSnapshot
-    ) -> ReviewAttemptStreamFailure? {
-        guard snapshot.status == .satisfied else { return nil }
-        defer { pendingOutageStreamFailure = nil }
-        return pendingOutageStreamFailure
-    }
-
-    mutating func markRecoverySettled(recoveryGeneration: Int) -> Bool {
-        guard isSettlingForNetworkRecovery,
-              recoverySettleGeneration == recoveryGeneration else { return false }
-        isReadyToStageRecovery = true
-        return true
-    }
-
-    mutating func networkSnapshotEffect(
-        _ snapshot: CodexReviewNetworkSnapshot,
-        recoveryGeneration: Int
-    ) -> ReviewNetworkSnapshotEffect {
-        guard snapshot.status == .satisfied else {
-            isReadyToStageRecovery = false
-            isSettlingForNetworkRecovery = false
-            recoverySettleGeneration = nil
-            return .none
-        }
-        guard isSettlingForNetworkRecovery == false else {
-            recoverySettleGeneration = recoveryGeneration
-            return .none
-        }
-        isSettlingForNetworkRecovery = true
-        recoverySettleGeneration = recoveryGeneration
-        return .restartSettling
-    }
 }
 
 private struct ReviewWorkerInputs {
@@ -2355,6 +2441,7 @@ private struct ReviewWorkerInputs {
     var initialEventSubscriptionID: Int
     var networkTask: Task<Void, Never>
     var signalCoordinator: ReviewNetworkSignalCoordinator
+    var modelCapacityBackoffCoordinator: ReviewModelCapacityBackoffCoordinator
 
     func next() async -> ReviewWorkerInput? {
         await queue.next()
@@ -2378,12 +2465,99 @@ private struct ReviewWorkerInputs {
         await eventSource.cancelActiveSubscription()
     }
 
+    func scheduleModelCapacityBackoff(
+        _ delay: Duration,
+        receipt: StoreReviewRecoveryReceipt
+    ) async throws {
+        try await modelCapacityBackoffCoordinator.schedule(delay, receipt: receipt)
+    }
+
     func cancelAndWait() async {
         networkTask.cancel()
         await eventSource.cancelAndWait()
         await signalCoordinator.cancelAndWait()
+        await modelCapacityBackoffCoordinator.cancelAndWait()
         await queue.finish()
         await networkTask.value
+    }
+}
+
+private actor ReviewModelCapacityBackoffCoordinator {
+    private let policy: CodexReviewModelCapacityRecoveryPolicy
+    private let queue: ReviewWorkerInputQueue
+    private var nextTaskID = 0
+    private var activeTask: (id: Int, task: Task<Void, Never>)?
+    private var isClosed = false
+
+    init(
+        policy: CodexReviewModelCapacityRecoveryPolicy,
+        queue: ReviewWorkerInputQueue
+    ) {
+        self.policy = policy
+        self.queue = queue
+    }
+
+    func schedule(
+        _ delay: Duration,
+        receipt: StoreReviewRecoveryReceipt
+    ) throws {
+        guard isClosed == false else {
+            throw ReviewAttemptContractFailure(
+                message: "Model-capacity backoff cannot start after its worker closed."
+            )
+        }
+        guard activeTask == nil else {
+            throw ReviewAttemptContractFailure(
+                message: "Model-capacity recovery already owns an active backoff."
+            )
+        }
+
+        nextTaskID += 1
+        let taskID = nextTaskID
+        let task = Task {
+            do {
+                try await policy.sleep(delay)
+                try Task.checkCancellation()
+                guard finishForDelivery(taskID: taskID) else {
+                    return
+                }
+                await queue.send(.modelCapacityBackoffElapsed(receipt))
+            } catch is CancellationError {
+                finish(taskID: taskID)
+            } catch {
+                guard finishForDelivery(taskID: taskID) else {
+                    return
+                }
+                await queue.send(.modelCapacityBackoffFailed(
+                    receipt,
+                    error.localizedDescription
+                ))
+            }
+        }
+        activeTask = (taskID, task)
+    }
+
+    func cancelAndWait() async {
+        isClosed = true
+        let task = activeTask?.task
+        task?.cancel()
+        await task?.value
+        activeTask = nil
+    }
+
+    private func finish(taskID: Int) {
+        guard activeTask?.id == taskID else {
+            return
+        }
+        activeTask = nil
+    }
+
+    private func finishForDelivery(taskID: Int) -> Bool {
+        guard activeTask?.id == taskID else {
+            return false
+        }
+        activeTask = nil
+        return isClosed == false
     }
 }
 
@@ -2617,6 +2791,32 @@ private func reviewTerminalRecord(
     case .failed(let message): .failed(message: message)
     case .cancelled(let message): .interrupted(.server(message: message?.nilIfEmpty))
     case .started, .message, .messageDelta, .agentMessageDelta, .log, .logEntry: nil
+    }
+}
+
+private extension CodexReviewBackendModel.Review.Event {
+    var confirmsModelCapacityRecovery: Bool {
+        switch self {
+        case .message, .messageDelta, .agentMessageDelta, .completed:
+            true
+        case .logEntry(let kind, _, _, _, let metadata, _):
+            switch kind {
+            case .agentMessage, .command, .commandOutput, .plan, .todoList,
+                 .reasoning, .reasoningSummary, .rawReasoning, .toolCall:
+                true
+            case .contextCompaction:
+                switch metadata?.status?.lowercased() {
+                case "completed", "succeeded", "success":
+                    true
+                case .none, .some:
+                    false
+                }
+            case .diagnostic, .error, .progress, .event:
+                false
+            }
+        case .started, .log, .failed, .cancelled:
+            false
+        }
     }
 }
 

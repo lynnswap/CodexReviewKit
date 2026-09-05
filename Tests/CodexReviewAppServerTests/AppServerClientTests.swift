@@ -1078,9 +1078,14 @@ struct AppServerClientTests {
     }
 
     @Test func appServerTurnErrorRequiresMessage() throws {
-        let valid = Data(#"{"id":"turn-1","error":{"message":"cancelled"}}"#.utf8)
+        let valid = Data(
+            #"{"id":"turn-1","error":{"message":"capacity","codexErrorInfo":"serverOverloaded"}}"#.utf8
+        )
         let turn = try JSONDecoder().decode(AppServerAPI.Turn.Payload.self, from: valid)
-        #expect(turn.error?.message == "cancelled")
+        #expect(turn.error == .init(
+            message: "capacity",
+            codexErrorInfo: .serverOverloaded
+        ))
 
         let missingMessage = Data(#"{"id":"turn-1","error":{}}"#.utf8)
         #expect(throws: (any Error).self) {
@@ -3777,7 +3782,10 @@ struct AppServerClientTests {
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
                 model: "gpt-5"
             ),
-            reason: .init(message: "Network unavailable; waiting to reconnect.")
+            reason: .init(
+                message: "Network unavailable; waiting to reconnect.",
+                purpose: .recovery
+            )
         )
 
         #expect(recovered.threadID == "thread-1")
@@ -3839,7 +3847,8 @@ struct AppServerClientTests {
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         ))
         let recoveryReason = CodexReviewBackendModel.CancellationReason(
-            message: "Network unavailable; waiting to reconnect."
+            message: "Network unavailable; waiting to reconnect.",
+            purpose: .recovery
         )
         let handoff = try await backend.prepareTypedReviewRecovery(
             started.run,
@@ -3918,7 +3927,10 @@ struct AppServerClientTests {
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
                 model: "gpt-5"
             ),
-            reason: .init(message: "Network unavailable; waiting to reconnect.")
+            reason: .init(
+                message: "Network unavailable; waiting to reconnect.",
+                purpose: .recovery
+            )
         )
 
         #expect(recovered.threadID == "parent-thread")
@@ -3974,7 +3986,10 @@ struct AppServerClientTests {
             model: nil
         ))
         let currentRun = startedRun.run
-        let reason = CodexReviewBackendModel.CancellationReason(message: "Network unavailable; waiting to reconnect.")
+        let reason = CodexReviewBackendModel.CancellationReason(
+            message: "Network unavailable; waiting to reconnect.",
+            purpose: .recovery
+        )
 
         let handoff = try await backend.prepareTypedReviewRecovery(
             currentRun,
@@ -4040,7 +4055,10 @@ struct AppServerClientTests {
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
                 model: "gpt-5"
             ),
-            reason: .init(message: "Network unavailable; waiting to reconnect.")
+            reason: .init(
+                message: "Network unavailable; waiting to reconnect.",
+                purpose: .recovery
+            )
         )
 
         #expect(recovered.threadID == "thread-1")
@@ -4072,7 +4090,10 @@ struct AppServerClientTests {
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
                 model: "gpt-5"
             ),
-            reason: .init(message: "Network unavailable; waiting to reconnect.")
+            reason: .init(
+                message: "Network unavailable; waiting to reconnect.",
+                purpose: .recovery
+            )
         )
         try await transport.emitServerNotification(
             method: "turn/completed",
@@ -4113,7 +4134,10 @@ struct AppServerClientTests {
 
         let handoff = try await backend.prepareTypedReviewRecovery(
             run,
-            reason: .init(message: "Network unavailable; waiting to reconnect.")
+            reason: .init(
+                message: "Network unavailable; waiting to reconnect.",
+                purpose: .recovery
+            )
         )
         try await transport.emitServerNotification(
             method: "turn/completed",
@@ -4175,7 +4199,10 @@ struct AppServerClientTests {
 
         let handoff = try await backend.prepareTypedReviewRecovery(
             run,
-            reason: .init(message: "Network unavailable; waiting to reconnect.")
+            reason: .init(
+                message: "Network unavailable; waiting to reconnect.",
+                purpose: .recovery
+            )
         )
         try await transport.emitServerNotification(
             method: "turn/completed",
@@ -4219,7 +4246,10 @@ struct AppServerClientTests {
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
                 model: "gpt-5"
             ),
-            reason: .init(message: "Network unavailable; waiting to reconnect.")
+            reason: .init(
+                message: "Network unavailable; waiting to reconnect.",
+                purpose: .recovery
+            )
         )
         await transport.waitForRequestCount(4)
         try await transport.emitServerNotification(
@@ -4263,7 +4293,10 @@ struct AppServerClientTests {
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
                 model: "gpt-5"
             ),
-            reason: .init(message: "Network unavailable; waiting to reconnect.")
+            reason: .init(
+                message: "Network unavailable; waiting to reconnect.",
+                purpose: .recovery
+            )
         )
         let rollbackRequested = await waitUntil {
             await transport.recordedRequests().contains { $0.method == "thread/rollback" }
@@ -4361,7 +4394,10 @@ struct AppServerClientTests {
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
                 model: "gpt-5"
             ),
-            reason: .init(message: "Network unavailable; waiting to reconnect.")
+            reason: .init(
+                message: "Network unavailable; waiting to reconnect.",
+                purpose: .recovery
+            )
         )
         await transport.waitForRequestCount(4)
         try await transport.emitServerNotification(
@@ -4424,7 +4460,10 @@ struct AppServerClientTests {
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
                 model: "gpt-5"
             ),
-            reason: .init(message: "Network unavailable; waiting to reconnect.")
+            reason: .init(
+                message: "Network unavailable; waiting to reconnect.",
+                purpose: .recovery
+            )
         )
         try await backend.cleanupReview(recovered)
 
@@ -7409,6 +7448,152 @@ struct AppServerClientTests {
         ))
     }
 
+    @Test func backendClassifiesOnlyStructuredModelCapacityAsRetryable() async throws {
+        let capacityRun = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-capacity",
+            turnID: "turn-capacity"
+        )
+        let capacityTransport = FakeJSONRPCTransport()
+        let capacityBackend = AppServerCodexReviewBackend(client: .init(transport: capacityTransport))
+        let capacityEvents = await eventSequence(capacityBackend, capacityRun)
+
+        try await capacityTransport.emitServerNotification(
+            method: "error",
+            params: TestErrorNotification(
+                threadID: capacityRun.threadID,
+                turnID: capacityRun.turnID,
+                message: "Capacity wording may change.",
+                codexErrorInfo: .serverOverloaded,
+                willRetry: false
+            )
+        )
+        try await capacityTransport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: capacityRun.threadID,
+                turn: .init(
+                    id: capacityRun.turnID ?? "",
+                    status: "failed",
+                    error: .init(
+                        message: "Capacity wording may change.",
+                        codexErrorInfo: .serverOverloaded
+                    )
+                )
+            )
+        )
+
+        var capacityIterator = capacityEvents.makeAsyncIterator()
+        do {
+            _ = try await capacityIterator.next()
+            Issue.record("Expected a typed model-capacity attempt failure.")
+        } catch let error as BackendReviewEventMailboxError {
+            #expect(error.failure == .modelCapacity(message: "Capacity wording may change."))
+        }
+
+        let messageOnlyRun = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-message-only",
+            turnID: "turn-message-only"
+        )
+        let messageOnlyTransport = FakeJSONRPCTransport()
+        let messageOnlyBackend = AppServerCodexReviewBackend(client: .init(transport: messageOnlyTransport))
+        let messageOnlyEvents = await eventSequence(messageOnlyBackend, messageOnlyRun)
+        let legacyMessage = "Selected model is at capacity. Please try a different model."
+
+        try await messageOnlyTransport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: messageOnlyRun.threadID,
+                turn: .init(
+                    id: messageOnlyRun.turnID ?? "",
+                    status: "failed",
+                    error: .init(message: legacyMessage)
+                )
+            )
+        )
+
+        var messageOnlyIterator = messageOnlyEvents.makeAsyncIterator()
+        #expect(try await messageOnlyIterator.next() == .failed(legacyMessage))
+    }
+
+    @Test func recoveryInterruptDoesNotHideStructuredModelCapacity() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(
+            AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"),
+            for: "thread/start"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Turn.Start.Response(turnID: "turn-1"),
+            for: "turn/start"
+        )
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let admission = ReviewStartAdmission()
+        let attempt = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        ), admission: admission)
+        let events = await eventSequence(backend, attempt)
+
+        let terminal = Task {
+            var iterator = events.makeAsyncIterator()
+            do {
+                _ = try await iterator.next()
+                throw ReviewAttemptContractFailure(
+                    message: "Expected a typed model-capacity attempt failure."
+                )
+            } catch let error as BackendReviewEventMailboxError {
+                try await admission.recordStreamTerminal(error.failure, for: attempt.run)
+                return error.failure
+            }
+        }
+        let recovery = Task {
+            try await admission.beginRecovery(
+                attempt.run,
+                trigger: .recoverableNetworkLoss
+            ) { requestAdmission, reason in
+                #expect(reason.purpose == .recovery)
+                try await backend.interruptReview(requestAdmission, reason: reason)
+            }
+        }
+        await transport.waitForRequestCount(4)
+
+        try await transport.emitServerNotification(
+            method: "error",
+            params: TestErrorNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                message: "Capacity",
+                codexErrorInfo: .serverOverloaded,
+                willRetry: false
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: "thread-1",
+                turn: .init(
+                    id: "turn-1",
+                    status: "failed",
+                    error: .init(
+                        message: "Capacity",
+                        codexErrorInfo: .serverOverloaded
+                    )
+                )
+            )
+        )
+
+        #expect(try await terminal.value == .modelCapacity(message: "Capacity"))
+        guard case .replacement(let candidate) = try await recovery.value else {
+            Issue.record("Expected network recovery to retain the capacity replacement.")
+            return
+        }
+        #expect(candidate.trigger == .recoverableNetworkLoss)
+        #expect(candidate.resolved.terminal == .stream(.modelCapacity(message: "Capacity")))
+        await transport.close()
+    }
+
     @Test func backendIgnoresUnrelatedNotificationsBeforeReviewPayloadDecode() async throws {
         let transport = FakeJSONRPCTransport()
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
@@ -8535,6 +8720,7 @@ private struct TestErrorNotification: Encodable, Sendable {
     var threadID: String? = nil
     var turnID: String? = nil
     var message: String
+    var codexErrorInfo: AppServerAPI.Turn.CodexErrorInfo? = nil
     var willRetry: Bool
 
     enum CodingKeys: String, CodingKey {
@@ -8548,7 +8734,13 @@ private struct TestErrorNotification: Encodable, Sendable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(threadID, forKey: .threadID)
         try container.encodeIfPresent(turnID, forKey: .turnID)
-        try container.encode(AppServerAPI.Turn.Error(message: message), forKey: .error)
+        try container.encode(
+            AppServerAPI.Turn.Error(
+                message: message,
+                codexErrorInfo: codexErrorInfo
+            ),
+            forKey: .error
+        )
         try container.encode(willRetry, forKey: .willRetry)
     }
 }

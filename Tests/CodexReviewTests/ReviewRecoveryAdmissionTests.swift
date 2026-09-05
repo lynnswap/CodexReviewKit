@@ -42,6 +42,7 @@ struct ReviewRecoveryAdmissionTests {
                 request: { requestAdmission, reason in
                     #expect(requestAdmission.run == run)
                     #expect(reason.message == "Network unavailable; waiting to reconnect.")
+                    #expect(reason.purpose == .recovery)
                     await requestStarted.open()
                 }
             )
