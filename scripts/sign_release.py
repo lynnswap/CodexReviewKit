@@ -15,6 +15,7 @@ from pathlib import Path
 import plistlib
 import re
 import secrets
+import shlex
 import shutil
 import signal
 import stat
@@ -269,6 +270,23 @@ def signing_identity(output: bytes, team: str) -> str:
 
 
 @contextmanager
+def searchable_keychain(tools: NativeTools, keychain: Path):
+    original = shlex.split(tools.run(
+        ["/usr/bin/security", "list-keychains", "-d", "user"], "Read keychain search list",
+    ).stdout.decode("utf-8"))
+    try:
+        # An explicit codesign --keychain still requires membership in the user's search list.
+        tools.run([
+            "/usr/bin/security", "list-keychains", "-d", "user", "-s", *original, str(keychain),
+        ], "Include temporary signing keychain")
+        yield
+    finally:
+        tools.run([
+            "/usr/bin/security", "list-keychains", "-d", "user", "-s", *original,
+        ], "Restore keychain search list")
+
+
+@contextmanager
 def temporary_credentials(tools: NativeTools, parent: Path, configuration: dict[str, str]):
     with tempfile.TemporaryDirectory(prefix="credentials-", dir=parent) as directory:
         root = Path(directory)
@@ -318,7 +336,8 @@ def temporary_credentials(tools: NativeTools, parent: Path, configuration: dict[
                 "/usr/bin/security", "set-key-partition-list", "-S", "apple-tool:,apple:,codesign:",
                 "-s", "-k", password, str(keychain),
             ], "Authorize codesign for the imported key")
-            yield SigningCredentials(keychain, identity, notary_key)
+            with searchable_keychain(tools, keychain):
+                yield SigningCredentials(keychain, identity, notary_key)
         finally:
             try:
                 if created or keychain.exists():

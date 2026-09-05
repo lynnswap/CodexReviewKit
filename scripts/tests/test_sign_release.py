@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import shlex
 import shutil
 import signal
 import subprocess
@@ -25,6 +26,8 @@ import sign_release as release  # noqa: E402
 TEAM = "ABCDE12345"
 FINGERPRINT = "A" * 40
 SUBMISSION = "5e301e35-a541-4b57-898f-c3c0b1d4aa23"
+KEYCHAIN_SEARCH_OUTPUT = b'    "/Library/Keychains/System.keychain"\n    "/Users/test/Library/Keychains/login with spaces.keychain-db"\n'
+KEYCHAIN_SEARCH_PATHS = ["/Library/Keychains/System.keychain", "/Users/test/Library/Keychains/login with spaces.keychain-db"]
 CONFIGURATION = {
     "GITHUB_REPOSITORY": "lynnswap/CodexReviewKit", "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2", "GITHUB_RUN_NUMBER": "23",
     "APPLE_TEAM_ID": TEAM, "NOTARY_API_KEY_ID": "KEY1234567",
@@ -172,6 +175,8 @@ class SigningTests(unittest.TestCase):
                 raise release.ReleaseError(f"{operation}: injected failure.")
             if operation == "Validate imported signing identity":
                 return valid_identity()
+            if operation == "Read keychain search list":
+                return success(KEYCHAIN_SEARCH_OUTPUT)
             return success()
 
         tools.run = mock.Mock(side_effect=run)
@@ -192,17 +197,24 @@ class SigningTests(unittest.TestCase):
             self.assertNotIn("-A", imported)
             self.assertEqual(imported[imported.index("-T") + 1], "/usr/bin/codesign")
             self.assertEqual(imported[imported.index("-k") + 1], str(credentials.keychain))
-            self.assertFalse(any("list-keychains" in arguments or "default-keychain" in arguments for arguments in calls))
+            self.assertFalse(any("default-keychain" in arguments for arguments in calls))
+            self.assertEqual(calls[-1], [
+                "/usr/bin/security", "list-keychains", "-d", "user", "-s", *KEYCHAIN_SEARCH_PATHS, str(credentials.keychain),
+            ])
             generated_password = calls[0][calls[0].index("-p") + 1]
             self.assertNotEqual(generated_password, TEST_SECRETS["DEVELOPER_ID_P12_PASSWORD"])
             self.assertGreaterEqual(len(generated_password), 48)
         self.assertFalse(credential_root.exists())
+        self.assertEqual(tools.run.call_args_list[-2].args[0], [
+            "/usr/bin/security", "list-keychains", "-d", "user", "-s", *KEYCHAIN_SEARCH_PATHS,
+        ])
         self.assertEqual(tools.run.call_args.args[0], ["/usr/bin/security", "delete-keychain", str(credentials.keychain)])
 
     def test_credential_failures_delete_keychain_and_private_files(self):
         for failure_operation in (
             "Configure temporary signing keychain", "Unlock temporary signing keychain", "Import release signing identity",
             "Validate imported signing identity", "Authorize codesign for the imported key", "Delete temporary signing keychain",
+            "Read keychain search list", "Include temporary signing keychain", "Restore keychain search list",
         ):
             with self.subTest(operation=failure_operation), mock.patch.dict(os.environ, TEST_SECRETS):
                 tools = self.credential_runner(failure_operation)
@@ -212,6 +224,26 @@ class SigningTests(unittest.TestCase):
                 self.assertEqual(tools.run.call_args.args[0][1], "delete-keychain")
                 self.assertFalse(list(self.root.glob("credentials-*")))
                 self.assertTrue(all(name not in os.environ for name in release.SECRET_NAMES))
+
+    def test_signing_failure_restores_search_list_before_deleting_credentials(self):
+        tools = self.credential_runner()
+        with self.assertRaisesRegex(release.ReleaseError, "signing failed"):
+            with release.temporary_credentials(tools, self.root, CONFIGURATION):
+                raise release.ReleaseError("signing failed")
+        self.assertEqual([call.args[1] for call in tools.run.call_args_list[-2:]], [
+            "Restore keychain search list", "Delete temporary signing keychain",
+        ])
+        self.assertEqual(tools.run.call_args_list[-2].args[0][5:], KEYCHAIN_SEARCH_PATHS)
+        self.assertFalse(list(self.root.glob("credentials-*")))
+
+    def test_partial_search_list_update_is_restored(self):
+        tools = self.credential_runner("Include temporary signing keychain")
+        with self.assertRaisesRegex(release.ReleaseError, "injected failure"):
+            with release.temporary_credentials(tools, self.root, CONFIGURATION):
+                self.fail("A failed search list update must not expose credentials")
+        self.assertEqual([call.args[1] for call in tools.run.call_args_list[-2:]], [
+            "Restore keychain search list", "Delete temporary signing keychain",
+        ])
 
     def test_base64_from_a_file_encoder_accepts_line_breaks(self):
         encoded = TEST_SECRETS["DEVELOPER_ID_P12_BASE64"]
@@ -438,6 +470,69 @@ class SigningTests(unittest.TestCase):
                             self.assertEqual(sha256, release.digest(output / name))
                         self.assertIn(f"dmg-sha256={release.digest(image)}\n", (self.root / "github-output").read_text())
                 self.assertFalse(list(self.root.glob(".release-*")))
+
+
+@unittest.skipUnless(sys.platform == "darwin", "Requires native macOS keychain and code signing tools")
+class NativeKeychainTests(unittest.TestCase):
+    def test_scoped_search_list_makes_an_imported_identity_available_to_codesign(self):
+        tools = release.NativeTools()
+        security = "/usr/bin/security"
+        original = tools.run([security, "list-keychains", "-d", "user"], "Read test baseline").stdout
+        original_paths = shlex.split(original.decode("utf-8"))
+        with tempfile.TemporaryDirectory(prefix="sign-release-keychain-tests-") as directory:
+            root = Path(directory)
+            keychain = root / "test signing.keychain-db"
+            password = os.urandom(24).hex()
+            tools.redactions.append(password)
+            key, cert, p12 = (root / name for name in ("test.key", "test.crt", "test.p12"))
+            configuration = root / "openssl.cnf"
+            configuration.write_text(
+                "[req]\ndistinguished_name=dn\nx509_extensions=extensions\nprompt=no\n"
+                "[dn]\nCN=Codex Release Test\n[extensions]\nbasicConstraints=critical,CA:FALSE\n"
+                "keyUsage=critical,digitalSignature\nextendedKeyUsage=codeSigning\n"
+            )
+            tools.run([
+                "/usr/bin/openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes", "-x509", "-days", "1",
+                "-config", str(configuration), "-keyout", str(key), "-out", str(cert),
+            ], "Generate test certificate")
+            tools.run([
+                "/usr/bin/openssl", "pkcs12", "-export", "-inkey", str(key), "-in", str(cert),
+                "-out", str(p12), "-passout", "pass:" + password,
+                "-keypbe", "PBE-SHA1-3DES", "-certpbe", "PBE-SHA1-3DES", "-macalg", "sha1",
+            ], "Export test identity")
+            fingerprint = tools.run([
+                "/usr/bin/openssl", "x509", "-in", str(cert), "-noout", "-fingerprint", "-sha1",
+            ], "Read test identity fingerprint").stdout.decode().strip().split("=")[-1].replace(":", "")
+            try:
+                tools.run([security, "create-keychain", "-p", password, str(keychain)], "Create test keychain")
+                tools.run([security, "unlock-keychain", "-p", password, str(keychain)], "Unlock test keychain")
+                tools.run([
+                    security, "import", str(p12), "-k", str(keychain), "-f", "pkcs12", "-x",
+                    "-P", password, "-T", "/usr/bin/codesign",
+                ], "Import test identity")
+                tools.run([
+                    security, "set-key-partition-list", "-S", "apple-tool:,apple:,codesign:", "-s", "-k", password, str(keychain),
+                ], "Authorize test signing")
+                tools.run([security, "list-keychains", "-d", "user", "-s", *original_paths], "Exclude test keychain")
+                binary = root / "test executable"
+                shutil.copyfile("/usr/bin/true", binary)
+                binary.chmod(0o755)
+                with release.searchable_keychain(tools, keychain):
+                    tools.run([
+                        "/usr/bin/codesign", "--force", "--timestamp=none", "--keychain", str(keychain),
+                        "--sign", fingerprint, "--options", "runtime", str(binary),
+                    ], "Sign with the imported test identity")
+                    tools.run(["/usr/bin/codesign", "--verify", "--strict", str(binary)], "Verify test signature")
+                self.assertEqual(
+                    tools.run([security, "list-keychains", "-d", "user"], "Check restored search list").stdout,
+                    original,
+                )
+            finally:
+                try:
+                    tools.run([security, "list-keychains", "-d", "user", "-s", *original_paths], "Restore test baseline")
+                finally:
+                    if keychain.exists():
+                        tools.run([security, "delete-keychain", str(keychain)], "Delete test keychain")
 
 
 @unittest.skipUnless(sys.platform == "darwin", "Requires native macOS image and code signing tools")
