@@ -1,19 +1,27 @@
 import AppKit
 import Testing
 @_spi(Testing) @testable import CodexReview
-@_spi(ApplicationHostSupport) @_spi(PreviewSupport) @testable import ReviewUI
+@_spi(PreviewSupport) @testable import ReviewUI
 
 @MainActor
 extension ReviewUITests {
-    @Test func updateToolbarItemIsSelectedVisibleAndImmediatelyBeforeFilter() async throws {
-        let store = CodexReviewStore.makePreviewStore()
-        let harness = makeWindowHarness(store: store, requestCodexUpdate: {})
+    @Test func updateAvailabilityNotificationControlsToolbarPresentation() async throws {
+        let notificationCenter = NotificationCenter()
+        let harness = makeWindowHarness(
+            store: CodexReviewStore.makePreviewStore(),
+            notificationCenter: notificationCenter
+        )
         defer { harness.window.close() }
         let sidebarItem = try #require(harness.viewController.splitViewItems.first)
         sidebarItem.isCollapsed = false
 
+        #expect(
+            ReviewMonitorCodexUpdateNotification.availabilityChanged.rawValue
+                == "CodexReviewKit.ReviewMonitor.codexUpdateAvailabilityChanged"
+        )
         #expect(harness.viewController.sidebarUpdateToolbarItemIsHiddenForTesting)
-        harness.windowController.setCodexUpdateAvailable(true)
+
+        postCodexUpdateAvailability(true, to: notificationCenter)
         try await waitForCondition {
             harness.viewController.sidebarUpdateToolbarItemIsHiddenForTesting == false
         }
@@ -42,33 +50,36 @@ extension ReviewUITests {
         try await waitForCondition {
             harness.viewController.sidebarUpdateToolbarItemIsHiddenForTesting
         }
-    }
 
-    @Test func updateToolbarItemRequiresAnAction() throws {
-        let harness = makeWindowHarness(store: CodexReviewStore.makePreviewStore())
-        defer { harness.window.close() }
-        let sidebarItem = try #require(harness.viewController.splitViewItems.first)
+        postCodexUpdateAvailability(false, to: notificationCenter)
         sidebarItem.isCollapsed = false
-
-        harness.windowController.setCodexUpdateAvailable(true)
-        let toolbar = try #require(harness.window.toolbar)
-
         #expect(harness.viewController.sidebarUpdateToolbarItemIsHiddenForTesting)
-        #expect(harness.viewController.toolbarDefaultItemIdentifiers(toolbar).contains(
-            harness.viewController.sidebarUpdateToolbarItemIdentifierForTesting
-        ) == false)
     }
 
-    @Test func updateWithoutActiveReviewsInvokesOnceWithoutConfirmation() async throws {
-        var updateCount = 0
+    @Test func updateToolbarPostsOneRequestAndRejectsDuplicateHiddenAction() async throws {
+        let notificationCenter = NotificationCenter()
+        let recorder = CodexUpdateRequestRecorder()
+        let requestObserver = notificationCenter.addObserver(
+            forName: Notification.Name(
+                "CodexReviewKit.ReviewMonitor.codexUpdateRequested"
+            ),
+            object: nil,
+            queue: .main
+        ) { _ in
+            MainActor.assumeIsolated {
+                recorder.requestCount += 1
+            }
+        }
+        defer { notificationCenter.removeObserver(requestObserver) }
+
         let harness = makeWindowHarness(
             store: CodexReviewStore.makePreviewStore(),
-            requestCodexUpdate: { updateCount += 1 }
+            notificationCenter: notificationCenter
         )
         defer { harness.window.close() }
         let sidebarItem = try #require(harness.viewController.splitViewItems.first)
         sidebarItem.isCollapsed = false
-        harness.windowController.setCodexUpdateAvailable(true)
+        postCodexUpdateAvailability(true, to: notificationCenter)
         try await waitForCondition {
             harness.viewController.sidebarUpdateToolbarItemIsHiddenForTesting == false
         }
@@ -77,89 +88,86 @@ extension ReviewUITests {
         harness.viewController.requestCodexUpdateForTesting()
         try await waitForCondition {
             harness.viewController.sidebarUpdateToolbarItemIsHiddenForTesting
+                && recorder.requestCount == 1
         }
 
-        #expect(updateCount == 1)
-        #expect(harness.viewController.pendingUpdateAlertForTesting == nil)
-        #expect(harness.viewController.sidebarUpdateToolbarItemIsHiddenForTesting)
+        #expect(
+            ReviewMonitorCodexUpdateNotification.requested.rawValue
+                == "CodexReviewKit.ReviewMonitor.codexUpdateRequested"
+        )
+        #expect(recorder.requestCount == 1)
 
-        harness.windowController.setCodexUpdateAvailable(true)
+        harness.viewController.requestCodexUpdateForTesting()
+        #expect(recorder.requestCount == 1)
+
+        postCodexUpdateAvailability(true, to: notificationCenter)
         try await waitForCondition {
             harness.viewController.sidebarUpdateToolbarItemIsHiddenForTesting == false
         }
     }
 
-    @Test func activeReviewUpdateCanBeCancelledAndAlertIsRemovedOnDetach() async throws {
-        let store = makeActiveReviewStore()
-        var updateCount = 0
-        let harness = makeWindowHarness(store: store, requestCodexUpdate: { updateCount += 1 })
-        defer { harness.window.close() }
-        let sidebarItem = try #require(harness.viewController.splitViewItems.first)
-        sidebarItem.isCollapsed = false
-        harness.windowController.setCodexUpdateAvailable(true)
-        try await waitForCondition {
-            harness.viewController.sidebarUpdateToolbarItemIsHiddenForTesting == false
-        }
-
-        harness.viewController.requestCodexUpdateForTesting()
-        let alert = try #require(harness.viewController.pendingUpdateAlertForTesting)
-        #expect(alert.messageText == "Stop Active Reviews and Update Codex?")
-        #expect(alert.informativeText == "Active and queued reviews will be cancelled. ReviewMonitor will restart after Codex is updated.")
-        #expect(alert.buttons.first?.hasDestructiveAction == true)
-        harness.viewController.respondToUpdateAlertForTesting(.alertSecondButtonReturn)
-        try await waitForCondition {
-            harness.viewController.pendingUpdateAlertForTesting == nil
-        }
-        #expect(updateCount == 0)
-        #expect(harness.viewController.sidebarUpdateToolbarItemIsHiddenForTesting == false)
-
-        harness.viewController.requestCodexUpdateForTesting()
-        #expect(harness.viewController.pendingUpdateAlertForTesting != nil)
-        harness.viewController.detachFromWindow()
-        #expect(harness.viewController.pendingUpdateAlertForTesting == nil)
-        #expect(updateCount == 0)
-    }
-
-    @Test func activeReviewConfirmationConsumesAvailabilityAndRejectsDoubleDispatch() async throws {
-        var updateCount = 0
+    @Test func malformedUpdateAvailabilityNotificationIsIgnored() throws {
+        let notificationCenter = NotificationCenter()
         let harness = makeWindowHarness(
-            store: makeActiveReviewStore(),
-            requestCodexUpdate: { updateCount += 1 }
+            store: CodexReviewStore.makePreviewStore(),
+            notificationCenter: notificationCenter
         )
         defer { harness.window.close() }
         let sidebarItem = try #require(harness.viewController.splitViewItems.first)
         sidebarItem.isCollapsed = false
-        harness.windowController.setCodexUpdateAvailable(true)
-        try await waitForCondition {
-            harness.viewController.sidebarUpdateToolbarItemIsHiddenForTesting == false
-        }
 
-        harness.viewController.requestCodexUpdateForTesting()
-        let firstAlert = try #require(harness.viewController.pendingUpdateAlertForTesting)
-        harness.viewController.requestCodexUpdateForTesting()
-        #expect(harness.viewController.pendingUpdateAlertForTesting === firstAlert)
-        harness.viewController.respondToUpdateAlertForTesting(.alertFirstButtonReturn)
-        try await waitForCondition { updateCount == 1 }
+        notificationCenter.post(
+            name: ReviewMonitorCodexUpdateNotification.availabilityChanged,
+            object: nil,
+            userInfo: [ReviewMonitorCodexUpdateNotification.availableUserInfoKey: "true"]
+        )
 
-        harness.viewController.requestCodexUpdateForTesting()
-        #expect(updateCount == 1)
-        #expect(harness.viewController.pendingUpdateAlertForTesting == nil)
+        #expect(harness.viewController.sidebarUpdateToolbarItemIsHiddenForTesting)
+    }
+
+    @Test func updateAvailabilityObserverCleanupStopsDelivery() throws {
+        let notificationCenter = RemovalRecordingNotificationCenter()
+        let harness = makeWindowHarness(
+            store: CodexReviewStore.makePreviewStore(),
+            notificationCenter: notificationCenter
+        )
+        defer { harness.window.close() }
+        let sidebarItem = try #require(harness.viewController.splitViewItems.first)
+        sidebarItem.isCollapsed = false
+        #expect(notificationCenter.removedObserverCount == 0)
+
+        harness.windowController.stopObservingCodexUpdateAvailabilityForTesting()
+        harness.windowController.stopObservingCodexUpdateAvailabilityForTesting()
+        postCodexUpdateAvailability(true, to: notificationCenter)
+
+        #expect(notificationCenter.removedObserverCount == 1)
         #expect(harness.viewController.sidebarUpdateToolbarItemIsHiddenForTesting)
     }
 }
 
 @MainActor
-private func makeActiveReviewStore() -> CodexReviewStore {
-    let store = CodexReviewStore.makePreviewStore()
-    let job = CodexReviewJob.makeForTesting(
-        targetSummary: "Active review",
-        status: .running,
-        summary: "Running."
+private final class CodexUpdateRequestRecorder {
+    var requestCount = 0
+}
+
+private final class RemovalRecordingNotificationCenter: NotificationCenter, @unchecked Sendable {
+    nonisolated(unsafe) private(set) var removedObserverCount = 0
+
+    override func removeObserver(_ observer: Any) {
+        removedObserverCount += 1
+        super.removeObserver(observer)
+    }
+}
+
+private func postCodexUpdateAvailability(
+    _ available: Bool,
+    to notificationCenter: NotificationCenter
+) {
+    notificationCenter.post(
+        name: Notification.Name(
+            "CodexReviewKit.ReviewMonitor.codexUpdateAvailabilityChanged"
+        ),
+        object: nil,
+        userInfo: ["available": available]
     )
-    store.loadForTesting(
-        serverState: .running,
-        workspaces: [CodexReviewWorkspace(cwd: job.cwd)],
-        jobs: [job]
-    )
-    return store
 }

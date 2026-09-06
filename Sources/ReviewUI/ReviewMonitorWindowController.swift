@@ -1,6 +1,16 @@
 import AppKit
 import CodexReview
 
+enum ReviewMonitorCodexUpdateNotification {
+    static let availabilityChanged = Notification.Name(
+        "CodexReviewKit.ReviewMonitor.codexUpdateAvailabilityChanged"
+    )
+    static let requested = Notification.Name(
+        "CodexReviewKit.ReviewMonitor.codexUpdateRequested"
+    )
+    static let availableUserInfoKey = "available"
+}
+
 @MainActor
 func configureReviewMonitorWindowBase(_ window: NSWindow) {
     window.isOpaque = true
@@ -18,6 +28,8 @@ public final class ReviewMonitorWindowController: NSWindowController {
     private static let frameAutosaveName = NSWindow.FrameAutosaveName("ReviewMonitor.MainWindow")
     private let rootViewController: ReviewMonitorRootViewController
     private let uiState: ReviewMonitorUIState
+    private let notificationCenter: NotificationCenter
+    private var codexUpdateAvailabilityObserver: NSObjectProtocol?
 
     public convenience init(store: CodexReviewStore) {
         self.init(
@@ -39,31 +51,12 @@ public final class ReviewMonitorWindowController: NSWindowController {
         )
     }
 
-    @_spi(ApplicationHostSupport)
-    public convenience init(
-        store: CodexReviewStore,
-        showSettings: @escaping @MainActor () -> Void,
-        requestCodexUpdate: (@MainActor () -> Void)?
-    ) {
-        self.init(
-            store: store,
-            contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
-            showSettings: showSettings,
-            requestCodexUpdate: requestCodexUpdate
-        )
-    }
-
-    @_spi(ApplicationHostSupport)
-    public func setCodexUpdateAvailable(_ isAvailable: Bool) {
-        uiState.isCodexUpdateAvailable = isAvailable
-    }
-
     convenience init(
         store: CodexReviewStore,
         contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator,
         sidebarJobFilterDefaults: UserDefaults? = .standard,
         showSettings: (@MainActor () -> Void)? = nil,
-        requestCodexUpdate: (@MainActor () -> Void)? = nil
+        notificationCenter: NotificationCenter = .default
     ) {
         self.init(
             store: store,
@@ -71,7 +64,7 @@ public final class ReviewMonitorWindowController: NSWindowController {
             frameAutosaveName: Self.frameAutosaveName,
             sidebarJobFilterDefaults: sidebarJobFilterDefaults,
             showSettings: showSettings,
-            requestCodexUpdate: requestCodexUpdate
+            notificationCenter: notificationCenter
         )
     }
 
@@ -81,7 +74,7 @@ public final class ReviewMonitorWindowController: NSWindowController {
         frameAutosaveName: NSWindow.FrameAutosaveName,
         sidebarJobFilterDefaults: UserDefaults? = .standard,
         showSettings: (@MainActor () -> Void)? = nil,
-        requestCodexUpdate: (@MainActor () -> Void)? = nil
+        notificationCenter: NotificationCenter = .default
     ) {
         let uiState = Self.makeUIState(
             auth: store.auth,
@@ -92,7 +85,7 @@ public final class ReviewMonitorWindowController: NSWindowController {
             uiState: uiState,
             contentTransitionAnimator: contentTransitionAnimator,
             showSettings: showSettings,
-            requestCodexUpdate: requestCodexUpdate
+            notificationCenter: notificationCenter
         )
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: Self.defaultContentSize),
@@ -106,15 +99,46 @@ public final class ReviewMonitorWindowController: NSWindowController {
 
         self.rootViewController = rootViewController
         self.uiState = uiState
+        self.notificationCenter = notificationCenter
         super.init(window: window)
 
         window.isReleasedWhenClosed = false
         window.setFrameAutosaveName(frameAutosaveName)
+        observeCodexUpdateAvailability()
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         nil
+    }
+
+    isolated deinit {
+        stopObservingCodexUpdateAvailability()
+    }
+
+    private func observeCodexUpdateAvailability() {
+        codexUpdateAvailabilityObserver = notificationCenter.addObserver(
+            forName: ReviewMonitorCodexUpdateNotification.availabilityChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let isAvailable = notification.userInfo?[
+                ReviewMonitorCodexUpdateNotification.availableUserInfoKey
+            ] as? Bool else {
+                return
+            }
+            MainActor.assumeIsolated {
+                self?.uiState.isCodexUpdateAvailable = isAvailable
+            }
+        }
+    }
+
+    private func stopObservingCodexUpdateAvailability() {
+        guard let codexUpdateAvailabilityObserver else {
+            return
+        }
+        notificationCenter.removeObserver(codexUpdateAvailabilityObserver)
+        self.codexUpdateAvailabilityObserver = nil
     }
 
     private static func makeUIState(
@@ -133,6 +157,14 @@ public final class ReviewMonitorWindowController: NSWindowController {
         )
     }
 }
+
+#if DEBUG
+extension ReviewMonitorWindowController {
+    func stopObservingCodexUpdateAvailabilityForTesting() {
+        stopObservingCodexUpdateAvailability()
+    }
+}
+#endif
 
 enum ReviewMonitorSidebar {}
 

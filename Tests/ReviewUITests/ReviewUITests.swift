@@ -6724,14 +6724,14 @@ func makeWindowHarness(
     contentSize: NSSize? = nil,
     sidebarJobFilterDefaults: UserDefaults? = nil,
     contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator = ReviewMonitorRootViewController.defaultContentTransitionAnimator,
-    requestCodexUpdate: (@MainActor () -> Void)? = nil
+    notificationCenter: NotificationCenter = .default
 ) -> ReviewMonitorWindowHarness {
     applyTestAuthState(auth: store.auth, state: authState)
     let windowController = ReviewMonitorWindowController(
         store: store,
         contentTransitionAnimator: contentTransitionAnimator,
         sidebarJobFilterDefaults: sidebarJobFilterDefaults,
-        requestCodexUpdate: requestCodexUpdate
+        notificationCenter: notificationCenter
     )
     guard let window = windowController.window else {
         fatalError("ReviewMonitorWindowController did not create a window.")

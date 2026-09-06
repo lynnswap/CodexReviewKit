@@ -23,7 +23,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
     private let store: CodexReviewStore
     private let uiState: ReviewMonitorUIState
     private let showSettings: (@MainActor () -> Void)?
-    private let requestCodexUpdate: (@MainActor () -> Void)?
+    private let notificationCenter: NotificationCenter
     private var sidebarViewController: ReviewMonitorSidebarViewController?
     private var transportViewController: ReviewMonitorTransportViewController?
     private var sidebarItem: NSSplitViewItem?
@@ -33,7 +33,6 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
     private var windowTitleObservation: PortableObservationTracking.Token?
     private var sidebarCollapseObservation: NSKeyValueObservation?
     private var windowCancellable: AnyCancellable?
-    private var updateAlert: NSAlert?
     private weak var attachedWindow: NSWindow?
     private var isSidebarCollapsed = false
 
@@ -41,12 +40,12 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         store: CodexReviewStore,
         uiState: ReviewMonitorUIState,
         showSettings: (@MainActor () -> Void)? = nil,
-        requestCodexUpdate: (@MainActor () -> Void)? = nil
+        notificationCenter: NotificationCenter = .default
     ) {
         self.store = store
         self.uiState = uiState
         self.showSettings = showSettings
-        self.requestCodexUpdate = requestCodexUpdate
+        self.notificationCenter = notificationCenter
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -159,7 +158,6 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
     }
 
     func detachFromWindow() {
-        dismissUpdateAlert()
         cancelToolbarObservations()
         attachedWindow = nil
     }
@@ -170,7 +168,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         toolbarMembershipObservation = withPortableContinuousObservation { [weak self, uiState] _ in
             let sidebarSelection = uiState.sidebarSelection
             let isAuthenticating = uiState.auth.isAuthenticating
-            let canShowUpdate = uiState.isCodexUpdateAvailable && self?.requestCodexUpdate != nil
+            let isCodexUpdateAvailable = uiState.isCodexUpdateAvailable
             guard let self else {
                 return
             }
@@ -178,7 +176,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
                 sidebarSelection: sidebarSelection,
                 isSidebarCollapsed: self.isSidebarCollapsed,
                 isAuthenticating: isAuthenticating,
-                canShowUpdate: canShowUpdate
+                isCodexUpdateAvailable: isCodexUpdateAvailable
             )
             self.applyToolbarItemIdentifiers(identifiers)
         }
@@ -250,7 +248,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
             sidebarSelection: uiState.sidebarSelection,
             isSidebarCollapsed: isSidebarCollapsed,
             isAuthenticating: uiState.auth.isAuthenticating,
-            canShowUpdate: uiState.isCodexUpdateAvailable && requestCodexUpdate != nil
+            isCodexUpdateAvailable: uiState.isCodexUpdateAvailable
         )
     }
 
@@ -396,7 +394,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         sidebarSelection: SidebarPickerSelection,
         isSidebarCollapsed: Bool,
         isAuthenticating: Bool,
-        canShowUpdate: Bool
+        isCodexUpdateAvailable: Bool
     ) -> [NSToolbarItem.Identifier] {
         var identifiers: [NSToolbarItem.Identifier] = [
             sidebarPickerToolbarItemIdentifier,
@@ -413,7 +411,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
             sidebarSelection: sidebarSelection,
             isSidebarCollapsed: isSidebarCollapsed
         ) {
-            if canShowUpdate {
+            if isCodexUpdateAvailable {
                 identifiers.append(sidebarUpdateToolbarItemIdentifier)
             }
             identifiers.append(sidebarJobFilterToolbarItemIdentifier)
@@ -441,7 +439,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
             sidebarSelection: uiState.sidebarSelection,
             isSidebarCollapsed: isSidebarCollapsed,
             isAuthenticating: uiState.auth.isAuthenticating,
-            canShowUpdate: uiState.isCodexUpdateAvailable && requestCodexUpdate != nil
+            isCodexUpdateAvailable: uiState.isCodexUpdateAvailable
         ))
     }
 
@@ -459,52 +457,11 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
     @objc
     private func handleCodexUpdate(_ sender: Any?) {
         (sender as? NSButton)?.state = .on
-        guard updateAlert == nil,
-              uiState.isCodexUpdateAvailable,
-              requestCodexUpdate != nil else {
-            return
-        }
-        guard store.hasRunningJobs else {
-            performCodexUpdate()
-            return
-        }
-        guard let attachedWindow else {
-            return
-        }
-
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "Stop Active Reviews and Update Codex?"
-        alert.informativeText = "Active and queued reviews will be cancelled. ReviewMonitor will restart after Codex is updated."
-        alert.addButton(withTitle: "Stop Reviews and Update").hasDestructiveAction = true
-        alert.addButton(withTitle: "Cancel")
-        updateAlert = alert
-        alert.beginSheetModal(for: attachedWindow) { [weak self, weak alert] response in
-            guard let self, let alert, updateAlert === alert else {
-                return
-            }
-            updateAlert = nil
-            if response == .alertFirstButtonReturn {
-                performCodexUpdate()
-            }
-        }
-    }
-
-    private func performCodexUpdate() {
-        guard uiState.isCodexUpdateAvailable,
-              let requestCodexUpdate else {
+        guard uiState.isCodexUpdateAvailable else {
             return
         }
         uiState.isCodexUpdateAvailable = false
-        requestCodexUpdate()
-    }
-
-    private func dismissUpdateAlert() {
-        guard let alert = updateAlert else {
-            return
-        }
-        updateAlert = nil
-        alert.window.sheetParent?.endSheet(alert.window, returnCode: .abort)
+        notificationCenter.post(name: ReviewMonitorCodexUpdateNotification.requested, object: nil)
     }
 
 }
@@ -610,19 +567,8 @@ extension ReviewMonitorSplitViewController {
         (sidebarUpdateToolbarItemForTesting?.view as? NSButton)?.state == .on
     }
 
-    var pendingUpdateAlertForTesting: NSAlert? {
-        updateAlert
-    }
-
     func requestCodexUpdateForTesting() {
         handleCodexUpdate(sidebarUpdateToolbarItemForTesting?.view)
-    }
-
-    func respondToUpdateAlertForTesting(_ response: NSApplication.ModalResponse) {
-        guard let alert = updateAlert else {
-            return
-        }
-        alert.window.sheetParent?.endSheet(alert.window, returnCode: response)
     }
 
     private var sidebarUpdateToolbarItemForTesting: NSToolbarItem? {
