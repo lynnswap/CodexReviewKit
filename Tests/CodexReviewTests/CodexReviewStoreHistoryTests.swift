@@ -1364,7 +1364,7 @@ struct CodexReviewStoreHistoryTests {
         #expect(await history.closeCallCount() == 1)
     }
 
-    @Test func shutdownClosesReviewAdmissionBeforeWaitingForHistoryLoad() async throws {
+    @Test func shutdownSealsReviewAdmissionBeforeWaitingForHistoryLoad() async throws {
         let loadEntered = AsyncGate()
         let loadRelease = AsyncGate()
         let history = ReviewHistoryPersistenceProbe(
@@ -1387,6 +1387,7 @@ struct CodexReviewStoreHistoryTests {
             store.applicationShutdownRequested
         })
 
+        store.storeWorkRegistry.openReviewAdmission()
         #expect(store.storeWorkRegistry.register(.reviewMutation("late start")) == nil)
 
         await loadRelease.open()
