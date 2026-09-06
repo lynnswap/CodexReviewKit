@@ -14,7 +14,7 @@ struct ReviewMonitorCodexUpdaterTests {
         ]
         var checkCount = 0
         var publishedAvailability: [Bool] = []
-        let available = UpdateTestSignal()
+        let available = TestSignal()
         let waitCount = UpdateTestCounter()
         let updater = ReviewMonitorCodexUpdater(
             check: {
@@ -44,7 +44,7 @@ struct ReviewMonitorCodexUpdaterTests {
     }
 
     @Test func disabledCheckStopsWithoutSchedulingAnotherCheck() async {
-        let checkCompleted = UpdateTestSignal()
+        let checkCompleted = TestSignal()
         let waitCount = UpdateTestCounter()
         let updater = ReviewMonitorCodexUpdater(
             check: { .disabled },
@@ -68,13 +68,13 @@ struct ReviewMonitorCodexUpdaterTests {
 
     @Test func acceptedUpdateSchedulesOneHelperBeforeRequestingTermination() async {
         let plan = updatePlan()
-        let available = UpdateTestSignal()
+        let available = TestSignal()
         var publishedAvailability: [Bool] = []
         var preparedUpdateCount = 0
         var updatedPlans: [CodexCommandUpdatePlan] = []
         var scheduledFailureValues: [Bool] = []
         var terminationRequestCount = 0
-        let terminationRequested = UpdateTestSignal()
+        let terminationRequested = TestSignal()
         let updater = ReviewMonitorCodexUpdater(
             check: { .available(plan) },
             publishAvailability: { value in
@@ -106,13 +106,13 @@ struct ReviewMonitorCodexUpdaterTests {
         #expect(publishedAvailability == [true, false])
     }
 
-    @Test func relaunchSchedulingFailureLeavesTheStoppedAppOpenWithAnError() async {
+    @Test func updateAndRelaunchFailuresPreserveThePrimaryUpdateError() async {
         let plan = updatePlan()
-        let available = UpdateTestSignal()
+        let available = TestSignal()
         var publishedAvailability: [Bool] = []
         var terminationRequestCount = 0
         var failures: [(String, String)] = []
-        let failurePresented = UpdateTestSignal()
+        let failurePresented = TestSignal()
         let updater = ReviewMonitorCodexUpdater(
             check: { .available(plan) },
             publishAvailability: { value in
@@ -122,7 +122,7 @@ struct ReviewMonitorCodexUpdaterTests {
                 }
             },
             prepareForUpdate: {},
-            runUpdate: { _ in },
+            runUpdate: { _ in throw UpdateTestFailure.injected },
             scheduleRelaunch: { _ in throw UpdateTestFailure.injected },
             requestApplicationTermination: {
                 terminationRequestCount += 1
@@ -141,13 +141,14 @@ struct ReviewMonitorCodexUpdaterTests {
         #expect(terminationRequestCount == 0)
         #expect(publishedAvailability == [true, false])
         #expect(failures.count == 1)
-        #expect(failures.first?.0 == "ReviewMonitor Could Not Restart")
+        #expect(failures.first?.0 == "Codex Could Not Be Updated")
+        #expect(failures.first?.1.contains("also could not schedule") == true)
     }
 
     @Test func updateFailureIsReportedToTheRelaunchedApplication() async {
         let plan = updatePlan()
-        let available = UpdateTestSignal()
-        let terminationRequested = UpdateTestSignal()
+        let available = TestSignal()
+        let terminationRequested = TestSignal()
         var scheduledFailureValues: [Bool] = []
         let updater = ReviewMonitorCodexUpdater(
             check: { .available(plan) },
@@ -173,6 +174,47 @@ struct ReviewMonitorCodexUpdaterTests {
         #expect(scheduledFailureValues == [true])
     }
 
+    @Test func applicationTerminationWaitsForAnUncancelledUpdate() async {
+        let plan = updatePlan()
+        let available = TestSignal()
+        let updateStarted = TestSignal()
+        let releaseUpdate = TestGate()
+        let stopCompleted = UpdateTestCounter()
+        var updateObservedCancellation: [Bool] = []
+        let updater = ReviewMonitorCodexUpdater(
+            check: { .available(plan) },
+            publishAvailability: { value in
+                if value {
+                    Task { await available.signal() }
+                }
+            },
+            prepareForUpdate: {},
+            runUpdate: { _ in
+                await updateStarted.signal()
+                await releaseUpdate.wait()
+                updateObservedCancellation.append(Task.isCancelled)
+            },
+            scheduleRelaunch: { _ in },
+            requestApplicationTermination: {},
+            presentFailure: { _, _ in }
+        )
+        updater.start()
+        await available.wait()
+        updater.requestUpdate()
+        await updateStarted.wait()
+
+        let stop = Task { @MainActor in
+            await updater.stopAndWait()
+            await stopCompleted.increment()
+        }
+        await Task.yield()
+        #expect(await stopCompleted.value == 0)
+
+        await releaseUpdate.open()
+        await stop.value
+        #expect(updateObservedCancellation == [false])
+    }
+
     @Test func helperWaitsForThisAppThenRelaunchesWithTheResult() {
         let applicationURL = URL(fileURLWithPath: "/Applications/ReviewMonitor.app")
 
@@ -184,6 +226,7 @@ struct ReviewMonitorCodexUpdaterTests {
 
         #expect(arguments[0] == "-c")
         #expect(arguments[2...] == [
+            "reviewmonitor-relaunch",
             "42",
             applicationURL.path,
             ReviewMonitorApplicationRelauncher.failedUpdateLaunchArgument,
@@ -214,27 +257,6 @@ struct ReviewMonitorCodexUpdaterTests {
 
 private enum UpdateTestFailure: Error {
     case injected
-}
-
-private actor UpdateTestSignal {
-    private var isSignaled = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-
-    func signal() {
-        isSignaled = true
-        let waiters = waiters
-        self.waiters.removeAll()
-        for waiter in waiters {
-            waiter.resume()
-        }
-    }
-
-    func wait() async {
-        guard isSignaled == false else {
-            return
-        }
-        await withCheckedContinuation { waiters.append($0) }
-    }
 }
 
 private actor UpdateTestCounter {

@@ -85,26 +85,33 @@ final class ReviewMonitorCodexUpdater {
                 return
             }
             await prepareForUpdate()
-            let reportsFailure: Bool
+            let updateFailure: (any Error)?
             do {
                 try await runUpdate(availablePlan)
-                reportsFailure = false
+                updateFailure = nil
             } catch {
                 codexUpdateLogger.error(
                     "Codex update failed: \(error.localizedDescription, privacy: .public)"
                 )
-                reportsFailure = true
+                updateFailure = error
             }
             do {
-                try scheduleRelaunch(reportsFailure)
+                try scheduleRelaunch(updateFailure != nil)
                 updateTask = nil
                 requestApplicationTermination()
             } catch {
                 updateTask = nil
-                presentFailure(
-                    "ReviewMonitor Could Not Restart",
-                    "The Codex update finished, but ReviewMonitor could not restart automatically. Quit and reopen the app. \(error.localizedDescription)"
-                )
+                if let updateFailure {
+                    presentFailure(
+                        "Codex Could Not Be Updated",
+                        "\(updateFailure.localizedDescription) ReviewMonitor also could not schedule an automatic restart. Quit and reopen the app. \(error.localizedDescription)"
+                    )
+                } else {
+                    presentFailure(
+                        "ReviewMonitor Could Not Restart",
+                        "Codex was updated, but ReviewMonitor could not restart automatically. Quit and reopen the app. \(error.localizedDescription)"
+                    )
+                }
             }
         }
     }

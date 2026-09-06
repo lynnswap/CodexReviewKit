@@ -57,10 +57,13 @@ public struct CodexCommandUpdateChecker: Sendable {
     }
 
     public func check() async throws -> CodexCommandUpdateCheckResult {
-        let executableURL = try resolver.resolve(
+        let selection = try resolver.resolveSelection(
             configuredPath: runtimePreferences.codexExecutablePath,
             environment: sourceEnvironment
         )
+        guard let homebrewBinURL = Self.homebrewBinURL(for: selection) else {
+            return .unavailable
+        }
         let codexHomeURL = runtimePreferences.codexHomePath.map {
             URL(fileURLWithPath: $0, isDirectory: true)
         } ?? AppServerCodexHome.url(environment: sourceEnvironment)
@@ -68,10 +71,11 @@ public struct CodexCommandUpdateChecker: Sendable {
             AppServerCodexHome.environment(
                 sourceEnvironment,
                 codexHomeURL: codexHomeURL
-            )
+            ),
+            homebrewBinURL: homebrewBinURL
         )
         let output = try await run(
-            executableURL,
+            selection.executableURL,
             ["doctor", "--json"],
             environment
         )
@@ -112,14 +116,12 @@ public struct CodexCommandUpdateChecker: Sendable {
             return .unavailable
         }
         return .available(.init(
-            executableURL: executableURL,
+            executableURL: selection.executableURL,
             environment: environment
         ))
     }
 
-    private static let stablePathEntries = [
-        "/opt/homebrew/bin",
-        "/usr/local/bin",
+    private static let systemPathEntries = [
         "/usr/bin",
         "/bin",
         "/usr/sbin",
@@ -127,7 +129,8 @@ public struct CodexCommandUpdateChecker: Sendable {
     ]
 
     private static func sanitizedEnvironment(
-        _ source: [String: String]
+        _ source: [String: String],
+        homebrewBinURL: URL
     ) -> [String: String] {
         var environment = source
         for key in source.keys where
@@ -136,29 +139,110 @@ public struct CodexCommandUpdateChecker: Sendable {
             environment.removeValue(forKey: key)
         }
 
-        environment["PATH"] = stablePathEntries.joined(separator: ":")
+        environment["PATH"] = ([homebrewBinURL.path] + systemPathEntries)
+            .joined(separator: ":")
         return environment
     }
 
-    private static func runDoctor(
+    private static func homebrewBinURL(
+        for selection: CodexExecutableSelection
+    ) -> URL? {
+        let launcherPath = selection.launcherURL.standardizedFileURL.path
+        let executablePath = selection.executableURL.standardizedFileURL.path
+        for prefix in ["/opt/homebrew", "/usr/local"] {
+            guard launcherPath == "\(prefix)/bin/codex" else {
+                continue
+            }
+            let caskRoot = "\(prefix)/Caskroom/codex/"
+            guard executablePath.hasPrefix(caskRoot) else {
+                return nil
+            }
+            let components = executablePath
+                .dropFirst(caskRoot.count)
+                .split(separator: "/", omittingEmptySubsequences: false)
+            guard components.count == 3,
+                  components[0].isEmpty == false,
+                  components[1] == "bin",
+                  components[2] == "codex" else {
+                return nil
+            }
+            return URL(fileURLWithPath: "\(prefix)/bin", isDirectory: true)
+        }
+        return nil
+    }
+
+    package static func runDoctor(
         executableURL: URL,
         arguments: [String],
         environment: [String: String]
     ) async throws -> Data {
-        try await Task.detached(priority: .utility) {
-            let process = Process()
-            let output = Pipe()
-            process.executableURL = executableURL
-            process.arguments = arguments
-            process.environment = environment
-            process.standardInput = FileHandle.nullDevice
-            process.standardOutput = output
-            process.standardError = FileHandle.nullDevice
+        let process = CancellableDoctorProcess(
+            executableURL: executableURL,
+            arguments: arguments,
+            environment: environment
+        )
+        return try await withTaskCancellationHandler {
+            let output = try await Task.detached(priority: .utility) {
+                try process.run()
+            }.value
+            try Task.checkCancellation()
+            return output
+        } onCancel: {
+            process.cancel()
+        }
+    }
+}
+
+private final class CancellableDoctorProcess: @unchecked Sendable {
+    private let process = Process()
+    private let output = Pipe()
+    private let stateLock = NSLock()
+    private var cancellationRequested = false
+    private var launched = false
+
+    init(
+        executableURL: URL,
+        arguments: [String],
+        environment: [String: String]
+    ) {
+        process.executableURL = executableURL
+        process.arguments = arguments
+        process.environment = environment
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+    }
+
+    func run() throws -> Data {
+        stateLock.lock()
+        if cancellationRequested {
+            stateLock.unlock()
+            throw CancellationError()
+        }
+        do {
             try process.run()
-            let data = output.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            return data
-        }.value
+            launched = true
+            stateLock.unlock()
+        } catch {
+            stateLock.unlock()
+            throw error
+        }
+
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        if stateLock.withLock({ cancellationRequested }) {
+            throw CancellationError()
+        }
+        return data
+    }
+
+    func cancel() {
+        stateLock.withLock {
+            cancellationRequested = true
+            if launched, process.isRunning {
+                process.terminate()
+            }
+        }
     }
 }
 

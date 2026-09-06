@@ -820,7 +820,7 @@ private final class TerminationReplyRecorder: ReviewMonitorTerminationReplying {
     }
 }
 
-private actor TestSignal {
+actor TestSignal {
     private var isSignaled = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
@@ -843,7 +843,7 @@ private actor TestSignal {
     }
 }
 
-private actor TestGate {
+actor TestGate {
     private var isOpen = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
