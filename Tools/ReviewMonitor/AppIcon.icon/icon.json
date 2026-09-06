@@ -26,28 +26,38 @@
       }
     },
     {
+      "blend-mode" : "plus-lighter",
+      "hidden" : false,
       "layers" : [
         {
-          "image-name" : "Frame 2 2.svg",
-          "name" : "Frame 2 2",
-          "opacity-specializations" : [
-            {
-              "value" : 0.5
-            },
-            {
-              "appearance" : "dark",
-              "value" : 0.3
-            }
-          ]
+          "glass" : true,
+          "image-name" : "blueprint-grid.svg",
+          "name" : "Blueprint Grid",
+          "opacity" : 0.5
+        }
+      ],
+      "lighting" : "individual",
+      "opacity-specializations" : [
+        {
+          "value" : 0.2
+        },
+        {
+          "appearance" : "dark",
+          "value" : 0.6
+        },
+        {
+          "appearance" : "tinted",
+          "value" : 0.4
         }
       ],
       "shadow" : {
-        "kind" : "neutral",
+        "kind" : "none",
         "opacity" : 0.5
       },
+      "specular" : false,
       "translucency" : {
         "enabled" : true,
-        "value" : 0.5
+        "value" : 0
       }
     }
   ],
