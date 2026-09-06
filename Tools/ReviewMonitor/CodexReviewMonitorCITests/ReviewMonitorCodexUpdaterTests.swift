@@ -106,6 +106,45 @@ struct ReviewMonitorCodexUpdaterTests {
         #expect(publishedAvailability == [true, false])
     }
 
+    @Test func stalePlanIsDiscardedBeforeTheStoreShutsDown() async {
+        let plan = updatePlan()
+        let available = TestSignal()
+        var results: [CodexCommandUpdateCheckResult] = [
+            .available(plan),
+            .unavailable,
+        ]
+        var checkCount = 0
+        var publishedAvailability: [Bool] = []
+        var prepareForUpdateCount = 0
+        var runUpdateCount = 0
+        let updater = ReviewMonitorCodexUpdater(
+            check: {
+                checkCount += 1
+                return results.removeFirst()
+            },
+            publishAvailability: { value in
+                publishedAvailability.append(value)
+                if value {
+                    Task { await available.signal() }
+                }
+            },
+            prepareForUpdate: { prepareForUpdateCount += 1 },
+            runUpdate: { _ in runUpdateCount += 1 },
+            requestApplicationTermination: {},
+            presentFailure: { _, _ in }
+        )
+        updater.start()
+        await available.wait()
+
+        updater.requestUpdate()
+        await updater.stopAndWait()
+
+        #expect(checkCount == 2)
+        #expect(publishedAvailability == [true, false])
+        #expect(prepareForUpdateCount == 0)
+        #expect(runUpdateCount == 0)
+    }
+
     @Test func updateAndRelaunchFailuresPreserveThePrimaryUpdateError() async {
         let plan = updatePlan()
         let available = TestSignal()

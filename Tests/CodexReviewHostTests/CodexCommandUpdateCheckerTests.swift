@@ -42,7 +42,7 @@ struct CodexCommandUpdateCheckerTests {
             Issue.record("Expected an available Homebrew update.")
             return
         }
-        #expect(plan.executableURL == executableURL)
+        #expect(plan.executableURL == launcherURL)
         #expect(plan.environment["CODEX_HOME"] == "/users/reviewer/.codex_review")
         #expect(plan.environment["CODEX_MANAGED_BY_NPM"] == nil)
     }
@@ -79,7 +79,7 @@ struct CodexCommandUpdateCheckerTests {
             Issue.record("Expected an available Intel Homebrew update.")
             return
         }
-        #expect(plan.executableURL == executableURL)
+        #expect(plan.executableURL == launcherURL)
         #expect(plan.environment["PATH"]?.contains("/opt/homebrew/bin") == false)
     }
 

@@ -116,7 +116,7 @@ public struct CodexCommandUpdateChecker: Sendable {
             return .unavailable
         }
         return .available(.init(
-            executableURL: selection.executableURL,
+            executableURL: selection.launcherURL,
             environment: environment
         ))
     }

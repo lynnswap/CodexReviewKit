@@ -75,19 +75,36 @@ final class ReviewMonitorCodexUpdater {
 
     func requestUpdate() {
         guard updateTask == nil,
-              let availablePlan else {
+              availablePlan != nil else {
             return
         }
-        self.availablePlan = nil
         publishAvailability(false)
         updateTask = Task { @MainActor [weak self] in
             guard let self else {
                 return
             }
+            let plan: CodexCommandUpdatePlan
+            do {
+                guard case .available(let currentPlan) = try await check() else {
+                    availablePlan = nil
+                    updateTask = nil
+                    return
+                }
+                plan = currentPlan
+                availablePlan = nil
+            } catch {
+                updateTask = nil
+                publishAvailability(true)
+                presentFailure(
+                    "Codex Update Could Not Start",
+                    "ReviewMonitor could not confirm that the Codex update is still available. \(error.localizedDescription)"
+                )
+                return
+            }
             await prepareForUpdate()
             let updateFailure: (any Error)?
             do {
-                try await runUpdate(availablePlan)
+                try await runUpdate(plan)
                 updateFailure = nil
             } catch {
                 codexUpdateLogger.error(
