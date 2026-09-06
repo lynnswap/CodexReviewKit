@@ -6,52 +6,42 @@ import Testing
 struct CodexCommandUpdateCheckerTests {
     private let executableURL = URL(fileURLWithPath: "/tools/codex")
 
-    @Test func supportedActionsReturnOneReusablePlan() async throws {
-        let actions = [
-            "npm install -g @openai/codex",
-            "bun install -g @openai/codex",
-            "vp install -g @openai/codex",
-            "pnpm add -g @openai/codex",
-            "brew upgrade --cask codex",
-            "standalone installer",
-        ]
-        for action in actions {
-            let checker = makeChecker(
-                environment: [
-                    "HOME": "/users/reviewer",
-                    "PATH": "relative:/custom/bin:/usr/bin:/custom/bin",
-                    "CODEX_MANAGED_BY_NPM": "1",
-                    "CODEX_MANAGED_BY_FUTURE": "1",
-                    "CODEX_MANAGED_PACKAGE_ROOT": "/spoofed",
-                ],
-                output: report(
-                    enabled: "true",
-                    latestStatus: "newer version is available",
-                    action: action
-                ),
-                inspect: { executableURL, arguments, environment in
-                    #expect(executableURL.path == "/tools/codex")
-                    #expect(arguments == ["doctor", "--json"])
-                    #expect(environment["CODEX_HOME"] == "/users/reviewer/.codex_review")
-                    #expect(environment["CODEX_SQLITE_HOME"] == "/users/reviewer/.codex_review/sqlite")
-                    #expect(environment["CODEX_MANAGED_BY_NPM"] == nil)
-                    #expect(environment["CODEX_MANAGED_BY_FUTURE"] == nil)
-                    #expect(environment["CODEX_MANAGED_PACKAGE_ROOT"] == nil)
-                    #expect(environment["PATH"] == [
-                        "/custom/bin", "/usr/bin", "/opt/homebrew/bin",
-                        "/usr/local/bin", "/bin", "/usr/sbin", "/sbin",
-                    ].joined(separator: ":"))
-                }
-            )
-
-            guard case .available(let plan) = try await checker.check() else {
-                Issue.record("Expected an available update for \(action).")
-                continue
+    @Test func homebrewUpdateReturnsOneReusablePlanWithAStableEnvironment() async throws {
+        let checker = makeChecker(
+            environment: [
+                "HOME": "/users/reviewer",
+                "PATH": "relative:/custom/bin:/usr/bin:/custom/bin",
+                "CODEX_MANAGED_BY_NPM": "1",
+                "CODEX_MANAGED_BY_FUTURE": "1",
+                "CODEX_MANAGED_PACKAGE_ROOT": "/spoofed",
+            ],
+            output: report(
+                enabled: "true",
+                latestStatus: "newer version is available",
+                action: "brew upgrade --cask codex"
+            ),
+            inspect: { executableURL, arguments, environment in
+                #expect(executableURL.path == "/tools/codex")
+                #expect(arguments == ["doctor", "--json"])
+                #expect(environment["CODEX_HOME"] == "/users/reviewer/.codex_review")
+                #expect(environment["CODEX_SQLITE_HOME"] == "/users/reviewer/.codex_review/sqlite")
+                #expect(environment["CODEX_MANAGED_BY_NPM"] == nil)
+                #expect(environment["CODEX_MANAGED_BY_FUTURE"] == nil)
+                #expect(environment["CODEX_MANAGED_PACKAGE_ROOT"] == nil)
+                #expect(environment["PATH"] == [
+                    "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin",
+                    "/bin", "/usr/sbin", "/sbin",
+                ].joined(separator: ":"))
             }
-            #expect(plan.executableURL == executableURL)
-            #expect(plan.environment["CODEX_HOME"] == "/users/reviewer/.codex_review")
-            #expect(plan.environment["CODEX_MANAGED_BY_NPM"] == nil)
+        )
+
+        guard case .available(let plan) = try await checker.check() else {
+            Issue.record("Expected an available Homebrew update.")
+            return
         }
+        #expect(plan.executableURL == executableURL)
+        #expect(plan.environment["CODEX_HOME"] == "/users/reviewer/.codex_review")
+        #expect(plan.environment["CODEX_MANAGED_BY_NPM"] == nil)
     }
 
     @Test func explicitRuntimeHomeOwnsDoctorAndPlanEnvironment() async throws {
@@ -64,7 +54,7 @@ struct CodexCommandUpdateCheckerTests {
             output: report(
                 enabled: "true",
                 latestStatus: "newer version is available",
-                action: "standalone installer"
+                action: "brew upgrade --cask codex"
             )
         )
         guard case .available(let plan) = try await checker.check() else {
@@ -93,7 +83,12 @@ struct CodexCommandUpdateCheckerTests {
         )).check()
         #expect(current == .unavailable)
 
-        for action in ["manual or unknown", "future updater"] {
+        for action in [
+            "manual or unknown",
+            "npm install -g @openai/codex",
+            "standalone installer",
+            "future updater",
+        ] {
             let unsupported = try await makeChecker(output: report(
                 enabled: "true",
                 latestStatus: "newer version is available",

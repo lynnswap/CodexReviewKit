@@ -6,7 +6,7 @@ public struct CodexCommandUpdatePlan: Equatable, Sendable {
     public let executableURL: URL
     public let environment: [String: String]
 
-    package init(executableURL: URL, environment: [String: String]) {
+    public init(executableURL: URL, environment: [String: String]) {
         self.executableURL = executableURL
         self.environment = environment
     }
@@ -107,9 +107,8 @@ public struct CodexCommandUpdateChecker: Sendable {
             )
         }
 
-        guard Self.supportedUpdateActions.contains(
-            try update.scalar(named: "update action")
-        ) else {
+        guard try update.scalar(named: "update action")
+            == "brew upgrade --cask codex" else {
             return .unavailable
         }
         return .available(.init(
@@ -117,15 +116,6 @@ public struct CodexCommandUpdateChecker: Sendable {
             environment: environment
         ))
     }
-
-    private static let supportedUpdateActions: Set<String> = [
-        "npm install -g @openai/codex",
-        "bun install -g @openai/codex",
-        "vp install -g @openai/codex",
-        "pnpm add -g @openai/codex",
-        "brew upgrade --cask codex",
-        "standalone installer",
-    ]
 
     private static let stablePathEntries = [
         "/opt/homebrew/bin",
@@ -146,17 +136,7 @@ public struct CodexCommandUpdateChecker: Sendable {
             environment.removeValue(forKey: key)
         }
 
-        var seen = Set<String>()
-        var path = (source["PATH"] ?? "")
-            .split(separator: ":", omittingEmptySubsequences: true)
-            .map(String.init)
-            .filter { $0.hasPrefix("/") }
-            .map { URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL.path }
-            .filter { seen.insert($0).inserted }
-        for entry in stablePathEntries where seen.insert(entry).inserted {
-            path.append(entry)
-        }
-        environment["PATH"] = path.joined(separator: ":")
+        environment["PATH"] = stablePathEntries.joined(separator: ":")
         return environment
     }
 
