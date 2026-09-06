@@ -424,7 +424,12 @@ private final class ReviewMonitorPresentationAnchorSource {
 }
 
 private enum ReviewMonitorNativeAuthentication {
-    static let callbackScheme = "lynnpd.CodexReviewMonitor.auth"
+    static var callbackScheme: String {
+        guard let bundleIdentifier = Bundle.main.bundleIdentifier else {
+            preconditionFailure("ReviewMonitor requires an application bundle identifier.")
+        }
+        return "\(bundleIdentifier).auth"
+    }
 }
 
 @MainActor

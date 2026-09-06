@@ -8,10 +8,10 @@
 			<key>CFBundleTypeRole</key>
 			<string>Editor</string>
 			<key>CFBundleURLName</key>
-			<string>lynnpd.CodexReviewMonitor.auth</string>
+			<string>$(PRODUCT_BUNDLE_IDENTIFIER).auth</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>lynnpd.CodexReviewMonitor.auth</string>
+				<string>$(PRODUCT_BUNDLE_IDENTIFIER).auth</string>
 			</array>
 		</dict>
 	</array>

@@ -8,7 +8,12 @@ import Testing
 @Suite(.serialized)
 @MainActor
 struct CodexReviewMonitorCITests {
-    @Test func applicationBundleProhibitsMultipleLaunchServicesInstances() {
+    @Test func testingApplicationBundleHasAnIsolatedLaunchServicesIdentity() {
+        #expect(Bundle.main.bundleIdentifier == "lynnpd.CodexReviewMonitor.Tests")
+        let urlTypes = Bundle.main.object(forInfoDictionaryKey: "CFBundleURLTypes")
+            as? [[String: Any]]
+        let urlSchemes = urlTypes?.first?["CFBundleURLSchemes"] as? [String]
+        #expect(urlSchemes == ["lynnpd.CodexReviewMonitor.Tests.auth"])
         #expect(
             Bundle.main.object(forInfoDictionaryKey: "LSMultipleInstancesProhibited") as? Bool
                 == true
@@ -323,7 +328,10 @@ struct CodexReviewMonitorCITests {
         #expect(capturedRuntimePreferences == expectedRuntimePreferences)
         #expect(capturedStoreMode == .production)
         #expect(didRequestPresentationAnchor == false)
-        #expect(capturedAuthenticationConfiguration?.callbackScheme == "lynnpd.CodexReviewMonitor.auth")
+        #expect(
+            capturedAuthenticationConfiguration?.callbackScheme
+                == "lynnpd.CodexReviewMonitor.Tests.auth"
+        )
         if case .ephemeral? = capturedAuthenticationConfiguration?.browserSessionPolicy {
         } else {
             Issue.record("Expected ReviewMonitor to use an ephemeral browser session.")
