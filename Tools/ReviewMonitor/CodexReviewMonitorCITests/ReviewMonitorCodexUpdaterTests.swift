@@ -15,6 +15,7 @@ struct ReviewMonitorCodexUpdaterTests {
         var checkCount = 0
         var publishedAvailability: [Bool] = []
         let available = TestSignal()
+        let scheduledAfterAvailable = TestSignal()
         let waitCount = UpdateTestCounter()
         let updater = ReviewMonitorCodexUpdater(
             check: {
@@ -22,7 +23,10 @@ struct ReviewMonitorCodexUpdaterTests {
                 return results.removeFirst()
             },
             wait: {
-                await waitCount.increment()
+                if await waitCount.increment() == 2 {
+                    await scheduledAfterAvailable.signal()
+                    try await Task.sleep(for: .seconds(60))
+                }
             },
             publishAvailability: { value in
                 publishedAvailability.append(value)
@@ -37,10 +41,12 @@ struct ReviewMonitorCodexUpdaterTests {
 
         updater.start()
         await available.wait()
+        await scheduledAfterAvailable.wait()
 
         #expect(checkCount == 2)
-        #expect(await waitCount.value == 1)
+        #expect(await waitCount.value == 2)
         #expect(publishedAvailability == [false, true])
+        await updater.stopAndWait()
     }
 
     @Test func disabledCheckStopsWithoutSchedulingAnotherCheck() async {
@@ -104,14 +110,17 @@ struct ReviewMonitorCodexUpdaterTests {
         #expect(scheduledFailureValues == [false])
         #expect(terminationRequestCount == 1)
         #expect(publishedAvailability == [true, false])
+        await updater.stopAndWait()
     }
 
     @Test func stalePlanIsDiscardedBeforeTheStoreShutsDown() async {
         let plan = updatePlan()
         let available = TestSignal()
+        let waitCount = UpdateTestCounter()
         var results: [CodexCommandUpdateCheckResult] = [
             .available(plan),
             .unavailable,
+            .available(plan),
         ]
         var checkCount = 0
         var publishedAvailability: [Bool] = []
@@ -121,6 +130,12 @@ struct ReviewMonitorCodexUpdaterTests {
             check: {
                 checkCount += 1
                 return results.removeFirst()
+            },
+            wait: {
+                let count = await waitCount.increment()
+                if count != 2 {
+                    try await Task.sleep(for: .seconds(60))
+                }
             },
             publishAvailability: { value in
                 publishedAvailability.append(value)
@@ -137,12 +152,15 @@ struct ReviewMonitorCodexUpdaterTests {
         await available.wait()
 
         updater.requestUpdate()
-        await updater.stopAndWait()
+        for _ in 0..<100 where checkCount < 3 {
+            await Task.yield()
+        }
 
-        #expect(checkCount == 2)
-        #expect(publishedAvailability == [true, false])
+        #expect(checkCount == 3)
         #expect(prepareForUpdateCount == 0)
         #expect(runUpdateCount == 0)
+        #expect(publishedAvailability.filter { $0 }.count == 2)
+        await updater.stopAndWait()
     }
 
     @Test func updateAndRelaunchFailuresPreserveThePrimaryUpdateError() async {
@@ -182,6 +200,7 @@ struct ReviewMonitorCodexUpdaterTests {
         #expect(failures.count == 1)
         #expect(failures.first?.0 == "Codex Could Not Be Updated")
         #expect(failures.first?.1.contains("also could not schedule") == true)
+        await updater.stopAndWait()
     }
 
     @Test func updateFailureIsReportedToTheRelaunchedApplication() async {
@@ -211,6 +230,7 @@ struct ReviewMonitorCodexUpdaterTests {
         await terminationRequested.wait()
 
         #expect(scheduledFailureValues == [true])
+        await updater.stopAndWait()
     }
 
     @Test func applicationTerminationWaitsForAnUncancelledUpdate() async {
@@ -301,7 +321,9 @@ private enum UpdateTestFailure: Error {
 private actor UpdateTestCounter {
     private(set) var value = 0
 
-    func increment() {
+    @discardableResult
+    func increment() -> Int {
         value += 1
+        return value
     }
 }

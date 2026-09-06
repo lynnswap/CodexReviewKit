@@ -51,26 +51,31 @@ final class ReviewMonitorCodexUpdater {
         self.presentFailure = presentFailure
     }
 
-    isolated deinit {
-        monitorTask?.cancel()
+    func start() {
+        startMonitoring(checkImmediately: true)
     }
 
-    func start() {
-        guard monitorTask == nil else {
+    private func startMonitoring(checkImmediately: Bool) {
+        guard monitorTask == nil, updateTask == nil else {
             return
         }
         monitorTask = Task { @MainActor [weak self] in
-            await self?.monitorForUpdate()
+            await self?.monitorForUpdate(checkImmediately: checkImmediately)
             self?.monitorTask = nil
         }
     }
 
     func stopAndWait() async {
         let monitorTask = monitorTask
+        let updateTask = updateTask
         monitorTask?.cancel()
         self.monitorTask = nil
         await monitorTask?.value
         await updateTask?.value
+        let successorMonitorTask = self.monitorTask
+        successorMonitorTask?.cancel()
+        self.monitorTask = nil
+        await successorMonitorTask?.value
     }
 
     func requestUpdate() {
@@ -79,15 +84,19 @@ final class ReviewMonitorCodexUpdater {
             return
         }
         publishAvailability(false)
+        let monitorTask = monitorTask
+        monitorTask?.cancel()
         updateTask = Task { @MainActor [weak self] in
             guard let self else {
                 return
             }
+            await monitorTask?.value
             let plan: CodexCommandUpdatePlan
             do {
                 guard case .available(let currentPlan) = try await check() else {
                     availablePlan = nil
                     updateTask = nil
+                    startMonitoring(checkImmediately: false)
                     return
                 }
                 plan = currentPlan
@@ -95,6 +104,7 @@ final class ReviewMonitorCodexUpdater {
             } catch {
                 updateTask = nil
                 publishAvailability(true)
+                startMonitoring(checkImmediately: false)
                 presentFailure(
                     "Codex Update Could Not Start",
                     "ReviewMonitor could not confirm that the Codex update is still available. \(error.localizedDescription)"
@@ -133,19 +143,27 @@ final class ReviewMonitorCodexUpdater {
         }
     }
 
-    private func monitorForUpdate() async {
-        while Task.isCancelled == false {
+    private func monitorForUpdate(checkImmediately: Bool) async {
+        if checkImmediately == false {
+            do {
+                try await wait()
+            } catch {
+                return
+            }
+        }
+        while Task.isCancelled == false, updateTask == nil {
             do {
                 switch try await check() {
                 case .disabled:
+                    availablePlan = nil
                     publishAvailability(false)
                     return
                 case .unavailable:
+                    availablePlan = nil
                     publishAvailability(false)
                 case .available(let plan):
                     availablePlan = plan
                     publishAvailability(true)
-                    return
                 }
             } catch is CancellationError {
                 return
