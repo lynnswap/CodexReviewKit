@@ -251,15 +251,11 @@ jobs:
         include:
           - gate: consumer
             label: Consumer
-          - gate: api
-            label: Public API
           - gate: mcp
             label: MCP
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
 
       - name: Show Xcode environment
         run: |

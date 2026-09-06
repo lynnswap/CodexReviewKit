@@ -87,8 +87,7 @@ artifacts; update or revoke them through Apple and GitHub when needed.
 Maintainers can build a validation DMG entirely on GitHub Actions. Open
 [Release Build](https://github.com/lynnswap/CodexReviewKit/actions/workflows/release-build.yml),
 choose **Run workflow** on `main`, and enter a version label such as
-`v0.0.0-validation`. The same build also runs for pull requests and pushes to
-`main`.
+`v0.0.0-validation`. The same build also runs for pushes to `main`.
 
 The workflow builds the selected commit with the runner's default Xcode, creates
 the DMG without Finder or Apple credentials, and verifies the mounted app.

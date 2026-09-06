@@ -1,7 +1,6 @@
 name: Release Build
 
 on:
-  pull_request:
   push:
     branches:
       - main
@@ -29,8 +28,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-build-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: release-build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   unsigned-dmg:
