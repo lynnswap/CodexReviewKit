@@ -8,6 +8,18 @@ import Testing
 @Suite(.serialized)
 @MainActor
 struct CodexReviewMonitorCITests {
+    @Test func codexUpdateNotificationsMatchReviewUIContract() {
+        #expect(
+            ReviewMonitorCodexUpdateNotification.availabilityChanged.rawValue
+                == "CodexReviewKit.ReviewMonitor.codexUpdateAvailabilityChanged"
+        )
+        #expect(
+            ReviewMonitorCodexUpdateNotification.requested.rawValue
+                == "CodexReviewKit.ReviewMonitor.codexUpdateRequested"
+        )
+        #expect(ReviewMonitorCodexUpdateNotification.availableUserInfoKey == "available")
+    }
+
     @Test func testingApplicationBundleHasAnIsolatedLaunchServicesIdentity() {
         #expect(Bundle.main.bundleIdentifier == "lynnpd.CodexReviewMonitor.Tests")
         let urlTypes = Bundle.main.object(forInfoDictionaryKey: "CFBundleURLTypes")
@@ -118,7 +130,6 @@ struct CodexReviewMonitorCITests {
         let expectedStore = CodexReviewStore.makePreviewStore()
         var capturedContext: ReviewMonitorLaunchContext?
         var capturedShowSettings: (@MainActor () -> Void)?
-        var capturedRequestCodexUpdate: (@MainActor () -> Void)?
         let recorder = WindowControllerFactoryRecorder()
         let settingsWindowController = CountingWindowController()
         let composition = ReviewMonitorAppComposition(
@@ -126,10 +137,9 @@ struct CodexReviewMonitorCITests {
                 capturedContext = context
                 return expectedStore
             },
-            makeWindowController: { store, showSettings, requestCodexUpdate in
+            makeWindowController: { store, showSettings in
                 #expect(store === expectedStore)
                 capturedShowSettings = showSettings
-                capturedRequestCodexUpdate = requestCodexUpdate
                 return recorder.makeWindowController()
             },
             makeSettingsWindowController: {
@@ -163,8 +173,6 @@ struct CodexReviewMonitorCITests {
         #expect(delegate.windowController === windowController)
         #expect(windowController?.showWindowCallCount == 1)
         #expect(windowController?.windowForTesting.makeKeyAndOrderFrontCallCount == 1)
-        #expect(capturedRequestCodexUpdate == nil)
-
         capturedShowSettings?()
         #expect(delegate.settingsWindowController === settingsWindowController)
         #expect(settingsWindowController.showWindowCallCount == 1)
@@ -184,7 +192,7 @@ struct CodexReviewMonitorCITests {
             makeStore: { _, _ in
                 CodexReviewStore.makePreviewStore()
             },
-            makeWindowController: { _, _, _ in
+            makeWindowController: { _, _ in
                 CountingWindowController()
             }
         )
@@ -231,7 +239,7 @@ struct CodexReviewMonitorCITests {
             makeStore: { _, _ in
                 CodexReviewStore.makePreviewStore()
             },
-            makeWindowController: { _, _, _ in
+            makeWindowController: { _, _ in
                 CountingWindowController()
             },
             makeSettingsWindowController: {
@@ -680,7 +688,7 @@ struct CodexReviewMonitorCITests {
             makeStore: { _, _ in
                 CodexReviewStore.makePreviewStore()
             },
-            makeWindowController: { _, _, _ in
+            makeWindowController: { _, _ in
                 CountingWindowController()
             }
         )

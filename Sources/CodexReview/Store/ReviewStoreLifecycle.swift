@@ -193,6 +193,10 @@ package final class ReviewStoreWorkRegistry {
         registeredTasks.keys.sorted()
     }
 
+    package var hasActiveReviewWork: Bool {
+        registeredTasks.values.contains { $0.admission.kind.isReviewWork }
+    }
+
     package func register(_ kind: ReviewStoreWorkKind) -> Admission? {
         guard admissionIsOpen, reviewAdmissionIsOpen || kind.isReviewWork == false else {
             return nil

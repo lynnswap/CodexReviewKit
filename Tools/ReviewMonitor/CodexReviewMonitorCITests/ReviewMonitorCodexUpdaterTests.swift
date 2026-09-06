@@ -34,7 +34,7 @@ struct ReviewMonitorCodexUpdaterTests {
                     Task { await available.signal() }
                 }
             },
-            prepareForUpdate: {},
+            prepareForUpdate: { true },
             requestApplicationTermination: {},
             presentFailure: { _, _ in }
         )
@@ -60,7 +60,7 @@ struct ReviewMonitorCodexUpdaterTests {
             publishAvailability: { _ in
                 Task { await checkCompleted.signal() }
             },
-            prepareForUpdate: {},
+            prepareForUpdate: { true },
             requestApplicationTermination: {},
             presentFailure: { _, _ in }
         )
@@ -89,7 +89,10 @@ struct ReviewMonitorCodexUpdaterTests {
                     Task { await available.signal() }
                 }
             },
-            prepareForUpdate: { preparedUpdateCount += 1 },
+            prepareForUpdate: {
+                preparedUpdateCount += 1
+                return true
+            },
             runUpdate: { updatedPlans.append($0) },
             scheduleRelaunch: { scheduledFailureValues.append($0) },
             requestApplicationTermination: {
@@ -143,7 +146,10 @@ struct ReviewMonitorCodexUpdaterTests {
                     Task { await available.signal() }
                 }
             },
-            prepareForUpdate: { prepareForUpdateCount += 1 },
+            prepareForUpdate: {
+                prepareForUpdateCount += 1
+                return true
+            },
             runUpdate: { _ in runUpdateCount += 1 },
             requestApplicationTermination: {},
             presentFailure: { _, _ in }
@@ -163,6 +169,53 @@ struct ReviewMonitorCodexUpdaterTests {
         await updater.stopAndWait()
     }
 
+    @Test func reviewArrivingDuringRevalidationRequiresFreshConfirmation() async {
+        let plan = updatePlan()
+        let available = TestSignal()
+        let revalidationStarted = TestSignal()
+        let releaseRevalidation = TestGate()
+        let preparationRejected = TestSignal()
+        var checkCount = 0
+        var publishedAvailability: [Bool] = []
+        var runUpdateCount = 0
+        let updater = ReviewMonitorCodexUpdater(
+            check: {
+                checkCount += 1
+                if checkCount == 1 {
+                    return .available(plan)
+                }
+                await revalidationStarted.signal()
+                await releaseRevalidation.wait()
+                return .available(plan)
+            },
+            publishAvailability: { value in
+                publishedAvailability.append(value)
+                if value, publishedAvailability.count == 1 {
+                    Task { await available.signal() }
+                }
+            },
+            prepareForUpdate: {
+                await preparationRejected.signal()
+                return false
+            },
+            runUpdate: { _ in runUpdateCount += 1 },
+            requestApplicationTermination: {},
+            presentFailure: { _, _ in }
+        )
+        updater.start()
+        await available.wait()
+        updater.requestUpdate()
+        await revalidationStarted.wait()
+
+        await releaseRevalidation.open()
+        await preparationRejected.wait()
+
+        #expect(checkCount == 2)
+        #expect(runUpdateCount == 0)
+        #expect(publishedAvailability == [true, false, true])
+        await updater.stopAndWait()
+    }
+
     @Test func updateAndRelaunchFailuresPreserveThePrimaryUpdateError() async {
         let plan = updatePlan()
         let available = TestSignal()
@@ -178,7 +231,7 @@ struct ReviewMonitorCodexUpdaterTests {
                     Task { await available.signal() }
                 }
             },
-            prepareForUpdate: {},
+            prepareForUpdate: { true },
             runUpdate: { _ in throw UpdateTestFailure.injected },
             scheduleRelaunch: { _ in throw UpdateTestFailure.injected },
             requestApplicationTermination: {
@@ -215,7 +268,7 @@ struct ReviewMonitorCodexUpdaterTests {
                     Task { await available.signal() }
                 }
             },
-            prepareForUpdate: {},
+            prepareForUpdate: { true },
             runUpdate: { _ in throw UpdateTestFailure.injected },
             scheduleRelaunch: { scheduledFailureValues.append($0) },
             requestApplicationTermination: {
@@ -247,7 +300,7 @@ struct ReviewMonitorCodexUpdaterTests {
                     Task { await available.signal() }
                 }
             },
-            prepareForUpdate: {},
+            prepareForUpdate: { true },
             runUpdate: { _ in
                 await updateStarted.signal()
                 await releaseUpdate.wait()

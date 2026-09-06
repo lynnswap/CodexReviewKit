@@ -1,7 +1,6 @@
 import AppKit
 import Foundation
 import OSLog
-@_spi(ApplicationHostSupport) import CodexReviewHost
 
 private let codexUpdateLogger = Logger(
     subsystem: "CodexReviewMonitor",
@@ -20,7 +19,7 @@ final class ReviewMonitorCodexUpdater {
     private let check: Check
     private let wait: Wait
     private let publishAvailability: PublishAvailability
-    private let prepareForUpdate: @MainActor () async -> Void
+    private let prepareForUpdate: @MainActor () async -> Bool
     private let runUpdate: RunUpdate
     private let scheduleRelaunch: ScheduleRelaunch
     private let requestApplicationTermination: @MainActor () -> Void
@@ -35,7 +34,7 @@ final class ReviewMonitorCodexUpdater {
             try await Task.sleep(for: .seconds(20 * 60 * 60))
         },
         publishAvailability: @escaping PublishAvailability,
-        prepareForUpdate: @escaping @MainActor () async -> Void,
+        prepareForUpdate: @escaping @MainActor () async -> Bool,
         runUpdate: @escaping RunUpdate = ReviewMonitorCodexUpdateProcess.run,
         scheduleRelaunch: @escaping ScheduleRelaunch = ReviewMonitorApplicationRelauncher.schedule,
         requestApplicationTermination: @escaping @MainActor () -> Void,
@@ -100,7 +99,7 @@ final class ReviewMonitorCodexUpdater {
                     return
                 }
                 plan = currentPlan
-                availablePlan = nil
+                availablePlan = currentPlan
             } catch {
                 updateTask = nil
                 publishAvailability(true)
@@ -111,7 +110,13 @@ final class ReviewMonitorCodexUpdater {
                 )
                 return
             }
-            await prepareForUpdate()
+            guard await prepareForUpdate() else {
+                updateTask = nil
+                publishAvailability(true)
+                startMonitoring(checkImmediately: false)
+                return
+            }
+            availablePlan = nil
             let updateFailure: (any Error)?
             do {
                 try await runUpdate(plan)
