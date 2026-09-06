@@ -1213,6 +1213,365 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func modelCapacityRetriesThroughExactRecoveryWithoutFailingTheJob() async throws {
+        let initialRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-initial",
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1",
+            model: "gpt-5"
+        )
+        let recoveredRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-recovered",
+            threadID: "thread-1",
+            turnID: "turn-2",
+            reviewThreadID: "review-thread-1",
+            model: "gpt-5"
+        )
+        let backend = FakeCodexReviewBackend(nextRun: initialRun)
+        await backend.setNextRecoveredRun(recoveredRun)
+        let storeBackend = TestingCodexReviewStoreBackend(reviewBackend: backend)
+        let sleepStarted = AsyncGate()
+        let sleepRelease = AsyncGate()
+        let sleepDurations = StoreCommandDurationRecorder()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: storeBackend,
+            idGenerator: .init(next: { "job-1" }),
+            modelCapacityRecoveryPolicy: .init(sleep: { duration in
+                await sleepDurations.record(duration)
+                await sleepStarted.open()
+                await sleepRelease.wait()
+                try Task.checkCancellation()
+            })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            try await scriptRecoveryRoute(in: store)
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+            )
+            try #require(await StoreSnapshotProbe(store: store)
+                .waitUntilJobStatus(.running, jobID: "job-1") != nil)
+
+            await backend.finishEvents(
+                throwing: ReviewAttemptStreamFailure.modelCapacity(message: "Capacity wording may change."),
+                for: initialRun
+            )
+            try await sleepStarted.wait(
+                timeout: .seconds(2),
+                operation: "model-capacity backoff"
+            )
+
+            let waiting = try store.readReview(jobID: "job-1")
+            #expect(waiting.core.lifecycle.status == .running)
+            #expect(waiting.core.lifecycle.endedAt == nil)
+            #expect(waiting.core.output.summary.contains("Retrying in"))
+            #expect(await sleepDurations.values == [.seconds(15)])
+            #expect(await backend.recordedCommands().contains {
+                if case .interruptReviewAdmission = $0 { true } else { false }
+            } == false)
+
+            await sleepRelease.open()
+            try await backend.waitForResumeReviewRecovery(timeout: .seconds(2))
+            try #require(await waitForRunAttemptActivation(store: store, run: recoveredRun))
+            await backend.yield(
+                .completed(summary: "Succeeded.", result: "recovered review"),
+                for: recoveredRun
+            )
+            let read = try await result
+
+            #expect(read.core.lifecycle.status == .succeeded)
+            #expect(read.core.run.turnID == "turn-2")
+            #expect(read.core.output.lastAgentMessage == "recovered review")
+            #expect(storeBackend.reviewRecoveryCommands.filter {
+                if case .prepare(let candidate, _) = $0 {
+                    candidate.trigger == .modelCapacity
+                } else {
+                    false
+                }
+            }.count == 1)
+        }
+    }
+
+    @Test func cancellationDuringModelCapacityBackoffPreventsRetryDispatch() async throws {
+        let initialRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-initial",
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1",
+            model: "gpt-5"
+        )
+        let backend = FakeCodexReviewBackend(nextRun: initialRun)
+        let storeBackend = TestingCodexReviewStoreBackend(reviewBackend: backend)
+        let sleepStarted = AsyncGate()
+        let sleepRelease = AsyncGate()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: storeBackend,
+            idGenerator: .init(next: { "job-1" }),
+            modelCapacityRecoveryPolicy: .init(sleep: { _ in
+                await sleepStarted.open()
+                await sleepRelease.wait()
+                try Task.checkCancellation()
+            })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            try await scriptRecoveryRoute(in: store)
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+            )
+            try #require(await StoreSnapshotProbe(store: store)
+                .waitUntilJobStatus(.running, jobID: "job-1") != nil)
+
+            await backend.finishEvents(
+                throwing: ReviewAttemptStreamFailure.modelCapacity(message: nil),
+                for: initialRun
+            )
+            try await sleepStarted.wait(
+                timeout: .seconds(2),
+                operation: "model-capacity cancellation backoff"
+            )
+
+            _ = try await store.cancelReview(
+                jobID: "job-1",
+                cancellation: .mcpClient(message: "Stop")
+            )
+            let read = try await result
+
+            #expect(read.core.lifecycle.status == .cancelled)
+            #expect(read.core.lifecycle.cancellation?.message == "Stop")
+            #expect(store.reviewAttemptOwnerships["job-1"] == nil)
+            #expect(store.reviewWorkerTasks["job-1"] == nil)
+            #expect(await backend.recordedCommands().contains {
+                if case .resumeReviewRecoveryHandoff = $0 { true } else { false }
+            } == false)
+            #expect(storeBackend.reviewRecoveryCommands.contains {
+                if case .discardPrepared = $0 { true } else { false }
+            })
+
+            await sleepRelease.open()
+        }
+    }
+
+    @Test func consecutiveModelCapacityFailuresUseCappedBackoffUntilSuccess() async throws {
+        let runs = (1...5).map { index in
+            CodexReviewBackendModel.Review.Run(
+                attemptID: "attempt-\(index)",
+                threadID: "thread-1",
+                turnID: "turn-\(index)",
+                reviewThreadID: "review-thread-1",
+                model: "gpt-5"
+            )
+        }
+        let backend = FakeCodexReviewBackend(nextRun: runs[0])
+        let storeBackend = TestingCodexReviewStoreBackend(reviewBackend: backend)
+        let sleepDurations = StoreCommandDurationRecorder()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: storeBackend,
+            idGenerator: .init(next: { "job-1" }),
+            modelCapacityRecoveryPolicy: .init(sleep: { duration in
+                await sleepDurations.record(duration)
+            })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            await store.start()
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+            )
+            try #require(await waitForRunAttemptActivation(store: store, run: runs[0]))
+
+            for index in 0..<4 {
+                await backend.setNextRecoveredRun(runs[index + 1])
+                try await scriptRecoveryRoute(in: store)
+                await backend.finishEvents(
+                    throwing: ReviewAttemptStreamFailure.modelCapacity(message: "Capacity"),
+                    for: runs[index]
+                )
+                try #require(await waitForRunAttemptActivation(
+                    store: store,
+                    run: runs[index + 1]
+                ))
+            }
+
+            #expect(await sleepDurations.values == [
+                .seconds(15),
+                .seconds(30),
+                .seconds(60),
+                .seconds(60),
+            ])
+            await backend.yield(
+                .completed(summary: "Succeeded.", result: "recovered review"),
+                for: runs[4]
+            )
+            let read = try await result
+            #expect(read.core.lifecycle.status == .succeeded)
+        }
+    }
+
+    @Test func onlyConfirmedModelProgressResetsCapacityBackoff() async throws {
+        let runs = (1...6).map { index in
+            CodexReviewBackendModel.Review.Run(
+                attemptID: "attempt-\(index)",
+                threadID: "thread-1",
+                turnID: "turn-\(index)",
+                reviewThreadID: "review-thread-1",
+                model: "gpt-5"
+            )
+        }
+        let backend = FakeCodexReviewBackend(nextRun: runs[0])
+        let storeBackend = TestingCodexReviewStoreBackend(reviewBackend: backend)
+        let sleepDurations = StoreCommandDurationRecorder()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: storeBackend,
+            idGenerator: .init(next: { "job-1" }),
+            modelCapacityRecoveryPolicy: .init(sleep: { duration in
+                await sleepDurations.record(duration)
+            })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            await store.start()
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+            )
+            try #require(await waitForRunAttemptActivation(store: store, run: runs[0]))
+
+            await backend.setNextRecoveredRun(runs[1])
+            try await scriptRecoveryRoute(in: store)
+            await backend.finishEvents(
+                throwing: ReviewAttemptStreamFailure.modelCapacity(message: "Capacity"),
+                for: runs[0]
+            )
+            try #require(await waitForRunAttemptActivation(store: store, run: runs[1]))
+
+            await backend.yield(.logEntry(
+                kind: .event,
+                text: "Model rerouted.",
+                groupID: "reroute",
+                replacesGroup: false
+            ), for: runs[1])
+            try #require(await waitUntil {
+                (try? store.readReview(jobID: "job-1").logs.contains {
+                    $0.text == "Model rerouted."
+                }) == true
+            })
+            await backend.setNextRecoveredRun(runs[2])
+            try await scriptRecoveryRoute(in: store)
+            await backend.finishEvents(
+                throwing: ReviewAttemptStreamFailure.modelCapacity(message: "Capacity after reroute"),
+                for: runs[1]
+            )
+            try #require(await waitForRunAttemptActivation(store: store, run: runs[2]))
+
+            for (offset, status) in ["inProgress", "failed", "completed"].enumerated() {
+                let sourceIndex = offset + 2
+                let logText = "Context compaction \(status)"
+                await backend.yield(.logEntry(
+                    kind: .contextCompaction,
+                    text: logText,
+                    groupID: "context-\(sourceIndex)",
+                    replacesGroup: true,
+                    metadata: .init(sourceType: "contextCompaction", status: status)
+                ), for: runs[sourceIndex])
+                try #require(await waitUntil {
+                    (try? store.readReview(jobID: "job-1").logs.contains { $0.text == logText }) == true
+                })
+
+                await backend.setNextRecoveredRun(runs[sourceIndex + 1])
+                try await scriptRecoveryRoute(in: store)
+                await backend.finishEvents(
+                    throwing: ReviewAttemptStreamFailure.modelCapacity(message: "Capacity again"),
+                    for: runs[sourceIndex]
+                )
+                try #require(await waitForRunAttemptActivation(
+                    store: store,
+                    run: runs[sourceIndex + 1]
+                ))
+            }
+
+            #expect(await sleepDurations.values == [
+                .seconds(15),
+                .seconds(30),
+                .seconds(60),
+                .seconds(60),
+                .seconds(15),
+            ])
+            await backend.yield(
+                .completed(summary: "Succeeded.", result: "recovered review"),
+                for: runs[5]
+            )
+            let read = try await result
+            #expect(read.core.lifecycle.status == .succeeded)
+        }
+    }
+
+    @Test func modelCapacityAddsBackoffToNetworkOwnedRecovery() async throws {
+        let initialRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-initial",
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1",
+            model: "gpt-5"
+        )
+        let recoveredRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-recovered",
+            threadID: "thread-1",
+            turnID: "turn-2",
+            reviewThreadID: "review-thread-1",
+            model: "gpt-5"
+        )
+        let backend = FakeCodexReviewBackend(nextRun: initialRun)
+        await backend.setNextRecoveredRun(recoveredRun)
+        let interruptGate = AsyncGate()
+        await backend.holdInterruptReview(with: interruptGate)
+        let networkMonitor = ManualCodexReviewNetworkMonitor()
+        let sleepDurations = StoreCommandDurationRecorder()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" }),
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: .init(sleep: { _ in }),
+            modelCapacityRecoveryPolicy: .init(sleep: { duration in
+                await sleepDurations.record(duration)
+            })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            try await scriptRecoveryRoute(in: store)
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+            )
+            try #require(await waitForRunAttemptActivation(store: store, run: initialRun))
+
+            networkMonitor.yield(.init(status: .unsatisfied))
+            try await backend.waitForInterruptReview(timeout: .seconds(2))
+            await backend.finishEvents(
+                throwing: ReviewAttemptStreamFailure.modelCapacity(message: "Capacity"),
+                for: initialRun
+            )
+            await interruptGate.open()
+            try #require(await waitUntil {
+                await sleepDurations.values == [.seconds(15)]
+            })
+
+            #expect(try store.readReview(jobID: "job-1").core.lifecycle.status == .running)
+            networkMonitor.yield(.satisfied())
+            try await backend.waitForResumeReviewRecovery(timeout: .seconds(2))
+            try #require(await waitForRunAttemptActivation(store: store, run: recoveredRun))
+            await backend.yield(
+                .completed(summary: "Succeeded.", result: "recovered review"),
+                for: recoveredRun
+            )
+            let read = try await result
+
+            #expect(read.core.lifecycle.status == .succeeded)
+            #expect(await backend.recordedCommands().filter {
+                if case .interruptReviewAdmission = $0 { true } else { false }
+            }.count == 1)
+        }
+    }
+
     @Test func sustainedNetworkOutageInterruptsForRecoveryWithoutTerminalJob() async throws {
         let backend = FakeCodexReviewBackend()
         let interruptGate = AsyncGate()
@@ -4343,6 +4702,14 @@ private actor StoreCommandSleepProbe {
                 waiters.append((count, continuation))
             }
         }
+    }
+}
+
+private actor StoreCommandDurationRecorder {
+    private(set) var values: [Duration] = []
+
+    func record(_ duration: Duration) {
+        values.append(duration)
     }
 }
 

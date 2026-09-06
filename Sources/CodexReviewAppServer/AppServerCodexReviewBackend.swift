@@ -890,7 +890,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             return
         }
         let session = await reviewEventSession(for: run, admittedBy: operationID)
-        let cancellationRequestID = await session.requestCancellation(message: reason.message)
+        let cancellationRequestID = await session.requestCancellation(
+            message: reason.message,
+            purpose: reason.purpose
+        )
         do {
             try await sendTurnInterrupt(for: run)
             await session.acceptCancellationRequest(cancellationRequestID)
@@ -922,7 +925,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                 ))
             }
             let session = await reviewEventSession(for: run, admittedBy: operationID)
-            let cancellationRequestID = await session.requestCancellation(message: reason.message)
+            let cancellationRequestID = await session.requestCancellation(
+                message: reason.message,
+                purpose: reason.purpose
+            )
             do {
                 try await sendTurnInterrupt(for: run)
                 await session.acceptCancellationRequest(cancellationRequestID)
@@ -2212,34 +2218,57 @@ private struct PendingStreamedLogEntry: Sendable {
 
 private actor AppServerReviewEventSession {
     private struct CancellationRequests {
-        var pendingMessagesByID: [UUID: String] = [:]
-        var acceptedMessage: String?
+        struct Request {
+            var message: String
+            var purpose: CodexReviewBackendModel.CancellationReason.Purpose
+        }
+
+        var pendingRequestsByID: [UUID: Request] = [:]
+        var acceptedCancellationMessage: String?
+        var acceptedRecoveryMessage: String?
+
+        var acceptedMessage: String? {
+            acceptedCancellationMessage ?? acceptedRecoveryMessage
+        }
 
         var hasIntent: Bool {
-            acceptedMessage != nil || pendingMessagesByID.isEmpty == false
+            acceptedMessage != nil || pendingRequestsByID.isEmpty == false
+        }
+
+        var hasTerminalCancellationIntent: Bool {
+            acceptedCancellationMessage != nil
+                || pendingRequestsByID.values.contains { $0.purpose == .cancellation }
         }
 
         var isAwaitingAcceptance: Bool {
-            acceptedMessage == nil && pendingMessagesByID.isEmpty == false
+            acceptedMessage == nil && pendingRequestsByID.isEmpty == false
         }
 
-        mutating func begin(message: String) -> UUID {
+        mutating func begin(
+            message: String,
+            purpose: CodexReviewBackendModel.CancellationReason.Purpose
+        ) -> UUID {
             let id = UUID()
-            pendingMessagesByID[id] = message
+            pendingRequestsByID[id] = .init(message: message, purpose: purpose)
             return id
         }
 
         mutating func accept(_ id: UUID) {
-            guard let message = pendingMessagesByID.removeValue(forKey: id) else {
+            guard let request = pendingRequestsByID.removeValue(forKey: id) else {
                 return
             }
-            if acceptedMessage == nil {
-                acceptedMessage = message
+            switch request.purpose {
+            case .cancellation where acceptedCancellationMessage == nil:
+                acceptedCancellationMessage = request.message
+            case .recovery where acceptedRecoveryMessage == nil:
+                acceptedRecoveryMessage = request.message
+            case .cancellation, .recovery:
+                break
             }
         }
 
         mutating func reject(_ id: UUID) {
-            pendingMessagesByID.removeValue(forKey: id)
+            pendingRequestsByID.removeValue(forKey: id)
         }
     }
 
@@ -2401,8 +2430,11 @@ private actor AppServerReviewEventSession {
         return threadIDs
     }
 
-    func requestCancellation(message: String) -> UUID {
-        cancellationRequests.begin(message: message)
+    func requestCancellation(
+        message: String,
+        purpose: CodexReviewBackendModel.CancellationReason.Purpose
+    ) -> UUID {
+        cancellationRequests.begin(message: message, purpose: purpose)
     }
 
     func acceptCancellationRequest(_ id: UUID) async {
@@ -2448,8 +2480,8 @@ private actor AppServerReviewEventSession {
         if cancellationMessage == nil {
             cancelPendingStreamedLogFlush()
         } else {
-            if cancellationRequests.acceptedMessage == nil {
-                cancellationRequests.acceptedMessage = cancellationMessage
+            if cancellationRequests.acceptedCancellationMessage == nil {
+                cancellationRequests.acceptedCancellationMessage = cancellationMessage
             }
             precedingEvents.append(contentsOf: commandLifecycleByItemID.closeActiveCommands(status: "canceled"))
             commandLifecycleByItemID.removeAll(keepingCapacity: true)
@@ -2697,6 +2729,13 @@ private actor AppServerReviewEventSession {
                 )
             }
             metrics.ignored += 1
+            return
+        }
+
+        if cancellationRequests.hasTerminalCancellationIntent == false,
+           case .failed(let message) = resolution.terminal,
+           notification.payload.turn?.error?.codexErrorInfo == .serverOverloaded {
+            await finish(throwing: .modelCapacity(message: message))
             return
         }
 
@@ -3462,14 +3501,20 @@ private struct AppServerNotificationTurn: Decodable, Sendable {
 
 private struct AppServerNotificationTurnError: Decodable, Sendable {
     var message: String?
+    var codexErrorInfo: AppServerAPI.Turn.CodexErrorInfo?
 
     enum CodingKeys: String, CodingKey {
         case message
+        case codexErrorInfo
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.message = try container.decodeStringIfPresent(forKey: .message)
+        self.codexErrorInfo = try container.decodeIfPresent(
+            AppServerAPI.Turn.CodexErrorInfo.self,
+            forKey: .codexErrorInfo
+        )
     }
 }
 
@@ -3676,13 +3721,20 @@ private func normalizeReviewNotification(
         events = []
     case "error":
         let message = payload.error?.message ?? payload.message ?? "Failed."
-        let kind: ReviewLogEntry.Kind = payload.willRetry == true ? .progress : .error
-        events = [.logEntry(
-            kind: kind,
-            text: message,
-            groupID: payload.turnID,
-            replacesGroup: false
-        )]
+        if payload.willRetry == false,
+           payload.error?.codexErrorInfo == .serverOverloaded {
+            // The matching turn/completed owns client-side capacity recovery.
+            // Suppress this companion notification so one failed turn schedules one retry.
+            events = []
+        } else {
+            let kind: ReviewLogEntry.Kind = payload.willRetry == true ? .progress : .error
+            events = [.logEntry(
+                kind: kind,
+                text: message,
+                groupID: payload.turnID,
+                replacesGroup: false
+            )]
+        }
     case "thread/closed":
         events = [.logEntry(
             kind: .diagnostic,

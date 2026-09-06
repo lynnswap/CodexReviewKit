@@ -125,6 +125,7 @@ public final class CodexReviewStore {
     @ObservationIgnored package let backend: any CodexReviewStoreBackend
     @ObservationIgnored package let networkMonitor: any CodexReviewNetworkMonitoring
     @ObservationIgnored package let networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy
+    @ObservationIgnored package let modelCapacityRecoveryPolicy: CodexReviewModelCapacityRecoveryPolicy
     @ObservationIgnored package var previewSupportRetainer: AnyObject?
     @ObservationIgnored package let clock: CodexReviewClock
     @ObservationIgnored package let idGenerator: CodexReviewIDGenerator
@@ -164,12 +165,14 @@ public final class CodexReviewStore {
         idGenerator: CodexReviewIDGenerator = .init(),
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
         networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
+        modelCapacityRecoveryPolicy: CodexReviewModelCapacityRecoveryPolicy = .default,
         historyPersistence: any ReviewHistoryPersistence = DisabledReviewHistoryPersistence(),
         historyRetentionPolicy: ReviewHistoryRetentionPolicy = .default
     ) {
         self.backend = backend
         self.networkMonitor = networkMonitor
         self.networkRecoveryPolicy = networkRecoveryPolicy
+        self.modelCapacityRecoveryPolicy = modelCapacityRecoveryPolicy
         self.diagnosticsURL = diagnosticsURL
         self.clock = clock
         self.idGenerator = idGenerator
@@ -247,6 +250,7 @@ public final class CodexReviewStore {
         idGenerator: CodexReviewIDGenerator = .init(),
         networkMonitor: any CodexReviewNetworkMonitoring = StaticCodexReviewNetworkMonitor(),
         networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
+        modelCapacityRecoveryPolicy: CodexReviewModelCapacityRecoveryPolicy = .default,
         historyPersistence: any ReviewHistoryPersistence = DisabledReviewHistoryPersistence(),
         historyRetentionPolicy: ReviewHistoryRetentionPolicy = .default
     ) -> CodexReviewStore {
@@ -257,6 +261,7 @@ public final class CodexReviewStore {
             idGenerator: idGenerator,
             networkMonitor: networkMonitor,
             networkRecoveryPolicy: networkRecoveryPolicy,
+            modelCapacityRecoveryPolicy: modelCapacityRecoveryPolicy,
             historyPersistence: historyPersistence,
             historyRetentionPolicy: historyRetentionPolicy
         )
