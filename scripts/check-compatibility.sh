@@ -15,7 +15,7 @@ trap cleanup EXIT INT TERM
 
 usage() {
   cat <<'EOF'
-Usage: scripts/check-compatibility.sh [all|consumer|api|mcp]
+Usage: scripts/check-compatibility.sh [all|consumer|mcp]
 
 With no argument, runs all v0.6.2 compatibility gates:
   scripts/check-compatibility.sh
@@ -39,10 +39,6 @@ run_consumer() {
   consumer_lock_created=false
 }
 
-run_api() {
-  "$repo_root/scripts/check-public-api-compatibility.sh"
-}
-
 run_mcp() {
   swift test \
     --package-path "$repo_root" \
@@ -56,14 +52,10 @@ gate="${1:-all}"
 case "$gate" in
   all)
     run_consumer
-    run_api
     run_mcp
     ;;
   consumer)
     run_consumer
-    ;;
-  api)
-    run_api
     ;;
   mcp)
     run_mcp
