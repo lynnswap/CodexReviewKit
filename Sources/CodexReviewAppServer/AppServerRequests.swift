@@ -310,11 +310,43 @@ struct Payload: Codable, Equatable, Sendable {
 
 
 package extension AppServerAPI.Turn {
+enum CodexErrorInfo: Codable, Equatable, Sendable {
+    case serverOverloaded
+    case other
+
+    package init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if (try? container.decode(String.self)) == "serverOverloaded" {
+            self = .serverOverloaded
+        } else {
+            self = .other
+        }
+    }
+
+    package func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .serverOverloaded:
+            try container.encode("serverOverloaded")
+        case .other:
+            try container.encode("other")
+        }
+    }
+}
+}
+
+
+package extension AppServerAPI.Turn {
 struct Error: Codable, Equatable, Sendable {
     package var message: String
+    package var codexErrorInfo: AppServerAPI.Turn.CodexErrorInfo?
 
-    package init(message: String) {
+    package init(
+        message: String,
+        codexErrorInfo: AppServerAPI.Turn.CodexErrorInfo? = nil
+    ) {
         self.message = message
+        self.codexErrorInfo = codexErrorInfo
     }
 }
 }

@@ -979,12 +979,17 @@ package actor ReviewStartAdmission {
             ReviewInterruptRequestAdmission,
             CodexReviewBackendModel.CancellationReason
         ) async throws -> Void
-    ) async throws -> ReviewRecoveryDisposition {
+        ) async throws -> ReviewRecoveryDisposition {
         do {
+            let reasonPurpose: CodexReviewBackendModel.CancellationReason.Purpose =
+                requestedCancellation == nil ? .recovery : .cancellation
             let requestCancellation = requestedCancellation ?? trigger.cancellation
             let barrier = try await performInterruptionBarrier(
                 run: run,
-                reason: .init(message: requestCancellation.message),
+                reason: .init(
+                    message: requestCancellation.message,
+                    purpose: reasonPurpose
+                ),
                 request: request
             )
             let resolved = ReviewResolvedAttemptTerminal(
@@ -1463,7 +1468,7 @@ package actor ReviewStartAdmission {
                         resolvedProductTerminal = .interrupted(
                             .requested(requestedCancellation)
                         )
-                    case .process, .protocolViolation, .workerContract,
+                    case .modelCapacity, .process, .protocolViolation, .workerContract,
                          .ownerCancellation:
                         resolvedProductTerminal = productTerminal(for: failure)
                     }
@@ -1489,6 +1494,8 @@ package actor ReviewStartAdmission {
         for failure: ReviewAttemptStreamFailure
     ) -> ReviewTerminalRecord {
         switch failure {
+        case .modelCapacity(let message):
+            .failed(message: message)
         case .process:
             .interrupted(.previousProcessExit)
         case .protocolViolation(let failure), .workerContract(let failure):

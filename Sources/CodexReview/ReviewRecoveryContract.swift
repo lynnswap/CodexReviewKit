@@ -13,6 +13,7 @@ package struct ReviewAttemptContractFailure: LocalizedError, Equatable, Sendable
 package enum ReviewAttemptRecoveryTrigger: Equatable, Sendable {
     case sameAccountRestart
     case recoverableNetworkLoss
+    case modelCapacity
 
     package var cancellation: ReviewCancellation {
         switch self {
@@ -20,15 +21,18 @@ package enum ReviewAttemptRecoveryTrigger: Equatable, Sendable {
             .system(message: "Review runtime is restarting.")
         case .recoverableNetworkLoss:
             .system(message: "Network unavailable; waiting to reconnect.")
+        case .modelCapacity:
+            .system(message: "Selected model is at capacity; waiting to retry.")
         }
     }
 }
 
-/// Exhaustively classifies why an admitted review event stream ended before its
-/// canonical terminal. Recovery policy is derived from this value once, at the
+/// Exhaustively classifies why an admitted review event stream ended without a
+/// product terminal. Recovery policy is derived from this value once, at the
 /// attempt admission boundary.
 package enum ReviewAttemptStreamFailure: LocalizedError, Equatable, Sendable {
     case recoverableNetwork(ReviewRuntimeCloseFailure)
+    case modelCapacity(message: String?)
     case ownerForcedConnectionClose(ReviewRuntimeCloseFailure)
     case unexpectedConnection(ReviewRuntimeCloseFailure)
     case process(ReviewRuntimeCloseFailure)
@@ -43,6 +47,8 @@ package enum ReviewAttemptStreamFailure: LocalizedError, Equatable, Sendable {
              .unexpectedConnection(let failure),
              .process(let failure):
             failure.localizedDescription
+        case .modelCapacity(let message):
+            message?.nilIfEmpty ?? "Selected model is at capacity."
         case .protocolViolation(let failure), .workerContract(let failure):
             failure.localizedDescription
         case .ownerCancellation:
@@ -52,7 +58,7 @@ package enum ReviewAttemptStreamFailure: LocalizedError, Equatable, Sendable {
 
     package var permitsRecoveryReplacement: Bool {
         switch self {
-        case .recoverableNetwork, .ownerForcedConnectionClose:
+        case .recoverableNetwork, .modelCapacity, .ownerForcedConnectionClose:
             true
         case .unexpectedConnection, .process, .protocolViolation,
              .workerContract, .ownerCancellation:

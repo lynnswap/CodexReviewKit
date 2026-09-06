@@ -16,6 +16,7 @@ struct ReviewInterruptAdmissionTests {
                 cancellation: cancellation,
                 request: { _, reason in
                     #expect(reason.message == cancellation.message)
+                    #expect(reason.purpose == .cancellation)
                     await requestStarted.open()
                 }
             )
