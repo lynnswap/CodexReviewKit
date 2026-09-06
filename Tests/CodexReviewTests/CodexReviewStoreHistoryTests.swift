@@ -346,6 +346,8 @@ struct CodexReviewStoreHistoryTests {
         try #require(await waitForHistoryTestCondition {
             store.historyStartReceipts.count == 2
         })
+        #expect(store.jobs.isEmpty)
+        #expect(store.hasRunningJobs)
         let reserved = store.historyStartReceipts.values
             .map(\.started)
             .sorted { $0.sortOrder < $1.sortOrder }
@@ -1360,6 +1362,37 @@ struct CodexReviewStoreHistoryTests {
         #expect(store.historyAvailability == .closed)
         #expect(await history.orderings().count == 1)
         #expect(await history.closeCallCount() == 1)
+    }
+
+    @Test func shutdownSealsReviewAdmissionBeforeWaitingForHistoryLoad() async throws {
+        let loadEntered = AsyncGate()
+        let loadRelease = AsyncGate()
+        let history = ReviewHistoryPersistenceProbe(
+            loadEntered: loadEntered,
+            loadRelease: loadRelease
+        )
+        let store = makeStore(history: history)
+
+        let load = Task { @MainActor in
+            await store.loadReviewHistoryIfNeeded()
+        }
+        try await loadEntered.wait(
+            timeout: .seconds(2),
+            operation: "history load before shutdown"
+        )
+        let shutdown = Task { @MainActor in
+            await store.shutdown()
+        }
+        try #require(await waitForHistoryTestCondition {
+            store.applicationShutdownRequested
+        })
+
+        store.storeWorkRegistry.openReviewAdmission()
+        #expect(store.storeWorkRegistry.register(.reviewMutation("late start")) == nil)
+
+        await loadRelease.open()
+        await load.value
+        await shutdown.value
     }
 
     @Test func shutdownAbandonsDurableInvalidatedReviewWork() async throws {

@@ -10,6 +10,16 @@ import AppKit
 @_spi(ApplicationHostSupport) import CodexReviewHost
 @_spi(PreviewSupport) import ReviewUI
 
+enum ReviewMonitorCodexUpdateNotification {
+    static let availabilityChanged = Notification.Name(
+        "CodexReviewKit.ReviewMonitor.codexUpdateAvailabilityChanged"
+    )
+    static let requested = Notification.Name(
+        "CodexReviewKit.ReviewMonitor.codexUpdateRequested"
+    )
+    static let availableUserInfoKey = "available"
+}
+
 enum ReviewMonitorLaunchMode: Sendable {
     case application
     case xctest
@@ -67,6 +77,10 @@ struct ReviewMonitorLaunchContext: Sendable {
         launchMode == .application
             && requestsPreviewContent == false
             && isolatedTestConfiguration?.validationFailure == nil
+    }
+
+    var reportsFailedCodexUpdate: Bool {
+        arguments.contains(ReviewMonitorApplicationRelauncher.failedUpdateLaunchArgument)
     }
 
     fileprivate var isolatedTestConfiguration: ReviewMonitorIsolatedTestConfiguration? {
@@ -338,6 +352,7 @@ extension NSApplication: ReviewMonitorTerminationReplying {
 final class ReviewMonitorLifecycleController {
     private let store: any ReviewMonitorLifecycleStore
     private let managesEmbeddedServerOnApplicationLaunch: Bool
+    private var prepareForApplicationTermination: @MainActor () async -> Void = {}
     private var shouldManageEmbeddedServer = true
     private var launchTask: Task<Void, Never>?
     private var launchTaskID: UUID?
@@ -349,6 +364,12 @@ final class ReviewMonitorLifecycleController {
     ) {
         self.store = store
         managesEmbeddedServerOnApplicationLaunch = shouldManageEmbeddedServer
+    }
+
+    func setApplicationTerminationPreparation(
+        _ operation: @escaping @MainActor () async -> Void
+    ) {
+        prepareForApplicationTermination = operation
     }
 
     func applicationDidFinishLaunching(launchMode: ReviewMonitorLaunchMode) {
@@ -388,8 +409,10 @@ final class ReviewMonitorLifecycleController {
         self.launchTask = nil
         launchTaskID = nil
         let store = store
+        let prepareForApplicationTermination = prepareForApplicationTermination
         terminationTask = Task { @MainActor [weak self] in
             await launchTask?.value
+            await prepareForApplicationTermination()
             await store.shutdown()
             self?.terminationTask = nil
             application.replyToApplicationShouldTerminate(true)
@@ -404,7 +427,12 @@ private final class ReviewMonitorPresentationAnchorSource {
 }
 
 private enum ReviewMonitorNativeAuthentication {
-    static let callbackScheme = "lynnpd.CodexReviewMonitor.auth"
+    static var callbackScheme: String {
+        guard let bundleIdentifier = Bundle.main.bundleIdentifier else {
+            preconditionFailure("ReviewMonitor requires an application bundle identifier.")
+        }
+        return "\(bundleIdentifier).auth"
+    }
 }
 
 @MainActor
@@ -421,7 +449,11 @@ struct ReviewMonitorAppComposition {
         any ReviewMonitorLifecycleStore,
         ReviewMonitorLaunchContext
     ) -> ReviewMonitorLifecycleController
-    var makeWindowController: (CodexReviewStore, @escaping @MainActor () -> Void) -> NSWindowController
+    var makeCodexUpdateChecker: (ReviewMonitorLaunchContext) -> CodexCommandUpdateChecker?
+    var makeWindowController: (
+        CodexReviewStore,
+        @escaping @MainActor () -> Void
+    ) -> NSWindowController
     var makeSettingsWindowController: () -> NSWindowController
 
     init(
@@ -438,6 +470,9 @@ struct ReviewMonitorAppComposition {
                 shouldManageEmbeddedServer: context.shouldStartEmbeddedServer
             )
         },
+        makeCodexUpdateChecker: @escaping (
+            ReviewMonitorLaunchContext
+        ) -> CodexCommandUpdateChecker? = { _ in nil },
         makeWindowController: @escaping (
             CodexReviewStore,
             @escaping @MainActor () -> Void
@@ -450,6 +485,7 @@ struct ReviewMonitorAppComposition {
     ) {
         self.makeStore = makeStore
         self.makeLifecycleController = makeLifecycleController
+        self.makeCodexUpdateChecker = makeCodexUpdateChecker
         self.makeWindowController = makeWindowController
         self.makeSettingsWindowController = makeSettingsWindowController
     }
@@ -519,6 +555,17 @@ struct ReviewMonitorAppComposition {
                     storeMode
                 )
             },
+            makeCodexUpdateChecker: { context in
+                guard context.launchMode == .application,
+                      context.requestsPreviewContent == false,
+                      context.isolatedTestConfiguration == nil else {
+                    return nil
+                }
+                return CodexCommandUpdateChecker(
+                    runtimePreferences: runtimePreferencesStore.load(),
+                    environment: context.environment
+                )
+            },
             makeWindowController: { store, showSettings in
                 ReviewMonitorWindowController(
                     store: store,
@@ -540,6 +587,7 @@ final class ReviewMonitorAppDelegate: NSObject, NSApplicationDelegate {
     private let launchContextProvider: () -> ReviewMonitorLaunchContext
     private let composition: ReviewMonitorAppComposition
     private let presentationAnchorSource = ReviewMonitorPresentationAnchorSource()
+    private var codexUpdateRequestObserver: NSObjectProtocol?
 
     private lazy var launchContext = launchContextProvider()
     private var launchMode: ReviewMonitorLaunchMode {
@@ -550,11 +598,48 @@ final class ReviewMonitorAppDelegate: NSObject, NSApplicationDelegate {
             presentationAnchorSource?.window
         }
     }()
-    lazy var lifecycle = composition.makeLifecycleController(store, launchContext)
-    lazy var windowController: NSWindowController = {
-        let windowController = composition.makeWindowController(store) { [weak self] in
-            self?.showSettingsWindow(nil)
+    lazy var lifecycle: ReviewMonitorLifecycleController = {
+        let lifecycle = composition.makeLifecycleController(store, launchContext)
+        lifecycle.setApplicationTerminationPreparation { [weak self] in
+            await self?.codexUpdater?.stopAndWait()
         }
+        return lifecycle
+    }()
+    lazy var codexUpdater: ReviewMonitorCodexUpdater? = {
+        guard let checker = composition.makeCodexUpdateChecker(launchContext) else {
+            return nil
+        }
+        let store = store
+        return ReviewMonitorCodexUpdater(
+            check: checker.check,
+            publishAvailability: { available in
+                NotificationCenter.default.post(
+                    name: ReviewMonitorCodexUpdateNotification.availabilityChanged,
+                    object: nil,
+                    userInfo: [
+                        ReviewMonitorCodexUpdateNotification.availableUserInfoKey: available,
+                    ]
+                )
+            },
+            prepareForUpdate: { [weak self] in
+                guard let self else {
+                    return false
+                }
+                return await prepareForCodexUpdate(store: store)
+            },
+            requestApplicationTermination: {
+                NSApp.terminate(nil)
+            },
+            presentFailure: { [weak self] title, message in
+                self?.presentCodexUpdateFailure(title: title, message: message)
+            }
+        )
+    }()
+    lazy var windowController: NSWindowController = {
+        let windowController = composition.makeWindowController(
+            store,
+            { [weak self] in self?.showSettingsWindow(nil) }
+        )
         presentationAnchorSource.window = windowController.window
         return windowController
     }()
@@ -566,6 +651,12 @@ final class ReviewMonitorAppDelegate: NSObject, NSApplicationDelegate {
         }
         composition = .live()
         super.init()
+    }
+
+    isolated deinit {
+        if let codexUpdateRequestObserver {
+            NotificationCenter.default.removeObserver(codexUpdateRequestObserver)
+        }
     }
 
     init(
@@ -595,13 +686,20 @@ final class ReviewMonitorAppDelegate: NSObject, NSApplicationDelegate {
         if launchMode == .application {
             NSApp.activate(ignoringOtherApps: true)
         }
+        if launchContext.reportsFailedCodexUpdate {
+            presentCodexUpdateFailure(
+                title: "Codex Could Not Be Updated",
+                message: "ReviewMonitor restarted without updating Codex. Run `codex update` in Terminal for details."
+            )
+        }
+        startCodexUpdateMonitoring()
         lifecycle.applicationDidFinishLaunching(
             launchMode: launchMode
         )
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        lifecycle.applicationShouldTerminate(replyingTo: sender)
+        return lifecycle.applicationShouldTerminate(replyingTo: sender)
     }
 
     func applicationShouldHandleReopen(_: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -623,6 +721,55 @@ final class ReviewMonitorAppDelegate: NSObject, NSApplicationDelegate {
         windowController.showWindow(sender)
         windowController.window?.orderFrontRegardless()
         windowController.window?.makeKeyAndOrderFront(sender)
+    }
+
+    private func prepareForCodexUpdate(
+        store: CodexReviewStore
+    ) async -> Bool {
+        if store.hasRunningJobs {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Stop Active Reviews and Update Codex?"
+            alert.informativeText = "Active and queued reviews will be cancelled. ReviewMonitor will restart after Codex is updated."
+            alert.addButton(withTitle: "Stop Reviews and Update").hasDestructiveAction = true
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else {
+                return false
+            }
+        }
+        await store.shutdown()
+        return true
+    }
+
+    private func startCodexUpdateMonitoring() {
+        guard let updater = codexUpdater else {
+            return
+        }
+        if codexUpdateRequestObserver == nil {
+            codexUpdateRequestObserver = NotificationCenter.default.addObserver(
+                forName: ReviewMonitorCodexUpdateNotification.requested,
+                object: nil,
+                queue: .main
+            ) { [weak updater] _ in
+                MainActor.assumeIsolated {
+                    updater?.requestUpdate()
+                }
+            }
+        }
+        updater.start()
+    }
+
+    private func presentCodexUpdateFailure(title: String, message: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+        if let window = presentationAnchorSource.window, window.isVisible {
+            alert.beginSheetModal(for: window)
+        } else {
+            alert.runModal()
+        }
     }
 
     private func installStandardMainMenuIfNeeded() {

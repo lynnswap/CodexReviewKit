@@ -1750,7 +1750,9 @@ public final class CodexReviewStore {
     }
 
     public var hasRunningJobs: Bool {
-        jobs.contains(where: { $0.isTerminal == false })
+        historyStartReceipts.isEmpty == false
+            || storeWorkRegistry.hasActiveReviewWork
+            || jobs.contains(where: { $0.isTerminal == false })
     }
 
     public var runningJobCount: Int {

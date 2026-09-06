@@ -15,6 +15,7 @@ final class ReviewMonitorRootViewController: NSViewController {
     private let store: CodexReviewStore
     private let contentTransitionAnimator: ReviewMonitorContentTransitionAnimator
     private let showSettings: (@MainActor () -> Void)?
+    private let notificationCenter: NotificationCenter
     private var observation: PortableObservationTracking.Token?
     private var windowCancellable: AnyCancellable?
     private var presentedContentKind: ReviewMonitorContentKind?
@@ -22,7 +23,8 @@ final class ReviewMonitorRootViewController: NSViewController {
     private lazy var splitViewController = ReviewMonitorSplitViewController(
         store: store,
         uiState: uiState,
-        showSettings: showSettings
+        showSettings: showSettings,
+        notificationCenter: notificationCenter
     )
 
     private lazy var signInViewController = ReviewMonitorSignInViewController(store: store)
@@ -31,12 +33,14 @@ final class ReviewMonitorRootViewController: NSViewController {
         store: CodexReviewStore,
         uiState: ReviewMonitorUIState,
         contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator = ReviewMonitorRootViewController.defaultContentTransitionAnimator,
-        showSettings: (@MainActor () -> Void)? = nil
+        showSettings: (@MainActor () -> Void)? = nil,
+        notificationCenter: NotificationCenter = .default
     ) {
         self.store = store
         self.uiState = uiState
         self.contentTransitionAnimator = contentTransitionAnimator
         self.showSettings = showSettings
+        self.notificationCenter = notificationCenter
         super.init(nibName: nil, bundle: nil)
     }
 

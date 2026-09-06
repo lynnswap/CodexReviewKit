@@ -8,7 +8,24 @@ import Testing
 @Suite(.serialized)
 @MainActor
 struct CodexReviewMonitorCITests {
-    @Test func applicationBundleProhibitsMultipleLaunchServicesInstances() {
+    @Test func codexUpdateNotificationsMatchReviewUIContract() {
+        #expect(
+            ReviewMonitorCodexUpdateNotification.availabilityChanged.rawValue
+                == "CodexReviewKit.ReviewMonitor.codexUpdateAvailabilityChanged"
+        )
+        #expect(
+            ReviewMonitorCodexUpdateNotification.requested.rawValue
+                == "CodexReviewKit.ReviewMonitor.codexUpdateRequested"
+        )
+        #expect(ReviewMonitorCodexUpdateNotification.availableUserInfoKey == "available")
+    }
+
+    @Test func testingApplicationBundleHasAnIsolatedLaunchServicesIdentity() {
+        #expect(Bundle.main.bundleIdentifier == "lynnpd.CodexReviewMonitor.Tests")
+        let urlTypes = Bundle.main.object(forInfoDictionaryKey: "CFBundleURLTypes")
+            as? [[String: Any]]
+        let urlSchemes = urlTypes?.first?["CFBundleURLSchemes"] as? [String]
+        #expect(urlSchemes == ["lynnpd.CodexReviewMonitor.Tests.auth"])
         #expect(
             Bundle.main.object(forInfoDictionaryKey: "LSMultipleInstancesProhibited") as? Bool
                 == true
@@ -156,7 +173,6 @@ struct CodexReviewMonitorCITests {
         #expect(delegate.windowController === windowController)
         #expect(windowController?.showWindowCallCount == 1)
         #expect(windowController?.windowForTesting.makeKeyAndOrderFrontCallCount == 1)
-
         capturedShowSettings?()
         #expect(delegate.settingsWindowController === settingsWindowController)
         #expect(settingsWindowController.showWindowCallCount == 1)
@@ -320,7 +336,10 @@ struct CodexReviewMonitorCITests {
         #expect(capturedRuntimePreferences == expectedRuntimePreferences)
         #expect(capturedStoreMode == .production)
         #expect(didRequestPresentationAnchor == false)
-        #expect(capturedAuthenticationConfiguration?.callbackScheme == "lynnpd.CodexReviewMonitor.auth")
+        #expect(
+            capturedAuthenticationConfiguration?.callbackScheme
+                == "lynnpd.CodexReviewMonitor.Tests.auth"
+        )
         if case .ephemeral? = capturedAuthenticationConfiguration?.browserSessionPolicy {
         } else {
             Issue.record("Expected ReviewMonitor to use an ephemeral browser session.")
@@ -809,7 +828,7 @@ private final class TerminationReplyRecorder: ReviewMonitorTerminationReplying {
     }
 }
 
-private actor TestSignal {
+actor TestSignal {
     private var isSignaled = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
@@ -832,7 +851,7 @@ private actor TestSignal {
     }
 }
 
-private actor TestGate {
+actor TestGate {
     private var isOpen = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
 

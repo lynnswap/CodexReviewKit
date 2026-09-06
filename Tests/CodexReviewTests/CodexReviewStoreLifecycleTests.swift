@@ -6,6 +6,31 @@ import CodexReviewTesting
 @Suite("store runtime lifecycle", .serialized)
 @MainActor
 struct CodexReviewStoreLifecycleTests {
+    @Test func registeredReviewWorkCountsAsRunningBeforeJobPublication() async throws {
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(
+                reviewBackend: FakeCodexReviewBackend()
+            )
+        )
+        let entered = AsyncGate()
+        let release = AsyncGate()
+        let work = try #require(store.startRegisteredStoreWork(
+            kind: .reviewMutation("pending start")
+        ) { _ in
+            await entered.open()
+            await release.wait()
+        })
+        await entered.wait()
+
+        #expect(store.jobs.isEmpty)
+        #expect(store.historyStartReceipts.isEmpty)
+        #expect(store.hasRunningJobs)
+
+        await release.open()
+        await work.value
+        #expect(store.hasRunningJobs == false)
+    }
+
     @Test func reopenedReviewAdmissionCannotReacceptCancelledCaller() async throws {
         let backend = FakeCodexReviewBackend()
         let startGate = AsyncGate()

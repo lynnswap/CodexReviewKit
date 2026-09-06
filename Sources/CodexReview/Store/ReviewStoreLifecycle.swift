@@ -113,6 +113,21 @@ package final class ReviewStoreWorkRegistry {
         case closed(CloseOperation, ReviewStoreWorkDrainResult)
     }
 
+    private enum ReviewAdmissionState {
+        case open(generation: UInt64)
+        case closed(generation: UInt64)
+        case terminal(generation: UInt64)
+
+        var generation: UInt64 {
+            switch self {
+            case .open(let generation),
+                 .closed(let generation),
+                 .terminal(let generation):
+                generation
+            }
+        }
+    }
+
     @MainActor
     private final class RegisteredTask {
         let admission: Admission
@@ -166,8 +181,7 @@ package final class ReviewStoreWorkRegistry {
 
     private var state: State = .open
     private var admissionIsOpen = true
-    private var reviewAdmissionIsOpen = true
-    private var reviewAdmissionGeneration: UInt64 = 0
+    private var reviewAdmissionState = ReviewAdmissionState.open(generation: 0)
     private var nextWorkOrdinal: UInt64 = 0
     private var nextCloseID: UInt64 = 0
     private var registeredTasks: [UInt64: RegisteredTask] = [:]
@@ -193,9 +207,22 @@ package final class ReviewStoreWorkRegistry {
         registeredTasks.keys.sorted()
     }
 
+    package var hasActiveReviewWork: Bool {
+        registeredTasks.values.contains { $0.admission.kind.isReviewWork }
+    }
+
     package func register(_ kind: ReviewStoreWorkKind) -> Admission? {
-        guard admissionIsOpen, reviewAdmissionIsOpen || kind.isReviewWork == false else {
+        guard admissionIsOpen else {
             return nil
+        }
+        let reviewGeneration: UInt64?
+        if kind.isReviewWork {
+            guard case .open(let generation) = reviewAdmissionState else {
+                return nil
+            }
+            reviewGeneration = generation
+        } else {
+            reviewGeneration = nil
         }
         guard nextWorkOrdinal < UInt64.max else {
             preconditionFailure("ReviewStoreWorkRegistry work ordinal exhausted.")
@@ -204,7 +231,7 @@ package final class ReviewStoreWorkRegistry {
         return .init(
             ordinal: nextWorkOrdinal,
             kind: kind,
-            reviewGeneration: kind.isReviewWork ? reviewAdmissionGeneration : nil
+            reviewGeneration: reviewGeneration
         )
     }
 
@@ -229,20 +256,40 @@ package final class ReviewStoreWorkRegistry {
     package func accepts(_ admission: Admission) -> Bool {
         guard admissionIsOpen else { return false }
         guard let generation = admission.reviewGeneration else { return true }
-        return reviewAdmissionIsOpen && generation == reviewAdmissionGeneration
+        guard case .open(let currentGeneration) = reviewAdmissionState else {
+            return false
+        }
+        return generation == currentGeneration
     }
 
     package func closeReviewAdmission() {
-        guard reviewAdmissionIsOpen else { return }
-        guard reviewAdmissionGeneration < UInt64.max else {
+        guard case .open(let generation) = reviewAdmissionState else { return }
+        guard generation < UInt64.max else {
             preconditionFailure("ReviewStoreWorkRegistry review generation exhausted.")
         }
-        reviewAdmissionGeneration += 1
-        reviewAdmissionIsOpen = false
+        reviewAdmissionState = .closed(generation: generation + 1)
+    }
+
+    package func sealReviewAdmission() {
+        switch reviewAdmissionState {
+        case .open(let generation):
+            guard generation < UInt64.max else {
+                preconditionFailure("ReviewStoreWorkRegistry review generation exhausted.")
+            }
+            reviewAdmissionState = .terminal(generation: generation + 1)
+        case .closed(let generation):
+            reviewAdmissionState = .terminal(generation: generation)
+        case .terminal:
+            break
+        }
     }
 
     package func openReviewAdmission() {
-        if admissionIsOpen { reviewAdmissionIsOpen = true }
+        guard admissionIsOpen,
+              case .closed(let generation) = reviewAdmissionState else {
+            return
+        }
+        reviewAdmissionState = .open(generation: generation)
     }
 
     package func beginClosing(
@@ -264,7 +311,7 @@ package final class ReviewStoreWorkRegistry {
                     guard let generation = task.admission.reviewGeneration else {
                         return false
                     }
-                    return generation != reviewAdmissionGeneration
+                    return generation != reviewAdmissionState.generation
                 }
                 for task in abandonedTasks {
                     registeredTasks.removeValue(forKey: task.admission.ordinal)
@@ -337,7 +384,7 @@ package final class ReviewStoreWorkRegistry {
 
     package func cancelWithoutWaiting() {
         admissionIsOpen = false
-        reviewAdmissionIsOpen = false
+        sealReviewAdmission()
         for task in registeredTasks.values {
             task.cancel()
         }

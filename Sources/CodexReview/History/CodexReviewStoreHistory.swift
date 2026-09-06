@@ -476,6 +476,7 @@ extension CodexReviewStore {
             return
         }
         applicationShutdownRequested = true
+        storeWorkRegistry.sealReviewAdmission()
         _ = requestHistoryStartCancellations(
             cancellation: .system(message: "The review application is shutting down.")
         )

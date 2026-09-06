@@ -16,10 +16,14 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
     private static let sidebarJobFilterToolbarItemIdentifier = NSToolbarItem.Identifier(
         "CodexReviewKit.ReviewMonitor.Toolbar.SidebarJobFilter"
     )
+    private static let sidebarUpdateToolbarItemIdentifier = NSToolbarItem.Identifier(
+        "CodexReviewKit.ReviewMonitor.Toolbar.SidebarUpdate"
+    )
 
     private let store: CodexReviewStore
     private let uiState: ReviewMonitorUIState
     private let showSettings: (@MainActor () -> Void)?
+    private let notificationCenter: NotificationCenter
     private var sidebarViewController: ReviewMonitorSidebarViewController?
     private var transportViewController: ReviewMonitorTransportViewController?
     private var sidebarItem: NSSplitViewItem?
@@ -35,11 +39,13 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
     init(
         store: CodexReviewStore,
         uiState: ReviewMonitorUIState,
-        showSettings: (@MainActor () -> Void)? = nil
+        showSettings: (@MainActor () -> Void)? = nil,
+        notificationCenter: NotificationCenter = .default
     ) {
         self.store = store
         self.uiState = uiState
         self.showSettings = showSettings
+        self.notificationCenter = notificationCenter
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -162,13 +168,15 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         toolbarMembershipObservation = withPortableContinuousObservation { [weak self, uiState] _ in
             let sidebarSelection = uiState.sidebarSelection
             let isAuthenticating = uiState.auth.isAuthenticating
+            let isCodexUpdateAvailable = uiState.isCodexUpdateAvailable
             guard let self else {
                 return
             }
             let identifiers = Self.toolbarItemIdentifiers(
                 sidebarSelection: sidebarSelection,
                 isSidebarCollapsed: self.isSidebarCollapsed,
-                isAuthenticating: isAuthenticating
+                isAuthenticating: isAuthenticating,
+                isCodexUpdateAvailable: isCodexUpdateAvailable
             )
             self.applyToolbarItemIdentifiers(identifiers)
         }
@@ -239,7 +247,8 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         Self.toolbarItemIdentifiers(
             sidebarSelection: uiState.sidebarSelection,
             isSidebarCollapsed: isSidebarCollapsed,
-            isAuthenticating: uiState.auth.isAuthenticating
+            isAuthenticating: uiState.auth.isAuthenticating,
+            isCodexUpdateAvailable: uiState.isCodexUpdateAvailable
         )
     }
 
@@ -247,6 +256,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         [
             Self.sidebarPickerToolbarItemIdentifier,
             Self.addAccountToolbarItemIdentifier,
+            Self.sidebarUpdateToolbarItemIdentifier,
             Self.sidebarJobFilterToolbarItemIdentifier,
             .sidebarTrackingSeparator,
             .space,
@@ -265,6 +275,9 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
 
         case Self.addAccountToolbarItemIdentifier:
             return makeAddAccountToolbarItem()
+
+        case Self.sidebarUpdateToolbarItemIdentifier:
+            return makeSidebarUpdateToolbarItem()
 
         case Self.sidebarJobFilterToolbarItemIdentifier:
             return makeSidebarJobFilterToolbarItem()
@@ -295,6 +308,31 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
             itemIdentifier: Self.sidebarJobFilterToolbarItemIdentifier,
             uiState: uiState
         )
+    }
+
+    private func makeSidebarUpdateToolbarItem() -> NSToolbarItem {
+        let button = NSButton(title: "Update", target: self, action: #selector(handleCodexUpdate(_:)))
+        button.bezelStyle = .toolbar
+        button.controlSize = .extraLarge
+        button.setButtonType(.onOff)
+        button.state = .on
+        button.setAccessibilityLabel("Update Codex")
+
+        let item = NSToolbarItem(itemIdentifier: Self.sidebarUpdateToolbarItemIdentifier)
+        item.label = "Update"
+        item.paletteLabel = "Update Codex"
+        item.toolTip = "A Codex update is available"
+        item.visibilityPriority = .high
+        item.view = button
+        let menuItem = NSMenuItem(
+            title: "Update Codex",
+            action: #selector(handleCodexUpdate(_:)),
+            keyEquivalent: ""
+        )
+        menuItem.target = self
+        menuItem.state = .on
+        item.menuFormRepresentation = menuItem
+        return item
     }
 
     private func handleSidebarPickerSelection(_ selection: SidebarPickerSelection) {
@@ -355,7 +393,8 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
     private static func toolbarItemIdentifiers(
         sidebarSelection: SidebarPickerSelection,
         isSidebarCollapsed: Bool,
-        isAuthenticating: Bool
+        isAuthenticating: Bool,
+        isCodexUpdateAvailable: Bool
     ) -> [NSToolbarItem.Identifier] {
         var identifiers: [NSToolbarItem.Identifier] = [
             sidebarPickerToolbarItemIdentifier,
@@ -372,6 +411,9 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
             sidebarSelection: sidebarSelection,
             isSidebarCollapsed: isSidebarCollapsed
         ) {
+            if isCodexUpdateAvailable {
+                identifiers.append(sidebarUpdateToolbarItemIdentifier)
+            }
             identifiers.append(sidebarJobFilterToolbarItemIdentifier)
         }
         identifiers.append(.sidebarTrackingSeparator)
@@ -396,7 +438,8 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         applyToolbarItemIdentifiers(Self.toolbarItemIdentifiers(
             sidebarSelection: uiState.sidebarSelection,
             isSidebarCollapsed: isSidebarCollapsed,
-            isAuthenticating: uiState.auth.isAuthenticating
+            isAuthenticating: uiState.auth.isAuthenticating,
+            isCodexUpdateAvailable: uiState.isCodexUpdateAvailable
         ))
     }
 
@@ -409,6 +452,16 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
             return
         }
         toolbar.itemIdentifiers = identifiers
+    }
+
+    @objc
+    private func handleCodexUpdate(_ sender: Any?) {
+        (sender as? NSButton)?.state = .on
+        guard uiState.isCodexUpdateAvailable else {
+            return
+        }
+        uiState.isCodexUpdateAvailable = false
+        notificationCenter.post(name: ReviewMonitorCodexUpdateNotification.requested, object: nil)
     }
 
 }
@@ -492,6 +545,34 @@ extension ReviewMonitorSplitViewController {
 
     var sidebarJobFilterToolbarItemIdentifierForTesting: NSToolbarItem.Identifier {
         Self.sidebarJobFilterToolbarItemIdentifier
+    }
+
+    var sidebarUpdateToolbarItemIdentifierForTesting: NSToolbarItem.Identifier {
+        Self.sidebarUpdateToolbarItemIdentifier
+    }
+
+    var sidebarUpdateToolbarItemIsHiddenForTesting: Bool {
+        sidebarUpdateToolbarItemForTesting == nil
+    }
+
+    var sidebarUpdateToolbarTitleForTesting: String? {
+        (sidebarUpdateToolbarItemForTesting?.view as? NSButton)?.title
+    }
+
+    var sidebarUpdateToolbarAccessibilityLabelForTesting: String? {
+        (sidebarUpdateToolbarItemForTesting?.view as? NSButton)?.accessibilityLabel()
+    }
+
+    var sidebarUpdateToolbarShowsSelectedBackgroundForTesting: Bool {
+        (sidebarUpdateToolbarItemForTesting?.view as? NSButton)?.state == .on
+    }
+
+    func requestCodexUpdateForTesting() {
+        handleCodexUpdate(sidebarUpdateToolbarItemForTesting?.view)
+    }
+
+    private var sidebarUpdateToolbarItemForTesting: NSToolbarItem? {
+        toolbar?.items.first { $0.itemIdentifier == Self.sidebarUpdateToolbarItemIdentifier }
     }
 
     var sidebarPickerToolbarSegmentAccessibilityDescriptionsForTesting: [String] {

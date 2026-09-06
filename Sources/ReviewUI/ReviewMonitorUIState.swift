@@ -10,6 +10,7 @@ final class ReviewMonitorUIState {
     private let persistSidebarJobFilter: (SidebarJobFilter) -> Void
     var selection: ReviewMonitorSelection?
     var sidebarSelection = SidebarPickerSelection.workspace
+    var isCodexUpdateAvailable = false
     var sidebarJobFilter: SidebarJobFilter {
         didSet {
             guard sidebarJobFilter != oldValue else {
