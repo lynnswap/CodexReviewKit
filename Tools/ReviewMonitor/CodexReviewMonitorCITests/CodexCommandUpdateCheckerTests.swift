@@ -1,9 +1,10 @@
-import Foundation
 import Darwin
+import Foundation
 import Testing
-@_spi(ApplicationHostSupport) @testable import CodexReviewHost
+@_spi(ApplicationHostSupport) import CodexReviewHost
+@testable import CodexReviewMonitor
 
-@Suite("Codex command update checker")
+@Suite("Codex command update checker", .serialized)
 struct CodexCommandUpdateCheckerTests {
     private let launcherURL = URL(fileURLWithPath: "/opt/homebrew/bin/codex")
     private let executableURL = URL(
@@ -63,7 +64,7 @@ struct CodexCommandUpdateCheckerTests {
                 "HOME": "/users/reviewer",
                 "PATH": "/opt/homebrew/bin:/usr/local/bin",
             ],
-            resolver: makeResolver(
+            resolver: makeHomebrewResolver(
                 executables: [executableURL.path],
                 canonical: [launcherURL.path: executableURL.path]
             ),
@@ -83,6 +84,58 @@ struct CodexCommandUpdateCheckerTests {
         #expect(plan.environment["PATH"]?.contains("/opt/homebrew/bin") == false)
     }
 
+    @Test func runtimeSelectionDoesNotSkipEarlierNonHomebrewExecutables() throws {
+        let customExecutable = "/custom/bin/codex"
+        let resolver = makeHomebrewResolver(
+            executables: [customExecutable, executableURL.path],
+            canonical: [launcherURL.path: executableURL.path]
+        )
+
+        #expect(try resolver.resolve(
+            configuredPath: customExecutable,
+            environment: ["PATH": "/opt/homebrew/bin"]
+        ) == nil)
+        #expect(try resolver.resolve(
+            configuredPath: nil,
+            environment: [
+                "CODEX_APP_SERVER_CODEX_EXECUTABLE": customExecutable,
+                "PATH": "/opt/homebrew/bin",
+            ]
+        ) == nil)
+        #expect(try resolver.resolve(
+            configuredPath: nil,
+            environment: ["PATH": "/custom/bin:/opt/homebrew/bin"]
+        ) == nil)
+
+        let resolvedInstallation = try resolver.resolve(
+            configuredPath: nil,
+            environment: ["PATH": "/opt/homebrew/bin"]
+        )
+        let installation = try #require(resolvedInstallation)
+        #expect(installation.launcherURL == launcherURL)
+        #expect(installation.executableURL == executableURL)
+        #expect(installation.binURL.path == "/opt/homebrew/bin")
+    }
+
+    @Test func homeAndApplicationCandidatesPrecedeHomebrewFallback() throws {
+        let homeExecutable = "/home/.local/bin/codex"
+        let appBundle = "/Applications/Codex.app"
+        let appExecutable = "\(appBundle)/Contents/Resources/codex"
+        let homeResolver = makeHomebrewResolver(
+            executables: [homeExecutable, executableURL.path],
+            canonical: [launcherURL.path: executableURL.path]
+        )
+        #expect(try homeResolver.resolve(configuredPath: nil, environment: [:]) == nil)
+
+        let appResolver = makeHomebrewResolver(
+            executables: [appExecutable, executableURL.path],
+            directories: [appBundle],
+            bundleIDs: [appBundle: "com.openai.codex"],
+            canonical: [launcherURL.path: executableURL.path]
+        )
+        #expect(try appResolver.resolve(configuredPath: nil, environment: [:]) == nil)
+    }
+
     @Test func versionPinnedHomebrewExecutableIsNotOfferedAnAutomaticUpdate() async throws {
         let pinnedExecutableURL = URL(
             fileURLWithPath: "/opt/homebrew/Caskroom/codex/1.2.3/bin/codex"
@@ -90,7 +143,7 @@ struct CodexCommandUpdateCheckerTests {
         let checker = CodexCommandUpdateChecker(
             runtimePreferences: .init(codexExecutablePath: pinnedExecutableURL.path),
             environment: ["HOME": "/users/reviewer", "PATH": "/opt/homebrew/bin"],
-            resolver: makeResolver(executables: [pinnedExecutableURL.path]),
+            resolver: makeHomebrewResolver(executables: [pinnedExecutableURL.path]),
             run: { _, _, _ in
                 Issue.record("A pinned executable must not run the automatic update check.")
                 return Data()
@@ -248,7 +301,7 @@ struct CodexCommandUpdateCheckerTests {
         CodexCommandUpdateChecker(
             runtimePreferences: preferences,
             environment: environment,
-            resolver: makeResolver(
+            resolver: makeHomebrewResolver(
                 executables: [executableURL.path],
                 canonical: [launcherURL.path: executableURL.path]
             ),
@@ -273,4 +326,34 @@ struct CodexCommandUpdateCheckerTests {
         }
         return "{\"schemaVersion\":1,\"checks\":{\"updates.status\":{\"details\":{\(details.joined(separator: ","))}}}}"
     }
+}
+
+private func makeHomebrewResolver(
+    executables: Set<String> = [],
+    directories: Set<String> = [],
+    bundleIDs: [String: String] = [:],
+    canonical: [String: String] = [:]
+) -> CodexHomebrewInstallationResolver {
+    let fileSystem = CodexHomebrewInstallationResolver.FileSystem(
+        canonicalURL: {
+            URL(fileURLWithPath: canonical[$0.standardizedFileURL.path]
+                ?? $0.standardizedFileURL.path)
+        },
+        isExecutableRegularFile: { executables.contains($0.path) },
+        isDirectory: { directories.contains($0.path) },
+        bundleIdentifier: { bundleIDs[$0.path] }
+    )
+    return .init(configuration: .init(
+        homeDirectory: URL(fileURLWithPath: "/home", isDirectory: true),
+        applicationDirectories: [
+            URL(fileURLWithPath: "/Applications", isDirectory: true),
+            URL(fileURLWithPath: "/home/Applications", isDirectory: true),
+        ],
+        fallbackBinDirectories: [
+            URL(fileURLWithPath: "/opt/homebrew/bin", isDirectory: true),
+            URL(fileURLWithPath: "/usr/local/bin", isDirectory: true),
+            URL(fileURLWithPath: "/usr/bin", isDirectory: true),
+        ],
+        fileSystem: fileSystem
+    ))
 }

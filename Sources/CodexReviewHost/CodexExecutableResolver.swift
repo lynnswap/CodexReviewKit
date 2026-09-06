@@ -1,15 +1,5 @@
 import Foundation
 
-package struct CodexExecutableSelection: Equatable, Sendable {
-    package let executableURL: URL
-    package let launcherURL: URL
-
-    package init(executableURL: URL, launcherURL: URL) {
-        self.executableURL = executableURL
-        self.launcherURL = launcherURL
-    }
-}
-
 package struct CodexExecutableResolutionError: LocalizedError, Equatable, Sendable {
     package enum Kind: Equatable, Sendable { case invalidExplicit, notFound }
     package enum Source: Equatable, Sendable {
@@ -108,15 +98,6 @@ package struct CodexExecutableResolver: Sendable {
     package func resolve(
         configuredPath: String?, environment: [String: String]
     ) throws(CodexExecutableResolutionError) -> URL {
-        try resolveSelection(
-            configuredPath: configuredPath,
-            environment: environment
-        ).executableURL
-    }
-
-    package func resolveSelection(
-        configuredPath: String?, environment: [String: String]
-    ) throws(CodexExecutableResolutionError) -> CodexExecutableSelection {
         var search = Search(configuration: configuration)
         if let configuredPath { return try search.explicitPath(configuredPath) }
         let path = Self.pathDirectories(environment["PATH"])
@@ -164,9 +145,7 @@ package struct CodexExecutableResolver: Sendable {
         var configuration: Configuration
         var seen: Set<String> = []
         var trace: [CodexExecutableResolutionError.Trace] = []
-        mutating func explicitPath(
-            _ value: String
-        ) throws(CodexExecutableResolutionError) -> CodexExecutableSelection {
+        mutating func explicitPath(_ value: String) throws(CodexExecutableResolutionError) -> URL {
             let path = value.trimmingCharacters(in: .whitespacesAndNewlines)
             guard path.hasPrefix("/") else { try failExplicit(.configuredPath, value, "not absolute") }
             if let url = candidate(URL(fileURLWithPath: path), .configuredPath) { return url }
@@ -174,7 +153,7 @@ package struct CodexExecutableResolver: Sendable {
         }
         mutating func environmentCommand(
             _ value: String, key: String, path: [URL]
-        ) throws(CodexExecutableResolutionError) -> CodexExecutableSelection {
+        ) throws(CodexExecutableResolutionError) -> URL {
             let command = value.trimmingCharacters(in: .whitespacesAndNewlines)
             let source = CodexExecutableResolutionError.Source.environment(key)
             if command.contains("/") {
@@ -190,7 +169,7 @@ package struct CodexExecutableResolver: Sendable {
             }
             throw .init(kind: .invalidExplicit, trace: trace)
         }
-        mutating func bundle(_ rawBundle: URL) -> CodexExecutableSelection? {
+        mutating func bundle(_ rawBundle: URL) -> URL? {
             let fs = configuration.fileSystem
             let bundle = fs.canonicalURL(rawBundle).standardizedFileURL
             let source = CodexExecutableResolutionError.Source.applicationBundle(rawBundle.path)
@@ -201,10 +180,7 @@ package struct CodexExecutableResolver: Sendable {
             }
             return candidate(bundle.appendingPathComponent("Contents/Resources/codex"), source)
         }
-        mutating func candidate(
-            _ rawURL: URL,
-            _ source: CodexExecutableResolutionError.Source
-        ) -> CodexExecutableSelection? {
+        mutating func candidate(_ rawURL: URL, _ source: CodexExecutableResolutionError.Source) -> URL? {
             let fs = configuration.fileSystem
             let url = fs.canonicalURL(rawURL).standardizedFileURL
             guard seen.insert(url.path).inserted else {
@@ -213,14 +189,11 @@ package struct CodexExecutableResolver: Sendable {
             guard fs.isExecutableRegularFile(url) else {
                 return reject(source, url.path, "not an executable regular file")
             }
-            return CodexExecutableSelection(
-                executableURL: url,
-                launcherURL: rawURL.standardizedFileURL
-            )
+            return url
         }
         mutating func reject(
             _ source: CodexExecutableResolutionError.Source, _ candidate: String, _ reason: String
-        ) -> CodexExecutableSelection? {
+        ) -> URL? {
             trace.append(.init(source: source, candidate: candidate, reason: reason))
             return nil
         }
