@@ -17,6 +17,7 @@ public final class ReviewMonitorWindowController: NSWindowController {
     private static let defaultContentSize = NSSize(width: 600, height: 400)
     private static let frameAutosaveName = NSWindow.FrameAutosaveName("ReviewMonitor.MainWindow")
     private let rootViewController: ReviewMonitorRootViewController
+    private let uiState: ReviewMonitorUIState
 
     public convenience init(store: CodexReviewStore) {
         self.init(
@@ -38,18 +39,39 @@ public final class ReviewMonitorWindowController: NSWindowController {
         )
     }
 
+    @_spi(ApplicationHostSupport)
+    public convenience init(
+        store: CodexReviewStore,
+        showSettings: @escaping @MainActor () -> Void,
+        requestCodexUpdate: (@MainActor () -> Void)?
+    ) {
+        self.init(
+            store: store,
+            contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
+            showSettings: showSettings,
+            requestCodexUpdate: requestCodexUpdate
+        )
+    }
+
+    @_spi(ApplicationHostSupport)
+    public func setCodexUpdateAvailable(_ isAvailable: Bool) {
+        uiState.isCodexUpdateAvailable = isAvailable
+    }
+
     convenience init(
         store: CodexReviewStore,
         contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator,
         sidebarJobFilterDefaults: UserDefaults? = .standard,
-        showSettings: (@MainActor () -> Void)? = nil
+        showSettings: (@MainActor () -> Void)? = nil,
+        requestCodexUpdate: (@MainActor () -> Void)? = nil
     ) {
         self.init(
             store: store,
             contentTransitionAnimator: contentTransitionAnimator,
             frameAutosaveName: Self.frameAutosaveName,
             sidebarJobFilterDefaults: sidebarJobFilterDefaults,
-            showSettings: showSettings
+            showSettings: showSettings,
+            requestCodexUpdate: requestCodexUpdate
         )
     }
 
@@ -58,7 +80,8 @@ public final class ReviewMonitorWindowController: NSWindowController {
         contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator,
         frameAutosaveName: NSWindow.FrameAutosaveName,
         sidebarJobFilterDefaults: UserDefaults? = .standard,
-        showSettings: (@MainActor () -> Void)? = nil
+        showSettings: (@MainActor () -> Void)? = nil,
+        requestCodexUpdate: (@MainActor () -> Void)? = nil
     ) {
         let uiState = Self.makeUIState(
             auth: store.auth,
@@ -68,7 +91,8 @@ public final class ReviewMonitorWindowController: NSWindowController {
             store: store,
             uiState: uiState,
             contentTransitionAnimator: contentTransitionAnimator,
-            showSettings: showSettings
+            showSettings: showSettings,
+            requestCodexUpdate: requestCodexUpdate
         )
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: Self.defaultContentSize),
@@ -81,6 +105,7 @@ public final class ReviewMonitorWindowController: NSWindowController {
         window.setContentSize(Self.defaultContentSize)
 
         self.rootViewController = rootViewController
+        self.uiState = uiState
         super.init(window: window)
 
         window.isReleasedWhenClosed = false
