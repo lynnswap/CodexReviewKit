@@ -340,9 +340,9 @@ struct CodexReviewMonitorCITests {
             capturedAuthenticationConfiguration?.callbackScheme
                 == "lynnpd.CodexReviewMonitor.Tests.auth"
         )
-        if case .ephemeral? = capturedAuthenticationConfiguration?.browserSessionPolicy {
+        if case .shared? = capturedAuthenticationConfiguration?.browserSessionPolicy {
         } else {
-            Issue.record("Expected ReviewMonitor to use an ephemeral browser session.")
+            Issue.record("Expected ReviewMonitor to use a shared browser session.")
         }
         #expect(capturedAuthenticationConfiguration?.presentationAnchorProvider() == nil)
         #expect(didRequestPresentationAnchor)
