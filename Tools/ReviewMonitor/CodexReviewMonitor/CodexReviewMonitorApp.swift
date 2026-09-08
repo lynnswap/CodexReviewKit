@@ -549,7 +549,7 @@ struct ReviewMonitorAppComposition {
                     runtimePreferences,
                     .init(
                         callbackScheme: ReviewMonitorNativeAuthentication.callbackScheme,
-                        browserSessionPolicy: .ephemeral,
+                        browserSessionPolicy: .shared,
                         presentationAnchorProvider: presentationAnchorProvider
                     ),
                     storeMode

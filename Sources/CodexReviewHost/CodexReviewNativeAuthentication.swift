@@ -11,6 +11,8 @@ public enum CodexReviewNativeAuthentication {}
 public extension CodexReviewNativeAuthentication {
     struct Configuration: Sendable {
         public enum BrowserSessionPolicy: Sendable {
+            /// Allows the authentication session to share the browser's cookies and browsing data.
+            case shared
             case ephemeral
         }
 
@@ -103,6 +105,8 @@ private final class SystemCodexReviewWebAuthenticationSession: NSObject, CodexRe
             completionHandler: makeSystemCodexReviewWebAuthenticationCompletionHandler(activeSession)
         )
         switch browserSessionPolicy {
+        case .shared:
+            session.prefersEphemeralWebBrowserSession = false
         case .ephemeral:
             session.prefersEphemeralWebBrowserSession = true
         }
