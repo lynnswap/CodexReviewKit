@@ -144,11 +144,18 @@ def prepare_draft(version: str, source_sha: str) -> dict:
     return release
 
 
+def verify_uploaded_asset(release: dict, name: str, checksum: str) -> None:
+    assets = [asset for asset in release["assets"] if asset["name"] == name]
+    if len(assets) != 1 or assets[0]["state"] != "uploaded" or assets[0].get("digest") != f"sha256:{checksum}":
+        raise ReleaseError(f"Draft asset upload/digest mismatch: {name}")
+
+
 def verify_uploaded_assets(release: dict, checksums: dict[str, str]) -> None:
+    assets = release["assets"]
+    if len(assets) != len(checksums) or {asset["name"] for asset in assets} != set(checksums):
+        raise ReleaseError("Release asset set differs from the verified artifact.")
     for name, checksum in checksums.items():
-        assets = [asset for asset in release["assets"] if asset["name"] == name]
-        if len(assets) != 1 or assets[0]["state"] != "uploaded" or assets[0].get("digest") != f"sha256:{checksum}":
-            raise ReleaseError(f"Draft asset upload/digest mismatch: {name}")
+        verify_uploaded_asset(release, name, checksum)
 
 
 def publish_draft(directory: Path, version: str, source_sha: str, dmg_sha256: str,
@@ -168,15 +175,21 @@ def publish_draft(directory: Path, version: str, source_sha: str, dmg_sha256: st
         if existing:
             # Rerunning the failed publish job reuses the same signed artifact.
             # Never overwrite a different upload under the same asset name.
-            verify_uploaded_assets(release, {name: checksum})
+            verify_uploaded_asset(release, name, checksum)
         else:
             run(["gh", "release", "upload", version, str(directory / name), "--repo", repository])
     release = api(endpoint)
     require_draft(release, version, source_sha, prerelease)
     verify_uploaded_assets(release, checksums)
     require_absent_tag(repository, version)
-    # Leave the user's title and notes untouched, including edits made during CI.
-    published = patch_release(repository, release_id, {"draft": False})
+    # Reassert the approved identity in the publishing update so intervening draft
+    # edits cannot redirect it. Leave the user's title and notes untouched.
+    published = patch_release(repository, release_id, {
+        "tag_name": version,
+        "target_commitish": source_sha,
+        "prerelease": prerelease,
+        "draft": False,
+    })
     return confirm_publication(repository, published, version, source_sha, checksums, prerelease)
 
 

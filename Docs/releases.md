@@ -45,6 +45,8 @@ must pass before signing. Signing runs separately from the build, uses native
 Apple tools and an ephemeral keychain, and does not execute the app. The final
 job verifies and uploads the DMG, `release-info.json`, and `SHA256SUMS`, then
 publishes that same draft. GitHub creates the tag at publication time.
+Only those three verified assets may be attached at publication; remove any
+unintended draft attachments before retrying a failed publication.
 
 Failures before publication leave the release as a draft. Rerun failed jobs to
 reuse successfully built and signed artifacts. Matching uploads are retained;

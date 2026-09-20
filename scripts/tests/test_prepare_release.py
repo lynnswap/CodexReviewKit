@@ -94,7 +94,52 @@ class PrepareReleaseTests(unittest.TestCase):
         self.assertEqual(len(commands), 3)
         self.assertTrue(all(command[:4] == ["gh", "release", "upload", self.version] for command in commands))
         self.assertTrue(all("--clobber" not in command for command in commands))
-        patch.assert_called_once_with(self.repository, 42, {"draft": False})
+        patch.assert_called_once_with(self.repository, 42, {
+            "tag_name": self.version, "target_commitish": self.sha,
+            "prerelease": True, "draft": False,
+        })
+
+    def test_unrecognized_remote_assets_prevent_publication(self):
+        complete = self.created_draft()
+        extra = {"name": "old-installer.dmg", "state": "uploaded", "digest": "sha256:" + "f" * 64}
+        for initially_present in (True, False):
+            with self.subTest(initially_present=initially_present):
+                with_extra = self.created_draft(assets=[*complete["assets"], extra])
+                initial = with_extra if initially_present else self.created_draft(assets=[])
+                with mock.patch.object(release, "api", side_effect=[initial, [], with_extra]), \
+                        mock.patch.object(release, "patch_release") as patch:
+                    with self.assertRaisesRegex(release.ReleaseError, "asset set"):
+                        self.create()
+                    patch.assert_not_called()
+
+    def test_publication_reasserts_fields_changed_after_final_read(self):
+        complete = self.created_draft()
+        remote = {**complete, "tag_name": "v9.9.9", "target_commitish": "b" * 40,
+                  "prerelease": False, "body": "Updated notes", "name": "Updated title"}
+
+        def publish(repository, release_id, fields):
+            self.assertEqual((repository, release_id), (self.repository, 42))
+            remote.update(fields)
+            return remote
+
+        def read_tag():
+            self.assertEqual(remote["target_commitish"], self.sha)
+            return {"object": {"type": "commit", "sha": remote["target_commitish"]}}
+
+        responses = iter([complete, [], complete, [], read_tag])
+
+        def api(*args, **kwargs):
+            response = next(responses)
+            return response() if callable(response) else response
+
+        with mock.patch.object(release, "api", side_effect=api), \
+                mock.patch.object(release, "patch_release", side_effect=publish):
+            self.create()
+        self.assertEqual(remote["tag_name"], self.version)
+        self.assertTrue(remote["prerelease"])
+        self.assertFalse(remote["draft"])
+        self.assertEqual(remote["body"], "Updated notes")
+        self.assertEqual(remote["name"], "Updated title")
 
     def test_partial_upload_retry_only_uploads_missing_files(self):
         complete = self.created_draft()
