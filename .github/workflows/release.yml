@@ -1,28 +1,28 @@
-name: Prepare Release
+name: Publish Release
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: New release tag, for example v1.2.3
+        description: Existing draft release tag to publish after CI succeeds, for example v1.2.3
         required: true
         type: string
-      prerelease:
-        description: Mark the draft as a prerelease
-        required: true
-        default: false
-        type: boolean
 
 permissions:
   contents: read
 
 concurrency:
-  group: prepare-release-${{ inputs.version }}
+  group: publish-release-${{ inputs.version }}
   cancel-in-progress: false
 
 jobs:
   validate:
-    name: Validate Release Request
+    name: Validate and Pin Draft Release
+    permissions:
+      contents: write
+    outputs:
+      release-id: ${{ steps.draft.outputs.release-id }}
+      prerelease: ${{ steps.draft.outputs.prerelease }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -31,10 +31,12 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Validate main ref and version
+      - name: Validate main ref and pin the approved draft
+        id: draft
         env:
+          GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ inputs.version }}
-        run: python3 scripts/prepare_release.py validate --version "$RELEASE_VERSION" --source-sha "$GITHUB_SHA"
+        run: python3 scripts/prepare_release.py prepare --version "$RELEASE_VERSION" --source-sha "$GITHUB_SHA"
 
   checks:
     name: Release Checks
@@ -111,9 +113,9 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  draft:
-    name: Create Draft Release
-    needs: sign
+  publish:
+    name: Upload Assets and Publish Release
+    needs: [validate, sign]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -131,16 +133,18 @@ jobs:
           path: ${{ runner.temp }}/signed-release
           digest-mismatch: error
 
-      - name: Create draft with immutable source commit
+      - name: Publish the approved draft after verifying its assets
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ inputs.version }}
-          RELEASE_PRERELEASE: ${{ inputs.prerelease }}
+          RELEASE_ID: ${{ needs.validate.outputs.release-id }}
+          RELEASE_PRERELEASE: ${{ needs.validate.outputs.prerelease }}
           DMG_SHA256: ${{ needs.sign.outputs.dmg-sha256 }}
         run: |
-          python3 scripts/prepare_release.py draft \
+          python3 scripts/prepare_release.py publish \
             --version "$RELEASE_VERSION" \
             --source-sha "$GITHUB_SHA" \
             --directory "$RUNNER_TEMP/signed-release" \
             --dmg-sha256 "$DMG_SHA256" \
+            --release-id "$RELEASE_ID" \
             --prerelease "$RELEASE_PRERELEASE"

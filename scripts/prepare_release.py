@@ -1,4 +1,4 @@
-"""Validate a release request and create a verified, unpublished GitHub draft."""
+"""Start a release from approved notes, then publish its verified CI artifacts."""
 from __future__ import annotations
 
 import argparse
@@ -18,8 +18,8 @@ class ReleaseError(Exception):
     pass
 
 
-def run(arguments: list[str]) -> str:
-    result = subprocess.run(arguments, capture_output=True, text=True)
+def run(arguments: list[str], *, input: str | None = None) -> str:
+    result = subprocess.run(arguments, input=input, capture_output=True, text=True)
     if result.returncode:
         raise ReleaseError(f"{arguments[0]} failed ({result.returncode}): {result.stderr.strip()}")
     return result.stdout
@@ -38,7 +38,7 @@ def validate_request(version: str, source_sha: str) -> str:
     if not re.fullmatch(r"[0-9a-f]{40}", source_sha):
         raise ReleaseError("The release source must be a full commit SHA.")
     if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("GITHUB_REF") != "refs/heads/main":
-        raise ReleaseError("Prepare Release must run on the main branch in GitHub Actions.")
+        raise ReleaseError("Publish Release must run on the main branch in GitHub Actions.")
     if source_sha != os.environ.get("GITHUB_SHA") or run(["git", "rev-parse", "HEAD"]).strip() != source_sha:
         raise ReleaseError("The release source does not match the workflow checkout.")
     repository = os.environ.get("GITHUB_REPOSITORY", "")
@@ -108,60 +108,150 @@ def require_absent_tag(repository: str, version: str) -> None:
         raise ReleaseError(f"Tag {version} already exists; it will not be moved or reused.")
 
 
-def create_draft(directory: Path, version: str, source_sha: str, dmg_sha256: str, prerelease: bool) -> str:
+def patch_release(repository: str, release_id: int, fields: dict) -> dict:
+    return json.loads(run([
+        "gh", "api", "--method", "PATCH", f"repos/{repository}/releases/{release_id}",
+        "--input", "-",
+    ], input=json.dumps(fields)))
+
+
+def require_draft(release: dict, version: str, source_sha: str, prerelease: bool | None = None) -> None:
+    if release["draft"] is not True or release["tag_name"] != version:
+        raise ReleaseError("The selected release is no longer the requested draft.")
+    if release["target_commitish"] != source_sha:
+        raise ReleaseError("The draft target differs from the tested commit.")
+    if prerelease is not None and release["prerelease"] is not prerelease:
+        raise ReleaseError("The draft's prerelease setting changed after publication was requested.")
+    if not (release.get("body") or "").strip():
+        raise ReleaseError("Register the approved release notes before starting publication.")
+
+
+def prepare_draft(version: str, source_sha: str) -> dict:
     repository = validate_request(version, source_sha)
-    checksums = validate_artifacts(directory, version, source_sha, repository, dmg_sha256)
-    if matching_releases(repository, version):
-        raise ReleaseError(f"A draft or published release for {version} already exists; no assets or notes were replaced.")
-    require_absent_tag(repository, version)
-    # Leave the tag absent until manual publication. The full SHA pins the draft
-    # without exposing a SwiftPM version before its release notes are approved.
-    run([
-        "gh", "release", "create", version,
-        *[str(directory / name) for name in checksums],
-        "--repo", repository, "--draft", "--target", source_sha,
-        "--title", version, "--generate-notes", f"--prerelease={'true' if prerelease else 'false'}",
-    ])
     releases = matching_releases(repository, version)
     if len(releases) != 1:
-        raise ReleaseError("The newly created draft could not be identified uniquely; inspect Releases before retrying.")
+        raise ReleaseError("Create one draft with the version and approved notes before starting this workflow.")
     release = releases[0]
-    if release["draft"] is not True or release["prerelease"] is not prerelease or release["target_commitish"] != source_sha:
-        raise ReleaseError("The created release does not match its draft/commit/prerelease contract; inspect Releases.")
-    assets = release["assets"]
-    if {asset["name"] for asset in assets} != set(checksums) or len(assets) != len(checksums):
-        raise ReleaseError("Draft asset set is incomplete; inspect Releases before retrying.")
-    for asset in assets:
-        if asset["state"] != "uploaded" or asset.get("digest") != f"sha256:{checksums[asset['name']]}":
-            raise ReleaseError(f"Draft asset upload/digest mismatch: {asset['name']}")
+    # A UI-created draft can name main; resolve it once to this workflow's commit.
+    target = release["target_commitish"]
+    if target not in ("main", source_sha):
+        raise ReleaseError("The draft must target main or this workflow's exact commit.")
+    require_draft({**release, "target_commitish": source_sha}, version, source_sha)
     require_absent_tag(repository, version)
-    url = release["html_url"]
-    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary_path:
+    if target != source_sha:
+        release = patch_release(repository, release["id"], {"target_commitish": source_sha})
+        require_draft(release, version, source_sha)
+    return release
+
+
+def verify_uploaded_assets(release: dict, checksums: dict[str, str]) -> None:
+    for name, checksum in checksums.items():
+        assets = [asset for asset in release["assets"] if asset["name"] == name]
+        if len(assets) != 1 or assets[0]["state"] != "uploaded" or assets[0].get("digest") != f"sha256:{checksum}":
+            raise ReleaseError(f"Draft asset upload/digest mismatch: {name}")
+
+
+def publish_draft(directory: Path, version: str, source_sha: str, dmg_sha256: str,
+                  release_id: int, prerelease: bool) -> str:
+    repository = validate_request(version, source_sha)
+    checksums = validate_artifacts(directory, version, source_sha, repository, dmg_sha256)
+    endpoint = f"repos/{repository}/releases/{release_id}"
+    release = api(endpoint)
+    if release["draft"] is False:
+        # A successful publish can lose its response or fail the final read.
+        # A retry may confirm the same artifact, but must never mutate a public release.
+        return confirm_publication(repository, release, version, source_sha, checksums, prerelease)
+    require_draft(release, version, source_sha, prerelease)
+    require_absent_tag(repository, version)
+    for name, checksum in checksums.items():
+        existing = [asset for asset in release["assets"] if asset["name"] == name]
+        if existing:
+            # Rerunning the failed publish job reuses the same signed artifact.
+            # Never overwrite a different upload under the same asset name.
+            verify_uploaded_assets(release, {name: checksum})
+        else:
+            run(["gh", "release", "upload", version, str(directory / name), "--repo", repository])
+    release = api(endpoint)
+    require_draft(release, version, source_sha, prerelease)
+    verify_uploaded_assets(release, checksums)
+    require_absent_tag(repository, version)
+    # Leave the user's title and notes untouched, including edits made during CI.
+    published = patch_release(repository, release_id, {"draft": False})
+    return confirm_publication(repository, published, version, source_sha, checksums, prerelease)
+
+
+def confirm_publication(repository: str, published: dict, version: str, source_sha: str,
+                        checksums: dict[str, str], prerelease: bool) -> str:
+    if published["draft"] is not False or published["tag_name"] != version or published["prerelease"] is not prerelease:
+        raise ReleaseError("GitHub did not confirm publication; inspect the release before retrying.")
+    verify_uploaded_assets(published, checksums)
+    tag = api(f"repos/{repository}/git/ref/tags/{version}")["object"]
+    while tag["type"] == "tag":
+        tag = api(f"repos/{repository}/git/tags/{tag['sha']}")["object"]
+    if tag["type"] != "commit" or tag["sha"] != source_sha:
+        raise ReleaseError("The published tag differs from the tested commit; inspect the release.")
+    url = published["html_url"]
+    if summary_path := os.environ.get("GITHUB_STEP_SUMMARY"):
         with Path(summary_path).open("a") as summary:
-            summary.write(f"## Release draft ready\n\n[{version}]({url}) targets `{source_sha}`.\n\n")
-            summary.write("Edit the release notes and review the attached DMG, then publish the draft in GitHub.\n")
+            summary.write(f"## Release published\n\n[{version}]({url}) targets `{source_sha}`.\n")
     return url
+
+
+def start_release(repository: str, version: str, notes_file: Path, prerelease: bool) -> str:
+    if not VERSION_PATTERN.fullmatch(version):
+        raise ReleaseError("Version must look like v1.2.3 or v1.2.3-beta.1.")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        raise ReleaseError("Repository must be OWNER/REPO.")
+    if not notes_file.read_text().strip():
+        raise ReleaseError("Release notes must not be empty.")
+    if matching_releases(repository, version):
+        raise ReleaseError("This release already exists. Use Publish Release to start an existing draft.")
+    require_absent_tag(repository, version)
+    source_sha = api(f"repos/{repository}/git/ref/heads/main")["object"]["sha"]
+    url = run([
+        "gh", "release", "create", version, "--repo", repository, "--draft",
+        "--target", source_sha, "--title", version, "--notes-file", str(notes_file),
+        f"--prerelease={'true' if prerelease else 'false'}",
+    ]).strip()
+    try:
+        run(["gh", "workflow", "run", "release.yml", "--repo", repository,
+             "--ref", "main", "-f", f"version={version}"])
+    except ReleaseError as error:
+        raise ReleaseError(f"Draft saved at {url}, but workflow dispatch was not confirmed. "
+                           f"Check Actions before retrying Publish Release: {error}") from error
+    return (f"Draft: {url}\nActions: https://github.com/{repository}/actions/workflows/release.yml\n"
+            "Approve signing in GitHub; CI then uploads assets and publishes. No local wait is needed.")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("validate", "draft"):
+    start = commands.add_parser("start", help="Save approved notes as a draft and dispatch publication without waiting")
+    start.add_argument("--repo", required=True)
+    start.add_argument("--version", required=True)
+    start.add_argument("--notes-file", type=Path, required=True)
+    start.add_argument("--prerelease", action="store_true")
+    for name in ("prepare", "publish"):
         command = commands.add_parser(name)
         command.add_argument("--version", required=True)
         command.add_argument("--source-sha", required=True)
-        if name == "draft":
+        if name == "publish":
             command.add_argument("--directory", type=Path, required=True)
             command.add_argument("--dmg-sha256", required=True)
+            command.add_argument("--release-id", type=int, required=True)
             command.add_argument("--prerelease", choices=("true", "false"), required=True)
     args = parser.parse_args()
     try:
-        if args.command == "validate":
-            validate_request(args.version, args.source_sha)
-            print(f"Release request validated: {args.version} at {args.source_sha}")
+        if args.command == "start":
+            print(start_release(args.repo, args.version, args.notes_file, args.prerelease))
+        elif args.command == "prepare":
+            release = prepare_draft(args.version, args.source_sha)
+            with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+                output.write(f"release-id={release['id']}\nprerelease={str(release['prerelease']).lower()}\n")
+            print(f"Publishing draft {release['id']}: {args.version} at {args.source_sha}")
         else:
-            print(create_draft(args.directory, args.version, args.source_sha, args.dmg_sha256, args.prerelease == "true"))
+            print(publish_draft(args.directory, args.version, args.source_sha, args.dmg_sha256,
+                                args.release_id, args.prerelease == "true"))
     except (ReleaseError, OSError, ValueError, KeyError) as error:
         print(f"Release preparation failed: {error}", file=sys.stderr)
         return 1

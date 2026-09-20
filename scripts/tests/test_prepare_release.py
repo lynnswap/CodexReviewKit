@@ -51,7 +51,7 @@ class PrepareReleaseTests(unittest.TestCase):
         self.addCleanup(self.environment_patch.stop)
         self.calls = []
 
-        def run(arguments):
+        def run(arguments, **kwargs):
             self.calls.append(arguments)
             if arguments == ["git", "rev-parse", "HEAD"]:
                 return self.sha + "\n"
@@ -72,6 +72,7 @@ class PrepareReleaseTests(unittest.TestCase):
 
     def created_draft(self, **changes):
         result = {
+            "id": 42, "body": "Approved release notes", "name": "Release title",
             "tag_name": self.version, "draft": True, "prerelease": True,
             "target_commitish": self.sha, "html_url": "https://example.invalid/draft",
             "assets": [{"name": name, "state": "uploaded", "digest": f"sha256:{value}"} for name, value in self.hashes.items()],
@@ -79,21 +80,44 @@ class PrepareReleaseTests(unittest.TestCase):
         return {**result, **changes}
 
     def create(self):
-        return release.create_draft(self.directory, self.version, self.sha, self.dmg_hash, True)
+        return release.publish_draft(self.directory, self.version, self.sha, self.dmg_hash, 42, True)
 
-    def test_success_creates_only_a_draft_pinned_to_commit(self):
-        # A previously successful signing job remains valid when only the draft job is rerun.
-        with mock.patch.object(release, "api", side_effect=[[[]], [], [[self.created_draft()]], []]):
+    def test_success_uploads_and_publishes_without_replacing_notes(self):
+        draft = self.created_draft(assets=[])
+        uploaded = self.created_draft(body="Notes edited while CI ran")
+        published = {**uploaded, "draft": False}
+        with mock.patch.object(release, "api", side_effect=[draft, [], uploaded, [], {
+            "object": {"type": "commit", "sha": self.sha}
+        }]), mock.patch.object(release, "patch_release", return_value=published) as patch:
             self.assertEqual(self.create(), "https://example.invalid/draft")
         commands = [args for args in self.calls if args[0] == "gh"]
-        self.assertEqual(len(commands), 1)
-        command = commands[0]
-        self.assertEqual(command[:4], ["gh", "release", "create", self.version])
-        self.assertIn("--draft", command)
-        self.assertEqual(command[command.index("--target") + 1], self.sha)
-        self.assertIn("--prerelease=true", command)
-        self.assertNotIn("--clobber", command)
-        self.assertNotIn("--verify-tag", command)
+        self.assertEqual(len(commands), 3)
+        self.assertTrue(all(command[:4] == ["gh", "release", "upload", self.version] for command in commands))
+        self.assertTrue(all("--clobber" not in command for command in commands))
+        patch.assert_called_once_with(self.repository, 42, {"draft": False})
+
+    def test_partial_upload_retry_only_uploads_missing_files(self):
+        complete = self.created_draft()
+        partial = self.created_draft(assets=complete["assets"][:1])
+        with mock.patch.object(release, "api", side_effect=[partial, [], complete, [], {
+            "object": {"type": "commit", "sha": self.sha}
+        }]), mock.patch.object(release, "patch_release", return_value={**complete, "draft": False}):
+            self.create()
+        uploads = [args for args in self.calls if args[:3] == ["gh", "release", "upload"]]
+        self.assertEqual(len(uploads), 2)
+        self.assertNotIn(str(self.directory / self.dmg_name), [args[4] for args in uploads])
+
+    def test_upload_failure_leaves_draft_unpublished(self):
+        def fail_upload(arguments, **kwargs):
+            if arguments[0] == "git":
+                return self.sha
+            raise release.ReleaseError("Upload failed")
+        with mock.patch.object(release, "api", side_effect=[self.created_draft(assets=[]), []]), \
+                mock.patch.object(release, "run", side_effect=fail_upload), \
+                mock.patch.object(release, "patch_release") as patch:
+            with self.assertRaisesRegex(release.ReleaseError, "Upload failed"):
+                self.create()
+        patch.assert_not_called()
 
     def test_non_main_and_checkout_mismatch_are_rejected(self):
         with mock.patch.dict(os.environ, {"GITHUB_REF": "refs/tags/v1.2.3"}):
@@ -147,31 +171,101 @@ class PrepareReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(release.ReleaseError, "regular file"):
             self.create()
 
-    def test_existing_draft_on_later_page_is_not_overwritten(self):
-        with mock.patch.object(release, "api", return_value=[[{"tag_name": "v0.1.0"}], [self.created_draft()]]):
-            with self.assertRaisesRegex(release.ReleaseError, "already exists"):
-                self.create()
+    def test_prepare_finds_draft_on_later_page_without_replacing_notes(self):
+        draft = self.created_draft()
+        with mock.patch.object(release, "api", side_effect=[[ [{"tag_name": "v0.1.0"}], [draft] ], []]):
+            self.assertEqual(release.prepare_draft(self.version, self.sha), draft)
         self.assertFalse(any(args[0] == "gh" for args in self.calls))
+
+    def test_prepare_pins_main_without_editing_user_notes(self):
+        draft = self.created_draft(target_commitish="main")
+        with mock.patch.object(release, "api", side_effect=[[[draft]], []]), \
+                mock.patch.object(release, "patch_release", return_value=self.created_draft()) as patch:
+            release.prepare_draft(self.version, self.sha)
+        patch.assert_called_once_with(self.repository, 42, {"target_commitish": self.sha})
 
     def test_existing_tag_is_not_reused(self):
-        with mock.patch.object(release, "api", side_effect=[[[]], [{"ref": f"refs/tags/{self.version}"}]]):
+        with mock.patch.object(release, "api", side_effect=[[[self.created_draft()]], [{"ref": f"refs/tags/{self.version}"}]]):
             with self.assertRaisesRegex(release.ReleaseError, "Tag .* already exists"):
-                self.create()
+                release.prepare_draft(self.version, self.sha)
         self.assertFalse(any(args[0] == "gh" for args in self.calls))
 
-    def test_created_draft_is_verified(self):
-        for changes in ({"draft": False}, {"target_commitish": "main"}, {"assets": []}):
+    def test_prepare_rejects_missing_notes_published_release_and_different_commit(self):
+        for changes in ({"body": " "}, {"draft": False}, {"target_commitish": "b" * 40}):
             with self.subTest(changes=changes):
-                with mock.patch.object(release, "api", side_effect=[[[]], [], [[self.created_draft(**changes)]]]):
+                with mock.patch.object(release, "api", return_value=[[self.created_draft(**changes)]]), \
+                        mock.patch.object(release, "patch_release") as patch:
+                    with self.assertRaises(release.ReleaseError):
+                        release.prepare_draft(self.version, self.sha)
+                    patch.assert_not_called()
+
+    def test_changed_draft_identity_is_rejected_before_upload(self):
+        for changes in ({"draft": False, "assets": []}, {"target_commitish": "main"}, {"tag_name": "v9.9.9"}, {"prerelease": False}):
+            with self.subTest(changes=changes):
+                with mock.patch.object(release, "api", return_value=self.created_draft(**changes)):
                     with self.assertRaises(release.ReleaseError):
                         self.create()
+        self.assertFalse(any(args[0] == "gh" for args in self.calls))
+
+    def test_remote_changes_during_upload_prevent_publication(self):
+        initial = self.created_draft(assets=[])
+        for changes in ({"target_commitish": "b" * 40}, {"prerelease": False}, {"body": ""}, {"assets": []}):
+            with self.subTest(changes=changes):
+                with mock.patch.object(release, "api", side_effect=[initial, [], self.created_draft(**changes)]), \
+                        mock.patch.object(release, "patch_release") as patch:
+                    with self.assertRaises(release.ReleaseError):
+                        self.create()
+                    patch.assert_not_called()
 
     def test_uploaded_asset_digest_is_verified(self):
         draft = self.created_draft()
         draft["assets"][0]["digest"] = "sha256:" + "0" * 64
-        with mock.patch.object(release, "api", side_effect=[[[]], [], [[draft]]]):
+        with mock.patch.object(release, "api", side_effect=[draft, []]), \
+                mock.patch.object(release, "patch_release") as patch:
             with self.assertRaisesRegex(release.ReleaseError, "upload/digest mismatch"):
                 self.create()
+            patch.assert_not_called()
+
+    def test_published_tag_is_verified(self):
+        draft = self.created_draft()
+        with mock.patch.object(release, "api", side_effect=[draft, [], draft, [], {
+            "object": {"type": "commit", "sha": "b" * 40}
+        }]), mock.patch.object(release, "patch_release", return_value={**draft, "draft": False}):
+            with self.assertRaisesRegex(release.ReleaseError, "published tag"):
+                self.create()
+
+    def test_retry_after_publication_only_confirms_existing_release(self):
+        published = self.created_draft(draft=False)
+        commit = {"object": {"type": "commit", "sha": self.sha}}
+        for tag_responses in ([commit], [{"object": {"type": "tag", "sha": "c" * 40}}, commit]):
+            with self.subTest(tag_responses=tag_responses):
+                with mock.patch.object(release, "api", side_effect=[published, *tag_responses]), \
+                        mock.patch.object(release, "patch_release") as patch:
+                    self.assertEqual(self.create(), published["html_url"])
+                patch.assert_not_called()
+        self.assertFalse(any(args[0] == "gh" for args in self.calls))
+
+    def test_start_saves_notes_and_dispatches_without_waiting(self):
+        notes = self.directory / "notes.md"
+        notes.write_text("Approved release notes\n")
+        with mock.patch.object(release, "api", side_effect=[[[]], [], {"object": {"sha": self.sha}}]):
+            result = release.start_release(self.repository, self.version, notes, True)
+        self.assertIn("No local wait", result)
+        create, dispatch = self.calls
+        self.assertEqual(create[:4], ["gh", "release", "create", self.version])
+        self.assertIn("--draft", create)
+        self.assertEqual(create[create.index("--notes-file") + 1], str(notes))
+        self.assertEqual(create[create.index("--target") + 1], self.sha)
+        self.assertEqual(dispatch, ["gh", "workflow", "run", "release.yml", "--repo", self.repository,
+                                    "--ref", "main", "-f", f"version={self.version}"])
+
+    def test_dispatch_failure_reports_retained_draft(self):
+        notes = self.directory / "notes.md"
+        notes.write_text("Approved release notes")
+        with mock.patch.object(release, "api", side_effect=[[[]], [], {"object": {"sha": self.sha}}]), \
+                mock.patch.object(release, "run", side_effect=["https://example.invalid/draft", release.ReleaseError("Offline")]):
+            with self.assertRaisesRegex(release.ReleaseError, "Draft saved.*dispatch was not confirmed"):
+                release.start_release(self.repository, self.version, notes, False)
 
     def test_github_failure_does_not_trigger_recovery_mutations(self):
         with mock.patch.object(release, "api", side_effect=release.ReleaseError("GitHub unavailable")):
