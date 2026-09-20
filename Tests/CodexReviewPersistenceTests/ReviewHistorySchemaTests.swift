@@ -102,6 +102,8 @@ struct ReviewHistorySchemaTests {
             "terminalCommittedAt",
             "createdAt",
             "updatedAt",
+            "reviewThreadID",
+            "threadID",
         ])
         #expect(findingColumns == [
             "id",
@@ -311,7 +313,11 @@ struct ReviewHistorySchemaTests {
         }
 
         let recordsBefore = try await writer.read { db in
-            try ReviewRecordRow.fetchAll(db).sorted { $0.id < $1.id }
+            try #sql(
+                "SELECT *, NULL AS \"reviewThreadID\", NULL AS \"threadID\" FROM \"review_records\"",
+                as: ReviewRecordRow.self
+            )
+            .fetchAll(db).sorted { $0.id < $1.id }
         }
         let findingsBefore = try await writer.read { db in
             try ReviewFindingRow.fetchAll(db).sorted { $0.id < $1.id }
@@ -327,6 +333,7 @@ struct ReviewHistorySchemaTests {
             try ReviewFindingRow.fetchAll(db).sorted { $0.id < $1.id }
         }
         #expect(recordsAfter == recordsBefore)
+        #expect(recordsAfter.allSatisfy { $0.reviewThreadID == nil && $0.threadID == nil })
         #expect(findingsAfter == findingsBefore)
 
         try await writer.write { db in

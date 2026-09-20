@@ -150,6 +150,10 @@ struct CodexReviewStoreHistoryTests {
         let terminalRecord = try #require(await history.terminalRecords().first)
         #expect(terminalRecord.canonicalReview == "No findings.")
         #expect(terminalRecord.parsedResult?.state == .noFindings)
+        let job = try #require(store.job(id: "job-1"))
+        let threadID = try #require(job.core.run.threadID)
+        #expect(terminalRecord.threadID == threadID)
+        #expect(terminalRecord.reviewThreadID == job.core.run.reviewThreadID)
     }
 
     @Test func liveProcessExitPersistsItsKnownEndWithoutDisablingHistory() async throws {
@@ -212,6 +216,8 @@ struct CodexReviewStoreHistoryTests {
         let terminal = try #require(await history.terminalRecords().first)
         #expect(terminal.terminal == .interrupted(.previousProcessExit))
         #expect(terminal.endedAt == endedAt)
+        #expect(terminal.threadID == initialRun.threadID)
+        #expect(terminal.reviewThreadID == initialRun.reviewThreadID)
     }
 
     @Test func reusedWorkspaceUpdatesMetadataInPlaceFromTheLatestAdmission() async throws {

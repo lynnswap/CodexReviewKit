@@ -45,6 +45,8 @@ struct ReviewRecordRow: Equatable, Sendable {
 
     var createdAt: Double
     var updatedAt: Double
+    var reviewThreadID: String?
+    var threadID: String?
 }
 
 @Table("review_findings")
@@ -311,14 +313,17 @@ enum ReviewHistorySchema {
             let workspaceSortOrders = Dictionary(uniqueKeysWithValues:
                 try ReviewWorkspaceRow.fetchAll(db).map { ($0.cwd, $0.sortOrder) }
             )
-            let orderedReviews = try ReviewRecordRow.fetchAll(db).map { review in
-                guard let workspaceSortOrder = workspaceSortOrders[review.cwd] else {
+            let orderedReviews = try ReviewRecordRow
+                .select { ($0.id, $0.cwd, $0.sortOrder) }
+                .fetchAll(db).map { id, cwd, sortOrder in
+                guard let workspaceSortOrder = workspaceSortOrders[cwd] else {
                     throw ReviewHistoryDatabaseError.invalidRecord(
-                        id: review.id,
+                        id: id,
                         reason: "workspace row is missing during review-order migration"
                     )
                 }
-                return (review: review, workspaceSortOrder: workspaceSortOrder)
+                return (review: (id: id, cwd: cwd, sortOrder: sortOrder),
+                        workspaceSortOrder: workspaceSortOrder)
             }.sorted { lhs, rhs in
                 if lhs.workspaceSortOrder != rhs.workspaceSortOrder {
                     return lhs.workspaceSortOrder > rhs.workspaceSortOrder
@@ -561,6 +566,13 @@ enum ReviewHistorySchema {
                 """
             )
             .execute(db)
+        }
+
+        migrator.registerMigration("v5_add_review_thread_ids") { db in
+            try #sql("ALTER TABLE \"review_records\" ADD COLUMN \"reviewThreadID\" TEXT")
+                .execute(db)
+            try #sql("ALTER TABLE \"review_records\" ADD COLUMN \"threadID\" TEXT")
+                .execute(db)
         }
 
         return migrator

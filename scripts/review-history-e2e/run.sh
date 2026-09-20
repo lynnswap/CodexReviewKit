@@ -422,7 +422,7 @@ assert_database_contract() {
     "interruptionKind", "cancellationSource", "cancellationMessage",
     "terminalMessage", "endedAt", "summary", "canonicalReview",
     "parsedState", "parsedFindingCount", "parsedSource", "parserVersion",
-    "terminalCommittedAt", "createdAt", "updatedAt"
+    "terminalCommittedAt", "createdAt", "updatedAt", "reviewThreadID", "threadID"
   ]' "$record_columns_path" >/dev/null || die "review schema inventory changed"
   /usr/bin/jq -e '[.[].name] == [
     "id", "reviewID", "ordinal", "priority", "title", "body", "path",

@@ -77,17 +77,23 @@ struct ReviewMonitorCopyTests {
         }
     }
 
-    @Test(arguments: [nil, "parent-thread"] as [String?])
-    func deepLinkAvailabilityUsesTheThreadWhenNoSeparateReviewThreadExists(threadID: String?) throws {
-        let job = CodexReviewJob(
-            id: "job", sessionID: "session", cwd: "/tmp/repo", targetSummary: "Review",
-            core: .init(
-                run: .init(threadID: threadID),
-                lifecycle: .init(status: .running),
-                output: .init(summary: "Running")
+    @Test(arguments: [(nil, nil), (nil, "parent-thread"), ("review-thread", "parent-thread")]
+        as [(String?, String?)])
+    func restoredDeepLinkAvailabilityUsesPersistedThreadIDs(
+        reviewThreadID: String?, threadID: String?
+    ) throws {
+        let job = try RestoredReviewRecord(
+            started: .init(
+                id: "job", cwd: "/tmp/repo", workspaceSortOrder: 0, sortOrder: 0,
+                target: .uncommittedChanges, model: nil, startedAt: .distantPast
             ),
-            logEntries: []
-        )
+            terminal: .init(
+                id: "job", model: nil, reviewThreadID: reviewThreadID, threadID: threadID,
+                terminal: .completed, endedAt: .now, summary: "No findings.",
+                canonicalReview: "No findings.",
+                parsedResult: PersistedParsedReviewResult(.parse(finalReviewText: "No findings."))
+            )
+        ).makeRestoredJob()
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running, workspaces: [CodexReviewWorkspace(cwd: job.cwd)], jobs: [job]
@@ -101,7 +107,8 @@ struct ReviewMonitorCopyTests {
             copyMenu = menu.item(withTitle: "Copy")?.submenu
         }
         let menu = try #require(copyMenu)
-        #expect(menu.item(withTitle: "Copy Deep Link")?.isEnabled == (threadID != nil))
+        #expect(menu.item(withTitle: "Copy Deep Link")?.isEnabled
+            == (reviewThreadID != nil || threadID != nil))
         #expect(menu.item(withTitle: "Copy Working Directory")?.isEnabled == true)
         #expect(menu.item(withTitle: "Copy as Markdown")?.isEnabled == true)
     }

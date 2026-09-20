@@ -146,6 +146,8 @@ package struct PersistedParsedReviewResult: Sendable, Hashable {
 package struct TerminalReviewRecord: Sendable, Hashable {
     package var id: String
     package var model: String?
+    package var reviewThreadID: String?
+    package var threadID: String?
     package var terminal: ReviewTerminalRecord
     package var endedAt: Date?
     package var summary: String
@@ -155,6 +157,8 @@ package struct TerminalReviewRecord: Sendable, Hashable {
     package init(
         id: String,
         model: String?,
+        reviewThreadID: String? = nil,
+        threadID: String? = nil,
         terminal: ReviewTerminalRecord,
         endedAt: Date?,
         summary: String,
@@ -194,6 +198,8 @@ package struct TerminalReviewRecord: Sendable, Hashable {
         }
         self.id = id
         self.model = model?.nilIfEmpty
+        self.reviewThreadID = reviewThreadID
+        self.threadID = threadID
         self.terminal = terminal
         self.endedAt = endedAt
         self.summary = summary
@@ -222,7 +228,11 @@ package struct RestoredReviewRecord: Sendable, Hashable {
     @MainActor
     package func makeRestoredJob() -> CodexReviewJob {
         let core = ReviewJobCore(
-            run: .init(model: terminal.model ?? started.model),
+            run: .init(
+                reviewThreadID: terminal.reviewThreadID,
+                threadID: terminal.threadID,
+                model: terminal.model ?? started.model
+            ),
             lifecycle: terminal.lifecycle(startedAt: started.startedAt),
             output: terminal.output
         )

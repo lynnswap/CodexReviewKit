@@ -303,6 +303,8 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
             let terminal = try TerminalReviewRecord(
                 id: row.id,
                 model: row.terminalModel,
+                reviewThreadID: row.reviewThreadID,
+                threadID: row.threadID,
                 terminal: .completed,
                 endedAt: ReviewHistoryTimestamp.decode(endedAt),
                 summary: summary,
@@ -442,6 +444,8 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
         try ReviewRecordRow.find(row.id).where { $0.phase.eq("active") }.update {
             $0.phase = #bind(row.phase)
             $0.terminalModel = #bind(row.terminalModel)
+            $0.reviewThreadID = #bind(row.reviewThreadID)
+            $0.threadID = #bind(row.threadID)
             $0.terminalKind = #bind(row.terminalKind)
             $0.interruptionKind = #bind(row.interruptionKind)
             $0.cancellationSource = #bind(row.cancellationSource)
@@ -570,6 +574,8 @@ private extension ReviewRecordRow {
         if startedAt != other.startedAt { columns.append("startedAt") }
         if phase != other.phase { columns.append("phase") }
         if terminalModel != other.terminalModel { columns.append("terminalModel") }
+        if reviewThreadID != other.reviewThreadID { columns.append("reviewThreadID") }
+        if threadID != other.threadID { columns.append("threadID") }
         if terminalKind != other.terminalKind { columns.append("terminalKind") }
         if interruptionKind != other.interruptionKind { columns.append("interruptionKind") }
         if cancellationSource != other.cancellationSource { columns.append("cancellationSource") }

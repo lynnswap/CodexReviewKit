@@ -6,6 +6,41 @@ import Testing
 
 @Suite("ReviewHistoryDatabase")
 struct ReviewHistoryDatabaseTests {
+    @Test("preserves deep-link identities across a file-backed relaunch", arguments: [
+        (nil, nil),
+        (nil, "thread"),
+        ("review-thread", "thread"),
+    ] as [(String?, String?)])
+    @MainActor
+    func threadIDsSurviveRelaunch(reviewThreadID: String?, threadID: String?) async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "ReviewThreadIDs-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appending(path: "review-history.sqlite")
+        let first = ReviewHistoryDatabase(databaseURL: url)
+        var terminal = try ReviewHistoryTestSupport.completed(id: "review")
+        terminal.reviewThreadID = reviewThreadID
+        terminal.threadID = threadID
+        _ = try await ReviewHistoryTestSupport.record(
+            started: ReviewHistoryTestSupport.started(id: "review"),
+            terminal: terminal,
+            in: first
+        )
+        try await first.close()
+
+        let second = ReviewHistoryDatabase(databaseURL: url)
+        let records = try await second.load(retentionPolicy: .default)
+        let restored = try #require(records.first)
+        #expect(restored.terminal == terminal)
+        let job = restored.makeRestoredJob()
+        #expect(job.core.run.reviewThreadID == reviewThreadID)
+        #expect(job.core.run.threadID == threadID)
+        #expect(job.origin == .restoredHistory)
+        #expect(job.belongs(toLiveSession: job.sessionID) == false)
+        try await second.close()
+    }
+
     @Test("round trips every target through phase-specific records")
     func targetRoundTrip() async throws {
         let (database, _) = try ReviewHistoryTestSupport.database()
