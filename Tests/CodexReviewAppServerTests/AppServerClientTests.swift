@@ -3822,20 +3822,20 @@ struct AppServerClientTests {
     @Test func recoveryContinuesAndObservesTheResumedReviewThread() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
-        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         try await transport.enqueue(EmptyResponse(), for: "thread/resume")
         try await transport.enqueue(AppServerAPI.Turn.Start.Response(turnID: "continued-turn"), for: "turn/start")
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
         let source = CodexReviewBackendModel.Review.Run(
             threadID: "parent", turnID: "interrupted-turn", reviewThreadID: "review"
         )
-        let recovered = try await backend.resumeTypedReviewRecovery(
-            source,
+        let handoff = try await makeResolvedRecoveryHandoffForTesting(backend, run: source)
+        let recovered = try await backend.resumeReviewRecovery(
+            handoff,
             request: .init(
                 jobID: "job", sessionID: "session",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             ),
-            reason: .init(message: "Reconnect", purpose: .recovery)
+            admission: ReviewStartAdmission()
         )
         #expect(recovered.threadID == "parent")
         #expect(recovered.reviewThreadID == "review")
