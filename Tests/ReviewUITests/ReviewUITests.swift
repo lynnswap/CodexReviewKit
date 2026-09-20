@@ -2166,7 +2166,7 @@ struct ReviewUITests {
             #expect(sidebar.hasTemporaryContextMenuForTesting)
         }
 
-        #expect(presentedTitles == ["Cancel"])
+        #expect(presentedTitles == ["Cancel", "", "Copy"])
         #expect(sidebar.isPresentingContextMenuForTesting == false)
         #expect(sidebar.acceptsFirstResponderForTesting)
         #expect(sidebar.sidebarHasFirstResponderForTesting)

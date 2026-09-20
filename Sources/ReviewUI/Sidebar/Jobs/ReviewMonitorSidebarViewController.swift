@@ -957,7 +957,66 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             deleteItem.isEnabled = false
             menu.addItem(deleteItem)
         }
-        return menu.items.isEmpty ? nil : menu
+        if menu.items.isEmpty == false {
+            menu.addItem(.separator())
+        }
+        let copyItem = NSMenuItem(title: "Copy", action: nil, keyEquivalent: "")
+        let copyMenu = NSMenu(title: "Copy")
+        copyMenu.autoenablesItems = false
+        for (title, action) in [
+            ("Copy Working Directory", #selector(handleCopyWorkingDirectory(_:))),
+            ("Copy Deep Link", #selector(handleCopyDeepLink(_:))),
+            ("Copy as Markdown", #selector(handleCopyMarkdown(_:))),
+        ] {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = self
+            item.representedObject = clickedJob
+            if action == #selector(handleCopyDeepLink(_:)) {
+                item.isEnabled = reviewDeepLink(for: clickedJob) != nil
+            }
+            copyMenu.addItem(item)
+        }
+        copyItem.submenu = copyMenu
+        menu.addItem(copyItem)
+        return menu
+    }
+
+    @objc
+    private func handleCopyWorkingDirectory(_ sender: NSMenuItem) {
+        guard let job = sender.representedObject as? CodexReviewJob else { return }
+        copyToPasteboard(job.cwd)
+    }
+
+    @objc
+    private func handleCopyDeepLink(_ sender: NSMenuItem) {
+        guard let job = sender.representedObject as? CodexReviewJob,
+              let url = reviewDeepLink(for: job)
+        else { return }
+        copyToPasteboard(url.absoluteString)
+    }
+
+    private func reviewDeepLink(for job: CodexReviewJob) -> URL? {
+        guard let threadID = job.core.run.reviewThreadID?.nilIfEmpty
+            ?? job.core.run.threadID?.nilIfEmpty
+        else { return nil }
+        return URL(string: "codex://threads")?.appendingPathComponent(threadID)
+    }
+
+    @objc
+    private func handleCopyMarkdown(_ sender: NSMenuItem) {
+        guard let job = sender.representedObject as? CodexReviewJob else { return }
+        var projection = ReviewMonitorLog.Projection()
+        let document = projection.render(
+            entries: job.logEntries,
+            terminal: job.core.lifecycle.terminal,
+            fallbackSummary: job.core.output.summary
+        )
+        copyToPasteboard(document.sourceText)
+    }
+
+    private func copyToPasteboard(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
     }
 
     @objc
