@@ -3819,6 +3819,54 @@ struct AppServerClientTests {
         ])
     }
 
+    @Test func recoveryContinuesAndObservesTheResumedReviewThread() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        try await transport.enqueue(EmptyResponse(), for: "thread/resume")
+        try await transport.enqueue(AppServerAPI.Turn.Start.Response(turnID: "continued-turn"), for: "turn/start")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let source = CodexReviewBackendModel.Review.Run(
+            threadID: "parent", turnID: "interrupted-turn", reviewThreadID: "review"
+        )
+        let recovered = try await backend.resumeTypedReviewRecovery(
+            source,
+            request: .init(
+                jobID: "job", sessionID: "session",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            ),
+            reason: .init(message: "Reconnect", purpose: .recovery)
+        )
+        #expect(recovered.threadID == "parent")
+        #expect(recovered.reviewThreadID == "review")
+        let requests = await transport.recordedRequests()
+        let resumed = try #require(requests.first { $0.method == "thread/resume" })
+        let continued = try #require(requests.first { $0.method == "turn/start" })
+        #expect(try JSONDecoder().decode(AppServerAPI.Thread.Resume.Params.self, from: resumed.params).threadID == "review")
+        #expect(try JSONDecoder().decode(AppServerAPI.Turn.Start.Params.self, from: continued.params).threadID == "review")
+
+        var iterator = await eventSequence(backend, recovered).makeAsyncIterator()
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: "review", turn: .init(id: "continued-turn", status: "completed"),
+                items: [.init(type: "agentMessage", id: "final", text: "No findings.")],
+                itemsView: "summary"
+            )
+        )
+        var completed = false
+        while let event = try await iterator.next() {
+            if case .completed(_, let result) = event {
+                #expect(result == "No findings.")
+                completed = true
+            } else if case .failed(let message) = event {
+                Issue.record("Continued review failed: \(message)")
+            }
+        }
+        #expect(completed)
+        try await backend.runtimeOwnerLifecycleHandle.closeAndWait()
+    }
+
     @Test func recoveredAttemptUsesFreshControlForTypedCancellation() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)

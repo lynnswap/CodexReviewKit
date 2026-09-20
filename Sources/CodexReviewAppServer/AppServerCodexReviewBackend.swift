@@ -1065,7 +1065,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         let provisionalRun = CodexReviewBackendModel.Review.Run(
             attemptID: attemptID,
             threadID: interruptedRun.threadID,
-            reviewThreadID: interruptedRun.threadID,
+            reviewThreadID: token.resumeThreadID,
             model: interruptedRun.model ?? request.model
         )
         try await admission.recordPreparedRecoveryRun(provisionalRun)
@@ -1087,7 +1087,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         let review: AppServerAPI.Turn.Start.Response
         do {
             review = try await startReviewTurn(
-                threadID: interruptedRun.threadID,
+                threadID: token.resumeThreadID,
                 request: request,
                 invocation: invocation,
                 provisionalRun: provisionalRun,
@@ -1119,7 +1119,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             attemptID: attemptID,
             threadID: interruptedRun.threadID,
             turnID: review.turnID,
-            reviewThreadID: interruptedRun.threadID,
+            reviewThreadID: token.resumeThreadID,
             model: interruptedRun.model ?? request.model
         )
         do {
