@@ -5,43 +5,72 @@ release build. For app installation and client setup, see the
 [README](../README.md#quick-start). Run the shell commands below from the
 repository root.
 
-## Prepare a Release
+## Publish a Release
 
-Maintainers can prepare a signed, notarized release entirely on GitHub Actions.
-After the [one-time signing setup](#one-time-signing-setup), open
-[Prepare Release](https://github.com/lynnswap/CodexReviewKit/actions/workflows/release.yml),
-choose **Run workflow** on `main`, enter a new tag such as `v1.2.3`, and select
-whether it is a prerelease.
+After the [one-time signing setup](#one-time-signing-setup), approve the version,
+release notes, and source commit before starting publication. CI runs checks and
+the build, then waits for your approval of the `release-signing` Environment.
+After you approve in GitHub, CI performs Developer ID signing, notarization,
+asset upload, and publication automatically.
+A successful run publishes the existing draft without changing its title or notes.
+No local process or LLM needs to watch the run.
 
-The workflow runs the existing CI checks and headless DMG build at the same
-commit. A separate macOS runner verifies that DMG, signs the app and disk image,
-submits it to Apple's notary service, and staples the accepted ticket. This job
-uses native Apple tools and the Python standard library; it does not install
-build dependencies or execute the app. The runner's default Xcode is used.
+To create the draft and start CI in one operation, save the approved notes in a
+UTF-8 file and run:
 
-The final job creates a Draft Release with the DMG, `release-info.json`, and
-`SHA256SUMS`. It has GitHub write permission and no Apple credentials. The draft
-targets the full tested commit SHA. Edit its generated release notes, review the
-assets, then choose **Publish release** in GitHub. The workflow never publishes
-the draft or creates the tag; GitHub creates the tag when you publish it.
+```bash
+python3 scripts/prepare_release.py start \
+  --repo lynnswap/CodexReviewKit \
+  --version v1.2.3 \
+  --notes-file /path/to/release-notes.md
+```
+
+Add `--prerelease` for a prerelease. The command targets the current remote `main`
+commit, creates a draft with the supplied notes, dispatches the workflow, and
+returns immediately. It does not create a tag or wait for CI. If dispatch cannot
+be confirmed, the draft remains available; check Actions before retrying the
+workflow to avoid starting it twice.
+
+To use a draft already prepared in GitHub, save its version, title, notes, and
+prerelease setting with `main` as the target. Then open
+[Publish Release](https://github.com/lynnswap/CodexReviewKit/actions/workflows/release.yml),
+choose **Run workflow** on `main`, and enter the draft's tag. This requests
+publication after CI succeeds and you approve signing.
+[Draft creation and editing do not trigger Actions](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#release),
+so this one dispatch is necessary. An API-created draft can target the full
+workflow commit SHA instead of `main`; a different commit is not silently substituted.
+
+The workflow pins the draft to its full source SHA before building. All CI checks
+must pass before signing. Signing runs separately from the build, uses native
+Apple tools and an ephemeral keychain, and does not execute the app. The final
+job verifies and uploads the DMG, `release-info.json`, and `SHA256SUMS`, then
+publishes that same draft. GitHub creates the tag at publication time.
+Only those three verified assets may be attached at publication; remove any
+unintended draft attachments before retrying a failed publication.
+
+Failures before publication leave the release as a draft. Rerun failed jobs to
+reuse successfully built and signed artifacts. Matching uploads are retained;
+different bytes under an existing asset name stop publication instead of being
+overwritten. If publication succeeded but its confirmation failed, rerunning the
+publish job confirms the same assets and tag without changing the public release.
+If rerunning the entire workflow creates different artifacts, inspect
+the draft's existing assets before removing them and retrying. Keep the tag,
+target commit, and prerelease setting unchanged while a run is active; title and
+release-note edits are preserved. Notarization can continue at Apple after a
+workflow timeout; diagnostics include its submission ID.
 
 The numeric part of the tag sets the app's marketing version: `v1.2.3-beta.1`
 produces version `1.2.3`, with the full tag retained in the filename and metadata.
-The workflow's run number sets the build version, so a new beta or release gets
-a later build number even when the marketing version stays the same. Retrying
-the same run keeps its build number.
-
-An existing tag or release, including a draft, stops creation without replacing
-notes or assets. After a partial failure, inspect the existing
-draft before retrying. Notarization diagnostics include the submission ID;
-a submission can continue at Apple after the workflow times out.
+The workflow run number sets the build version. Retrying the same run keeps its
+build number.
 
 ## One-time signing setup
 
 Use **Settings → Environments → release-signing** for these values. Its branch
-policy must allow only the `main` branch. If you also enable required reviewers,
-leave **Prevent self-review** off when the maintainer who starts the workflow
-must approve it.
+policy must allow only the `main` branch, with a required reviewer for signing.
+Leave **Prevent self-review** off when the maintainer starting the workflow also
+approves it. The maintainer approves this Environment in GitHub; CI publishes
+automatically after the approved signing job and all checks succeed.
 
 | Environment secret | Value |
 | --- | --- |
