@@ -313,7 +313,7 @@ struct ReviewRecoveryAdmissionTests {
         let candidate = makeRecoveryCandidate()
         let token = CodexReviewBackendModel.Review.RecoveryToken(
             interruptedRun: candidate.resolved.run,
-            rollbackThreadID: "review-thread"
+            resumeThreadID: "review-thread"
         )
         let handoff = try await candidate.prepareHandoff(token: token)
         let copy = handoff
@@ -330,7 +330,7 @@ struct ReviewRecoveryAdmissionTests {
         let candidate = makeRecoveryCandidate()
         let token = CodexReviewBackendModel.Review.RecoveryToken(
             interruptedRun: candidate.resolved.run,
-            rollbackThreadID: "review-thread"
+            resumeThreadID: "review-thread"
         )
         let handoff = try await candidate.prepareHandoff(token: token)
         let copy = handoff
@@ -375,16 +375,16 @@ struct ReviewRecoveryAdmissionTests {
         ))
     }
 
-    @Test func rollbackIsOutcomeUnknownBeforeItsNonIdempotentSend() async throws {
+    @Test func resumeIsOutcomeUnknownBeforeItsNonIdempotentSend() async throws {
         let admission = ReviewStartAdmission()
         let predecessor = makeRecoveryCandidate().resolved.run
 
-        try await admission.admitRecoveryRollbackDispatch(for: predecessor)
-        #expect(await admission.currentPhase() == .rollingBackRecovery(
+        try await admission.admitRecoveryResumeDispatch(for: predecessor)
+        #expect(await admission.currentPhase() == .resumingRecovery(
             predecessorRun: predecessor
         ))
 
-        try await admission.recordRecoveryRollbackAcknowledged(for: predecessor)
+        try await admission.recordRecoveryResumeAcknowledged(for: predecessor)
         #expect(await admission.currentPhase() == .preparingThread(.notSent))
     }
 }

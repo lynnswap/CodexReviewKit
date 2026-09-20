@@ -1081,8 +1081,8 @@ struct CodexReviewHostTests {
         #expect(fixture.store.liveReviewAttemptRouteCountForTesting == 0)
         let sourceMethods = await fixture.source.recordedRequests().map(\.method)
         let destinationMethods = await fixture.destination.recordedRequests().map(\.method)
-        #expect(sourceMethods.contains("thread/rollback") == false)
-        #expect(destinationMethods.filter { $0 == "thread/rollback" }.count == 1)
+        #expect(sourceMethods.contains("thread/resume") == false)
+        #expect(destinationMethods.filter { $0 == "thread/resume" }.count == 1)
         #expect(destinationMethods.filter { $0 == "turn/start" }.count == 1)
         await fixture.store.stop()
     }
@@ -1115,15 +1115,15 @@ struct CodexReviewHostTests {
     }
 
     @Test(arguments: [false, true])
-    func liveTypedRecoveryDestinationCleansFailedStart(cancelAfterRollback: Bool) async throws {
+    func liveTypedRecoveryDestinationCleansFailedStart(cancelAfterResume: Bool) async throws {
         let fixture = try await makeLiveTypedRecoveryFixture(
-            outcomeUnknown: cancelAfterRollback == false
+            outcomeUnknown: cancelAfterResume == false
         )
         let retainedHandoff = fixture.prepared.handoff
         let admission = ReviewStartAdmission()
-        if cancelAfterRollback {
+        if cancelAfterResume {
             await fixture.destination.beforeReturningNextResponse(
-                method: "thread/rollback"
+                method: "thread/resume"
             ) {
                 await admission.recordCancellation(.system())
             }
@@ -1144,8 +1144,8 @@ struct CodexReviewHostTests {
         #expect(fixture.store.liveReviewAttemptRouteCountForTesting == 0)
         #expect(fixture.store.liveReviewRecoveryRouteCountForTesting == 0)
         let methods = await fixture.destination.recordedRequests().map(\.method)
-        #expect(methods.filter { $0 == "thread/rollback" }.count == 1)
-        #expect(methods.filter { $0 == "turn/start" }.count == (cancelAfterRollback ? 0 : 1))
+        #expect(methods.filter { $0 == "thread/resume" }.count == 1)
+        #expect(methods.filter { $0 == "turn/start" }.count == (cancelAfterResume ? 0 : 1))
         #expect(methods.filter { $0 == "thread/unsubscribe" }.count == 1)
         #expect(methods.filter { $0 == "thread/backgroundTerminals/clean" }.count == 1)
         await #expect(throws: ReviewRecoveryHandoffAlreadyConsumed.self) {
@@ -6776,7 +6776,7 @@ private func makeLiveTypedRecoveryFixture(
         threadID: "typed-stage-thread",
         turnID: "typed-stage-source-turn"
     )
-    try await destination.enqueue(EmptyResponse(), for: "thread/rollback")
+    try await destination.enqueue(EmptyResponse(), for: "thread/resume")
     if outcomeUnknown {
         await destination.enqueueCancellation(for: "turn/start")
     } else {

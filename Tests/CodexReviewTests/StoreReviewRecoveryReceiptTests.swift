@@ -395,10 +395,10 @@ struct StoreReviewRecoveryReceiptTests {
         #expect(loggedPrepared.receipt === prepared1.receipt)
         #expect(loggedStage.receipt === prepared2.receipt && loggedDestination == destinationGeneration)
         #expect(loggedAdmission === admission2 && loggedCommit === staged2 && loggedDiscard === staged3)
-        guard case .cleanupReview(let rollbackRun) = await fake.recordedCommands().last else {
-            Issue.record("Failed staging did not record exact rollback cleanup."); return
+        guard case .cleanupReview(let resumeRun) = await fake.recordedCommands().last else {
+            Issue.record("Failed staging did not record exact resume cleanup."); return
         }
-        #expect(rollbackRun == run4)
+        #expect(resumeRun == run4)
     }
     private func advance(
         _ receipt: StoreReviewRecoveryReceipt, candidate: ReviewRecoveryCandidate,
@@ -419,7 +419,7 @@ struct StoreReviewRecoveryReceiptTests {
         let prepared = PreparedReviewRecovery(
             receipt: .init(sourceRun: run, sourceGeneration: .init(rawValue: 1)),
             handoff: try await candidate.prepareHandoff(token: .init(
-                interruptedRun: run, rollbackThreadID: run.threadID
+                interruptedRun: run, resumeThreadID: run.threadID
             ))
         )
         return (run, source, candidate, prepared)

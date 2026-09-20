@@ -6,7 +6,8 @@ package struct AppServerReviewTurnInvocation: Equatable, Sendable {
 
     package init(
         codexHome: String?,
-        target: CodexReviewAPI.Target
+        target: CodexReviewAPI.Target,
+        isRecovery: Bool = false
     ) throws {
         guard let codexHome,
               codexHome.hasPrefix("/")
@@ -32,9 +33,13 @@ package struct AppServerReviewTurnInvocation: Equatable, Sendable {
             .path
         // Keep the skill as typed input. A Markdown skill mention truncates a path at `)`
         // before Codex can match the app-server-provisioned skill identity.
+        let text = isRecovery
+            ? "Continue the interrupted review in this thread. Reuse completed analysis and tool results "
+                + "where still applicable, and finish the original review request."
+            : Self.instruction(for: target)
         input = [
             .skill(name: "review-agent", path: skillPath),
-            .text(Self.instruction(for: target)),
+            .text(text),
         ]
     }
 

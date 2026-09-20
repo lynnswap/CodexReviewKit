@@ -998,7 +998,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         )
         let handoff = try await candidate.prepareHandoff(token: .init(
             interruptedRun: run,
-            rollbackThreadID: interruption.threadID
+            resumeThreadID: interruption.threadID
         ))
         markAttemptAbandoned(run, interruption: interruption)
         if let session = unregisterReviewEventSession(for: run) {
@@ -1022,33 +1022,35 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         let initialization = try await client.initialize()
         let invocation = try AppServerReviewTurnInvocation(
             codexHome: initialization.codexHome,
-            target: request.request.target
+            target: request.request.target,
+            isRecovery: true
         )
         await ensureNotificationRouterStarted(for: operationID)
         let consumedHandoff = try await handoff.consume()
         let token = consumedHandoff.token
         let interruptedRun = token.interruptedRun
-        try await admission.admitRecoveryRollbackDispatch(for: interruptedRun)
+        // The handoff already owns a terminal source attempt. Restore its thread
+        // without deleting analysis or tool results before asking it to continue.
+        try await admission.admitRecoveryResumeDispatch(for: interruptedRun)
         do {
             let _: EmptyResponse = try await client.send(
-                AppServerAPI.Thread.Rollback.Request(
+                AppServerAPI.Thread.Resume.Request(
                     params: .init(
-                        threadID: token.rollbackThreadID,
-                        numTurns: 1
+                        threadID: token.resumeThreadID
                     )
                 )
             )
         } catch {
             let failure = Self.startRequestFailure(for: error)
             if case .rejected = failure {
-                try await admission.recordRecoveryRollbackRejected(
+                try await admission.recordRecoveryResumeRejected(
                     failure,
                     for: interruptedRun
                 )
             }
             throw error
         }
-        try await admission.recordRecoveryRollbackAcknowledged(for: interruptedRun)
+        try await admission.recordRecoveryResumeAcknowledged(for: interruptedRun)
 
         let control = AppServerReviewControl(client: client)
         controlsByThreadID[interruptedRun.threadID] = control
@@ -1056,7 +1058,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         let provisionalRun = CodexReviewBackendModel.Review.Run(
             attemptID: attemptID,
             threadID: interruptedRun.threadID,
-            reviewThreadID: interruptedRun.threadID,
+            reviewThreadID: token.resumeThreadID,
             model: interruptedRun.model ?? request.model
         )
         try await admission.recordPreparedRecoveryRun(provisionalRun)
@@ -1078,7 +1080,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         let review: AppServerAPI.Turn.Start.Response
         do {
             review = try await startReviewTurn(
-                threadID: interruptedRun.threadID,
+                threadID: token.resumeThreadID,
                 request: request,
                 invocation: invocation,
                 provisionalRun: provisionalRun,
@@ -1110,7 +1112,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             attemptID: attemptID,
             threadID: interruptedRun.threadID,
             turnID: review.turnID,
-            reviewThreadID: interruptedRun.threadID,
+            reviewThreadID: token.resumeThreadID,
             model: interruptedRun.model ?? request.model
         )
         do {

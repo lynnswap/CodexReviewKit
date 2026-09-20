@@ -289,14 +289,14 @@ struct Run: Codable, Equatable, Sendable {
 package extension CodexReviewBackendModel.Review {
 struct RecoveryToken: Equatable, Sendable {
     package var interruptedRun: CodexReviewBackendModel.Review.Run
-    package var rollbackThreadID: String
+    package var resumeThreadID: String
 
     package init(
         interruptedRun: CodexReviewBackendModel.Review.Run,
-        rollbackThreadID: String
+        resumeThreadID: String
     ) {
         self.interruptedRun = interruptedRun
-        self.rollbackThreadID = rollbackThreadID
+        self.resumeThreadID = resumeThreadID
     }
 }
 }

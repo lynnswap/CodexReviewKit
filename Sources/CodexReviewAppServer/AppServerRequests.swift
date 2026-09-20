@@ -5,7 +5,7 @@ package enum AppServerAPI {
     package enum Initialize {}
     package enum Thread {
         package enum Start {}
-        package enum Rollback {}
+        package enum Resume {}
         package enum Delete {}
         package enum Unsubscribe {}
         package enum BackgroundTerminals {
@@ -511,35 +511,35 @@ struct Request: AppServerAPI.Request {
 }
 
 
-package extension AppServerAPI.Thread.Rollback {
+package extension AppServerAPI.Thread.Resume {
 struct Params: Codable, Equatable, Sendable {
     package var threadID: String
-    package var numTurns: Int
+    package var excludeTurns: Bool
 
     enum CodingKeys: String, CodingKey {
         case threadID = "threadId"
-        case numTurns
+        case excludeTurns
     }
 
-    package init(threadID: String, numTurns: Int) {
+    package init(threadID: String, excludeTurns: Bool = true) {
         self.threadID = threadID
-        self.numTurns = numTurns
+        self.excludeTurns = excludeTurns
     }
 }
 }
 
 
-package extension AppServerAPI.Thread.Rollback {
+package extension AppServerAPI.Thread.Resume {
 struct Request: AppServerAPI.Request {
     package typealias Response = EmptyResponse
 
-    package static let method = "thread/rollback"
-    package var params: AppServerAPI.Thread.Rollback.Params
+    package static let method = "thread/resume"
+    package var params: AppServerAPI.Thread.Resume.Params
     package var scope: AppServerAPI.RequestScope? {
         .thread(params.threadID)
     }
 
-    package init(params: AppServerAPI.Thread.Rollback.Params) {
+    package init(params: AppServerAPI.Thread.Resume.Params) {
         self.params = params
     }
 }
