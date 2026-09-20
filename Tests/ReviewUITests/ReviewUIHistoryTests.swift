@@ -137,7 +137,7 @@ struct ReviewUIHistoryTests {
             titles = menu.items.map(\.title)
         }
 
-        #expect(titles == ["Cancel"])
+        #expect(titles == ["Cancel", "", "Copy"])
     }
 
     @Test func mixedActiveAndTerminalSelectionDisablesHistoryDeletion() throws {
