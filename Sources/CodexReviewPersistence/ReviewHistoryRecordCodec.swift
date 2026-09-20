@@ -81,6 +81,8 @@ enum ReviewHistoryRecordCodec {
         var review = existing
         review.phase = "terminal"
         review.terminalModel = record.model
+        review.reviewThreadID = record.reviewThreadID
+        review.threadID = record.threadID
         review.terminalKind = terminalColumns.kind
         review.interruptionKind = terminalColumns.interruptionKind
         review.cancellationSource = terminalColumns.cancellation?.source.rawValue
@@ -256,6 +258,8 @@ enum ReviewHistoryRecordCodec {
             terminal = try TerminalReviewRecord(
                 id: row.id,
                 model: row.terminalModel,
+                reviewThreadID: row.reviewThreadID,
+                threadID: row.threadID,
                 terminal: terminalValue,
                 endedAt: row.endedAt.map(ReviewHistoryTimestamp.decode),
                 summary: row.summary ?? "",

@@ -706,6 +706,8 @@ extension CodexReviewStore {
         return try TerminalReviewRecord(
             id: job.id,
             model: job.core.run.model,
+            reviewThreadID: job.core.run.reviewThreadID,
+            threadID: job.core.run.threadID,
             terminal: terminal,
             endedAt: job.core.lifecycle.endedAt,
             summary: job.core.output.summary,
