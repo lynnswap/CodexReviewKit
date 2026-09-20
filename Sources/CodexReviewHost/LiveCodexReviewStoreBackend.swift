@@ -2579,7 +2579,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             run
         case .terminal(.active(let resolution)):
             resolution.run
-        case .preparingThread, .rollingBackRecovery, .terminal:
+        case .preparingThread, .resumingRecovery, .terminal:
             nil
         }
     }

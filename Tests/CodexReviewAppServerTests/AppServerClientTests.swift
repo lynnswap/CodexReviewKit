@@ -3204,17 +3204,17 @@ struct AppServerClientTests {
         }
     }
 
-    @Test func backendLifecycleCloseJoinsAdmittedRecoveryAcrossRollbackAndReviewStart() async throws {
+    @Test func backendLifecycleCloseJoinsAdmittedRecoveryAcrossResumeAndReviewStart() async throws {
         let transport = DeferredNotificationCloseTransport()
         try await transport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
-        try await transport.enqueue(EmptyResponse(), for: "thread/rollback")
+        try await transport.enqueue(EmptyResponse(), for: "thread/resume")
         try await transport.enqueue(
             AppServerAPI.Turn.Start.Response(turnID: "turn-2"),
             for: "turn/start"
         )
-        let rollbackBarrier = RequestBarrier()
+        let resumeBarrier = RequestBarrier()
         let reviewStartBarrier = RequestBarrier()
-        await transport.holdNext(method: "thread/rollback", barrier: rollbackBarrier)
+        await transport.holdNext(method: "thread/resume", barrier: resumeBarrier)
         await transport.holdNext(method: "turn/start", barrier: reviewStartBarrier)
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
         let lifecycle = backend.runtimeOwnerLifecycleHandle
@@ -3245,7 +3245,7 @@ struct AppServerClientTests {
             await recoveryCompletion.recordCompletion()
             return attempt
         }
-        await rollbackBarrier.waitUntilEntered()
+        await resumeBarrier.waitUntilEntered()
         let close = Task {
             try await lifecycle.closeAndWait()
             await closeCompletion.recordCompletion()
@@ -3253,7 +3253,7 @@ struct AppServerClientTests {
         await backend.waitForRuntimeOwnerCloseCallersForTesting(1)
         await transport.waitForCloseCall()
 
-        await rollbackBarrier.open()
+        await resumeBarrier.open()
         await reviewStartBarrier.waitUntilEntered()
         await transport.finishNotificationStream(throwing: JSONRPC.Error.closed)
         #expect(await recoveryCompletion.hasCompleted() == false)
@@ -3760,11 +3760,11 @@ struct AppServerClientTests {
         #expect(try await iterator.next() == nil)
     }
 
-    @Test func backendRecoverReviewRollsBackAndRestartsSameThread() async throws {
+    @Test func backendRecoverReviewResumesAndRestartsSameThread() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
-        try await transport.enqueue(EmptyResponse(), for: "thread/rollback")
+        try await transport.enqueue(EmptyResponse(), for: "thread/resume")
         try await transport.enqueue(AppServerAPI.Turn.Start.Response(turnID: "turn-2"), for: "turn/start")
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
         let run = CodexReviewBackendModel.Review.Run(
@@ -3794,17 +3794,17 @@ struct AppServerClientTests {
         #expect(requests.map(\.method) == [
             "initialize",
             "turn/interrupt",
-            "thread/rollback",
+            "thread/resume",
             "turn/start",
         ])
         let interrupt = try #require(requests.first { $0.method == "turn/interrupt" })
         let interruptParams = try JSONDecoder().decode(AppServerAPI.Turn.Interrupt.Params.self, from: interrupt.params)
         #expect(interruptParams.threadID == "thread-1")
         #expect(interruptParams.turnID == "turn-1")
-        let rollback = try #require(requests.first { $0.method == "thread/rollback" })
-        let rollbackParams = try JSONDecoder().decode(AppServerAPI.Thread.Rollback.Params.self, from: rollback.params)
-        #expect(rollbackParams.threadID == "thread-1")
-        #expect(rollbackParams.numTurns == 1)
+        let resume = try #require(requests.first { $0.method == "thread/resume" })
+        let resumeParams = try JSONDecoder().decode(AppServerAPI.Thread.Resume.Params.self, from: resume.params)
+        #expect(resumeParams.threadID == "thread-1")
+        #expect(resumeParams.excludeTurns)
         let restart = try #require(requests.first { $0.method == "turn/start" })
         let restartParams = try JSONDecoder().decode(AppServerAPI.Turn.Start.Params.self, from: restart.params)
         #expect(restartParams.threadID == "thread-1")
@@ -3814,7 +3814,8 @@ struct AppServerClientTests {
                 name: "review-agent",
                 path: "/tmp/codex/skills/.system/review-agent/SKILL.md"
             ),
-            .text("Review the code changes against the base branch \"main\"."),
+            .text("Continue the interrupted review in this thread. Reuse completed analysis and tool results "
+                + "where still applicable, and finish the original review request."),
         ])
     }
 
@@ -3832,7 +3833,7 @@ struct AppServerClientTests {
             for: "turn/start"
         )
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
-        try await transport.enqueue(EmptyResponse(), for: "thread/rollback")
+        try await transport.enqueue(EmptyResponse(), for: "thread/resume")
         try await transport.enqueue(
             AppServerAPI.Turn.Start.Response(
                 turnID: "turn-2"
@@ -3910,7 +3911,7 @@ struct AppServerClientTests {
         try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "parent-thread", model: "gpt-5"), for: "thread/start")
         try await transport.enqueue(AppServerAPI.Turn.Start.Response(turnID: "turn-old"), for: "turn/start")
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
-        try await transport.enqueue(EmptyResponse(), for: "thread/rollback")
+        try await transport.enqueue(EmptyResponse(), for: "thread/resume")
         try await transport.enqueue(AppServerAPI.Turn.Start.Response(turnID: "turn-2"), for: "turn/start")
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
         let run = try await backend.startReview(.init(
@@ -3941,10 +3942,10 @@ struct AppServerClientTests {
         let interruptParams = try JSONDecoder().decode(AppServerAPI.Turn.Interrupt.Params.self, from: interrupt.params)
         #expect(interruptParams.threadID == "parent-thread")
         #expect(interruptParams.turnID == "turn-old")
-        let rollback = try #require(requests.first { $0.method == "thread/rollback" })
-        let rollbackParams = try JSONDecoder().decode(AppServerAPI.Thread.Rollback.Params.self, from: rollback.params)
-        #expect(rollbackParams.threadID == "parent-thread")
-        #expect(rollbackParams.numTurns == 1)
+        let resume = try #require(requests.first { $0.method == "thread/resume" })
+        let resumeParams = try JSONDecoder().decode(AppServerAPI.Thread.Resume.Params.self, from: resume.params)
+        #expect(resumeParams.threadID == "parent-thread")
+        #expect(resumeParams.excludeTurns)
         let restart = try #require(requests.last { $0.method == "turn/start" })
         let restartParams = try JSONDecoder().decode(AppServerAPI.Turn.Start.Params.self, from: restart.params)
         #expect(restartParams.threadID == "parent-thread")
@@ -3954,17 +3955,18 @@ struct AppServerClientTests {
                 name: "review-agent",
                 path: "/tmp/codex/skills/.system/review-agent/SKILL.md"
             ),
-            .text("Review the code changes against the base branch \"main\"."),
+            .text("Continue the interrupted review in this thread. Reuse completed analysis and tool results "
+                + "where still applicable, and finish the original review request."),
         ])
     }
 
-    @Test func backendRecoveryRollsBackTheRunThread() async throws {
+    @Test func backendRecoveryResumesTheRunThread() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "parent-thread", model: "gpt-5"), for: "thread/start")
         try await transport.enqueue(AppServerAPI.Turn.Start.Response(turnID: "turn-old"), for: "turn/start")
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
-        try await transport.enqueue(EmptyResponse(), for: "thread/rollback")
+        try await transport.enqueue(EmptyResponse(), for: "thread/resume")
         try await transport.enqueue(AppServerAPI.Turn.Start.Response(turnID: "turn-2"), for: "turn/start")
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
         let startedRun = try await backend.startReview(.init(
@@ -4016,10 +4018,10 @@ struct AppServerClientTests {
         #expect(interruptParams == [
             .init(threadID: "parent-thread", turnID: "turn-old"),
         ])
-        let rollback = try #require(requests.first { $0.method == "thread/rollback" })
-        let rollbackParams = try JSONDecoder().decode(AppServerAPI.Thread.Rollback.Params.self, from: rollback.params)
-        #expect(rollbackParams.threadID == "parent-thread")
-        #expect(rollbackParams.numTurns == 1)
+        let resume = try #require(requests.first { $0.method == "thread/resume" })
+        let resumeParams = try JSONDecoder().decode(AppServerAPI.Thread.Resume.Params.self, from: resume.params)
+        #expect(resumeParams.threadID == "parent-thread")
+        #expect(resumeParams.excludeTurns)
         let restart = try #require(requests.last { $0.method == "turn/start" })
         let restartParams = try JSONDecoder().decode(AppServerAPI.Turn.Start.Params.self, from: restart.params)
         #expect(restartParams.threadID == "parent-thread")
@@ -4029,7 +4031,8 @@ struct AppServerClientTests {
                 name: "review-agent",
                 path: "/tmp/codex/skills/.system/review-agent/SKILL.md"
             ),
-            .text("Review the code changes against the base branch \"main\"."),
+            .text("Continue the interrupted review in this thread. Reuse completed analysis and tool results "
+                + "where still applicable, and finish the original review request."),
         ])
     }
 
@@ -4037,7 +4040,7 @@ struct AppServerClientTests {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
-        try await transport.enqueue(EmptyResponse(), for: "thread/rollback")
+        try await transport.enqueue(EmptyResponse(), for: "thread/resume")
         try await transport.enqueue(AppServerAPI.Turn.Start.Response(turnID: "turn-2"), for: "turn/start")
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
         let run = CodexReviewBackendModel.Review.Run(
@@ -4070,7 +4073,7 @@ struct AppServerClientTests {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
-        try await transport.enqueue(EmptyResponse(), for: "thread/rollback")
+        try await transport.enqueue(EmptyResponse(), for: "thread/resume")
         try await transport.enqueue(AppServerAPI.Turn.Start.Response(turnID: "turn-2"), for: "turn/start")
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
         let run = CodexReviewBackendModel.Review.Run(
@@ -4120,7 +4123,7 @@ struct AppServerClientTests {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
-        try await transport.enqueue(EmptyResponse(), for: "thread/rollback")
+        try await transport.enqueue(EmptyResponse(), for: "thread/resume")
         try await transport.enqueue(AppServerAPI.Turn.Start.Response(turnID: "turn-2"), for: "turn/start")
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
         let run = CodexReviewBackendModel.Review.Run(
@@ -4167,7 +4170,7 @@ struct AppServerClientTests {
         #expect(requests.map(\.method) == [
             "initialize",
             "turn/interrupt",
-            "thread/rollback",
+            "thread/resume",
             "turn/start",
         ])
         let recoveredEvents = await eventSequence(backend, recovered)
@@ -4224,7 +4227,7 @@ struct AppServerClientTests {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
-        try await transport.enqueue(EmptyResponse(), for: "thread/rollback")
+        try await transport.enqueue(EmptyResponse(), for: "thread/resume")
         try await transport.enqueue(AppServerAPI.Turn.Start.Response(turnID: "turn-2"), for: "turn/start")
         let reviewStartGate = AsyncGate()
         await transport.hold(method: "turn/start", gate: reviewStartGate)
@@ -4267,14 +4270,14 @@ struct AppServerClientTests {
         ))
     }
 
-    @Test func backendIgnoresStaleInterruptedTurnNotificationsWhileRollbackIsInFlight() async throws {
+    @Test func backendIgnoresStaleInterruptedTurnNotificationsWhileResumeIsInFlight() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
-        try await transport.enqueue(EmptyResponse(), for: "thread/rollback")
+        try await transport.enqueue(EmptyResponse(), for: "thread/resume")
         try await transport.enqueue(AppServerAPI.Turn.Start.Response(turnID: "turn-2"), for: "turn/start")
-        let rollbackGate = AsyncGate()
-        await transport.holdNext(method: "thread/rollback", gate: rollbackGate)
+        let resumeGate = AsyncGate()
+        await transport.holdNext(method: "thread/resume", gate: resumeGate)
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
         let run = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
@@ -4298,10 +4301,10 @@ struct AppServerClientTests {
                 purpose: .recovery
             )
         )
-        let rollbackRequested = await waitUntil {
-            await transport.recordedRequests().contains { $0.method == "thread/rollback" }
+        let resumeRequested = await waitUntil {
+            await transport.recordedRequests().contains { $0.method == "thread/resume" }
         }
-        #expect(rollbackRequested)
+        #expect(resumeRequested)
 
         try await transport.emitServerNotification(
             method: "item/started",
@@ -4317,7 +4320,7 @@ struct AppServerClientTests {
         }
         #expect(ignoredStaleNotification)
 
-        await rollbackGate.open()
+        await resumeGate.open()
         let recoveredRun = try await recovered
         #expect(recoveredRun.turnID == "turn-2")
         let recoveredEvents = await eventSequence(backend, recoveredRun)
@@ -4338,7 +4341,7 @@ struct AppServerClientTests {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
-        try await transport.enqueue(EmptyResponse(), for: "thread/rollback")
+        try await transport.enqueue(EmptyResponse(), for: "thread/resume")
         try await transport.enqueue(AppServerAPI.Turn.Start.Response(turnID: "turn-2"), for: "turn/start")
         let reviewStartGate = AsyncGate()
         await transport.hold(method: "turn/start", gate: reviewStartGate)
@@ -4438,7 +4441,7 @@ struct AppServerClientTests {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
-        try await transport.enqueue(EmptyResponse(), for: "thread/rollback")
+        try await transport.enqueue(EmptyResponse(), for: "thread/resume")
         try await transport.enqueue(AppServerAPI.Turn.Start.Response(turnID: "turn-2"), for: "turn/start")
         try await transport.enqueue(
             AppServerAPI.Thread.Unsubscribe.Response(status: .unsubscribed),

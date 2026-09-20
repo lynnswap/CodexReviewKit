@@ -659,7 +659,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         let run = candidate.resolved.run
         return try await candidate.prepareHandoff(token: .init(
             interruptedRun: run,
-            rollbackThreadID: run.reviewThreadID ?? run.threadID
+            resumeThreadID: run.reviewThreadID ?? run.threadID
         ))
     }
 
@@ -676,7 +676,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         }
         let consumedHandoff = try await handoff.consume()
         let interruptedRun = consumedHandoff.token.interruptedRun
-        try await admission.admitRecoveryRollbackDispatch(for: interruptedRun)
+        try await admission.admitRecoveryResumeDispatch(for: interruptedRun)
         let recoveredRun = nextRecoveredRun ?? .init(
             attemptID: "attempt-recovered",
             threadID: interruptedRun.threadID,
@@ -696,7 +696,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         if let recoveryFailureMessage {
             throw FakeCodexReviewBackendError(message: recoveryFailureMessage)
         }
-        try await admission.recordRecoveryRollbackAcknowledged(for: interruptedRun)
+        try await admission.recordRecoveryResumeAcknowledged(for: interruptedRun)
         try await admission.recordPreparedRecoveryRun(provisionalRun)
         try await admission.admitReviewStartDispatch(for: provisionalRun)
         try await admission.recordActiveRun(recoveredRun)
@@ -1520,7 +1520,7 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
              .interrupting(let run, _, _), .finishing(let run, _, _, _),
              .recovering(let run, _, _), .finishingRecovery(let run, _, _, _): run
         case .terminal(.active(let resolution)): resolution.run
-        case .preparingThread, .rollingBackRecovery, .terminal: nil
+        case .preparingThread, .resumingRecovery, .terminal: nil
         }
     }
 

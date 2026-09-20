@@ -197,7 +197,7 @@ package enum ReviewRecoveryStagingFailure: LocalizedError, Equatable, Sendable {
     }
 }
 
-/// Copies share one consumption owner, so a rollback token can be consumed or
+/// Copies share one consumption owner, so a resume token can be consumed or
 /// discarded exactly once even when concurrent callers retain the value.
 package struct ReviewRecoveryHandoff: Equatable, Sendable {
     package struct Consumption: Equatable, Sendable {

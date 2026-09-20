@@ -115,9 +115,9 @@ package enum ReviewStartAdmissionOperation: String, Equatable, Sendable {
     case retryReviewStartDispatch
     case recordActiveRun
     case recordPreparedRecoveryRun
-    case admitRecoveryRollbackDispatch
-    case recordRecoveryRollbackAcknowledged
-    case recordRecoveryRollbackRejected
+    case admitRecoveryResumeDispatch
+    case recordRecoveryResumeAcknowledged
+    case recordRecoveryResumeRejected
     case interruptActiveRun
     case inspectRecordedActiveTerminal
     case recoverActiveRun
@@ -238,9 +238,9 @@ package actor ReviewStartAdmission {
             preparedRun: CodexReviewBackendModel.Review.Run,
             dispatch: RequestDispatch
         )
-        /// `thread/rollback` may have been applied. This phase is entered
-        /// immediately before the non-idempotent request is sent.
-        case rollingBackRecovery(
+        /// The source thread may have been loaded and subscribed by `thread/resume`.
+        /// Retain its cleanup owner until the response is acknowledged.
+        case resumingRecovery(
             predecessorRun: CodexReviewBackendModel.Review.Run
         )
         case active(CodexReviewBackendModel.Review.Run)
@@ -308,7 +308,7 @@ package actor ReviewStartAdmission {
             requestedCancellation = cancellation
             phase = .terminal(.cancelledBeforeDispatch(cancellation))
         case .preparingThread(.outcomeUnknown), .startingReview(_, .outcomeUnknown),
-             .rollingBackRecovery, .active, .interrupting, .finishing, .recovering,
+             .resumingRecovery, .active, .interrupting, .finishing, .recovering,
              .finishingRecovery:
             requestedCancellation = cancellation
         }
@@ -324,7 +324,7 @@ package actor ReviewStartAdmission {
         switch phase {
         case .finishing, .finishingRecovery, .terminal:
             return .init(receipt: receipt, disposition: .terminal)
-        case .preparingThread, .startingReview, .rollingBackRecovery,
+        case .preparingThread, .startingReview, .resumingRecovery,
              .active, .interrupting, .recovering:
             break
         }
@@ -342,7 +342,7 @@ package actor ReviewStartAdmission {
         case .terminal(.cancelledBeforeDispatch(let cancellation)):
             throw ReviewStartCancelledBeforeDispatch(cancellation: cancellation)
         case .preparingThread(.outcomeUnknown), .startingReview,
-             .rollingBackRecovery, .active,
+             .resumingRecovery, .active,
              .interrupting, .finishing, .recovering, .finishingRecovery,
              .terminal:
             throw contractFailure(.wrongPhase(operation: .admitThreadStartDispatch))
@@ -383,7 +383,7 @@ package actor ReviewStartAdmission {
             return
         case .terminal:
             return
-        case .preparingThread(.notSent), .startingReview, .rollingBackRecovery,
+        case .preparingThread(.notSent), .startingReview, .resumingRecovery,
              .active,
              .interrupting, .finishing, .recovering, .finishingRecovery:
             throw contractFailure(.wrongPhase(operation: .recordThreadStartRejected))
@@ -413,7 +413,7 @@ package actor ReviewStartAdmission {
                 )
             }
             throw contractFailure(.wrongPhase(operation: .recordPreparedThread))
-        case .preparingThread(.notSent), .rollingBackRecovery, .active,
+        case .preparingThread(.notSent), .resumingRecovery, .active,
              .interrupting, .finishing,
              .recovering, .finishingRecovery, .terminal:
             throw contractFailure(.wrongPhase(operation: .recordPreparedThread))
@@ -438,7 +438,7 @@ package actor ReviewStartAdmission {
         case .startingReview(let currentRun, .notSent) where currentRun == run:
             return
         case .preparingThread(.outcomeUnknown), .startingReview,
-             .rollingBackRecovery, .active,
+             .resumingRecovery, .active,
              .interrupting, .finishing, .recovering, .finishingRecovery,
              .terminal:
             throw contractFailure(.wrongPhase(
@@ -447,7 +447,7 @@ package actor ReviewStartAdmission {
         }
     }
 
-    package func admitRecoveryRollbackDispatch(
+    package func admitRecoveryResumeDispatch(
         for predecessorRun: CodexReviewBackendModel.Review.Run
     ) throws {
         switch phase {
@@ -456,10 +456,10 @@ package actor ReviewStartAdmission {
         case .terminal(.cancelledBeforeDispatch(let cancellation)):
             throw ReviewStartCancelledBeforeDispatch(cancellation: cancellation)
         case .preparingThread(.outcomeUnknown), .startingReview,
-             .rollingBackRecovery, .active, .interrupting, .finishing,
+             .resumingRecovery, .active, .interrupting, .finishing,
              .recovering, .finishingRecovery, .terminal:
             throw contractFailure(.wrongPhase(
-                operation: .admitRecoveryRollbackDispatch
+                operation: .admitRecoveryResumeDispatch
             ))
         }
         if let requestedCancellation {
@@ -468,20 +468,20 @@ package actor ReviewStartAdmission {
                 cancellation: requestedCancellation
             )
         }
-        phase = .rollingBackRecovery(predecessorRun: predecessorRun)
+        phase = .resumingRecovery(predecessorRun: predecessorRun)
     }
 
-    package func recordRecoveryRollbackAcknowledged(
+    package func recordRecoveryResumeAcknowledged(
         for predecessorRun: CodexReviewBackendModel.Review.Run
     ) throws {
-        guard case .rollingBackRecovery(let currentRun) = phase else {
+        guard case .resumingRecovery(let currentRun) = phase else {
             throw contractFailure(.wrongPhase(
-                operation: .recordRecoveryRollbackAcknowledged
+                operation: .recordRecoveryResumeAcknowledged
             ))
         }
         guard currentRun == predecessorRun else {
             throw staleRunFailure(
-                operation: .recordRecoveryRollbackAcknowledged,
+                operation: .recordRecoveryResumeAcknowledged,
                 expected: currentRun,
                 received: predecessorRun
             )
@@ -495,7 +495,7 @@ package actor ReviewStartAdmission {
         phase = .preparingThread(.notSent)
     }
 
-    package func recordRecoveryRollbackRejected(
+    package func recordRecoveryResumeRejected(
         _ failure: ReviewStartRequestFailure,
         for predecessorRun: CodexReviewBackendModel.Review.Run
     ) throws {
@@ -503,10 +503,10 @@ package actor ReviewStartAdmission {
             throw contractFailure(.retryRequiresExplicitRejection(failure))
         }
         switch phase {
-        case .rollingBackRecovery(let currentRun):
+        case .resumingRecovery(let currentRun):
             guard currentRun == predecessorRun else {
                 throw staleRunFailure(
-                    operation: .recordRecoveryRollbackRejected,
+                    operation: .recordRecoveryResumeRejected,
                     expected: currentRun,
                     received: predecessorRun
                 )
@@ -520,7 +520,7 @@ package actor ReviewStartAdmission {
              .finishing, .recovering,
              .finishingRecovery:
             throw contractFailure(.wrongPhase(
-                operation: .recordRecoveryRollbackRejected
+                operation: .recordRecoveryResumeRejected
             ))
         }
     }
@@ -543,7 +543,7 @@ package actor ReviewStartAdmission {
             throw contractFailure(.wrongPhase(operation: .admitReviewStartDispatch))
         case .terminal(.cancelledBeforeDispatch(let cancellation)):
             throw ReviewStartCancelledBeforeDispatch(cancellation: cancellation)
-        case .preparingThread, .rollingBackRecovery, .active, .interrupting,
+        case .preparingThread, .resumingRecovery, .active, .interrupting,
              .finishing, .recovering,
              .finishingRecovery, .terminal:
             throw contractFailure(.wrongPhase(operation: .admitReviewStartDispatch))
@@ -608,7 +608,7 @@ package actor ReviewStartAdmission {
         case .terminal:
             return
         case .preparingThread, .startingReview(_, .notSent),
-             .rollingBackRecovery, .active,
+             .resumingRecovery, .active,
              .interrupting, .finishing, .recovering, .finishingRecovery:
             throw contractFailure(.wrongPhase(operation: .recordReviewStartRejected))
         }
@@ -636,7 +636,7 @@ package actor ReviewStartAdmission {
                 received: run
             )
         case .preparingThread, .startingReview(_, .notSent),
-             .rollingBackRecovery, .interrupting,
+             .resumingRecovery, .interrupting,
              .finishing, .recovering, .finishingRecovery, .terminal:
             throw contractFailure(.wrongPhase(operation: .recordActiveRun))
         }
@@ -854,7 +854,7 @@ package actor ReviewStartAdmission {
         }
         switch phase {
         case .preparingThread(.outcomeUnknown), .startingReview(_, .outcomeUnknown),
-             .rollingBackRecovery:
+             .resumingRecovery:
             phase = .terminal(.connection(failure))
         case .terminal:
             return
@@ -869,7 +869,7 @@ package actor ReviewStartAdmission {
     ) throws {
         switch phase {
         case .preparingThread(.outcomeUnknown), .startingReview(_, .outcomeUnknown),
-             .rollingBackRecovery:
+             .resumingRecovery:
             phase = .terminal(.protocolFailure(failure))
         case .terminal(.protocolFailure(let currentFailure)) where currentFailure == failure:
             return
@@ -888,7 +888,7 @@ package actor ReviewStartAdmission {
             cancellation
         case .terminal(.active(let resolution)):
             resolution.cancellation
-        case .rollingBackRecovery, .recovering, .finishingRecovery:
+        case .resumingRecovery, .recovering, .finishingRecovery:
             requestedCancellation
         case .terminal(.recovery):
             requestedCancellation
@@ -911,7 +911,7 @@ package actor ReviewStartAdmission {
                 for: disposition,
                 cancellation: requestedCancellation
             )
-        case .preparingThread, .startingReview, .rollingBackRecovery, .active,
+        case .preparingThread, .startingReview, .resumingRecovery, .active,
              .interrupting,
              .finishing, .recovering, .finishingRecovery, .terminal:
             return nil
@@ -1050,7 +1050,7 @@ package actor ReviewStartAdmission {
                 recoveryTask = nil
             case .interrupting:
                 interruptionTask = nil
-            case .preparingThread, .startingReview, .rollingBackRecovery,
+            case .preparingThread, .startingReview, .resumingRecovery,
                  .active, .finishing,
                  .finishingRecovery, .terminal:
                 break
@@ -1161,7 +1161,7 @@ package actor ReviewStartAdmission {
                 for: disposition,
                 cancellation: requestedCancellation
             )
-        case .preparingThread, .startingReview, .rollingBackRecovery, .terminal:
+        case .preparingThread, .startingReview, .resumingRecovery, .terminal:
             throw contractFailure(.wrongPhase(operation: operation))
         }
         return snapshot
@@ -1205,7 +1205,7 @@ package actor ReviewStartAdmission {
              .finishingRecovery(_, _, _, .notSent),
              .terminal(.active), .terminal(.recovery):
             return nil
-        case .preparingThread, .startingReview, .rollingBackRecovery, .active,
+        case .preparingThread, .startingReview, .resumingRecovery, .active,
              .interrupting,
              .finishing, .recovering, .finishingRecovery, .terminal:
             throw contractFailure(.wrongPhase(operation: .interruptActiveRun))
@@ -1278,7 +1278,7 @@ package actor ReviewStartAdmission {
             // late ACK drains the request but cannot move its linearization
             // ahead of that already-recorded terminal.
             return
-        case .preparingThread, .startingReview, .rollingBackRecovery, .active,
+        case .preparingThread, .startingReview, .resumingRecovery, .active,
              .interrupting,
              .finishing, .recovering, .finishingRecovery, .terminal:
             throw contractFailure(.wrongPhase(
@@ -1375,7 +1375,7 @@ package actor ReviewStartAdmission {
                     cancellation: receipt.cancellation,
                     request: request
                 )
-            case .preparingThread, .startingReview, .rollingBackRecovery,
+            case .preparingThread, .startingReview, .resumingRecovery,
                  .active, .recovering:
                 setEffectiveCancellationRequestReceipt(receipt)
                 requestedCancellation = receipt.cancellation
@@ -1578,7 +1578,7 @@ package actor ReviewStartAdmission {
             resolution.run
         case .terminal(.recovery(let disposition)):
             disposition.resolved.run
-        case .preparingThread, .startingReview, .rollingBackRecovery, .terminal:
+        case .preparingThread, .startingReview, .resumingRecovery, .terminal:
             nil
         }
     }
@@ -1594,7 +1594,7 @@ package actor ReviewStartAdmission {
             nil
         case .active:
             requestedCancellation
-        case .preparingThread, .startingReview, .rollingBackRecovery, .terminal:
+        case .preparingThread, .startingReview, .resumingRecovery, .terminal:
             nil
         }
     }
@@ -1616,7 +1616,7 @@ package actor ReviewStartAdmission {
             resolution.terminal
         case .terminal(.recovery(let disposition)):
             interruptTerminal(from: disposition.resolved.terminal)
-        case .preparingThread, .startingReview, .rollingBackRecovery, .active,
+        case .preparingThread, .startingReview, .resumingRecovery, .active,
              .interrupting,
              .recovering, .terminal:
             nil

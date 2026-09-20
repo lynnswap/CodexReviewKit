@@ -3189,7 +3189,7 @@ struct CodexReviewStoreCommandTests {
 
     @Test func recoveryFailureFailsReviewAndLogsError() async throws {
         let backend = FakeCodexReviewBackend()
-        await backend.failRecovery(message: "Rollback failed")
+        await backend.failRecovery(message: "Resume failed")
         let networkMonitor = ManualCodexReviewNetworkMonitor()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -3209,8 +3209,8 @@ struct CodexReviewStoreCommandTests {
             let read = try await result
 
             #expect(read.core.lifecycle.status == .failed)
-            #expect(read.core.lifecycle.errorMessage == "Rollback failed")
-            #expect(read.logs.contains { $0.kind == .error && $0.text == "Rollback failed" })
+            #expect(read.core.lifecycle.errorMessage == "Resume failed")
+            #expect(read.logs.contains { $0.kind == .error && $0.text == "Resume failed" })
         }
     }
 

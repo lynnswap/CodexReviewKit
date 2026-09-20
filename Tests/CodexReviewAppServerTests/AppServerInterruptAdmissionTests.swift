@@ -782,8 +782,8 @@ struct AppServerInterruptAdmissionTests {
     @Test func concurrentRecoveryPreparationClaimsTheCandidateOnce() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInterruptInitialize(transport)
-        await transport.enqueueFailure(.closed, for: "thread/rollback")
-        await transport.enqueueFailure(.closed, for: "thread/rollback")
+        await transport.enqueueFailure(.closed, for: "thread/resume")
+        await transport.enqueueFailure(.closed, for: "thread/resume")
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
         let (candidate, _) = try await makeAppServerRecoveryCandidate()
         let alias = candidate
@@ -807,17 +807,17 @@ struct AppServerInterruptAdmissionTests {
                 )
             }
         }
-        let rollbackCount = await transport.recordedRequests()
-            .filter { $0.method == "thread/rollback" }
+        let resumeCount = await transport.recordedRequests()
+            .filter { $0.method == "thread/resume" }
             .count
-        #expect(rollbackCount == 1)
+        #expect(resumeCount == 1)
         await transport.close()
     }
 
-    @Test func typedRecoveryRollbackTransportFailureConsumesHandoffWithoutRetry() async throws {
+    @Test func typedRecoveryResumeTransportFailureConsumesHandoffWithoutRetry() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInterruptInitialize(transport)
-        await transport.enqueueFailure(.closed, for: "thread/rollback")
+        await transport.enqueueFailure(.closed, for: "thread/resume")
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
         let (handoff, predecessor) = try await makePreparedRecoveryHandoff(backend)
         let admission = ReviewStartAdmission()
@@ -829,7 +829,7 @@ struct AppServerInterruptAdmissionTests {
                 admission: admission
             )
         }
-        #expect(await admission.currentPhase() == .rollingBackRecovery(
+        #expect(await admission.currentPhase() == .resumingRecovery(
             predecessorRun: predecessor
         ))
 
@@ -841,12 +841,12 @@ struct AppServerInterruptAdmissionTests {
             )
         }
         let methods = await transport.recordedRequests().map(\.method)
-        #expect(methods.filter { $0 == "thread/rollback" }.count == 1)
+        #expect(methods.filter { $0 == "thread/resume" }.count == 1)
         #expect(methods.contains("turn/start") == false)
         await transport.close()
     }
 
-    @Test func typedRecoveryResumeRejectsNonFreshAdmissionBeforeRollbackSend() async throws {
+    @Test func typedRecoveryResumeRejectsNonFreshAdmissionBeforeResumeSend() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInterruptInitialize(transport)
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
@@ -864,7 +864,7 @@ struct AppServerInterruptAdmissionTests {
         await transport.close()
     }
 
-    @Test func typedRecoveryPreflightsInvocationBeforeConsumingHandoffOrRollback() async throws {
+    @Test func typedRecoveryPreflightsInvocationBeforeConsumingHandoffOrResume() async throws {
         let transport = FakeJSONRPCTransport()
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
@@ -888,7 +888,7 @@ struct AppServerInterruptAdmissionTests {
     @Test func typedRecoveryResumeUsesFreshAdmissionWithoutThreadStart() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInterruptInitialize(transport)
-        try await transport.enqueue(EmptyResponse(), for: "thread/rollback")
+        try await transport.enqueue(EmptyResponse(), for: "thread/resume")
         try await transport.enqueue(
             AppServerAPI.Turn.Start.Response(
                 turnID: "replacement-turn"
@@ -908,7 +908,7 @@ struct AppServerInterruptAdmissionTests {
         #expect(await admission.currentPhase() == .active(attempt.run))
         #expect(await transport.recordedRequests().map(\.method) == [
             "initialize",
-            "thread/rollback",
+            "thread/resume",
             "turn/start",
         ])
         await transport.close()
@@ -916,10 +916,10 @@ struct AppServerInterruptAdmissionTests {
 
     @Test func typedRecoveryResumeIsJoinedByRuntimeOwnerClose() async throws {
         let transport = FakeJSONRPCTransport()
-        let rollbackGate = AsyncGate()
+        let resumeGate = AsyncGate()
         try await enqueueInterruptInitialize(transport)
-        try await transport.enqueue(EmptyResponse(), for: "thread/rollback")
-        await transport.hold(method: "thread/rollback", gate: rollbackGate)
+        try await transport.enqueue(EmptyResponse(), for: "thread/resume")
+        await transport.hold(method: "thread/resume", gate: resumeGate)
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
         let (handoff, _) = try await makePreparedRecoveryHandoff(backend)
         let resume = Task {
@@ -939,7 +939,7 @@ struct AppServerInterruptAdmissionTests {
         await backend.waitForAdmittedReviewOperationDrainForTesting()
         #expect(await closeCompletion.count() == 0)
 
-        await rollbackGate.open()
+        await resumeGate.open()
         await #expect(throws: (any Error).self) {
             try await resume.value
         }
