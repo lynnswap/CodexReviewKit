@@ -1070,6 +1070,34 @@ struct AppServerClientTests {
         #expect(notification["method"] as? String == "initialized")
     }
 
+    @Test func processTransportCancellationIgnoresLateResponseAndKeepsConnection() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "codex-review-cancel-response-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let transport = try makeProcessTransport(in: directory, script: """
+        #!/bin/sh
+        IFS= read -r first
+        printf '{"method":"requestSeen","params":{}}\\n'
+        IFS= read -r second
+        printf '{"id":1,"result":{"value":1}}\\n'
+        printf '{"id":2,"result":{"value":2}}\\n'
+        printf '{"method":"stillAlive","params":{}}\\n'
+        IFS= read -r shutdown
+        """)
+        var notifications = await transport.notificationStream().makeAsyncIterator()
+        let first = Task {
+            try await transport.send(.init(id: 1, method: "thread/delete", params: Data("{}".utf8)))
+        }
+        #expect(try await notifications.next()?.method == "requestSeen")
+        first.cancel()
+        await #expect(throws: CancellationError.self) { try await first.value }
+        let second = try await transport.send(.init(id: 2, method: "thread/read", params: Data("{}".utf8)))
+        let response = try #require(JSONSerialization.jsonObject(with: second) as? [String: Int])
+        #expect(response == ["value": 2])
+        #expect(try await notifications.next()?.method == "stillAlive")
+        try await transport.close()
+    }
+
     @Test func processTransportMapsNullJSONRPCResultToEmptyPayload() throws {
         let data = try AppServerProcessTransport.responsePayloadData(from: NSNull())
 
@@ -7744,42 +7772,72 @@ struct AppServerClientTests {
         #expect(deletedThreadIDs == ["thread-1"])
     }
 
-    @Test func backendCleanupTimesOutHeldRequestAndCancelsItsSend() async throws {
+    @Test(arguments: ["thread/backgroundTerminals/clean", "thread/unsubscribe", "thread/delete"])
+    func backendCleanupTimeoutKeepsConcurrentReviewRunning(method: String) async throws {
         let transport = FakeJSONRPCTransport()
-        let cleanupGate = AsyncGate()
         let timeoutGate = AsyncGate()
-        await transport.holdNextIgnoringCancellation(
-            method: "thread/backgroundTerminals/clean",
-            gate: cleanupGate
+        await transport.holdNext(method: method, gate: AsyncGate())
+        try await transport.enqueue(
+            AppServerAPI.Thread.Unsubscribe.Response(status: .unsubscribed),
+            for: "thread/unsubscribe"
         )
         let backend = AppServerCodexReviewBackend(
             client: .init(transport: transport),
             cleanupRequestTimeout: .seconds(2),
-            cleanupRequestSleep: { _ in
-                await timeoutGate.wait()
-            }
+            cleanupRequestSleep: { _ in await timeoutGate.wait() }
         )
-        let run = CodexReviewBackendModel.Review.Run(
-            threadID: "thread-1",
-            turnID: "turn-1"
+        let activeRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "active-attempt", threadID: "active", turnID: "active-turn", reviewThreadID: "active"
         )
+        var iterator = await eventSequence(backend, activeRun).makeAsyncIterator()
         let cleanup = Task {
-            try await backend.cleanupReview(run)
+            try await backend.cleanupReview(.init(threadID: "finished", turnID: "finished-turn"))
         }
-
-        await transport.waitForRequestCount(1)
+        await transport.waitForActiveRequests(method: method)
         await timeoutGate.open()
 
-        await #expect(throws: ReviewRuntimeCloseFailure.connection(
-            "thread/backgroundTerminals/clean for thread-1: "
-                + "thread/backgroundTerminals/clean cleanup request timed out after 2.0 seconds."
+        await #expect(throws: ReviewRuntimeCloseFailure.cleanup(
+            "\(method) for finished: \(method) cleanup request timed out after 2.0 seconds. "
+                + "The request outcome is unknown; remaining cleanup was not attempted."
         )) {
             try await cleanup.value
         }
-        #expect(await transport.recordedRequests().map(\.method) == [
-            "thread/backgroundTerminals/clean",
-        ])
-        #expect(await transport.isClosedForTesting())
+        #expect(await transport.isClosedForTesting() == false)
+        let methods = await transport.recordedRequests().map(\.method)
+        let cleanupMethods = ["thread/backgroundTerminals/clean", "thread/unsubscribe", "thread/delete"]
+        let methodIndex = try #require(cleanupMethods.firstIndex(of: method))
+        #expect(methods == Array(cleanupMethods.prefix(through: methodIndex)))
+
+        try await emitAgentMessageStarted(
+            transport, threadID: "active", turnID: "active-turn", itemID: "final", phase: "final_answer"
+        )
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: TestItemNotification(
+                lifecycle: .completed, threadID: "active", turnID: "active-turn",
+                item: .init(type: "agentMessage", id: "final", text: "No findings.", phase: "final_answer")
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: "active", turn: .init(id: "active-turn", status: "completed"),
+                items: [.init(type: "agentMessage", id: "final", text: "No findings.")],
+                itemsView: "summary"
+            )
+        )
+        var completed = false
+        while let event = try await iterator.next() {
+            if case .completed(_, let review) = event {
+                #expect(review == "No findings.")
+                completed = true
+            } else if case .failed(let message) = event {
+                Issue.record("Concurrent review failed: \(message)")
+            }
+        }
+        #expect(completed)
+        #expect(await transport.recordedRequests().map(\.method) == methods)
+        try await backend.runtimeOwnerLifecycleHandle.closeAndWait()
     }
 
     @Test func backendCleanupTimeoutRemovesQueuedSerializerRequest() async throws {
@@ -7827,19 +7885,19 @@ struct AppServerClientTests {
         _ = await waiterQueuedIterator.next()
         await timeoutGate.open()
 
-        await #expect(throws: ReviewRuntimeCloseFailure.connection(
+        await #expect(throws: ReviewRuntimeCloseFailure.cleanup(
             "thread/backgroundTerminals/clean for thread-1: "
-                + "thread/backgroundTerminals/clean cleanup request timed out after 2.0 seconds."
+                + "thread/backgroundTerminals/clean cleanup request timed out after 2.0 seconds. "
+                + "The request outcome is unknown; remaining cleanup was not attempted."
         )) {
             try await cleanup.value
         }
-        await #expect(throws: JSONRPC.Error.closed) {
-            try await activeRequest.value
-        }
+        await activeRequestGate.open()
+        #expect(try await activeRequest.value.status == .unsubscribed)
         #expect(await transport.recordedRequests().map(\.method) == [
             "thread/unsubscribe",
         ])
-        #expect(await transport.isClosedForTesting())
+        #expect(await transport.isClosedForTesting() == false)
         #expect(try await serializer.run(scope: .thread("thread-1")) { "next" } == "next")
     }
 
@@ -7953,90 +8011,48 @@ struct AppServerClientTests {
         #expect(try await serializer.run(scope: scope) { "next" } == "next")
     }
 
-    @Test func timeoutCleanupPreservesCallerCancellationAcrossTransportContainment() async throws {
+    @Test func timeoutCleanupPreservesCallerCancellationWhileJoiningSend() async throws {
         let transport = FakeJSONRPCTransport()
-        let cleanupGate = AsyncGate()
         let timeoutGate = AsyncGate()
-        let closeStarted = AsyncGate()
-        let closeGate = AsyncGate()
-        await transport.holdNextIgnoringCancellation(
-            method: "thread/backgroundTerminals/clean",
-            gate: cleanupGate
-        )
-        let client = AppServerClient(transport: transport)
+        let responseReturning = AsyncGate()
+        let responseGate = AsyncGate()
+        await transport.holdNext(method: "thread/backgroundTerminals/clean", gate: AsyncGate())
+        await transport.beforeReturningNextResponse(method: "thread/backgroundTerminals/clean") {
+            await responseReturning.open()
+            await responseGate.waitIgnoringCancellation()
+        }
         let backend = AppServerCodexReviewBackend(
-            client: client,
+            client: .init(transport: transport),
             cleanupRequestTimeout: .seconds(2),
-            cleanupRequestSleep: { _ in
-                await timeoutGate.wait()
-            },
-            cleanupTransportClose: {
-                await closeStarted.open()
-                await closeGate.waitIgnoringCancellation()
-                try await client.close()
-            }
-        )
-        let run = CodexReviewBackendModel.Review.Run(
-            threadID: "thread-1",
-            turnID: "turn-1"
+            cleanupRequestSleep: { _ in await timeoutGate.wait() }
         )
         let cleanup = Task {
-            try await backend.cleanupReview(run)
+            try await backend.cleanupReview(.init(threadID: "thread-1", turnID: "turn-1"))
         }
-
         await transport.waitForRequestCount(1)
         await timeoutGate.open()
-        await closeStarted.wait()
+        await responseReturning.wait()
         cleanup.cancel()
-        await closeGate.open()
+        await responseGate.open()
 
-        do {
-            try await cleanup.value
-            Issue.record("Timeout cleanup unexpectedly succeeded.")
-        } catch let invalidation as AppServerCleanupTransportInvalidation {
-            #expect(invalidation.failure == .connection(
-                "thread/backgroundTerminals/clean cleanup request timed out after 2.0 seconds."
-            ))
-            #expect(invalidation.callerWasCancelled)
-        } catch {
-            Issue.record("Timeout cleanup returned an untyped error.")
-        }
+        await #expect(throws: CancellationError.self) { try await cleanup.value }
+        #expect(await transport.isClosedForTesting() == false)
+        #expect(await transport.recordedRequests().map(\.method) == ["thread/backgroundTerminals/clean"])
     }
 
-    @Test func cancelledCleanupClosesTransportAndReturnsCancellation() async throws {
+    @Test func cancelledCleanupKeepsSharedTransportOpen() async throws {
         let transport = FakeJSONRPCTransport()
-        let cleanupGate = AsyncGate()
-        await transport.holdNextIgnoringCancellation(
-            method: "thread/backgroundTerminals/clean",
-            gate: cleanupGate
-        )
+        await transport.holdNext(method: "thread/backgroundTerminals/clean", gate: AsyncGate())
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
-        let run = CodexReviewBackendModel.Review.Run(
-            threadID: "thread-1",
-            turnID: "turn-1"
-        )
         let cleanup = Task {
-            try await backend.cleanupReview(run)
+            try await backend.cleanupReview(.init(threadID: "thread-1", turnID: "turn-1"))
         }
-
         await transport.waitForRequestCount(1)
         cleanup.cancel()
 
-        do {
-            try await cleanup.value
-            Issue.record("Cancelled cleanup unexpectedly succeeded.")
-        } catch let invalidation as AppServerCleanupTransportInvalidation {
-            #expect(invalidation.failure == .connection(
-                "thread/backgroundTerminals/clean cleanup request was cancelled."
-            ))
-            #expect(invalidation.callerWasCancelled)
-        } catch {
-            Issue.record("Cancelled cleanup returned an untyped error.")
-        }
-        #expect(await transport.isClosedForTesting())
-        #expect(await transport.recordedRequests().map(\.method) == [
-            "thread/backgroundTerminals/clean",
-        ])
+        await #expect(throws: CancellationError.self) { try await cleanup.value }
+        #expect(await transport.isClosedForTesting() == false)
+        #expect(await transport.recordedRequests().map(\.method) == ["thread/backgroundTerminals/clean"])
     }
 
     @Test func cleanupAlreadyCancelledAtAdmissionStillRunsBoundedRequests() async throws {
