@@ -63,15 +63,28 @@ struct AccountUsageSummaryView: View {
         let presentation = AccountUsageSummaryPresentation(account: account)
         switch presentation {
         case .loading, .gauges:
-            VStack(spacing:0) {
-                ForEach(displayedRateLimits) { window in
-                    RateLimitWindowGaugeView(window: window)
-                        .transaction(value: account?.id) { transaction in
-                            transaction.disablesAnimations = true
+            VStack(spacing: 8) {
+                if rateLimits.isEmpty == false || account?.rateLimitStatusMessage == nil {
+                    VStack(spacing: 0) {
+                        ForEach(displayedRateLimits) { window in
+                            RateLimitWindowGaugeView(window: window)
+                                .transaction(value: account?.id) { transaction in
+                                    transaction.disablesAnimations = true
+                                }
                         }
+                    }
+                    .redacted(reason: presentation == .loading ? .placeholder : [])
+                }
+                if let message = account?.rateLimitStatusMessage {
+                    Label(
+                        account?.requiresReauthentication == true ? "Sign in again" : "Couldn’t refresh usage",
+                        systemImage: "exclamationmark.triangle"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .help(message)
                 }
             }
-            .redacted(reason: presentation == .loading ? .placeholder : [])
             .animation(.easeInOut, value: presentation == .loading)
         case .provider(let title, let systemImage):
             Label(title, systemImage: systemImage)
