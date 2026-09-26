@@ -411,21 +411,15 @@ package actor CodexReviewMCPHTTPServer {
         }
 
         enum RequestRole: Sendable {
-            case initialize
             case regular
             case close
         }
 
         final class RequestLease: @unchecked Sendable {
             let operation: MCPHTTPNetworkResourceOwner.RequestOperation
-            let role: RequestRole
 
-            init(
-                operation: MCPHTTPNetworkResourceOwner.RequestOperation,
-                role: RequestRole
-            ) {
+            init(operation: MCPHTTPNetworkResourceOwner.RequestOperation) {
                 self.operation = operation
-                self.role = role
             }
         }
 
@@ -450,7 +444,7 @@ package actor CodexReviewMCPHTTPServer {
             self.createdAt = now
             self.phase = .initializing(starting)
             self.lastAccessedAt = now
-            let lease = RequestLease(operation: initialOperation, role: .initialize)
+            let lease = RequestLease(operation: initialOperation)
             self.initialRequestLease = lease
             requestLeases[initialOperation.id] = lease
         }
@@ -466,7 +460,7 @@ package actor CodexReviewMCPHTTPServer {
             if case .regular = role, closeReceipt != nil {
                 return nil
             }
-            let lease = RequestLease(operation: operation, role: role)
+            let lease = RequestLease(operation: operation)
             requestLeases[operation.id] = lease
             lastAccessedAt = now
             return lease
@@ -1735,11 +1729,10 @@ package actor CodexReviewMCPHTTPServer {
         in session: MCPSemanticSession
     ) {
         Task { [weak self, weak session] in
-            let terminalCause = await lease.operation.waitUntilClosed()
+            _ = await lease.operation.waitUntilClosed()
             guard let self, let session else { return }
             await self.finishSessionRequest(
                 lease,
-                terminalCause: terminalCause,
                 in: session
             )
         }
@@ -1747,7 +1740,6 @@ package actor CodexReviewMCPHTTPServer {
 
     private func finishSessionRequest(
         _ lease: MCPSemanticSession.RequestLease,
-        terminalCause: MCPHTTPNetworkResourceOwner.TerminalCause?,
         in session: MCPSemanticSession
     ) async {
         guard sessions[session.identity.sessionID] === session,
@@ -1757,10 +1749,9 @@ package actor CodexReviewMCPHTTPServer {
         if session.requestLeases.isEmpty {
             resumeSessionRequestDrainWaiters(sessionID: session.identity.sessionID)
         }
+        // A completed HTTP request releases its lease, not the MCP session.
+        // Failed session startup is closed by createSessionAndHandle.
         await sessionRequestRetirementGate.waitIfNeeded()
-        if lease.role == .initialize, terminalCause != nil {
-            await closeSession(session)
-        }
     }
 
     private func closeAllSessions() async {

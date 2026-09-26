@@ -56,6 +56,67 @@ struct CodexReviewMCPHTTPServerTests {
         }
     }
 
+    @Test func initializeResponseDisconnectPreservesSession() async throws {
+        try await withHTTPServer(store: CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        )) { server in
+            let endpoint = await server.url
+            await server.holdNextResponseEndWriteForTesting()
+            await server.holdNextSessionRequestRetirementForTesting()
+            let connection = try await RawHTTPConnection.connect(to: endpoint)
+            defer { connection.close() }
+            do {
+                try await connection.send(rawHTTPRequest(
+                    endpoint: endpoint,
+                    sessionID: nil,
+                    body: makeInitializeBody(id: 1)
+                ))
+                let head = try await connection.readResponseHead()
+                #expect(head.contains(" 200 "))
+                let sessionHeader = try #require(head.components(separatedBy: "\r\n").first {
+                    $0.lowercased().hasPrefix("mcp-session-id:")
+                })
+                let sessionID = String(sessionHeader.dropFirst("mcp-session-id:".count))
+                    .trimmingCharacters(in: .whitespaces)
+                var response = Data()
+                repeat {
+                    response.append(try await connection.readUntil(Data("\n\n".utf8)))
+                } while String(decoding: response, as: UTF8.self).contains("data: {") == false
+                #expect(try decodeSSEJSON(from: response)["result"] != nil)
+                await server.waitUntilResponseEndWriteIsHeldForTesting()
+                connection.reset()
+                await server.releaseResponseEndWriteForTesting()
+                await server.waitUntilSessionRequestRetirementIsHeldForTesting()
+                let sessionCount = await server.sessionCountForTesting()
+                await server.releaseSessionRequestRetirementForTesting()
+                try #require(sessionCount == 1)
+
+                _ = try await postJSONRPCData(
+                    endpoint: endpoint,
+                    sessionID: sessionID,
+                    bodyData: makeJSONBody(["jsonrpc": "2.0", "method": "notifications/initialized"]),
+                    headers: ["MCP-Protocol-Version": "2025-11-25"],
+                    expectedStatusCode: 202
+                )
+                let result = try await postJSONRPC(
+                    endpoint: endpoint,
+                    sessionID: sessionID,
+                    body: [
+                        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                        "params": ["name": "review_list", "arguments": ["limit": 1]],
+                    ]
+                )
+                #expect(result["result"] != nil)
+                #expect(result["error"] == nil)
+            } catch {
+                connection.reset()
+                await server.releaseResponseEndWriteForTesting()
+                await server.releaseSessionRequestRetirementForTesting()
+                throw error
+            }
+        }
+    }
+
     @Test func toolsListMatchesPublishedV062Golden() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
@@ -2999,12 +3060,15 @@ private final class RawHTTPConnection: @unchecked Sendable {
     }
 
     func readResponseHead() async throws -> String {
+        String(decoding: try await readUntil(Data("\r\n\r\n".utf8)), as: UTF8.self)
+    }
+
+    func readUntil(_ terminator: Data) async throws -> Data {
         let descriptor = self.descriptor
         var bytes = lock.withLock {
             defer { bufferedInput.removeAll(keepingCapacity: false) }
             return bufferedInput
         }
-        let terminator = Data("\r\n\r\n".utf8)
         let result = try await Task.detached {
             while let range = bytes.range(of: terminator) {
                 let head = Data(bytes[..<range.upperBound])
@@ -3034,7 +3098,7 @@ private final class RawHTTPConnection: @unchecked Sendable {
         lock.withLock {
             bufferedInput = result.1 + bufferedInput
         }
-        return String(decoding: result.0, as: UTF8.self)
+        return result.0
     }
 
     func readUntilEOF() async throws -> Data {
