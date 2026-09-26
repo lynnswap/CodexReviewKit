@@ -17,6 +17,14 @@ import SwiftUI
     ReviewMonitorContentPreviewHost(previewScenario: .commandOutput)
 }
 
+#Preview("Update in Accounts") {
+    ReviewMonitorContentPreviewHost(sidebarSelection: .account, isCodexUpdateAvailable: true)
+}
+
+#Preview("Update in Workspaces") {
+    ReviewMonitorContentPreviewHost(isCodexUpdateAvailable: true)
+}
+
 @MainActor
 private struct ReviewMonitorContentPreviewHost: NSViewControllerRepresentable {
     enum PreviewScenario {
@@ -28,13 +36,17 @@ private struct ReviewMonitorContentPreviewHost: NSViewControllerRepresentable {
     var authPhase: CodexReviewAuthModel.Phase = .signedOut
     var account: CodexAccount?
     var serverState: CodexReviewServerState = .running
+    var sidebarSelection: SidebarPickerSelection = .workspace
+    var isCodexUpdateAvailable = false
 
     func makeNSViewController(context: Context) -> ReviewMonitorRootViewController {
         makeReviewMonitorPreviewContentViewControllerForPreview(
             authPhase: authPhase,
             account: account,
             serverState: serverState,
-            previewStore: previewStore()
+            previewStore: previewStore(),
+            sidebarSelection: sidebarSelection,
+            isCodexUpdateAvailable: isCodexUpdateAvailable
         )
     }
 

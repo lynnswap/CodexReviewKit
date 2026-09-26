@@ -101,6 +101,21 @@ struct SignInView: View {
     SignInView(store: makeAuthenticatingSignInPreviewStore())
 }
 
+#Preview("Codex CLI Not Installed") {
+    SignInView(store: makeSetupFailurePreviewStore("No usable Codex executable was found. Install the Codex CLI, then retry setup."))
+}
+
+#Preview("Codex Startup Failed") {
+    SignInView(store: makeSetupFailurePreviewStore("The explicitly selected Codex executable is invalid. Check its path in Settings."))
+}
+
+@MainActor
+private func makeSetupFailurePreviewStore(_ message: String) -> CodexReviewStore {
+    let store = makeSignInPreviewStore()
+    store.transitionToFailed(message)
+    return store
+}
+
 @MainActor
 func makeSignInPreviewStore() -> CodexReviewStore {
     CodexReviewStore.makePreviewStore()

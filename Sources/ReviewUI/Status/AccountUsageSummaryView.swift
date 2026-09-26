@@ -163,6 +163,30 @@ extension CodexAccount.RateLimitWindow {
         .frame(width: 320)
 }
 
+#Preview("Refresh Failed with Cached Usage") {
+    AccountUsageSummaryView(account: makeFailedUsagePreviewAccount(hasCachedUsage: true))
+        .padding()
+        .frame(width: 320)
+}
+
+#Preview("Refresh Failed without Cached Usage") {
+    AccountUsageSummaryView(account: makeFailedUsagePreviewAccount(hasCachedUsage: false))
+        .padding()
+        .frame(width: 320)
+}
+
+@MainActor
+private func makeFailedUsagePreviewAccount(hasCachedUsage: Bool) -> CodexAccount {
+    let account = hasCachedUsage
+        ? makeAccountRateLimitGaugesPreviewAccount()
+        : CodexAccount(email: "review@example.com", planType: "pro")
+    account.updateRateLimitFetchMetadata(
+        fetchedAt: .now,
+        error: "Could not connect to Codex. Check the CLI installation and try Refresh again."
+    )
+    return account
+}
+
 @MainActor
 private func makeAccountRateLimitGaugesPreviewAccount() -> CodexAccount {
     let account = CodexAccount(email: "review@example.com", planType: "pro")
