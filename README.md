@@ -43,6 +43,27 @@ visible.
 - `codex app-server` runs behind CodexReviewMonitor as the live review backend.
 - `~/.codex_review` is the dedicated Codex home used by CodexReviewMonitor.
 
+## Codex Updates
+
+ReviewMonitor checks the selected Codex installation at launch and every eight
+hours. Use **Settings → Updates → Check for Updates** for a manual check and its
+last-check time. Manual checks do not change the automatic schedule and do not
+install an update. Unsupported installations and failed checks are reported
+separately from **Up to Date**. Automatic installation currently supports the
+stable Homebrew Codex cask.
+
+When an update is available, choose **Update** in the sidebar toolbar. During a
+review, **Update After Reviews** lets current reviews finish and queues new
+requests inside ReviewMonitor. **Stop Reviews and Update** cancels current
+reviews and updates immediately. ReviewMonitor and its MCP sessions stay open;
+queued requests resume after Codex restarts, without being resubmitted.
+
+If updating fails but Codex can restart, queued reviews resume and the error
+remains visible in Settings. If Codex cannot restart, the queue is retained and
+**Retry** in the sidebar attempts runtime recovery without reinstalling. Explicitly
+quitting the app cancels queued reviews; an installation already in progress is
+allowed to finish before the app exits.
+
 ## Timeout Setup
 
 Long reviews can exceed the default MCP client timeout. `codex mcp add` does

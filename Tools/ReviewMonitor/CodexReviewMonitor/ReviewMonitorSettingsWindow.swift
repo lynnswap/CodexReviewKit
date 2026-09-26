@@ -2,15 +2,20 @@ import AppKit
 import CodexReviewHost
 import Observation
 import SwiftUI
+@_spi(ApplicationHostSupport) import CodexReview
+@_spi(PreviewSupport) import ReviewUI
 
 @MainActor
 enum ReviewMonitorSettingsPane: String, CaseIterable {
     case runtime
+    case updates
 
     var label: String {
         switch self {
         case .runtime:
             "Runtime"
+        case .updates:
+            "Updates"
         }
     }
 
@@ -18,15 +23,19 @@ enum ReviewMonitorSettingsPane: String, CaseIterable {
         switch self {
         case .runtime:
             "gearshape"
+        case .updates:
+            "arrow.triangle.2.circlepath"
         }
     }
 
     func tabViewItem(
-        runtimePreferencesStore: any CodexReviewRuntime.PreferencesStore
-    ) -> NSTabViewItem {
-        let viewController = makeViewController(
-            runtimePreferencesStore: runtimePreferencesStore
-        )
+        runtimePreferencesStore: any CodexReviewRuntime.PreferencesStore,
+        updater: ReviewMonitorCodexUpdater?
+    ) -> NSTabViewItem? {
+        guard let viewController = makeViewController(
+            runtimePreferencesStore: runtimePreferencesStore,
+            updater: updater
+        ) else { return nil }
         let tabViewItem = NSTabViewItem(viewController: viewController)
         tabViewItem.label = label
         tabViewItem.identifier = rawValue
@@ -38,25 +47,28 @@ enum ReviewMonitorSettingsPane: String, CaseIterable {
     }
 
     private func makeViewController(
-        runtimePreferencesStore: any CodexReviewRuntime.PreferencesStore
-    ) -> NSViewController {
+        runtimePreferencesStore: any CodexReviewRuntime.PreferencesStore,
+        updater: ReviewMonitorCodexUpdater?
+    ) -> NSViewController? {
         switch self {
         case .runtime:
             ReviewMonitorRuntimeSettingsViewController(
                 runtimePreferencesStore: runtimePreferencesStore
             )
+        case .updates:
+            updater.map { ReviewMonitorUpdateSettingsViewController(updater: $0) }
         }
     }
 }
 
 @MainActor
 final class ReviewMonitorSettingsWindowController: NSWindowController {
-    init(runtimePreferencesStore: any CodexReviewRuntime.PreferencesStore) {
+    init(runtimePreferencesStore: any CodexReviewRuntime.PreferencesStore, updater: ReviewMonitorCodexUpdater? = nil) {
         let tabViewController = NSTabViewController()
         tabViewController.tabStyle = .toolbar
         tabViewController.title = "Settings"
-        tabViewController.tabViewItems = ReviewMonitorSettingsPane.allCases.map {
-            $0.tabViewItem(runtimePreferencesStore: runtimePreferencesStore)
+        tabViewController.tabViewItems = ReviewMonitorSettingsPane.allCases.compactMap {
+            $0.tabViewItem(runtimePreferencesStore: runtimePreferencesStore, updater: updater)
         }
 
         let window = ReviewMonitorSettingsWindow(
@@ -77,7 +89,7 @@ final class ReviewMonitorSettingsWindowController: NSWindowController {
 
     func openPane(_ pane: ReviewMonitorSettingsPane) {
         guard let tabViewController = contentViewController as? NSTabViewController,
-              let index = ReviewMonitorSettingsPane.allCases.firstIndex(of: pane)
+              let index = tabViewController.tabViewItems.firstIndex(where: { $0.identifier as? String == pane.rawValue })
         else {
             showWindow(nil)
             return
@@ -426,5 +438,128 @@ private final class PreviewRuntimePreferencesStore: CodexReviewRuntime.Preferenc
 
     func save(_: CodexReviewRuntime.Preferences) throws {
     }
+}
+#endif
+
+@MainActor
+final class ReviewMonitorUpdateSettingsViewController: NSHostingController<ReviewMonitorUpdateSettingsForm> {
+    init(updater: ReviewMonitorCodexUpdater) {
+        super.init(rootView: ReviewMonitorUpdateSettingsForm(updater: updater))
+        title = ReviewMonitorSettingsPane.updates.label
+        preferredContentSize = NSSize(width: 560, height: 320)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { nil }
+}
+
+struct ReviewMonitorUpdateSettingsForm: View {
+    @Bindable var updater: ReviewMonitorCodexUpdater
+
+    var body: some View {
+        Form {
+            Section("Codex Updates") {
+                HStack {
+                    status
+                    Spacer()
+                    if updater.checkState == .checking { ProgressView().controlSize(.small) }
+                    Button("Check for Updates") {
+                        Task { await updater.checkForUpdates() }
+                    }
+                    .disabled(updater.isBusy)
+                }
+                if let date = updater.lastCheckedAt {
+                    LabeledContent("Last checked", value: date.formatted(date: .abbreviated, time: .shortened))
+                } else {
+                    Text("Not checked yet.").foregroundStyle(.secondary)
+                }
+                Text("Automatically checks at launch and every 8 hours.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            operationStatus
+        }
+        .formStyle(.grouped)
+        .frame(width: 560)
+    }
+
+    @ViewBuilder
+    private var status: some View {
+        switch updater.checkState {
+        case .notChecked: Text("Not Checked")
+        case .checking: Text("Checking…")
+        case .available: Text("Update Available")
+        case .upToDate: Text("Up to Date")
+        case .unavailable(let message):
+            VStack(alignment: .leading) {
+                Text("Check Unavailable")
+                Text(message).font(.callout).foregroundStyle(.secondary)
+            }
+        case .failed(let message):
+            VStack(alignment: .leading) {
+                Text("Check Failed")
+                Text(message).font(.callout).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var operationStatus: some View {
+        switch updater.store.codexUpdateState {
+        case .idle: EmptyView()
+        case .waitingForReviews:
+            Section { Text("The update will start after current reviews finish. New requests are queued.") }
+        case .stoppingRuntime, .installing, .restarting:
+            Section { Label("Updating Codex…", systemImage: "arrow.triangle.2.circlepath") }
+        case .failed(let message):
+            Section("Last Update Error") { Text(message).foregroundStyle(.secondary) }
+        }
+    }
+}
+
+#if DEBUG
+#Preview("Checking for Updates") { UpdateSettingsPreview(.checking) }
+#Preview("Update Available") { UpdateSettingsPreview(.available) }
+#Preview("Codex Up to Date") { UpdateSettingsPreview(.upToDate) }
+#Preview("Update Check Unavailable") { UpdateSettingsPreview(.unavailable) }
+#Preview("Update Check Failed") { UpdateSettingsPreview(.failed) }
+
+@MainActor
+private struct UpdateSettingsPreview: View {
+    enum Result { case checking, available, upToDate, unavailable, failed }
+    @State private var updater: ReviewMonitorCodexUpdater
+
+    init(_ result: Result) {
+        _updater = State(initialValue: ReviewMonitorCodexUpdater(
+            store: ReviewMonitorUpdatePreview().store,
+            check: {
+                switch result {
+                case .checking:
+                    try await Task.sleep(for: .seconds(600))
+                    return .upToDate
+                case .available:
+                    return .available(.init(executableURL: URL(fileURLWithPath: "/preview/codex"), environment: [:]))
+                case .upToDate: return .upToDate
+                case .unavailable: return .unavailable("This installation is managed outside ReviewMonitor.")
+                case .failed: throw PreviewUpdateCheckError.offline
+                }
+            },
+            publishAvailability: { _ in },
+            chooseTiming: { nil },
+            runUpdate: { _ in },
+            presentFailure: { _, _ in }
+        ))
+    }
+
+    var body: some View {
+        ReviewMonitorUpdateSettingsForm(updater: updater)
+            .frame(height: 320)
+            .task { await updater.checkForUpdates() }
+            .onDisappear { Task { await updater.stopChecking() } }
+    }
+}
+
+private enum PreviewUpdateCheckError: LocalizedError {
+    case offline
+    var errorDescription: String? { "The update server could not be reached. Check your connection and try again." }
 }
 #endif

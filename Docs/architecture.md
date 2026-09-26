@@ -35,6 +35,26 @@ ReviewMonitor composes `ReviewUI` and `CodexReviewMCPServer` over one
 `CodexReviewHost` to `CodexReviewAppServer`; dependencies do not point back
 toward the app or UI.
 
+### Codex Updates
+
+`CodexReviewStore.updateCodex(when:install:)` owns the update operation, its
+observable progress, review dispatch suspension, and runtime replacement. It
+retains MCP sessions and accepted jobs, joins existing execution and cleanup,
+then resumes dispatch after runtime publication. Repeated update requests join
+the same operation. Runtime recovery confirms the owned process has closed
+without treating a recorded close error as permanent evidence that it is live.
+
+The app's `ReviewMonitorCodexUpdater` owns update checks and their results. The
+sidebar receives its availability projection, and Settings uses the same
+instance. A continuous clock anchors automatic checks to launch and eight-hour
+boundaries; manual checks share in-flight work without moving that anchor.
+Checks due during installation are covered by one post-update check.
+
+Application termination stops read-only checking, shuts down the Store, and
+joins startup before replying to AppKit. The Store can cancel a deferred update
+or wait for an installation already in progress. Codex updates do not use an
+application relaunch helper.
+
 ## CodexReview
 
 `CodexReviewStore` is the single source of truth for review, runtime, auth,

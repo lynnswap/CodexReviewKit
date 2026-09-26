@@ -7,8 +7,8 @@ struct CodexCommandUpdatePlan: Equatable, Sendable {
 }
 
 enum CodexCommandUpdateCheckResult: Equatable, Sendable {
-    case disabled
-    case unavailable
+    case upToDate
+    case unavailable(String)
     case available(CodexCommandUpdatePlan)
 }
 
@@ -59,7 +59,7 @@ struct CodexCommandUpdateChecker: Sendable {
             configuredPath: runtimePreferences.codexExecutablePath,
             environment: sourceEnvironment
         ) else {
-            return .unavailable
+            return .unavailable("Automatic updates are not supported for this Codex installation.")
         }
         let codexHomeURL = runtimePreferences.codexHomePath.map {
             URL(fileURLWithPath: $0, isDirectory: true)
@@ -75,28 +75,17 @@ struct CodexCommandUpdateChecker: Sendable {
             environment
         )
         let report = try JSONDecoder().decode(DoctorReport.self, from: output)
-        guard report.schemaVersion == 1 else {
-            throw CodexCommandUpdateCheckError.unsupportedSchema(report.schemaVersion)
-        }
         guard let update = report.checks["updates.status"] else {
             throw CodexCommandUpdateCheckError.missingUpdateStatus
         }
 
-        switch try update.scalar(named: "check for update on startup") {
-        case "false":
-            return .disabled
-        case "true":
-            break
-        case let value:
-            throw CodexCommandUpdateCheckError.invalidDetail(
-                name: "check for update on startup",
-                value: value
-            )
+        if case .scalar(let message) = update.details["latest version probe"] {
+            throw CodexCommandUpdateCheckError.probeFailed(message)
         }
 
         switch try update.scalar(named: "latest version status") {
         case "current version is not older":
-            return .unavailable
+            return .upToDate
         case "newer version is available":
             break
         case let value:
@@ -108,7 +97,7 @@ struct CodexCommandUpdateChecker: Sendable {
 
         guard try update.scalar(named: "update action")
             == "brew upgrade --cask codex" else {
-            return .unavailable
+            return .unavailable("This Codex installation does not provide a supported automatic update action.")
         }
         return .available(.init(
             executableURL: installation.launcherURL,
@@ -421,7 +410,6 @@ private final class CancellableDoctorProcess: @unchecked Sendable {
 }
 
 private struct DoctorReport: Decodable {
-    let schemaVersion: Int
     let checks: [String: DoctorCheck]
 }
 
@@ -454,7 +442,7 @@ private enum DoctorDetail: Decodable {
 }
 
 private enum CodexCommandUpdateCheckError: LocalizedError {
-    case unsupportedSchema(Int)
+    case probeFailed(String)
     case missingUpdateStatus
     case missingDetail(String)
     case nonScalarDetail(String)
@@ -462,8 +450,8 @@ private enum CodexCommandUpdateCheckError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .unsupportedSchema(let version):
-            "Codex returned unsupported doctor schema version \(version)."
+        case .probeFailed(let message):
+            "The latest Codex version could not be checked. \(message)"
         case .missingUpdateStatus:
             "Codex did not include updates.status in its doctor report."
         case .missingDetail(let name):
