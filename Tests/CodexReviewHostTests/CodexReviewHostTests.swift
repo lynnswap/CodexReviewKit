@@ -5672,6 +5672,46 @@ struct CodexReviewHostTests {
         #expect(message.contains("No usable Codex executable was found."))
     }
 
+    @Test func liveStoreCanRetrySetupAfterInstallingCodex() async throws {
+        let homeURL = try temporaryHome()
+        let executableURL = homeURL.appendingPathComponent("codex")
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
+        try await transport.enqueue(
+            AppServerAPI.Account.Read.Response(requiresOpenAIAuth: true), for: "account/read"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")), for: "config/read"
+        )
+        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        let resolver = CodexExecutableResolver(configuration: .init(
+            homeDirectory: homeURL, fallbackBinDirectories: [], fileSystem: .live
+        ))
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path, "PATH": homeURL.path],
+            codexExecutableResolver: resolver,
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            resolvedTransportFactory: { _, selectedExecutable in
+                #expect(selectedExecutable == executableURL.resolvingSymlinksInPath())
+                return transport
+            }
+        )
+        await store.start()
+        guard case .failed = store.serverState else {
+            Issue.record("Missing Codex should fail setup.")
+            return
+        }
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executableURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executableURL.path)
+
+        await store.restart()
+
+        #expect(store.serverState == .running)
+        #expect(store.canPerformPrimaryAuthenticationAction)
+        #expect(store.auth.accounts.isEmpty)
+        await store.stop()
+    }
+
     @Test func liveStoreResolvesUpdatedExecutableForStagingAndCleansLoginOnFailure() async throws {
         let homeURL = try temporaryHome()
         let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)

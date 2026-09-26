@@ -60,8 +60,19 @@ struct SignInView: View {
             }
             
         } description: {
-            if let descriptionText {
-                Text(descriptionText)
+            VStack(spacing: 12) {
+                Text("Reviews run using the Codex CLI installed on your Mac.")
+                Link("Install Codex CLI", destination: URL(string: "https://github.com/openai/codex")!)
+                    .accessibilityIdentifier("review-monitor.install-codex-link")
+                if let descriptionText {
+                    Text(descriptionText)
+                }
+                if case .failed = store.serverState {
+                    Button("Retry Setup", systemImage: "arrow.clockwise") {
+                        Task { await store.restart() }
+                    }
+                    .accessibilityIdentifier("review-monitor.retry-setup-button")
+                }
             }
         }
         .animation(.default, value: store.auth.isAuthenticating)
