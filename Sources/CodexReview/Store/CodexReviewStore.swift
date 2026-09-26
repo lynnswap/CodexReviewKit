@@ -280,10 +280,6 @@ public final class CodexReviewStore {
     }
 
     public func start(forceRestartIfNeeded: Bool = false) async {
-        if let update = codexUpdateTask {
-            _ = try? await update.value
-            if case .running = runtimeState { return }
-        }
         guard applicationShutdownRequested == false else {
             return
         }
@@ -299,6 +295,11 @@ public final class CodexReviewStore {
             catch { transitionToFailed(error.localizedDescription); return }
         default: break
         }
+        while let update = codexUpdateTask {
+            _ = try? await update.value
+            if case .running = runtimeState { return }
+        }
+        guard Task.isCancelled == false, applicationShutdownRequested == false else { return }
         guard let operation = admitRuntimeStart(
             forceRestartIfNeeded: forceRestartIfNeeded
         ) else {

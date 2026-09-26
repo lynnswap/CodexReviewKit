@@ -7,6 +7,32 @@ import CodexReviewTesting
 @Suite("review history store", .serialized)
 @MainActor
 struct CodexReviewStoreHistoryTests {
+    @Test func startupJoinsUpdateThatBeganWhileHistoryWasLoading() async throws {
+        let loadEntered = AsyncGate()
+        let loadRelease = AsyncGate()
+        let history = ReviewHistoryPersistenceProbe(loadEntered: loadEntered, loadRelease: loadRelease)
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        let store = CodexReviewStore.makeTestingStore(backend: backend, historyPersistence: history)
+        let startup = Task { await store.start() }
+        await loadEntered.wait()
+        let installEntered = AsyncGate()
+        let installRelease = AsyncGate()
+        let update = Task { try await store.updateCodex(when: .immediately) {
+            await installEntered.open()
+            await installRelease.wait()
+        } }
+        await installEntered.wait()
+        await loadRelease.open()
+        try #require(await waitUntil { store.historyLoadWasApplied })
+        #expect(backend.startRequests.isEmpty)
+        await installRelease.open()
+        try await update.value
+        await startup.value
+        #expect(backend.startRequests.count == 1)
+        #expect(store.serverState == .running)
+        await store.stop()
+    }
+
     @Test func deferredUpdateContinuesWhenAnotherCompletedReviewIsDeleted() async throws {
         let history = ReviewHistoryPersistenceProbe()
         let backend = FakeCodexReviewBackend()
