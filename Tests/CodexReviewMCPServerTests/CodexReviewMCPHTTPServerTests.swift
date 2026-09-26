@@ -3,13 +3,73 @@ import Foundation
 import MCP
 @preconcurrency import NIOCore
 import Testing
-@_spi(Testing) @testable import CodexReview
+@_spi(Testing) @_spi(ApplicationHostSupport) @testable import CodexReview
 import CodexReviewMCPServer
 import CodexReviewTesting
 
 @Suite("MCP Streamable HTTP server")
 @MainActor
 struct CodexReviewMCPHTTPServerTests {
+    @Test func sameMCPSessionWaitsThroughDeferredUpdateAndCompletesTwoQueuedCalls() async throws {
+        let reviews = FakeCodexReviewBackend()
+        let runs = (0..<3).map { CodexReviewBackendModel.Review.Run(
+            threadID: "thread-\($0)", turnID: "turn-\($0)", reviewThreadID: "review-\($0)"
+        ) }
+        await reviews.scriptReviewRuns(runs)
+        let owner = TestingMCPServerLifecycleOwner()
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: reviews, mcpServerLifecycle: owner)
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+        try await withHTTPServer(store: store) { server in
+            let endpoint = await server.url
+            let session = try await initializeSession(endpoint: endpoint)
+            let first = Task { try await postJSONRPCData(
+                endpoint: endpoint, sessionID: session, bodyData: makeReviewStartBody(id: 2)
+            ) }
+            try await reviews.waitForStartReview(timeout: .seconds(2))
+            var installs = 0
+            let entered = AsyncGate()
+            let release = AsyncGate()
+            let update = Task { try await store.updateCodex(when: .afterCurrentReviews) {
+                installs += 1
+                await entered.open()
+                await release.wait()
+            } }
+            try #require(await waitUntil(timeout: .seconds(2)) { store.codexUpdateState == .waitingForReviews })
+            var queuedResponses = 0
+            let second = Task {
+                defer { queuedResponses += 1 }
+                return try await postJSONRPCData(endpoint: endpoint, sessionID: session, bodyData: makeReviewStartBody(id: 3))
+            }
+            let third = Task {
+                defer { queuedResponses += 1 }
+                return try await postJSONRPCData(endpoint: endpoint, sessionID: session, bodyData: makeReviewStartBody(id: 4))
+            }
+            try #require(await waitUntil(timeout: .seconds(2)) { store.jobs.filter { $0.core.lifecycle.status == .queued }.count == 2 })
+            let queuedIDs = Set(store.jobs.filter { $0.core.lifecycle.status == .queued }.map(\.id))
+            await reviews.yield(.completed(summary: "Done", result: "No findings."), for: runs[0])
+            let firstResult = try decodeSSEJSON(from: try await first.value)
+            #expect(firstResult.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String == "succeeded")
+            await entered.wait()
+            #expect(queuedResponses == 0)
+            #expect(owner.stopCallCount == 0)
+            await release.open()
+            try await update.value
+            try #require(await waitUntil(timeout: .seconds(2)) {
+                queuedIDs.allSatisfy { store.job(id: $0)?.core.run.threadID != nil }
+            })
+            await reviews.yield(.completed(summary: "Done", result: "No findings."), for: runs[1])
+            await reviews.yield(.completed(summary: "Done", result: "No findings."), for: runs[2])
+            let results = try [decodeSSEJSON(from: await second.value), decodeSSEJSON(from: await third.value)]
+            #expect(Set(results.compactMap { $0.value(for: ["result", "structuredContent", "jobId"]) as? String }) == queuedIDs)
+            #expect(results.allSatisfy { $0.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String == "succeeded" })
+            #expect(installs == 1)
+            #expect(owner.preparedServers.count == 1)
+            #expect(owner.activatedServers.count == 1)
+        }
+        await store.stop()
+    }
+
     @Test func reviewStartRemainsPendingAcrossKitQueueWithoutClientResubmission() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(

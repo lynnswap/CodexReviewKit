@@ -27,6 +27,7 @@ package struct CodexReviewStoreSeed {
 package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend, Sendable {
     var seed: CodexReviewStoreSeed { get }
     var isActive: Bool { get }
+    var shutdownCleanupTimeout: Duration { get }
     var handlesActiveReviewStopCleanup: Bool { get }
     var mcpServerLifecycle: any MCPServerLifecycleOwner { get }
 
@@ -85,6 +86,7 @@ package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend, Sendable {
 }
 
 extension CodexReviewStoreBackend {
+    package var shutdownCleanupTimeout: Duration { .seconds(2) }
     package var handlesActiveReviewStopCleanup: Bool {
         false
     }

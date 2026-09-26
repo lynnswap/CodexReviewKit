@@ -192,10 +192,11 @@ extension CodexReviewStore {
     }
 
     package func requestActiveReviewCancellationsForRuntimeStop(
-        reason: ReviewCancellation = .system(message: "Review runtime stopped.")
+        reason: ReviewCancellation = .system(message: "Review runtime stopped."),
+        includingQueued: Bool = true
     ) async -> ReviewRuntimeCancellationRequestOutcome {
         let activeJobIDs = orderedJobs
-            .filter { $0.isTerminal == false }
+            .filter { $0.isTerminal == false && (includingQueued || queuedReviewStarts[$0.id] == nil) }
             .map(\.id)
         var firstFailure: ReviewRuntimeCloseFailure?
         for jobID in activeJobIDs {
@@ -221,10 +222,11 @@ extension CodexReviewStore {
 
     @discardableResult
     package func cancelActiveReviewsLocallyForRuntimeStop(
-        reason: ReviewCancellation = .system(message: "Review runtime stopped.")
+        reason: ReviewCancellation = .system(message: "Review runtime stopped."),
+        includingQueued: Bool = true
     ) -> [String] {
         let activeJobIDs = orderedJobs
-            .filter { $0.isTerminal == false }
+            .filter { $0.isTerminal == false && (includingQueued || queuedReviewStarts[$0.id] == nil) }
             .map(\.id)
         guard activeJobIDs.isEmpty == false else {
             return []

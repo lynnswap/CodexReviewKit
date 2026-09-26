@@ -2,7 +2,7 @@ import Foundation
 import AppKit
 import AuthenticationServices
 import Testing
-import CodexReview
+@_spi(ApplicationHostSupport) import CodexReview
 import CodexReviewAppServer
 import CodexReviewHost
 import CodexReviewMCPServer
@@ -46,6 +46,84 @@ private actor HostCloseFailureTransport: JSONRPC.Transport {
 @Suite("host composition")
 @MainActor
 struct CodexReviewHostTests {
+    @Test func updateRecoveryConfirmsPhysicalClosureWithoutReplayingCachedFailure() async throws {
+        let homeURL = try temporaryHome()
+        let original = FakeJSONRPCTransport()
+        let replacement = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(original)
+        try await enqueueRuntimeStartResponses(replacement)
+        let delayedClose = DelayedCloseConfirmationTransport(base: original)
+        let server = ControlledMCPHTTPServer(endpoint: try #require(URL(string: "http://127.0.0.1:19439/mcp")))
+        var transports: [any JSONRPC.Transport] = [delayedClose, replacement]
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            mcpHTTPServerFactory: { _, _ in server },
+            mcpHTTPServerBindChecker: { _ in },
+            transportFactory: { _ in transports.removeFirst() }
+        )
+        await store.start()
+        store.suspendReviewStarts()
+        let queued = try await store.startReview(sessionID: "owner", request: .init(cwd: "/tmp/project", target: .uncommittedChanges), waitTimeout: .zero)
+        var installations = 0
+        do {
+            try await store.updateCodex(when: .immediately) { installations += 1 }
+            Issue.record("Expected close failure")
+        } catch { #expect(error.localizedDescription.contains("Injected host close failure")) }
+        await store.restart()
+        #expect(transports.count == 1)
+        #expect(store.job(id: queued.jobID)?.core.lifecycle.status == .queued)
+        #expect(server.stopCallCount == 0)
+        _ = try await store.cancelReview(jobID: queued.jobID, sessionID: "owner")
+        await delayedClose.finishProcessTermination()
+        await store.restart()
+        #expect(store.serverState == .running)
+        #expect(transports.isEmpty)
+        #expect(installations == 0)
+        #expect(await delayedClose.closeCalls == 1)
+        #expect(server.startCallCount == 1)
+        await store.stop()
+    }
+
+    @Test func liveRuntimeUpdatePreservesMCPAndDispatchesQueueOnNewTransport() async throws {
+        let homeURL = try temporaryHome()
+        let old = FakeJSONRPCTransport()
+        let new = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(old)
+        try await enqueueRuntimeStartResponses(new)
+        try await enqueueLiveRouteReviewStartResponses(new, threadID: "new-thread", turnID: "new-turn")
+        try await new.enqueue(EmptyResponse(), for: "turn/interrupt")
+        try await enqueueReviewCleanupResponses(new)
+        let server = ControlledMCPHTTPServer(endpoint: try #require(URL(string: "http://127.0.0.1:19438/mcp")))
+        var transports = [old, new]
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            mcpHTTPServerFactory: { _, _ in server },
+            mcpHTTPServerBindChecker: { _ in },
+            transportFactory: { _ in transports.removeFirst() }
+        )
+        await store.start()
+        store.suspendReviewStarts()
+        let queued = try await store.startReview(
+            sessionID: "client", request: .init(cwd: "/tmp/project", target: .uncommittedChanges), waitTimeout: .zero
+        )
+        try await store.updateCodex(when: .immediately) {
+            #expect(await old.isClosedForTesting())
+            #expect(store.job(id: queued.jobID)?.core.lifecycle.status == .queued)
+            #expect(server.stopCallCount == 0)
+        }
+        try #require(await StoreSnapshotProbe(store: store).waitUntil { $0.job()?.activeRun?.turnID == "new-turn" } != nil)
+        #expect(await old.recordedRequests().contains { $0.method == "thread/start" } == false)
+        #expect(server.startCallCount == 1)
+        #expect(store.serverURL == server.endpoint)
+        let cancel = Task { try await store.cancelReview(jobID: queued.jobID, sessionID: "client") }
+        try #require(await waitUntil(timeout: .seconds(2)) { await new.recordedRequests().contains { $0.method == "turn/interrupt" } })
+        try await emitInterruptedTurn(new, threadID: "new-thread", turnID: "new-turn", message: "Cancelled.")
+        _ = try await cancel.value
+        await store.stop()
+    }
+
     @Test func hostStartsAndStopsRuntimeWithFakeBackend() async throws {
         let backend = FakeCodexReviewBackend()
         let host = CodexReviewHost(
@@ -7153,4 +7231,25 @@ private actor CompletionFlag {
     func isCompleted() -> Bool {
         completed
     }
+}
+
+private actor DelayedCloseConfirmationTransport: JSONRPC.Transport {
+    let base: FakeJSONRPCTransport
+    private var processTerminated = false
+    private(set) var closeCalls = 0
+
+    init(base: FakeJSONRPCTransport) { self.base = base }
+    func send(_ request: JSONRPC.Request) async throws -> Data { try await base.send(request) }
+    func notify(_ notification: JSONRPC.Notification) async throws { try await base.notify(notification) }
+    func notificationStream() async -> AsyncThrowingStream<JSONRPC.ReceivedNotification, Error> { await base.notificationStream() }
+    func notificationHighWatermark() async -> JSONRPC.NotificationReceipt { await base.notificationHighWatermark() }
+    func close() async throws {
+        closeCalls += 1
+        try await base.close()
+        throw HostCloseFailure.injected
+    }
+    func confirmClosed() async throws {
+        guard processTerminated else { throw HostCloseFailure.injected }
+    }
+    func finishProcessTermination() { processTerminated = true }
 }

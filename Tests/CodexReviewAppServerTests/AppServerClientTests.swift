@@ -685,9 +685,13 @@ struct AppServerClientTests {
             }
         )
 
+        await #expect(throws: JSONRPC.Error.self) {
+            try await transport.confirmClosed()
+        }
         await #expect(throws: failure) {
             try await transport.close()
         }
+        try await transport.confirmClosed()
         await #expect(throws: failure) {
             try await transport.close()
         }

@@ -14,6 +14,7 @@ package struct ReviewRuntimeGeneration: Hashable, Sendable {
 
 package enum ReviewRuntimeCleanupRecoverySuppression: Equatable, Sendable {
     case explicitStop
+    case codexUpdate
     case staleSource
     case successorAlreadyFinished
 }
@@ -89,6 +90,11 @@ package protocol RuntimeLifecycleHandle: AnyObject, Sendable {
     func closeAdmission()
     func close(purpose: ReviewRuntimeTransitionPurpose) async throws
     func waitUntilClosed() async throws
+    func confirmClosed() async throws
+}
+
+extension RuntimeLifecycleHandle {
+    package func confirmClosed() async throws { try await waitUntilClosed() }
 }
 
 @MainActor

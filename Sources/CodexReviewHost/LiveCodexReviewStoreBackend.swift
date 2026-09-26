@@ -726,7 +726,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
     private let mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver
     private let mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker
     private let appServerRuntimeFactory: AppServerRuntimeFactory
-    private let shutdownCleanupTimeout: Duration
+    let shutdownCleanupTimeout: Duration
     private weak var attachedStore: CodexReviewStore?
     private var preparingMCPServer: PreparedMCPServer?
     private var preparedMCPServer: PreparedMCPServer?
@@ -1169,13 +1169,14 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         store: CodexReviewStore,
         appServerBackend: AppServerCodexReviewBackend,
         reason: ReviewCancellation,
-        timeoutWarning: String
+        timeoutWarning: String,
+        includingQueued: Bool = true
     ) async {
         let workerJobIDs = store.reviewWorkerJobIDsForRuntimeStop
         let cancellationCleanup = await runRuntimeShutdownCleanup(
             timeout: shutdownCleanupTimeout
         ) {
-            await store.requestActiveReviewCancellationsForRuntimeStop(reason: reason)
+            await store.requestActiveReviewCancellationsForRuntimeStop(reason: reason, includingQueued: includingQueued)
         }
         let cancellationJobIDs: [String]
         let didRequestCancellation: Bool
@@ -1207,7 +1208,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
             }
         }
         let locallyCancelledJobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
-            reason: reason
+            reason: reason, includingQueued: includingQueued
         )
         let currentWorkerJobIDs = store.reviewWorkerJobIDsForRuntimeStop
         await store.cancelAndDetachReviewWorkersForRuntimeStop(
@@ -1252,7 +1253,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                 store: store,
                 appServerBackend: appServerBackend,
                 reason: intent.reviewCancellation,
-                timeoutWarning: intent.cleanupTimeoutWarning
+                timeoutWarning: intent.cleanupTimeoutWarning,
+                includingQueued: intent != .codexUpdate
             )
         }
         await cleanupLoginRuntime(loginCleanup)
@@ -4182,6 +4184,14 @@ private final class LiveRuntimeLifecycleHandle: RuntimeLifecycleHandle {
         }
         try await closeTask.value.get()
     }
+    func confirmClosed() async throws {
+        guard let closeTask else { throw CancellationError() }
+        switch await closeTask.value {
+        case .success: return
+        case .failure: try await client.confirmClosed()
+        }
+    }
+
 }
 
 @MainActor

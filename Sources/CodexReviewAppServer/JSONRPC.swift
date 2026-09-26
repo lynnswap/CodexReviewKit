@@ -56,6 +56,7 @@ package enum JSONRPC {
         func notificationStream() async -> AsyncThrowingStream<ReceivedNotification, Swift.Error>
         func notificationHighWatermark() async -> NotificationReceipt
         func close() async throws
+        func confirmClosed() async throws
     }
 
     package enum Error: Swift.Error, Equatable, Sendable, LocalizedError {
@@ -141,4 +142,8 @@ package struct AnyEncodable: Encodable {
 
 package struct EmptyResponse: Codable, Equatable, Sendable {
     package init() {}
+}
+
+extension JSONRPC.Transport {
+    package func confirmClosed() async throws { try await close() }
 }

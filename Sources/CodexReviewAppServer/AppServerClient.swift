@@ -290,6 +290,10 @@ package actor AppServerClient {
         try await transport.close()
     }
 
+    package func confirmClosed() async throws {
+        try await transport.confirmClosed()
+    }
+
     private func allocateRequestID() -> Int {
         defer { nextRequestID += 1 }
         return nextRequestID
