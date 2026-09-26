@@ -5672,7 +5672,7 @@ struct CodexReviewHostTests {
         #expect(message.contains("No usable Codex executable was found."))
     }
 
-    @Test func liveStoreUsesOneExecutableForPrimaryAndStagingAndCleansLoginOnFailure() async throws {
+    @Test func liveStoreResolvesUpdatedExecutableForStagingAndCleansLoginOnFailure() async throws {
         let homeURL = try temporaryHome()
         let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
         try writeRegistry(
@@ -5703,12 +5703,24 @@ struct CodexReviewHostTests {
         )
         let sessions = FakeWebAuthenticationSessions()
         var isolatedCodexHomeURL: URL?
-        let executableURL = URL(fileURLWithPath: "/resolved/codex")
+        let executableURL = homeURL.appendingPathComponent("codex-v1")
+        let updatedExecutableURL = homeURL.appendingPathComponent("codex-v2")
+        let launcherURL = homeURL.appendingPathComponent("codex")
+        for url in [executableURL, updatedExecutableURL] {
+            try Data("#!/bin/sh\nexit 0\n".utf8).write(to: url)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+        }
+        try FileManager.default.createSymbolicLink(at: launcherURL, withDestinationURL: executableURL)
+        let resolver = CodexExecutableResolver(configuration: .init(
+            homeDirectory: homeURL,
+            fallbackBinDirectories: [],
+            fileSystem: .live
+        ))
         var runtimeExecutables: [URL] = []
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
-            runtimePreferences: .init(codexExecutablePath: executableURL.path),
-            codexExecutableResolver: makeResolver(executables: [executableURL.path]),
+            runtimePreferences: .init(codexExecutablePath: launcherURL.path),
+            codexExecutableResolver: resolver,
             nativeAuthenticationConfiguration: .init(
                 callbackScheme: "lynnpd.CodexReviewMonitor.auth",
                 browserSessionPolicy: .ephemeral,
@@ -5728,10 +5740,14 @@ struct CodexReviewHostTests {
 
         await store.start(forceRestartIfNeeded: true)
         await mainTransport.waitForNotificationStreamCount(1)
+        try FileManager.default.removeItem(at: launcherURL)
+        try FileManager.default.createSymbolicLink(at: launcherURL, withDestinationURL: updatedExecutableURL)
         await store.addAccount()
         let session = await sessions.waitForSession()
         await session.waitUntilWaitingForCallback()
-        #expect(runtimeExecutables == [executableURL, executableURL])
+        #expect(runtimeExecutables.map(\.path) == [executableURL, updatedExecutableURL].map {
+            $0.resolvingSymlinksInPath().path
+        })
         let resolvedIsolatedCodexHomeURL = try #require(isolatedCodexHomeURL)
         #expect(FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path))
 

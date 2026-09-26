@@ -117,7 +117,7 @@ struct CodexCommandUpdateCheckerTests {
         #expect(installation.binURL.path == "/opt/homebrew/bin")
     }
 
-    @Test func homeAndApplicationCandidatesPrecedeHomebrewFallback() throws {
+    @Test func homeCommandPrecedesHomebrewFallbackAndApplicationDoesNot() throws {
         let homeExecutable = "/home/.local/bin/codex"
         let appBundle = "/Applications/Codex.app"
         let appExecutable = "\(appBundle)/Contents/Resources/codex"
@@ -129,11 +129,9 @@ struct CodexCommandUpdateCheckerTests {
 
         let appResolver = makeHomebrewResolver(
             executables: [appExecutable, executableURL.path],
-            directories: [appBundle],
-            bundleIDs: [appBundle: "com.openai.codex"],
             canonical: [launcherURL.path: executableURL.path]
         )
-        #expect(try appResolver.resolve(configuredPath: nil, environment: [:]) == nil)
+        #expect(try appResolver.resolve(configuredPath: nil, environment: ["PATH": "/usr/bin:/bin"])?.launcherURL == launcherURL)
     }
 
     @Test func versionPinnedHomebrewExecutableIsNotOfferedAnAutomaticUpdate() async throws {
@@ -330,8 +328,6 @@ struct CodexCommandUpdateCheckerTests {
 
 private func makeHomebrewResolver(
     executables: Set<String> = [],
-    directories: Set<String> = [],
-    bundleIDs: [String: String] = [:],
     canonical: [String: String] = [:]
 ) -> CodexHomebrewInstallationResolver {
     let fileSystem = CodexHomebrewInstallationResolver.FileSystem(
@@ -339,16 +335,10 @@ private func makeHomebrewResolver(
             URL(fileURLWithPath: canonical[$0.standardizedFileURL.path]
                 ?? $0.standardizedFileURL.path)
         },
-        isExecutableRegularFile: { executables.contains($0.path) },
-        isDirectory: { directories.contains($0.path) },
-        bundleIdentifier: { bundleIDs[$0.path] }
+        isExecutableRegularFile: { executables.contains($0.path) }
     )
     return .init(configuration: .init(
         homeDirectory: URL(fileURLWithPath: "/home", isDirectory: true),
-        applicationDirectories: [
-            URL(fileURLWithPath: "/Applications", isDirectory: true),
-            URL(fileURLWithPath: "/home/Applications", isDirectory: true),
-        ],
         fallbackBinDirectories: [
             URL(fileURLWithPath: "/opt/homebrew/bin", isDirectory: true),
             URL(fileURLWithPath: "/usr/local/bin", isDirectory: true),

@@ -4,7 +4,7 @@ package struct CodexExecutableResolutionError: LocalizedError, Equatable, Sendab
     package enum Kind: Equatable, Sendable { case invalidExplicit, notFound }
     package enum Source: Equatable, Sendable {
         case configuredPath, environment(String), path(String), homeLocalBin
-        case applicationBundle(String), fallbackBin(String)
+        case fallbackBin(String)
     }
     package struct Trace: Equatable, Sendable {
         package var source: Source
@@ -15,7 +15,7 @@ package struct CodexExecutableResolutionError: LocalizedError, Equatable, Sendab
     package var errorDescription: String? {
         let headline = kind == .invalidExplicit
             ? "The explicitly selected Codex executable is invalid."
-            : "No usable Codex executable was found."
+            : "No usable Codex executable was found. Install the Codex CLI or select its executable in Settings."
         return ([headline] + trace.map { "\($0.source): \($0.candidate) — \($0.reason)" })
             .joined(separator: "\n")
     }
@@ -25,16 +25,11 @@ package struct CodexExecutableResolver: Sendable {
     package struct FileSystem: Sendable {
         package var canonicalURL: @Sendable (URL) -> URL
         package var isExecutableRegularFile: @Sendable (URL) -> Bool
-        package var isDirectory: @Sendable (URL) -> Bool
-        package var bundleIdentifier: @Sendable (URL) -> String?
         package init(
             canonicalURL: @escaping @Sendable (URL) -> URL,
-            isExecutableRegularFile: @escaping @Sendable (URL) -> Bool,
-            isDirectory: @escaping @Sendable (URL) -> Bool,
-            bundleIdentifier: @escaping @Sendable (URL) -> String?
+            isExecutableRegularFile: @escaping @Sendable (URL) -> Bool
         ) {
-            (self.canonicalURL, self.isExecutableRegularFile, self.isDirectory, self.bundleIdentifier) =
-                (canonicalURL, isExecutableRegularFile, isDirectory, bundleIdentifier)
+            (self.canonicalURL, self.isExecutableRegularFile) = (canonicalURL, isExecutableRegularFile)
         }
         package static let live = FileSystem(
             canonicalURL: { $0.standardizedFileURL.resolvingSymlinksInPath() },
@@ -44,47 +39,26 @@ package struct CodexExecutableResolver: Sendable {
                       let attributes = try? manager.attributesOfItem(atPath: url.path)
                 else { return false }
                 return attributes[.type] as? FileAttributeType == .typeRegular
-            },
-            isDirectory: { url in
-                guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
-                else { return false }
-                return attributes[.type] as? FileAttributeType == .typeDirectory
-            },
-            bundleIdentifier: { bundle in
-                let plist = bundle.appendingPathComponent("Contents/Info.plist")
-                guard let data = try? Data(contentsOf: plist),
-                      let value = try? PropertyListSerialization.propertyList(
-                        from: data, options: [], format: nil
-                      ),
-                      let dictionary = value as? [String: Any]
-                else { return nil }
-                return dictionary["CFBundleIdentifier"] as? String
             }
         )
     }
 
     package struct Configuration: Sendable {
         package var homeDirectory: URL
-        package var applicationDirectories: [URL]
         package var fallbackBinDirectories: [URL]
         package var fileSystem: FileSystem
         package init(
             homeDirectory: URL,
-            applicationDirectories: [URL],
             fallbackBinDirectories: [URL],
             fileSystem: FileSystem
         ) {
-            (self.homeDirectory, self.applicationDirectories, self.fallbackBinDirectories, self.fileSystem) =
-                (homeDirectory, applicationDirectories, fallbackBinDirectories, fileSystem)
+            (self.homeDirectory, self.fallbackBinDirectories, self.fileSystem) =
+                (homeDirectory, fallbackBinDirectories, fileSystem)
         }
         package static func live() -> Self {
             let home = FileManager.default.homeDirectoryForCurrentUser
             return .init(
                 homeDirectory: home,
-                applicationDirectories: [
-                    URL(fileURLWithPath: "/Applications", isDirectory: true),
-                    home.appendingPathComponent("Applications", isDirectory: true),
-                ],
                 fallbackBinDirectories: [
                     "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin",
                 ].map { URL(fileURLWithPath: $0, isDirectory: true) },
@@ -125,11 +99,6 @@ package struct CodexExecutableResolver: Sendable {
         if let url = search.candidate(
             configuration.homeDirectory.appendingPathComponent(".local/bin/codex"), .homeLocalBin
         ) { return url }
-        for root in configuration.applicationDirectories {
-            for name in ["ChatGPT.app", "Codex.app"] {
-                if let url = search.bundle(root.appendingPathComponent(name)) { return url }
-            }
-        }
         for directory in configuration.fallbackBinDirectories {
             if let url = search.candidate(
                 directory.appendingPathComponent("codex"), .fallbackBin(directory.path)
@@ -168,17 +137,6 @@ package struct CodexExecutableResolver: Sendable {
                 trace.append(.init(source: source, candidate: value, reason: "command is empty"))
             }
             throw .init(kind: .invalidExplicit, trace: trace)
-        }
-        mutating func bundle(_ rawBundle: URL) -> URL? {
-            let fs = configuration.fileSystem
-            let bundle = fs.canonicalURL(rawBundle).standardizedFileURL
-            let source = CodexExecutableResolutionError.Source.applicationBundle(rawBundle.path)
-            guard fs.isDirectory(bundle) else { return reject(source, bundle.path, "not a directory") }
-            let identifier = fs.bundleIdentifier(bundle)
-            guard identifier == "com.openai.codex" else {
-                return reject(source, bundle.path, "bundle identifier is \(identifier ?? "missing")")
-            }
-            return candidate(bundle.appendingPathComponent("Contents/Resources/codex"), source)
         }
         mutating func candidate(_ rawURL: URL, _ source: CodexExecutableResolutionError.Source) -> URL? {
             let fs = configuration.fileSystem

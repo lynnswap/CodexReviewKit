@@ -55,47 +55,15 @@ struct CodexExecutableResolverTests {
         #expect(resolved.path == "/first/codex")
     }
 
-    @Test func homeBundlesAndFallbackKeepContractOrder() throws {
-        let homeFirst = makeResolver(
-            executables: [
-                "/home/.local/bin/codex",
-                "/Applications/Codex.app/Contents/Resources/codex",
-                "/brew/codex",
-            ],
-            directories: ["/Applications/Codex.app"],
-            bundleIDs: ["/Applications/Codex.app": "com.openai.codex"]
-        )
+    @Test func installedCommandsIgnoreApplicationBundles() throws {
+        let bundled = "/Applications/ChatGPT.app/Contents/Resources/codex"
+        let homeFirst = makeResolver(executables: ["/home/.local/bin/codex", bundled, "/brew/codex"])
         #expect(try homeFirst.resolve(configuredPath: nil, environment: ["HOME": "/other"]).path == "/home/.local/bin/codex")
-        let systemAppFirst = makeResolver(
-            executables: [
-                "/Applications/Codex.app/Contents/Resources/codex",
-                "/home/Applications/ChatGPT.app/Contents/Resources/codex",
-            ],
-            directories: ["/Applications/Codex.app", "/home/Applications/ChatGPT.app"],
-            bundleIDs: [
-                "/Applications/Codex.app": "com.openai.codex",
-                "/home/Applications/ChatGPT.app": "com.openai.codex",
-            ]
-        )
-        #expect(try systemAppFirst.resolve(configuredPath: nil, environment: [:]).path == "/Applications/Codex.app/Contents/Resources/codex")
-        let fallback = makeResolver(executables: ["/brew/codex", "/system/codex"])
-        #expect(try fallback.resolve(configuredPath: nil, environment: [:]).path == "/brew/codex")
-    }
-
-    @Test func bundleIdentityAndExactLayoutAreRequired() throws {
-        let resolver = makeResolver(
-            executables: [
-                "/Applications/ChatGPT.app/Contents/Resources/codex",
-                "/Applications/Codex.app/codex",
-                "/system/codex",
-            ],
-            directories: ["/Applications/ChatGPT.app", "/Applications/Codex.app"],
-            bundleIDs: [
-                "/Applications/ChatGPT.app": "com.apple.Safari.WebApp",
-                "/Applications/Codex.app": "com.openai.codex",
-            ]
-        )
-        #expect(try resolver.resolve(configuredPath: nil, environment: [:]).path == "/system/codex")
+        let fallback = makeResolver(executables: [bundled, "/brew/codex", "/system/codex"])
+        #expect(try fallback.resolve(configuredPath: nil, environment: ["PATH": "/usr/bin:/bin"]).path == "/brew/codex")
+        #expect(throws: CodexExecutableResolutionError.self) {
+            try makeResolver(executables: [bundled]).resolve(configuredPath: nil, environment: [:])
+        }
     }
 
     @Test func canonicalizesSymlinksAndDeduplicatesTrace() throws {
@@ -114,7 +82,6 @@ struct CodexExecutableResolverTests {
         } catch {
             #expect(error.kind == .notFound)
             #expect(error.trace.contains { $0.reason.contains("duplicate of /real/missing") })
-            #expect(error.trace.contains { if case .applicationBundle = $0.source { true } else { false } })
             #expect(error.trace.contains { if case .fallbackBin = $0.source { true } else { false } })
             #expect(error.localizedDescription.contains("No usable Codex executable was found."))
         }
@@ -132,22 +99,14 @@ struct CodexExecutableResolverTests {
 
 func makeResolver(
     executables: Set<String> = [],
-    directories: Set<String> = [],
-    bundleIDs: [String: String] = [:],
     canonical: [String: String] = [:]
 ) -> CodexExecutableResolver {
     let fileSystem = CodexExecutableResolver.FileSystem(
         canonicalURL: { URL(fileURLWithPath: canonical[$0.standardizedFileURL.path] ?? $0.standardizedFileURL.path) },
-        isExecutableRegularFile: { executables.contains($0.path) },
-        isDirectory: { directories.contains($0.path) },
-        bundleIdentifier: { bundleIDs[$0.path] }
+        isExecutableRegularFile: { executables.contains($0.path) }
     )
     return .init(configuration: .init(
         homeDirectory: URL(fileURLWithPath: "/home", isDirectory: true),
-        applicationDirectories: [
-            URL(fileURLWithPath: "/Applications", isDirectory: true),
-            URL(fileURLWithPath: "/home/Applications", isDirectory: true),
-        ],
         fallbackBinDirectories: [
             URL(fileURLWithPath: "/brew", isDirectory: true),
             URL(fileURLWithPath: "/system", isDirectory: true),
