@@ -79,7 +79,7 @@ extension CodexReviewStore {
         let model = settings.effectiveModel
         let workspaceSortOrder = historyWorkspaceSortOrder(cwd: request.cwd)
             ?? nextHistoryWorkspaceSortOrder()
-        let record = try StartedReviewRecord(
+        let record = try AcceptedReviewRecord(
             id: id,
             cwd: request.cwd,
             workspaceMetadata: ReviewWorkspaceMetadata.resolve(cwd: request.cwd),
@@ -87,7 +87,7 @@ extension CodexReviewStore {
             sortOrder: try nextHistoryJobSortOrder(),
             target: request.target,
             model: model,
-            startedAt: clock.now()
+            acceptedAt: clock.now()
         )
         let receipt = HistoryStartReceipt(
             ordinal: nextHistoryStartOrdinal,
@@ -107,7 +107,7 @@ extension CodexReviewStore {
             intent: receipt.started,
             prepare: { $0 },
             operation: { record in
-                try await persistence.recordStarted(record)
+                try await persistence.recordAccepted(record)
             },
             apply: { [weak self] record, result in
                 guard let self else {

@@ -2,7 +2,7 @@
 package final class HistoryStartReceipt {
     package let ordinal: UInt64
     package let sessionID: String
-    package let started: StartedReviewRecord
+    package let started: AcceptedReviewRecord
     package let workAdmission: ReviewStoreWorkRegistry.Admission
 
     private(set) var cancellation: ReviewCancellation?
@@ -12,7 +12,7 @@ package final class HistoryStartReceipt {
     package init(
         ordinal: UInt64,
         sessionID: String,
-        started: StartedReviewRecord,
+        started: AcceptedReviewRecord,
         workAdmission: ReviewStoreWorkRegistry.Admission
     ) {
         self.ordinal = ordinal

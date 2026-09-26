@@ -66,11 +66,12 @@ extension CodexReviewStore {
         waitTimeout: Duration?,
         workAdmission: ReviewStoreWorkRegistry.Admission
     ) async throws -> CodexReviewAPI.Read.Result {
-        let jobID = try await beginReview(
+        let accepted = try await beginReview(
             sessionID: sessionID,
             request: request,
             workAdmission: workAdmission
         )
+        let jobID = accepted.jobID
         let historyResultLease = acquireHistoryResultLease(jobID: jobID)
         defer {
             releaseHistoryResultLease(historyResultLease)
@@ -87,14 +88,13 @@ extension CodexReviewStore {
             await reviewWorkerTasks[jobID]?.value
             return try readReview(sessionID: sessionID, jobID: jobID)
         }
-        let workerTask = reviewWorkerTasks[jobID]
         _ = try await awaitReview(
             sessionID: sessionID,
             jobID: jobID,
             timeout: waitTimeout
         )
         if storeWorkRegistry.accepts(workAdmission) == false {
-            await workerTask?.value
+            await accepted.start.waitUntilFinished()
         }
         return try readReview(sessionID: sessionID, jobID: jobID)
     }
@@ -123,7 +123,7 @@ extension CodexReviewStore {
         sessionID: String,
         request: CodexReviewAPI.Start.Request,
         workAdmission: ReviewStoreWorkRegistry.Admission
-    ) async throws -> String {
+    ) async throws -> (jobID: String, start: QueuedReviewStart) {
         guard closedSessions.contains(sessionID) == false else {
             throw CodexReviewAPI.Error.invalidArguments("Review session \(sessionID) is closed.")
         }
@@ -136,6 +136,7 @@ extension CodexReviewStore {
         )
         defer {
             finishHistoryStartReceipt(receipt)
+            scheduleQueuedReviewStarts()
         }
         switch await persistHistoryStart(receipt) {
         case .success:
@@ -164,40 +165,29 @@ extension CodexReviewStore {
             target: started.target,
             core: .init(
                 run: .init(model: started.model),
-                lifecycle: .init(status: .running, startedAt: started.startedAt),
-                output: .init(summary: "Review started.")
+                lifecycle: .init(status: .queued),
+                output: .init(summary: "Review queued.")
             ),
             logEntries: []
         )
         let admission = ReviewStartAdmission()
-        guard let workerTask = makeReviewWorker(
-            jobID: jobID,
-            sessionID: sessionID,
-            request: validatedRequest,
-            effectiveModel: started.model,
-            admission: admission
-        ) else {
-            let cancellation = ReviewCancellation.system(
-                message: "Review start was cancelled before backend dispatch."
-            )
-            await terminalizeStaleHistoryStart(
-                receipt,
-                cancellation: cancellation
-            )
-            throw CodexReviewAPI.Error.io("Review Store work admission is closed.")
-        }
         insertReviewJob(
             job,
             workspaceMetadata: started.workspaceMetadata,
             workspaceSortOrder: started.workspaceSortOrder
         )
         reviewAttemptOwnerships[jobID] = .starting(admission)
-        reviewWorkerTasks[jobID]?.cancel()
-        reviewWorkerTasks[jobID] = workerTask
-        return jobID
+        let queued = QueuedReviewStart(
+            ordinal: receipt.ordinal,
+            request: validatedRequest,
+            model: started.model,
+            admission: admission
+        )
+        queuedReviewStarts[jobID] = queued
+        return (jobID, queued)
     }
 
-    private func makeReviewWorker(
+    package func makeReviewWorker(
         jobID: String,
         sessionID: String,
         request: CodexReviewAPI.Start.Request,
@@ -387,7 +377,7 @@ extension CodexReviewStore {
     }
 
     @discardableResult
-    private func removeStartingReviewOwnership(
+    package func removeStartingReviewOwnership(
         for jobID: String,
         ifOwnedBy admission: ReviewStartAdmission
     ) -> Bool {
@@ -1380,7 +1370,7 @@ extension CodexReviewStore {
         writeDiagnosticsIfNeeded()
     }
 
-    private func markReviewFailed(
+    package func markReviewFailed(
         _ job: CodexReviewJob,
         message: String?,
         terminal: ReviewTerminalRecord? = nil

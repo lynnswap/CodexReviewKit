@@ -96,6 +96,10 @@ extension CodexReviewStore {
             return
         }
 
+        if let queued = queuedReviewStarts.removeValue(forKey: jobID) {
+            queued.finishDispatch()
+            removeStartingReviewOwnership(for: jobID, ifOwnedBy: queued.admission)
+        }
         let endedAt = clock.now()
         job.closeActiveCommandLogEntries(status: "canceled", completedAt: endedAt)
         job.pendingCancellationRequest = nil

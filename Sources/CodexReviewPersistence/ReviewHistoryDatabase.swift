@@ -50,7 +50,7 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
         }
     }
 
-    package func recordStarted(_ record: StartedReviewRecord) async throws {
+    package func recordAccepted(_ record: AcceptedReviewRecord) async throws {
         let database = try preparedDatabase()
         let timestamp = now()
         let encoded = try ReviewHistoryRecordCodec.encodeStarted(
@@ -68,6 +68,23 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
         }
     }
 
+    package func recordExecutionStarted(id: String, at date: Date) async throws {
+        let database = try preparedDatabase()
+        let timestamp = ReviewHistoryTimestamp.encode(date)
+        try write(database) { db in
+            try ReviewRecordRow.where { $0.id.eq(id) && $0.phase.eq("queued") }
+                .update {
+                    $0.phase = "active"
+                    $0.startedAt = #bind(timestamp)
+                    $0.updatedAt = #bind(timestamp)
+                }
+                .execute(db)
+            guard db.changesCount == 1 else {
+                throw ReviewHistoryDatabaseError.invalidRecord(id: id, reason: "review is not queued")
+            }
+        }
+    }
+
     package func recordTerminal(
         _ record: TerminalReviewRecord,
         retentionPolicy: ReviewHistoryRetentionPolicy
@@ -79,7 +96,7 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
             else {
                 throw ReviewHistoryDatabaseError.reviewNotFound(record.id)
             }
-            guard existing.phase == "active" else {
+            guard existing.phase == "active" || existing.phase == "queued" else {
                 throw ReviewHistoryDatabaseError.invalidRecord(
                     id: record.id,
                     reason: "terminal state can only be recorded once"
@@ -264,7 +281,7 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
         in db: Database,
         committedAt: Date
     ) throws {
-        for row in try ReviewRecordRow.fetchAll(db) where row.phase == "active" {
+        for row in try ReviewRecordRow.fetchAll(db) where row.phase == "active" || row.phase == "queued" {
             let terminal = try TerminalReviewRecord(
                 id: row.id,
                 model: nil,
@@ -441,7 +458,7 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
         _ row: ReviewRecordRow,
         in db: Database
     ) throws {
-        try ReviewRecordRow.find(row.id).where { $0.phase.eq("active") }.update {
+        try ReviewRecordRow.find(row.id).where { $0.phase.eq("active") || $0.phase.eq("queued") }.update {
             $0.phase = #bind(row.phase)
             $0.terminalModel = #bind(row.terminalModel)
             $0.reviewThreadID = #bind(row.reviewThreadID)
@@ -571,6 +588,7 @@ private extension ReviewRecordRow {
         if targetCommitTitle != other.targetCommitTitle { columns.append("targetCommitTitle") }
         if targetInstructions != other.targetInstructions { columns.append("targetInstructions") }
         if startedModel != other.startedModel { columns.append("startedModel") }
+        if acceptedAt != other.acceptedAt { columns.append("acceptedAt") }
         if startedAt != other.startedAt { columns.append("startedAt") }
         if phase != other.phase { columns.append("phase") }
         if terminalModel != other.terminalModel { columns.append("terminalModel") }

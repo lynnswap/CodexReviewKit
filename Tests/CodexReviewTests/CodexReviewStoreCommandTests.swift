@@ -1,11 +1,179 @@
 import Foundation
 import Testing
 @_spi(Testing) @testable import CodexReview
+@_spi(ApplicationHostSupport) import CodexReview
 import CodexReviewTesting
 
 @Suite("Codex review store", .serialized)
 @MainActor
 struct CodexReviewStoreCommandTests {
+    @Test func shutdownCancelsQueuedReviewsAndFinishesTheirOriginalCalls() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+        await store.start()
+        store.suspendReviewStarts()
+        let request = Task {
+            try await store.startReview(
+                sessionID: "session", request: .init(cwd: "/tmp/queued", target: .uncommittedChanges)
+            )
+        }
+        try #require(await waitUntil { store.jobs.first?.core.lifecycle.status == .queued })
+        await store.shutdown()
+        #expect(try await request.value.core.lifecycle.status == .cancelled)
+        #expect(store.queuedReviewStarts.isEmpty)
+        #expect(await backend.recordedCommands().contains { if case .startReview = $0 { true } else { false } } == false)
+    }
+
+    @Test func queuedReviewKeepsTheOriginalStartCallWaitingUntilCompletion() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+        store.suspendReviewStarts()
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            var returned = false
+            let request = Task {
+                defer { returned = true }
+                return try await store.startReview(
+                    sessionID: "queued-client",
+                    request: .init(cwd: "/tmp/queued", target: .uncommittedChanges)
+                )
+            }
+            defer { request.cancel() }
+            try #require(await waitUntil { store.jobs.first?.core.lifecycle.status == .queued })
+            let queued = try #require(store.jobs.first)
+            #expect(queued.core.lifecycle.startedAt == nil)
+            #expect(returned == false)
+            #expect(await backend.recordedCommands().contains { if case .startReview = $0 { true } else { false } } == false)
+
+            store.resumeReviewStarts()
+            try await backend.waitForStartReview(timeout: .seconds(2))
+            await backend.yield(.completed(summary: "Succeeded.", result: "No findings."))
+            let result = try await request.value
+            #expect(result.jobID == queued.id)
+            #expect(result.core.lifecycle.status == .succeeded)
+            #expect(result.core.lifecycle.startedAt != nil)
+            #expect(returned)
+        }
+    }
+
+    @Test func diagnosticsPublishRunningReviewWhileBackendStartIsHeld() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let diagnosticsURL = directory.appendingPathComponent("diagnostics.json")
+        let backend = FakeCodexReviewBackend()
+        await backend.holdStartReview(with: AsyncGate())
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            diagnosticsURL: diagnosticsURL
+        )
+        store.suspendReviewStarts()
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            let queued = try await store.startReview(
+                sessionID: "session", request: .init(cwd: "/tmp/queued", target: .uncommittedChanges),
+                waitTimeout: .zero
+            )
+            func diagnosticJob() throws -> [String: Any] {
+                let snapshot = try #require(
+                    JSONSerialization.jsonObject(with: Data(contentsOf: diagnosticsURL)) as? [String: Any]
+                )
+                return try #require((snapshot["jobs"] as? [[String: Any]])?.first)
+            }
+            #expect(try diagnosticJob()["status"] as? String == "queued")
+            #expect(try diagnosticJob()["startedAt"] == nil)
+
+            store.resumeReviewStarts()
+            try await backend.waitForStartReview(timeout: .seconds(2))
+            let runningSnapshot = Result { try diagnosticJob() }
+            try await store.cancelAllRunningJobs()
+            let running = try runningSnapshot.get()
+            #expect(running["id"] as? String == queued.jobID)
+            #expect(running["status"] as? String == "running")
+            #expect(running["startedAt"] != nil)
+            #expect(running["summary"] as? String == "Review started.")
+        }
+    }
+
+    @Test func queuedReviewCanBeReadAwaitedAndCancelledBeforeDispatch() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+        store.suspendReviewStarts()
+        let queued = try await store.startReview(
+            sessionID: "owner", request: .init(cwd: "/tmp/queued", target: .uncommittedChanges),
+            waitTimeout: .zero
+        )
+        #expect(queued.core.lifecycle.status == .queued)
+        #expect(queued.elapsedSeconds == nil)
+        #expect(queued.cancellable)
+        #expect(throws: CodexReviewAPI.Error.self) {
+            try store.readReview(sessionID: "other", jobID: queued.jobID)
+        }
+        let waiting = try await store.awaitReview(sessionID: "owner", jobID: queued.jobID, timeout: .zero)
+        #expect(waiting.core.lifecycle.status == .queued)
+        let cancelled = try await store.cancelReview(jobID: queued.jobID, sessionID: "owner")
+        #expect(cancelled.cancelled)
+        #expect(cancelled.core.lifecycle.startedAt == nil)
+        #expect(store.queuedReviewStarts.isEmpty)
+        store.resumeReviewStarts()
+        #expect(await backend.recordedCommands().isEmpty)
+    }
+
+    @Test func closingOneSessionOnlyCancelsItsQueuedReviews() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+        store.suspendReviewStarts()
+        let first = try await store.startReview(
+            sessionID: "first", request: .init(cwd: "/tmp/first", target: .uncommittedChanges),
+            waitTimeout: .zero
+        )
+        let second = try await store.startReview(
+            sessionID: "second", request: .init(cwd: "/tmp/second", target: .uncommittedChanges),
+            waitTimeout: .zero
+        )
+        await store.closeSession("first")
+        #expect(try store.readReview(jobID: first.jobID).core.lifecycle.status == .cancelled)
+        #expect(try store.readReview(jobID: second.jobID).core.lifecycle.status == .queued)
+        await store.closeSession("second")
+        #expect(store.queuedReviewStarts.isEmpty)
+        #expect(await backend.recordedCommands().isEmpty)
+    }
+
+    @Test func queuedReviewsStartInAcceptanceOrderWithoutSerializingCompletion() async throws {
+        let backend = FakeCodexReviewBackend()
+        await backend.holdStartReview(with: AsyncGate())
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+        store.suspendReviewStarts()
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            let first = try await store.startReview(
+                sessionID: "first", request: .init(cwd: "/tmp/first", target: .uncommittedChanges),
+                waitTimeout: .zero
+            )
+            let second = try await store.startReview(
+                sessionID: "second", request: .init(cwd: "/tmp/second", target: .uncommittedChanges),
+                waitTimeout: .zero
+            )
+            store.resumeReviewStarts()
+            try #require(await waitUntil {
+                await backend.recordedCommands().filter { if case .startReview = $0 { true } else { false } }.count == 2
+            })
+            let starts = await backend.recordedCommands().compactMap { command -> String? in
+                guard case .startReview(let request) = command else { return nil }
+                return request.jobID
+            }
+            #expect(starts == [first.jobID, second.jobID])
+            #expect(store.jobs.allSatisfy { $0.core.lifecycle.status == .running })
+            try await store.cancelAllRunningJobs()
+        }
+    }
+
     @Test func storeBackendForwardsExplicitAdmission() async throws {
         let reviewBackend = FakeCodexReviewBackend()
         let storeBackend = TestingCodexReviewStoreBackend(reviewBackend: reviewBackend)

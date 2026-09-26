@@ -418,7 +418,7 @@ assert_database_contract() {
   /usr/bin/jq -e '[.[].name] == [
     "id", "cwd", "sortOrder", "targetKind", "targetBranch",
     "targetCommitSHA", "targetCommitTitle", "targetInstructions",
-    "startedModel", "startedAt", "phase", "terminalModel", "terminalKind",
+    "startedModel", "acceptedAt", "startedAt", "phase", "terminalModel", "terminalKind",
     "interruptionKind", "cancellationSource", "cancellationMessage",
     "terminalMessage", "endedAt", "summary", "canonicalReview",
     "parsedState", "parsedFindingCount", "parsedSource", "parserVersion",
@@ -430,7 +430,7 @@ assert_database_contract() {
   ]' "$finding_columns_path" >/dev/null || die "finding schema inventory changed"
 
   /usr/bin/sqlite3 -json "$history_path" \
-    "SELECT id, cwd, targetKind, startedModel, startedAt, phase, terminalModel, terminalKind, endedAt, summary, canonicalReview, parsedState, parsedFindingCount, parsedSource, parserVersion FROM review_records" \
+    "SELECT id, cwd, targetKind, startedModel, acceptedAt, startedAt, phase, terminalModel, terminalKind, endedAt, summary, canonicalReview, parsedState, parsedFindingCount, parsedSource, parserVersion FROM review_records" \
     >"$semantic_record_path"
   /usr/bin/sqlite3 -json "$history_path" \
     "SELECT reviewID, ordinal, priority, title, body, path, startLine, endLine FROM review_findings ORDER BY ordinal" \
@@ -441,6 +441,7 @@ assert_database_contract() {
     and .[0].id == $job_id
     and .[0].cwd == $cwd
     and .[0].targetKind == "uncommittedChanges"
+    and (.[0].acceptedAt | type == "number")
     and (.[0].startedAt | type == "number")
     and .[0].phase == "terminal"
     and .[0].terminalKind == "completed"

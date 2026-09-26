@@ -137,13 +137,14 @@ struct ReviewMonitorLogProjectionTests {
         let cancellation = ReviewCancellation.sessionClosed(message: " \t")
         let summary = "Session closed."
         let restored = try RestoredReviewRecord(
-            started: StartedReviewRecord(
+            started: AcceptedReviewRecord(
                 id: "review-1",
                 cwd: "/tmp/project",
                 workspaceSortOrder: 0,
                 sortOrder: 0,
                 target: .uncommittedChanges,
                 model: "gpt-5",
+                acceptedAt: Date(timeIntervalSince1970: 1),
                 startedAt: Date(timeIntervalSince1970: 1)
             ),
             terminal: TerminalReviewRecord(
