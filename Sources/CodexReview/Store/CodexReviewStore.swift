@@ -77,7 +77,7 @@ package enum StoreReviewAttemptOwnership {
 @MainActor
 @Observable
 public final class CodexReviewStore {
-    private struct RuntimeStartOperation {
+    package struct RuntimeStartOperation {
         let task: Task<Void, Never>
         let sourceCloseReceiptOwner: ReviewRuntimeRecoveryReplacement?
     }
@@ -87,6 +87,13 @@ public final class CodexReviewStore {
         package var continuation: CheckedContinuation<Void, Never>
         package var timeoutTask: Task<Void, Never>?
     }
+
+    package var codexUpdate: CodexUpdateState = .idle
+    @_spi(ApplicationHostSupport) public var codexUpdateState: CodexUpdateState { codexUpdate }
+    @ObservationIgnored package var codexUpdateRuntimeFailure: String?
+    @ObservationIgnored package var codexUpdateTask: Task<Void, any Error>?
+    @ObservationIgnored package var runtimeAccountOperations: [UUID: Task<Void, any Error>] = [:]
+    @ObservationIgnored package var unclosedCodexUpdateRuntime: PreparedRuntime?
 
     public package(set) var serverState: CodexReviewServerState = .stopped
     public let auth: CodexReviewAuthModel
@@ -206,6 +213,7 @@ public final class CodexReviewStore {
     }
 
     isolated deinit {
+        codexUpdateTask?.cancel()
         accountRateLimitAutoRefreshDriver?.cancel()
         historyLoadTask?.cancel()
         applicationShutdownTask?.cancel()
@@ -272,6 +280,10 @@ public final class CodexReviewStore {
     }
 
     public func start(forceRestartIfNeeded: Bool = false) async {
+        if let update = codexUpdateTask {
+            _ = try? await update.value
+            if case .running = runtimeState { return }
+        }
         guard applicationShutdownRequested == false else {
             return
         }
@@ -280,6 +292,12 @@ public final class CodexReviewStore {
               applicationShutdownRequested == false
         else {
             return
+        }
+        switch runtimeState {
+        case .stopped, .failed(_, nil, _):
+            do { try await closeUnclosedCodexUpdateRuntimeIfNeeded() }
+            catch { transitionToFailed(error.localizedDescription); return }
+        default: break
         }
         guard let operation = admitRuntimeStart(
             forceRestartIfNeeded: forceRestartIfNeeded
@@ -301,7 +319,7 @@ public final class CodexReviewStore {
         }
     }
 
-    private func admitRuntimeStart(
+    package func admitRuntimeStart(
         forceRestartIfNeeded: Bool
     ) -> RuntimeStartOperation? {
         let previousState = runtimeState
@@ -327,8 +345,9 @@ public final class CodexReviewStore {
         case .failed(let sourceGeneration, let retainedMCP?, _):
             return admitRuntimeReplacement(
                 sourceGeneration: sourceGeneration,
-                retiringRuntime: nil,
-                retainedMCP: retainedMCP
+                retiringRuntime: unclosedCodexUpdateRuntime,
+                retainedMCP: retainedMCP,
+                preservingQueuedReviews: hasQueuedCodexUpdateRecovery
             )
         case .acquiring(let sourceGeneration, let context, let task):
             task.cancel()
@@ -381,8 +400,16 @@ public final class CodexReviewStore {
     }
 
     package func stop(intent: ReviewRuntimeTeardownIntent) async {
+        let update = codexUpdateTask
+        if codexUpdate == .waitingForReviews {
+            update?.cancel()
+        } else {
+            _ = try? await update?.value
+        }
         let task = admitRuntimeTeardown(intent: intent)
         await task.value
+        _ = try? await update?.value
+        if intent == .explicitStop { reviewStartsAreSuspended = false }
     }
 
     package func requestRuntimeTeardown(
@@ -396,6 +423,21 @@ public final class CodexReviewStore {
         handle: any RuntimeLifecycleHandle,
         cause: String
     ) -> Bool {
+        if codexUpdateTask != nil {
+            switch runtimeState {
+            case .running(_, let runtime, _) where runtime.handle === handle:
+                for job in jobs where job.isTerminal == false && queuedReviewStarts[job.id] == nil {
+                    markReviewFailed(job, message: cause, terminal: .interrupted(.transport(message: cause)))
+                }
+                serverState = .failed(cause)
+                writeDiagnosticsIfNeeded()
+                return true
+            case .replacing(let replacement, _) where replacement.ownsPublishedRuntime(handle: handle):
+                codexUpdateRuntimeFailure = cause
+                return true
+            default: break
+            }
+        }
         let failureIncident: ReviewRuntimeFailureIncident
         switch runtimeState {
         case .running(let generation, let runtime, _)
@@ -427,6 +469,11 @@ public final class CodexReviewStore {
         sourceGeneration: ReviewRuntimeGeneration,
         cause: String
     ) -> ReviewRuntimeCleanupRecoveryAdmission {
+        if codexUpdateTask != nil,
+           case .running(let generation, let runtime, _) = runtimeState,
+           runtime.handle === sourceHandle, generation == sourceGeneration {
+            return .suppressed(.codexUpdate)
+        }
         switch runtimeState {
         case .running(let generation, let runtime, _)
             where runtime.handle === sourceHandle && generation == sourceGeneration:
@@ -640,6 +687,12 @@ public final class CodexReviewStore {
             await task.value
 
         case .failed(_, let retainedMCP, _):
+            await stopPublishedRuntimeSemantics(intent: intent)
+            if let runtime = unclosedCodexUpdateRuntime {
+                if await closeRuntime(runtime, purpose: .stop) == nil {
+                    unclosedCodexUpdateRuntime = nil
+                }
+            }
             if retainedMCP != nil {
                 await stopMCPServer()
             }
@@ -1080,13 +1133,16 @@ public final class CodexReviewStore {
         }
     }
 
-    private func admitRuntimeReplacement(
+    package func admitRuntimeReplacement(
         sourceGeneration: ReviewRuntimeGeneration,
         retiringRuntime: PreparedRuntime?,
-        retainedMCP: RetainedMCPServer
+        retainedMCP: RetainedMCPServer,
+        preservingQueuedReviews: Bool = false,
+        install: (@MainActor @Sendable () async -> Void)? = nil
     ) -> RuntimeStartOperation {
-        storeWorkRegistry.closeReviewAdmission()
-        let pendingHistoryStarts = requestHistoryStartCancellations(
+        if preservingQueuedReviews { codexUpdateRuntimeFailure = nil }
+        else { storeWorkRegistry.closeReviewAdmission() }
+        let pendingHistoryStarts = preservingQueuedReviews ? [] : requestHistoryStartCancellations(
             cancellation: .system(message: "Review runtime restarted.")
         )
         let replacement = ReviewRuntimeRecoveryReplacement(
@@ -1102,7 +1158,7 @@ public final class CodexReviewStore {
                 return
             }
             await self.waitForHistoryStarts(pendingHistoryStarts)
-            await self.performRuntimeReplacement(replacement)
+            await self.performRuntimeReplacement(replacement, preservingQueuedReviews: preservingQueuedReviews, install: install)
         }
         runtimeState = .replacing(
             replacement: replacement,
@@ -1112,7 +1168,9 @@ public final class CodexReviewStore {
     }
 
     private func performRuntimeReplacement(
-        _ replacement: ReviewRuntimeRecoveryReplacement
+        _ replacement: ReviewRuntimeRecoveryReplacement,
+        preservingQueuedReviews: Bool,
+        install: (@MainActor @Sendable () async -> Void)?
     ) async {
         guard isCurrentReplacement(replacement) else {
             return
@@ -1125,12 +1183,17 @@ public final class CodexReviewStore {
             let token = try await settingsService.beginRuntimeCutover()
             cutoverToken = token
 
-            await closeRetiringRuntime(for: replacement)
+            if preservingQueuedReviews {
+                try await closeRetiringRuntimeForCodexUpdate(replacement)
+            } else {
+                await closeRetiringRuntime(for: replacement)
+            }
             guard isCurrentReplacement(replacement) else {
                 cancelRuntimeCutover(token)
                 return
             }
 
+            await install?()
             let runtime = try await backend.prepareRuntime(
                 generation: replacement.replacementGeneration,
                 purpose: .restartSameAccount
@@ -1175,6 +1238,9 @@ public final class CodexReviewStore {
             guard isCurrentReplacement(replacement) else {
                 return
             }
+            if preservingQueuedReviews, let failure = codexUpdateRuntimeFailure {
+                throw CodexReviewAPI.Error.io(failure)
+            }
             guard let publishedRuntime = replacement.takePublishedRuntime() else {
                 preconditionFailure(
                     "ReviewRuntimeRecoveryReplacement must own its published runtime until exact-identity transfer."
@@ -1189,9 +1255,18 @@ public final class CodexReviewStore {
             publishRuntime(serverURL: replacement.retainedMCP.serverURL)
             replacement.finish(.running(replacement.replacementGeneration))
         } catch {
-            await closeRetiringRuntime(for: replacement)
-            if let preparedRuntime {
-                await closeRuntime(preparedRuntime, purpose: .restartSameAccount)
+            var failureMessage = error.localizedDescription
+            if preservingQueuedReviews {
+                do { try await closeRetiringRuntimeForCodexUpdate(replacement) }
+                catch { failureMessage += "; Runtime cleanup failed: \(error.localizedDescription)" }
+            } else {
+                await closeRetiringRuntime(for: replacement)
+            }
+            let failedRuntime = preparedRuntime ?? replacement.takePublishedRuntime()
+            if let failedRuntime,
+               let cleanupFailure = await closeRuntime(failedRuntime, purpose: .restartSameAccount) {
+                failureMessage += "; Runtime cleanup failed: \(cleanupFailure.localizedDescription)"
+                if preservingQueuedReviews { unclosedCodexUpdateRuntime = failedRuntime }
             }
             let isCurrentGeneration = isCurrentReplacement(replacement)
             let wasIntentionallyCancelled = Task.isCancelled || isCurrentGeneration == false
@@ -1199,7 +1274,7 @@ public final class CodexReviewStore {
                 if wasIntentionallyCancelled {
                     cancelRuntimeCutover(cutoverToken)
                 } else {
-                    abortRuntimeCutover(cutoverToken, message: error.localizedDescription)
+                    abortRuntimeCutover(cutoverToken, message: failureMessage)
                 }
             }
             guard wasIntentionallyCancelled == false else {
@@ -1211,10 +1286,33 @@ public final class CodexReviewStore {
                 failureIncident: nil
             )
             serverURL = replacement.retainedMCP.serverURL
-            serverState = .failed(error.localizedDescription)
+            serverState = .failed(failureMessage)
             writeDiagnosticsIfNeeded()
-            replacement.finish(.failed(error.localizedDescription))
+            replacement.finish(.failed(failureMessage))
         }
+    }
+
+    private func closeRetiringRuntimeForCodexUpdate(
+        _ replacement: ReviewRuntimeRecoveryReplacement
+    ) async throws {
+        guard let retiring = replacement.takeRetiringRuntime() else {
+            replacement.finishSourceClose(.closed)
+            return
+        }
+        unclosedCodexUpdateRuntime = retiring
+        await stopPublishedRuntimeSemantics(intent: .codexUpdate)
+        if let failure = await closeRuntime(retiring, purpose: .restartSameAccount) {
+            replacement.finishSourceClose(.failed(failure))
+            throw failure
+        }
+        unclosedCodexUpdateRuntime = nil
+        replacement.finishSourceClose(.closed)
+    }
+
+    package func closeUnclosedCodexUpdateRuntimeIfNeeded() async throws {
+        guard let runtime = unclosedCodexUpdateRuntime else { return }
+        if let failure = await closeRuntime(runtime, purpose: .restartSameAccount) { throw failure }
+        unclosedCodexUpdateRuntime = nil
     }
 
     private func closePublishedRuntimeForReplacement(
@@ -1251,7 +1349,8 @@ public final class CodexReviewStore {
             locallyCancelledJobIDs = []
         } else {
             let cancellationOutcome = await requestActiveReviewCancellationsForRuntimeStop(
-                reason: intent.reviewCancellation
+                reason: intent.reviewCancellation,
+                includingQueued: intent != .codexUpdate
             )
             locallyCancelledJobIDs = cancellationOutcome.jobIDs
             if let failure = cancellationOutcome.firstFailure {
@@ -1262,10 +1361,12 @@ public final class CodexReviewStore {
         }
         await backend.stop(store: self, intent: intent)
         let remainingLocallyCancelledJobIDs = cancelActiveReviewsLocallyForRuntimeStop(
-            reason: intent.reviewCancellation
+            reason: intent.reviewCancellation,
+            includingQueued: intent != .codexUpdate
         )
         await cancelAndDetachReviewWorkersForRuntimeStop(
-            jobIDs: Array(Set(locallyCancelledJobIDs + remainingLocallyCancelledJobIDs)),
+            jobIDs: Array(Set(locallyCancelledJobIDs + remainingLocallyCancelledJobIDs
+                + (intent == .codexUpdate ? reviewWorkerJobIDsForRuntimeStop : []))),
             reason: intent.reviewCancellation
         )
     }
@@ -1400,7 +1501,7 @@ public final class CodexReviewStore {
         for intent: ReviewRuntimeTeardownIntent
     ) -> ReviewRuntimeTransitionPurpose {
         switch intent {
-        case .explicitStop:
+        case .explicitStop, .codexUpdate:
             .stop
         case .unexpectedFailure:
             .runtimeFailure
@@ -1410,27 +1511,30 @@ public final class CodexReviewStore {
     private func publishRuntime(serverURL: URL?) {
         storeWorkRegistry.openReviewAdmission()
         transitionToRunning(serverURL: serverURL)
+        if hasQueuedCodexUpdateRecovery, codexUpdateTask == nil {
+            resumeReviewsAfterCodexUpdateIfPossible()
+        }
         startAccountRateLimitAutoRefresh()
     }
 
     public func refreshAuthentication() async {
-        await backend.refreshAuth(auth: auth)
+        await performRuntimeAuthentication { store in await store.backend.refreshAuth(auth: store.auth) }
     }
 
     public func signIn() async {
-        await backend.signIn(auth: auth, using: .chatGPT)
+        await performRuntimeAuthentication { store in await store.backend.signIn(auth: store.auth, using: .chatGPT) }
     }
 
     package func signIn(apiKey: CodexReviewAPIKey) async {
-        await backend.signIn(auth: auth, using: .apiKey(apiKey))
+        await performRuntimeAuthentication { store in await store.backend.signIn(auth: store.auth, using: .apiKey(apiKey)) }
     }
 
     public func addAccount() async {
-        await backend.addAccount(auth: auth, using: .chatGPT)
+        await performRuntimeAuthentication { store in await store.backend.addAccount(auth: store.auth, using: .chatGPT) }
     }
 
     package func addAccount(apiKey: CodexReviewAPIKey) async {
-        await backend.addAccount(auth: auth, using: .apiKey(apiKey))
+        await performRuntimeAuthentication { store in await store.backend.addAccount(auth: store.auth, using: .apiKey(apiKey)) }
     }
 
     public func cancelAuthentication() async {
@@ -1463,7 +1567,7 @@ public final class CodexReviewStore {
         else {
             return
         }
-        await backend.signIn(auth: auth, using: method)
+        await performRuntimeAuthentication { store in await store.backend.signIn(auth: store.auth, using: method) }
     }
 
     public func logout() async {
@@ -1481,7 +1585,9 @@ public final class CodexReviewStore {
     }
 
     public func signOutActiveAccount() async throws {
-        try await backend.signOutActiveAccount(auth: auth)
+        try await performRuntimeAccountChange { store in
+            try await store.backend.signOutActiveAccount(auth: store.auth)
+        }
     }
 
     package func switchAccount(_ account: CodexAccount) async throws {
@@ -1496,7 +1602,9 @@ public final class CodexReviewStore {
         defer {
             targetAccount?.updateIsSwitching(false)
         }
-        try await backend.switchAccount(auth: auth, accountKey: account.accountKey)
+        try await performRuntimeAccountChange { store in
+            try await store.backend.switchAccount(auth: store.auth, accountKey: account.accountKey)
+        }
     }
 
     package func requestSwitchAccount(_ account: CodexAccount, requiresConfirmation: Bool) {
@@ -1583,15 +1691,21 @@ public final class CodexReviewStore {
     }
 
     package func removeAccount(accountKey: String) async throws {
-        try await backend.removeAccount(auth: auth, accountKey: accountKey)
+        try await performRuntimeAccountChange { store in
+            try await store.backend.removeAccount(auth: store.auth, accountKey: accountKey)
+        }
     }
 
     package func reorderPersistedAccount(accountKey: String, toIndex: Int) async throws {
-        try await backend.reorderPersistedAccount(auth: auth, accountKey: accountKey, toIndex: toIndex)
+        try await performRuntimeAccountChange { store in
+            try await store.backend.reorderPersistedAccount(auth: store.auth, accountKey: accountKey, toIndex: toIndex)
+        }
     }
 
     package func refreshAccountRateLimits(accountKey: String) async {
-        await backend.refreshAccountRateLimits(auth: auth, accountKey: accountKey)
+        await performRuntimeAuthentication { store in
+            await store.backend.refreshAccountRateLimits(auth: store.auth, accountKey: accountKey)
+        }
     }
 
     package func startStartupAuthRefresh() {

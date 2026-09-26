@@ -223,6 +223,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     private var auth: CodexReviewBackendModel.Auth.Snapshot
     private var commands: [Command] = []
     private var startAdmissionIdentities: [ObjectIdentifier] = []
+    private var scriptedRuns: [CodexReviewBackendModel.Review.Run] = []
     private var nextRun: CodexReviewBackendModel.Review.Run
     private var nextRecoveredRun: CodexReviewBackendModel.Review.Run?
     private var interruptFailureMessage: String?
@@ -329,6 +330,10 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
 
     package func holdInterruptReview(with gate: AsyncGate) {
         interruptReviewGate = gate
+    }
+
+    package func scriptReviewRuns(_ runs: [CodexReviewBackendModel.Review.Run]) {
+        scriptedRuns = runs
     }
 
     package func setNextRun(_ run: CodexReviewBackendModel.Review.Run) {
@@ -576,6 +581,8 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         _ request: CodexReviewBackendModel.Review.Start,
         admission: ReviewStartAdmission
     ) async throws -> BackendReviewAttempt {
+        if scriptedRuns.isEmpty == false { nextRun = scriptedRuns.removeFirst() }
+        let run = nextRun
         startAdmissionIdentities.append(ObjectIdentifier(admission))
         try await admission.admitThreadStartDispatch()
         commands.append(.startReview(request))
@@ -585,10 +592,10 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
             waiter.resume()
         }
         let provisionalRun = CodexReviewBackendModel.Review.Run(
-            attemptID: nextRun.attemptID,
-            threadID: nextRun.threadID,
-            reviewThreadID: nextRun.threadID,
-            model: nextRun.model
+            attemptID: run.attemptID,
+            threadID: run.threadID,
+            reviewThreadID: run.threadID,
+            model: run.model
         )
         try await admission.recordPreparedThread(provisionalRun)
         do {
@@ -604,8 +611,8 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
                 await startReviewGate.wait()
             }
         }
-        try await admission.recordActiveRun(nextRun)
-        return .init(run: nextRun, events: eventMailbox(for: nextRun))
+        try await admission.recordActiveRun(run)
+        return .init(run: run, events: eventMailbox(for: run))
     }
 
     package func receivedStartAdmission(_ admission: ReviewStartAdmission) -> Bool {

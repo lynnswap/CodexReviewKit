@@ -14,6 +14,7 @@ package struct ReviewRuntimeGeneration: Hashable, Sendable {
 
 package enum ReviewRuntimeCleanupRecoverySuppression: Equatable, Sendable {
     case explicitStop
+    case codexUpdate
     case staleSource
     case successorAlreadyFinished
 }

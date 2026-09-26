@@ -7,6 +7,37 @@ import CodexReviewTesting
 @Suite("review history store", .serialized)
 @MainActor
 struct CodexReviewStoreHistoryTests {
+    @Test func updateKeepsRequestAcceptedDuringHistoryWriteInTheQueue() async throws {
+        let acceptedEntered = AsyncGate()
+        let acceptedRelease = AsyncGate()
+        let history = ReviewHistoryPersistenceProbe(startedWriteEntered: acceptedEntered, startedWriteRelease: acceptedRelease)
+        let backend = FakeCodexReviewBackend()
+        let store = makeStore(history: history, backend: backend)
+        await store.start()
+        let request = Task { try await store.startReview(
+            sessionID: "client", request: .init(cwd: "/tmp/queued", target: .uncommittedChanges), waitTimeout: .zero
+        ) }
+        await acceptedEntered.wait()
+        let installEntered = AsyncGate()
+        let installRelease = AsyncGate()
+        let update = Task { try await store.updateCodex(when: .afterCurrentReviews) {
+            await installEntered.open()
+            await installRelease.wait()
+        } }
+        await installEntered.wait()
+        await acceptedRelease.open()
+        let queued = try await request.value
+        #expect(queued.core.lifecycle.status == .queued)
+        #expect(queued.core.lifecycle.startedAt == nil)
+        #expect(await backend.recordedCommands().contains { if case .startReview = $0 { true } else { false } } == false)
+        await installRelease.open()
+        try await update.value
+        try await backend.waitForStartReview(timeout: .seconds(2))
+        await backend.yield(.completed(summary: "Done", result: "No findings."))
+        #expect(try await store.awaitReview(sessionID: "client", jobID: queued.jobID).core.lifecycle.status == .succeeded)
+        await store.stop()
+    }
+
     @Test func executionPersistenceFailureReturnsTheAcceptedJobWithoutDispatch() async throws {
         let history = ReviewHistoryPersistenceProbe(executionWriteFailure: "Execution start could not be saved.")
         let backend = FakeCodexReviewBackend()

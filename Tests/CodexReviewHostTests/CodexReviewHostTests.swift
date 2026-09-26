@@ -2,7 +2,7 @@ import Foundation
 import AppKit
 import AuthenticationServices
 import Testing
-import CodexReview
+@_spi(ApplicationHostSupport) import CodexReview
 import CodexReviewAppServer
 import CodexReviewHost
 import CodexReviewMCPServer
@@ -46,6 +46,45 @@ private actor HostCloseFailureTransport: JSONRPC.Transport {
 @Suite("host composition")
 @MainActor
 struct CodexReviewHostTests {
+    @Test func liveRuntimeUpdatePreservesMCPAndDispatchesQueueOnNewTransport() async throws {
+        let homeURL = try temporaryHome()
+        let old = FakeJSONRPCTransport()
+        let new = FakeJSONRPCTransport()
+        try await enqueueRuntimeStartResponses(old)
+        try await enqueueRuntimeStartResponses(new)
+        try await enqueueLiveRouteReviewStartResponses(new, threadID: "new-thread", turnID: "new-turn")
+        try await new.enqueue(EmptyResponse(), for: "turn/interrupt")
+        try await enqueueReviewCleanupResponses(new)
+        let server = ControlledMCPHTTPServer(endpoint: try #require(URL(string: "http://127.0.0.1:19438/mcp")))
+        var transports = [old, new]
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            mcpHTTPServerFactory: { _, _ in server },
+            mcpHTTPServerBindChecker: { _ in },
+            transportFactory: { _ in transports.removeFirst() }
+        )
+        await store.start()
+        store.suspendReviewStarts()
+        let queued = try await store.startReview(
+            sessionID: "client", request: .init(cwd: "/tmp/project", target: .uncommittedChanges), waitTimeout: .zero
+        )
+        try await store.updateCodex(when: .immediately) {
+            #expect(await old.isClosedForTesting())
+            #expect(store.job(id: queued.jobID)?.core.lifecycle.status == .queued)
+            #expect(server.stopCallCount == 0)
+        }
+        try #require(await StoreSnapshotProbe(store: store).waitUntil { $0.job()?.activeRun?.turnID == "new-turn" } != nil)
+        #expect(await old.recordedRequests().contains { $0.method == "thread/start" } == false)
+        #expect(server.startCallCount == 1)
+        #expect(store.serverURL == server.endpoint)
+        let cancel = Task { try await store.cancelReview(jobID: queued.jobID, sessionID: "client") }
+        try #require(await waitUntil(timeout: .seconds(2)) { await new.recordedRequests().contains { $0.method == "turn/interrupt" } })
+        try await emitInterruptedTurn(new, threadID: "new-thread", turnID: "new-turn", message: "Cancelled.")
+        _ = try await cancel.value
+        await store.stop()
+    }
+
     @Test func hostStartsAndStopsRuntimeWithFakeBackend() async throws {
         let backend = FakeCodexReviewBackend()
         let host = CodexReviewHost(

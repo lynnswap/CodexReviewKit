@@ -1,0 +1,326 @@
+import Foundation
+import Testing
+@_spi(ApplicationHostSupport) @testable import CodexReview
+import CodexReviewTesting
+
+@Suite("Codex runtime updates", .serialized)
+@MainActor
+struct CodexReviewStoreUpdateTests {
+    @Test func deferredUpdateWaitsForCleanupAndRetainsQueuedCalls() async throws {
+        let reviews = FakeCodexReviewBackend()
+        let mcp = TestingMCPServerLifecycleOwner()
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: reviews, mcpServerLifecycle: mcp)
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+        let originalRuntime = try #require(backend.lastPreparedRuntimeHandle)
+        let cleanup = AsyncGate()
+        await reviews.holdCleanupReview(with: cleanup)
+        let first = Task { try await store.startReview(sessionID: "client", request: request("first")) }
+        try await reviews.waitForStartReview(timeout: .seconds(2))
+        var installations = 0
+        let installing = AsyncGate()
+        let releaseInstall = AsyncGate()
+        let update = Task {
+            try await store.updateCodex(when: .afterCurrentReviews) {
+                installations += 1
+                #expect(originalRuntime.waitUntilClosedCallCount == 1)
+                await installing.open()
+                await releaseInstall.wait()
+            }
+        }
+        try #require(await waitUntil { store.codexUpdateState == .waitingForReviews })
+        var queuedReturned = false
+        let queued = Task {
+            defer { queuedReturned = true }
+            return try await store.startReview(sessionID: "client", request: request("queued"))
+        }
+        try #require(await waitUntil { store.jobs.contains { $0.cwd == "/tmp/queued" } })
+        let queuedID = try #require(store.jobs.first { $0.cwd == "/tmp/queued" }?.id)
+        await reviews.yield(.completed(summary: "Done", result: "No findings."))
+        await reviews.waitForCleanupReview()
+        #expect(installations == 0)
+        #expect(originalRuntime.closePurposes.isEmpty)
+        await cleanup.open()
+        #expect(try await first.value.core.lifecycle.status == .succeeded)
+        await installing.wait()
+        #expect(queuedReturned == false)
+        #expect(try store.readReview(sessionID: "client", jobID: queuedID).core.lifecycle.status == .queued)
+        #expect(mcp.stopCallCount == 0)
+        let duplicate = Task {
+            try await store.updateCodex(when: .immediately) { installations += 100 }
+        }
+        await releaseInstall.open()
+        try await update.value
+        try await duplicate.value
+        #expect(installations == 1)
+        #expect(backend.startRequests == [false, true])
+        #expect(mcp.preparedServers.count == 1)
+        #expect(mcp.activatedServers.count == 1)
+        try #require(await waitUntil { store.job(id: queuedID)?.core.run.threadID != nil })
+        await reviews.yield(.completed(summary: "Done", result: "No findings."))
+        #expect(try await queued.value.jobID == queuedID)
+        #expect(store.codexUpdateState == .idle)
+        await store.stop()
+    }
+
+    @Test func failedInstallRestartsRuntimeAndResumesQueueButKeepsError() async throws {
+        let reviews = FakeCodexReviewBackend()
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: reviews)
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+        var queuedID: String?
+        do {
+            try await store.updateCodex(when: .afterCurrentReviews) {
+                queuedID = try await store.startReview(sessionID: "client", request: request("queued"), waitTimeout: .zero).jobID
+                throw UpdateTestError.install
+            }
+            Issue.record("Expected installation failure")
+        } catch { #expect(error.localizedDescription.contains("install failed")) }
+        #expect(store.serverState == .running)
+        #expect(store.codexUpdateState == .failed("install failed"))
+        let id = try #require(queuedID)
+        try #require(await waitUntil { store.job(id: id)?.core.run.threadID != nil })
+        await reviews.yield(.completed(summary: "Done", result: "No findings."))
+        #expect(try await store.awaitReview(sessionID: "client", jobID: id).core.lifecycle.status == .succeeded)
+        await store.stop()
+    }
+
+    @Test func failedRestartRetainsQueueAndRetryDoesNotInstallAgain() async throws {
+        let reviews = FakeCodexReviewBackend()
+        let mcp = TestingMCPServerLifecycleOwner()
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: reviews, mcpServerLifecycle: mcp)
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+        backend.failNextRuntimePreparation(message: "restart failed")
+        var queuedID: String?
+        var installs = 0
+        do {
+            try await store.updateCodex(when: .afterCurrentReviews) {
+                installs += 1
+                queuedID = try await store.startReview(sessionID: "client", request: request("queued"), waitTimeout: .zero).jobID
+            }
+            Issue.record("Expected restart failure")
+        } catch { #expect(error.localizedDescription.contains("restart failed")) }
+        let id = try #require(queuedID)
+        #expect(try store.readReview(sessionID: "client", jobID: id).core.lifecycle.status == .queued)
+        #expect(mcp.stopCallCount == 0)
+        await store.restart()
+        #expect(store.serverState == .running)
+        #expect(installs == 1)
+        try #require(await waitUntil { store.job(id: id)?.core.run.threadID != nil })
+        await reviews.yield(.completed(summary: "Done", result: "No findings."))
+        #expect(try await store.awaitReview(sessionID: "client", jobID: id).core.lifecycle.status == .succeeded)
+        await store.stop()
+    }
+
+    @Test func failedSourceClosePreventsInstallationAndKeepsRecoverableRuntime() async throws {
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+        let runtime = try #require(backend.lastPreparedRuntimeHandle)
+        runtime.failClose(with: .process("close failed"))
+        var installs = 0
+        do {
+            try await store.updateCodex(when: .afterCurrentReviews) { installs += 1 }
+            Issue.record("Expected close failure")
+        } catch { #expect(error.localizedDescription.contains("close failed")) }
+        #expect(installs == 0)
+        #expect(store.unclosedCodexUpdateRuntime?.handle === runtime)
+        #expect(backend.startRequests == [false])
+        await store.restart()
+        #expect(store.serverState == .running)
+        #expect(store.unclosedCodexUpdateRuntime == nil)
+        #expect(installs == 0)
+        await store.stop()
+    }
+
+    @Test func shutdownWaitsForInstallationThenCancelsQueuedJobs() async throws {
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+        let entered = AsyncGate()
+        let release = AsyncGate()
+        let update = Task {
+            try await store.updateCodex(when: .immediately) {
+                await entered.open()
+                await release.wait()
+            }
+        }
+        await entered.wait()
+        let queued = try await store.startReview(sessionID: "client", request: request("queued"), waitTimeout: .zero)
+        var stopped = false
+        let shutdown = Task { await store.shutdown(); stopped = true }
+        try #require(await waitUntil { store.applicationShutdownRequested })
+        #expect(stopped == false)
+        await release.open()
+        try await update.value
+        await shutdown.value
+        #expect(store.serverState == .stopped)
+        #expect(store.job(id: queued.jobID)?.core.lifecycle.status == .cancelled)
+    }
+
+    @Test func immediateUpdateCancelsExecutingReviewButKeepsQueuedReview() async throws {
+        let reviews = FakeCodexReviewBackend()
+        await reviews.holdStartReview(with: AsyncGate())
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: reviews)
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+        let active = Task { try await store.startReview(sessionID: "owner", request: request("active")) }
+        try await reviews.waitForStartReview(timeout: .seconds(2))
+        var queuedID: String?
+        try await store.updateCodex(when: .immediately) {
+            queuedID = try await store.startReview(sessionID: "owner", request: request("queued"), waitTimeout: .zero).jobID
+            #expect(try await active.value.core.lifecycle.status == .cancelled)
+        }
+        let id = try #require(queuedID)
+        #expect(store.job(id: id)?.isTerminal == false)
+        await store.stop()
+    }
+
+    @Test func shutdownCancelsDeferredUpdateWithoutWaitingForReviewCompletion() async throws {
+        let reviews = FakeCodexReviewBackend()
+        await reviews.holdStartReview(with: AsyncGate())
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: reviews)
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+        let active = Task { try await store.startReview(sessionID: "owner", request: request("active")) }
+        try await reviews.waitForStartReview(timeout: .seconds(2))
+        var installs = 0
+        let update = Task { try await store.updateCodex(when: .afterCurrentReviews) { installs += 1 } }
+        try #require(await waitUntil { store.codexUpdateState == .waitingForReviews })
+        await store.shutdown()
+        do { try await update.value; Issue.record("Expected update cancellation") }
+        catch { #expect(error is CancellationError) }
+        #expect(installs == 0)
+        #expect(try await active.value.core.lifecycle.status == .cancelled)
+    }
+
+    @Test func manualRestartJoinsInstallationInsteadOfReplacingAgain() async throws {
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+        let entered = AsyncGate()
+        let release = AsyncGate()
+        let update = Task { try await store.updateCodex(when: .immediately) {
+            await entered.open()
+            await release.wait()
+        } }
+        await entered.wait()
+        var restartReturned = false
+        let restart = Task { await store.restart(); restartReturned = true }
+        await Task.yield()
+        #expect(restartReturned == false)
+        await release.open()
+        try await update.value
+        await restart.value
+        #expect(backend.startRequests == [false, true])
+        await store.stop()
+    }
+
+    @Test func accountChangesAndUpdateExecuteInOrderWithoutDispatchingQueueBetweenThem() async throws {
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+        let firstEntered = AsyncGate()
+        let firstRelease = AsyncGate()
+        var events: [String] = []
+        let first = Task { try await store.performRuntimeAccountChange { _ in
+            events.append("first")
+            await firstEntered.open()
+            await firstRelease.wait()
+        } }
+        await firstEntered.wait()
+        let installEntered = AsyncGate()
+        let installRelease = AsyncGate()
+        let update = Task { try await store.updateCodex(when: .immediately) {
+            events.append("install")
+            await installEntered.open()
+            await installRelease.wait()
+        } }
+        try #require(await waitUntil { store.codexUpdateTask != nil })
+        #expect(events == ["first"])
+        await firstRelease.open()
+        try await first.value
+        await installEntered.wait()
+        let queued = try await store.startReview(sessionID: "owner", request: request("queued"), waitTimeout: .zero)
+        let second = Task { try await store.performRuntimeAccountChange { store in
+            events.append("second")
+            #expect(store.job(id: queued.jobID)?.core.lifecycle.status == .queued)
+            await store.closeActiveReviewSessions(reason: .system(message: "Account switched."))
+        } }
+        try #require(await waitUntil { store.runtimeAccountOperations.isEmpty == false })
+        await installRelease.open()
+        try await update.value
+        try await second.value
+        #expect(events == ["first", "install", "second"])
+        #expect(store.job(id: queued.jobID)?.core.lifecycle.status == .cancelled)
+        await store.stop()
+    }
+
+    @Test func failedRuntimeDuringDeferredUpdateDoesNotDiscardQueuedJobs() async throws {
+        let reviews = FakeCodexReviewBackend()
+        let mcp = TestingMCPServerLifecycleOwner()
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: reviews, mcpServerLifecycle: mcp)
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+        let runtime = try #require(backend.lastPreparedRuntimeHandle)
+        let active = Task { try await store.startReview(sessionID: "owner", request: request("active")) }
+        try await reviews.waitForStartReview(timeout: .seconds(2))
+        var installs = 0
+        let update = Task { try await store.updateCodex(when: .afterCurrentReviews) { installs += 1 } }
+        try #require(await waitUntil { store.codexUpdateState == .waitingForReviews })
+        let queued = try await store.startReview(sessionID: "owner", request: request("queued"), waitTimeout: .zero)
+        #expect(store.requestRuntimeFailure(handle: runtime, cause: "process exited"))
+        await reviews.finishEvents(throwing: UpdateTestError.install)
+        try await update.value
+        #expect(installs == 1)
+        #expect(try await active.value.core.lifecycle.terminal == .interrupted(.transport(message: "process exited")))
+        #expect(store.job(id: queued.jobID)?.isTerminal == false)
+        #expect(mcp.stopCallCount == 0)
+        await store.stop()
+    }
+
+    @Test func publicationFailureRetainsQueueAndCanBeRetried() async throws {
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+        backend.runOnNextRuntimePublication {
+            if let handle = backend.lastPreparedRuntimeHandle {
+                #expect(store.requestRuntimeFailure(handle: handle, cause: "publication failed"))
+            }
+        }
+        var queuedID: String?
+        do {
+            try await store.updateCodex(when: .immediately) {
+                queuedID = try await store.startReview(sessionID: "owner", request: request("queued"), waitTimeout: .zero).jobID
+            }
+            Issue.record("Expected publication failure")
+        } catch { #expect(error.localizedDescription.contains("publication failed")) }
+        let id = try #require(queuedID)
+        #expect(store.job(id: id)?.core.lifecycle.status == .queued)
+        #expect(store.serverState == .failed("publication failed"))
+        await store.restart()
+        #expect(store.serverState == .running)
+        await store.stop()
+    }
+
+    private func request(_ name: String) -> CodexReviewAPI.Start.Request {
+        .init(cwd: "/tmp/\(name)", target: .uncommittedChanges)
+    }
+}
+
+private enum UpdateTestError: LocalizedError {
+    case install
+    var errorDescription: String? { "install failed" }
+}
+
+@MainActor
+private func waitUntil(condition: () -> Bool) async -> Bool {
+    let clock = ContinuousClock()
+    let deadline = clock.now + .seconds(2)
+    while condition() == false {
+        if clock.now >= deadline { return false }
+        await Task.yield()
+    }
+    return true
+}
