@@ -40,7 +40,8 @@ extension ReviewUITests {
 
         harness.viewController.selectSidebarPickerToolbarSegmentForTesting(.account)
         try await waitForCondition {
-            harness.viewController.sidebarUpdateToolbarItemIsHiddenForTesting
+            harness.viewController.sidebarUpdateToolbarItemIsHiddenForTesting == false
+                && harness.viewController.sidebarJobFilterToolbarItemIsHiddenForTesting
         }
         harness.viewController.selectSidebarPickerToolbarSegmentForTesting(.workspace)
         try await waitForCondition {
@@ -79,6 +80,7 @@ extension ReviewUITests {
         defer { harness.window.close() }
         let sidebarItem = try #require(harness.viewController.splitViewItems.first)
         sidebarItem.isCollapsed = false
+        harness.viewController.selectSidebarPickerToolbarSegmentForTesting(.account)
         postCodexUpdateAvailability(true, to: notificationCenter)
         try await waitForCondition {
             harness.viewController.sidebarUpdateToolbarItemIsHiddenForTesting == false

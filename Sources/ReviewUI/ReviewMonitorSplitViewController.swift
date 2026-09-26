@@ -407,13 +407,13 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         ) {
             identifiers.append(addAccountToolbarItemIdentifier)
         }
+        if isSidebarCollapsed == false, isCodexUpdateAvailable {
+            identifiers.append(sidebarUpdateToolbarItemIdentifier)
+        }
         if isShowingSidebarJobFilterToolbarItem(
             sidebarSelection: sidebarSelection,
             isSidebarCollapsed: isSidebarCollapsed
         ) {
-            if isCodexUpdateAvailable {
-                identifiers.append(sidebarUpdateToolbarItemIdentifier)
-            }
             identifiers.append(sidebarJobFilterToolbarItemIdentifier)
         }
         identifiers.append(.sidebarTrackingSeparator)
