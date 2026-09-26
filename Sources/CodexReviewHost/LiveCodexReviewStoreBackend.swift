@@ -4184,6 +4184,14 @@ private final class LiveRuntimeLifecycleHandle: RuntimeLifecycleHandle {
         }
         try await closeTask.value.get()
     }
+    func confirmClosed() async throws {
+        guard let closeTask else { throw CancellationError() }
+        switch await closeTask.value {
+        case .success: return
+        case .failure: try await client.confirmClosed()
+        }
+    }
+
 }
 
 @MainActor

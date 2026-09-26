@@ -176,6 +176,15 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
         try await closeTransport(terminateProcess: true, readerTask: nil)
     }
 
+    package func confirmClosed() async throws {
+        guard let closeTask else {
+            throw JSONRPC.Error.invalidMessage("Transport closure has not been requested.")
+        }
+        _ = await closeTask.result
+        await waitForReaderTasks(excluding: nil)
+        try process.confirmTerminated()
+    }
+
     private func closeTransport(
         terminateProcess: Bool,
         readerTask: ReaderTask?
@@ -745,6 +754,7 @@ private final class AppServerSpawnedProcess: @unchecked Sendable {
     private let processGroupID: pid_t
     private let stateLock = NSLock()
     private var didReap = false
+    private var terminationProcesses: Set<ProcessIdentity>?
 
     private init(processIdentifier: pid_t) {
         self.processIdentifier = processIdentifier
@@ -850,7 +860,7 @@ private final class AppServerSpawnedProcess: @unchecked Sendable {
         killDuration: Duration = .seconds(1)
     ) async throws {
         let processIdentity = Self.processSnapshot(processIdentifier)?.identity
-        let trackedProcesses = descendantProcesses()
+        let trackedProcesses = beginTerminationTracking()
         guard isFullyTerminated(trackedProcesses: trackedProcesses) == false else {
             return
         }
@@ -871,6 +881,24 @@ private final class AppServerSpawnedProcess: @unchecked Sendable {
             throw AppServerProcessTransportError.processDidNotTerminate(
                 processIdentifier,
                 liveProcessIdentifiers: liveProcessIdentifiers(trackedProcesses: trackedProcesses)
+            )
+        }
+    }
+
+    private func beginTerminationTracking() -> Set<ProcessIdentity> {
+        let descendants = descendantProcesses()
+        stateLock.withLock { terminationProcesses = descendants }
+        return descendants
+    }
+
+    func confirmTerminated() throws {
+        let (reaped, tracked) = stateLock.withLock { (didReap, terminationProcesses) }
+        // Reaping follows complete tree termination; never inspect a reused PID/group afterward.
+        if reaped { return }
+        guard let tracked, isFullyTerminated(trackedProcesses: tracked) else {
+            throw AppServerProcessTransportError.processDidNotTerminate(
+                processIdentifier,
+                liveProcessIdentifiers: liveProcessIdentifiers(trackedProcesses: tracked ?? [])
             )
         }
     }

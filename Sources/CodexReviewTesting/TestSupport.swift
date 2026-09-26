@@ -932,6 +932,7 @@ package final class TestingRuntimeLifecycleHandle: RuntimeLifecycleHandle {
         await closeGate?.waitIgnoringCancellation()
         closeGate = nil
         guard didClose == false else {
+            if let closeFailure { throw closeFailure }
             return
         }
         didClose = true

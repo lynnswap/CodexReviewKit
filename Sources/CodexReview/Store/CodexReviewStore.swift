@@ -1316,6 +1316,16 @@ public final class CodexReviewStore {
             replacement.finishSourceClose(.closed)
             return
         }
+        if unclosedCodexUpdateRuntime?.handle === retiring.handle {
+            do { try await retiring.handle.confirmClosed() }
+            catch {
+                replacement.finishSourceClose(.failed(runtimeCloseFailure(from: error)))
+                throw error
+            }
+            unclosedCodexUpdateRuntime = nil
+            replacement.finishSourceClose(.closed)
+            return
+        }
         unclosedCodexUpdateRuntime = retiring
         await stopPublishedRuntimeSemantics(intent: .codexUpdate)
         if let failure = await closeRuntime(retiring, purpose: .restartSameAccount) {
@@ -1328,8 +1338,10 @@ public final class CodexReviewStore {
 
     package func closeUnclosedCodexUpdateRuntimeIfNeeded() async throws {
         guard let runtime = unclosedCodexUpdateRuntime else { return }
-        if let failure = await closeRuntime(runtime, purpose: .restartSameAccount) { throw failure }
-        unclosedCodexUpdateRuntime = nil
+        try await runtime.handle.confirmClosed()
+        if unclosedCodexUpdateRuntime?.handle === runtime.handle {
+            unclosedCodexUpdateRuntime = nil
+        }
     }
 
     private func closePublishedRuntimeForReplacement(

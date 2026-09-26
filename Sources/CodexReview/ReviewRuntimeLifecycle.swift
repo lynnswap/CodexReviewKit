@@ -90,6 +90,11 @@ package protocol RuntimeLifecycleHandle: AnyObject, Sendable {
     func closeAdmission()
     func close(purpose: ReviewRuntimeTransitionPurpose) async throws
     func waitUntilClosed() async throws
+    func confirmClosed() async throws
+}
+
+extension RuntimeLifecycleHandle {
+    package func confirmClosed() async throws { try await waitUntilClosed() }
 }
 
 @MainActor
