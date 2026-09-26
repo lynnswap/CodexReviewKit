@@ -86,7 +86,13 @@ extension CodexReviewStore {
             job.core.lifecycle.startedAt = startedAt
             job.core.output.summary = "Review started."
             do {
-                try await persistReviewExecutionStart(id: next.id, at: startedAt)
+                do {
+                    try await persistReviewExecutionStart(id: next.id, at: startedAt)
+                } catch {
+                    // The durable job is still queued when its execution-start write fails.
+                    job.core.lifecycle.startedAt = nil
+                    throw error
+                }
                 try Task.checkCancellation()
                 guard job.isTerminal == false else {
                     removeStartingReviewOwnership(for: next.id, ifOwnedBy: next.start.admission)
