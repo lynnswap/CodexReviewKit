@@ -195,8 +195,6 @@ struct CodexHomebrewInstallationResolver: Sendable {
     struct FileSystem: Sendable {
         var canonicalURL: @Sendable (URL) -> URL
         var isExecutableRegularFile: @Sendable (URL) -> Bool
-        var isDirectory: @Sendable (URL) -> Bool
-        var bundleIdentifier: @Sendable (URL) -> String?
 
         static let live = FileSystem(
             canonicalURL: { $0.standardizedFileURL.resolvingSymlinksInPath() },
@@ -208,35 +206,12 @@ struct CodexHomebrewInstallationResolver: Sendable {
                     return false
                 }
                 return attributes[.type] as? FileAttributeType == .typeRegular
-            },
-            isDirectory: { url in
-                guard let attributes = try? FileManager.default.attributesOfItem(
-                    atPath: url.path
-                ) else {
-                    return false
-                }
-                return attributes[.type] as? FileAttributeType == .typeDirectory
-            },
-            bundleIdentifier: { bundle in
-                let plist = bundle.appendingPathComponent("Contents/Info.plist")
-                guard let data = try? Data(contentsOf: plist),
-                      let value = try? PropertyListSerialization.propertyList(
-                        from: data,
-                        options: [],
-                        format: nil
-                      ),
-                      let dictionary = value as? [String: Any]
-                else {
-                    return nil
-                }
-                return dictionary["CFBundleIdentifier"] as? String
             }
         )
     }
 
     struct Configuration: Sendable {
         var homeDirectory: URL
-        var applicationDirectories: [URL]
         var fallbackBinDirectories: [URL]
         var fileSystem: FileSystem
 
@@ -244,10 +219,6 @@ struct CodexHomebrewInstallationResolver: Sendable {
             let home = FileManager.default.homeDirectoryForCurrentUser
             return .init(
                 homeDirectory: home,
-                applicationDirectories: [
-                    URL(fileURLWithPath: "/Applications", isDirectory: true),
-                    home.appendingPathComponent("Applications", isDirectory: true),
-                ],
                 fallbackBinDirectories: [
                     "/opt/homebrew/bin",
                     "/usr/local/bin",
@@ -308,14 +279,6 @@ struct CodexHomebrewInstallationResolver: Sendable {
             return nil
         }
 
-        for root in configuration.applicationDirectories {
-            for name in ["ChatGPT.app", "Codex.app"] where
-                bundleSelection(root.appendingPathComponent(name)) != nil
-            {
-                return nil
-            }
-        }
-
         for directory in configuration.fallbackBinDirectories {
             if let selection = candidate(directory.appendingPathComponent("codex")) {
                 return installation(for: selection)
@@ -365,18 +328,6 @@ struct CodexHomebrewInstallationResolver: Sendable {
         return Selection(
             launcherURL: launcherURL.standardizedFileURL,
             executableURL: executableURL
-        )
-    }
-
-    private func bundleSelection(_ rawBundleURL: URL) -> Selection? {
-        let fileSystem = configuration.fileSystem
-        let bundleURL = fileSystem.canonicalURL(rawBundleURL).standardizedFileURL
-        guard fileSystem.isDirectory(bundleURL),
-              fileSystem.bundleIdentifier(bundleURL) == "com.openai.codex" else {
-            return nil
-        }
-        return candidate(
-            bundleURL.appendingPathComponent("Contents/Resources/codex")
         )
     }
 
