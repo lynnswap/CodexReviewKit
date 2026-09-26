@@ -16,13 +16,6 @@ package struct AppServerReviewTurnInvocation: Equatable, Sendable {
                 message: "Review execution requires an absolute Codex home from initialize."
             )
         }
-        guard codexHome == codexHome.trimmingCharacters(in: .whitespacesAndNewlines),
-              codexHome.rangeOfCharacter(from: .newlines) == nil
-        else {
-            throw ReviewAttemptContractFailure(
-                message: "Review execution cannot reference a Codex home with boundary whitespace or a line break."
-            )
-        }
         // The app-server provisions built-in skills before returning initialize.
         // Build from its reported home so CodexReviewKit does not own a second skill copy.
         let skillPath = URL(fileURLWithPath: codexHome, isDirectory: true)

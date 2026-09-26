@@ -1990,8 +1990,6 @@ struct AppServerClientTests {
         nil,
         "",
         "relative/codex",
-        "/tmp/codex ",
-        "/tmp/codex\ninjected",
     ] as [String?])
     func reviewTurnInvocationRejectsInvalidServerCodexHome(codexHome: String?) {
         #expect(throws: ReviewAttemptContractFailure.self) {
@@ -2002,16 +2000,20 @@ struct AppServerClientTests {
         }
     }
 
-    @Test func reviewTurnInvocationPreservesSpecialCharactersInStructuredSkillPath() throws {
+    @Test(arguments: ["/tmp/Codex Review #1 (QA)", "/tmp/codex ", "/tmp/codex\nworkspace"])
+    func reviewTurnInvocationPreservesSpecialCharactersInStructuredSkillPath(codexHome: String) throws {
         let invocation = try AppServerReviewTurnInvocation(
-            codexHome: "/tmp/Codex Review #1 (QA)",
+            codexHome: codexHome,
             target: .uncommittedChanges
         )
 
         #expect(invocation.input.first == .skill(
             name: "review-agent",
-            path: "/tmp/Codex Review #1 (QA)/skills/.system/review-agent/SKILL.md"
+            path: "\(codexHome)/skills/.system/review-agent/SKILL.md"
         ))
+        let encoded = try JSONEncoder().encode(invocation.input)
+        #expect(try JSONDecoder().decode([AppServerAPI.Turn.Start.UserInput].self, from: encoded) == invocation.input)
+        #expect(invocation.input.last == .text("Review the current code changes (staged, unstaged, and untracked files)."))
     }
 
     @Test func backendPreflightsReviewInvocationBeforeCreatingThread() async throws {
