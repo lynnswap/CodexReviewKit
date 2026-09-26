@@ -7,6 +7,34 @@ import CodexReviewTesting
 @Suite("review history store", .serialized)
 @MainActor
 struct CodexReviewStoreHistoryTests {
+    @Test func deferredUpdateContinuesWhenAnotherCompletedReviewIsDeleted() async throws {
+        let history = ReviewHistoryPersistenceProbe()
+        let backend = FakeCodexReviewBackend()
+        let runs = (0..<2).map { CodexReviewBackendModel.Review.Run(threadID: "thread-\($0)", turnID: "turn-\($0)") }
+        await backend.scriptReviewRuns(runs)
+        let store = makeStore(history: history, backend: backend)
+        await store.start()
+        for index in 0..<2 {
+            _ = try await store.startReview(sessionID: "client", request: .init(cwd: "/tmp/\(index)", target: .uncommittedChanges), waitTimeout: .zero)
+        }
+        try #require(await waitUntil { store.jobs.count == 2 && store.jobs.allSatisfy { $0.core.run.threadID != nil } })
+        var installs = 0
+        let update = Task { try await store.updateCodex(when: .afterCurrentReviews) { installs += 1 } }
+        try #require(await waitUntil { store.reviewTerminalWaiters.isEmpty == false })
+        let awaitedID = try #require(store.reviewTerminalWaiters.keys.first)
+        let other = try #require(store.jobs.first { $0.id != awaitedID })
+        let otherRun = try #require(runs.first { $0.threadID == other.core.run.threadID })
+        let awaitedRun = try #require(runs.first { $0.threadID == store.job(id: awaitedID)?.core.run.threadID })
+        await backend.yield(.completed(summary: "Done", result: "No findings."), for: otherRun)
+        try #require(await waitUntil { other.isTerminal && store.reviewWorkerTasks[other.id] == nil })
+        await store.deleteReviewHistory(withIDs: [other.id])
+        #expect(store.job(id: other.id) == nil)
+        await backend.yield(.completed(summary: "Done", result: "No findings."), for: awaitedRun)
+        try await update.value
+        #expect(installs == 1)
+        await store.stop()
+    }
+
     @Test func updateKeepsRequestAcceptedDuringHistoryWriteInTheQueue() async throws {
         let acceptedEntered = AsyncGate()
         let acceptedRelease = AsyncGate()
@@ -2167,4 +2195,15 @@ private actor ReviewHistoryPersistenceProbe: ReviewHistoryPersistence {
     func durableTerminalIDs() -> Set<String> {
         Set(records.map { $0.started.id } + terminals.map(\.id))
     }
+}
+
+@MainActor
+private func waitUntil(condition: () -> Bool) async -> Bool {
+    let clock = ContinuousClock()
+    let deadline = clock.now + .seconds(2)
+    while condition() == false {
+        if clock.now >= deadline { return false }
+        await Task.yield()
+    }
+    return true
 }

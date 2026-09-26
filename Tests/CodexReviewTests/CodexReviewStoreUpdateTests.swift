@@ -299,6 +299,15 @@ struct CodexReviewStoreUpdateTests {
         let id = try #require(queuedID)
         #expect(store.job(id: id)?.core.lifecycle.status == .queued)
         #expect(store.serverState == .failed("publication failed"))
+        backend.runOnNextRuntimePublication {
+            if let handle = backend.lastPreparedRuntimeHandle {
+                #expect(store.requestRuntimeFailure(handle: handle, cause: "retry publication failed"))
+            }
+        }
+        await store.restart()
+        await store.waitUntilStopped()
+        #expect(store.serverState == .failed("retry publication failed"))
+        #expect(store.job(id: id)?.core.lifecycle.status == .queued)
         await store.restart()
         #expect(store.serverState == .running)
         await store.stop()

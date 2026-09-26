@@ -423,7 +423,7 @@ public final class CodexReviewStore {
         handle: any RuntimeLifecycleHandle,
         cause: String
     ) -> Bool {
-        if codexUpdateTask != nil {
+        if codexUpdateTask != nil || hasQueuedCodexUpdateRecovery {
             switch runtimeState {
             case .running(_, let runtime, _) where runtime.handle === handle:
                 for job in jobs where job.isTerminal == false && queuedReviewStarts[job.id] == nil {
@@ -469,7 +469,7 @@ public final class CodexReviewStore {
         sourceGeneration: ReviewRuntimeGeneration,
         cause: String
     ) -> ReviewRuntimeCleanupRecoveryAdmission {
-        if codexUpdateTask != nil,
+        if codexUpdateTask != nil || hasQueuedCodexUpdateRecovery,
            case .running(let generation, let runtime, _) = runtimeState,
            runtime.handle === sourceHandle, generation == sourceGeneration {
             return .suppressed(.codexUpdate)

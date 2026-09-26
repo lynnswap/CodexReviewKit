@@ -69,6 +69,8 @@ extension CodexReviewStore {
                 $0.isTerminal == false && queuedReviewStarts[$0.id] == nil
             }.map(\.id)
             for id in executingIDs {
+                // Another completed review can be removed while we await this batch.
+                guard job(id: id)?.isTerminal == false else { continue }
                 _ = try await awaitReview(sessionID: nil, jobID: id)
                 try Task.checkCancellation()
             }
