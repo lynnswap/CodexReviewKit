@@ -2,7 +2,7 @@ import AppKit
 import Combine
 import Foundation
 import ObservationBridge
-import CodexReview
+@_spi(ApplicationHostSupport) import CodexReview
 
 @MainActor
 final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDelegate {
@@ -168,7 +168,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         toolbarMembershipObservation = withPortableContinuousObservation { [weak self, uiState] _ in
             let sidebarSelection = uiState.sidebarSelection
             let isAuthenticating = uiState.auth.isAuthenticating
-            let isCodexUpdateAvailable = uiState.isCodexUpdateAvailable
+            let isCodexUpdateAvailable = self?.codexUpdatePresentation != nil
             guard let self else {
                 return
             }
@@ -179,6 +179,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
                 isCodexUpdateAvailable: isCodexUpdateAvailable
             )
             self.applyToolbarItemIdentifiers(identifiers)
+            self.synchronizeCodexUpdatePresentation()
         }
 
         windowTitleObservation = withPortableContinuousObservation { [weak self, uiState] _ in
@@ -248,7 +249,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
             sidebarSelection: uiState.sidebarSelection,
             isSidebarCollapsed: isSidebarCollapsed,
             isAuthenticating: uiState.auth.isAuthenticating,
-            isCodexUpdateAvailable: uiState.isCodexUpdateAvailable
+            isCodexUpdateAvailable: codexUpdatePresentation != nil
         )
     }
 
@@ -332,7 +333,41 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         menuItem.target = self
         menuItem.state = .on
         item.menuFormRepresentation = menuItem
+        applyCodexUpdatePresentation(to: item)
         return item
+    }
+
+    private var codexUpdatePresentation: (title: String, help: String, enabled: Bool)? {
+        switch store.codexUpdateState {
+        case .waitingForReviews:
+            return ("Waiting", "Current reviews will finish before Codex is updated. New requests are queued.", false)
+        case .stoppingRuntime, .installing:
+            return ("Updating", "Codex is being updated. New requests are queued.", false)
+        case .restarting:
+            return ("Restarting", "Preparing Codex to resume queued reviews.", false)
+        case .failed(let message):
+            if case .failed = store.serverState { return ("Retry", message, true) }
+            return uiState.isCodexUpdateAvailable ? ("Update", message, true) : nil
+        case .idle:
+            return uiState.isCodexUpdateAvailable ? ("Update", "A Codex update is available", true) : nil
+        }
+    }
+
+    private func synchronizeCodexUpdatePresentation() {
+        if let item = toolbar?.items.first(where: { $0.itemIdentifier == Self.sidebarUpdateToolbarItemIdentifier }) {
+            applyCodexUpdatePresentation(to: item)
+        }
+    }
+
+    private func applyCodexUpdatePresentation(to item: NSToolbarItem) {
+        guard let presentation = codexUpdatePresentation, let button = item.view as? NSButton else { return }
+        button.title = presentation.title
+        button.isEnabled = presentation.enabled
+        button.setAccessibilityLabel(store.codexUpdateState == .waitingForReviews ? "Waiting to Update Codex" : presentation.title + " Codex")
+        item.label = presentation.title
+        item.toolTip = presentation.help
+        item.menuFormRepresentation?.title = presentation.title + " Codex"
+        item.menuFormRepresentation?.isEnabled = presentation.enabled
     }
 
     private func handleSidebarPickerSelection(_ selection: SidebarPickerSelection) {
@@ -439,7 +474,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
             sidebarSelection: uiState.sidebarSelection,
             isSidebarCollapsed: isSidebarCollapsed,
             isAuthenticating: uiState.auth.isAuthenticating,
-            isCodexUpdateAvailable: uiState.isCodexUpdateAvailable
+            isCodexUpdateAvailable: codexUpdatePresentation != nil
         ))
     }
 
@@ -457,9 +492,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
     @objc
     private func handleCodexUpdate(_ sender: Any?) {
         (sender as? NSButton)?.state = .on
-        guard uiState.isCodexUpdateAvailable else {
-            return
-        }
+        guard codexUpdatePresentation?.enabled == true else { return }
         uiState.isCodexUpdateAvailable = false
         notificationCenter.post(name: ReviewMonitorCodexUpdateNotification.requested, object: nil)
     }
@@ -561,6 +594,10 @@ extension ReviewMonitorSplitViewController {
 
     var sidebarUpdateToolbarAccessibilityLabelForTesting: String? {
         (sidebarUpdateToolbarItemForTesting?.view as? NSButton)?.accessibilityLabel()
+    }
+
+    var sidebarUpdateToolbarIsEnabledForTesting: Bool {
+        (sidebarUpdateToolbarItemForTesting?.view as? NSButton)?.isEnabled == true
     }
 
     var sidebarUpdateToolbarShowsSelectedBackgroundForTesting: Bool {

@@ -1,10 +1,45 @@
 import AppKit
 import Testing
-@_spi(Testing) @testable import CodexReview
+@_spi(Testing) @_spi(ApplicationHostSupport) @testable import CodexReview
 @_spi(PreviewSupport) @testable import ReviewUI
 
 @MainActor
 extension ReviewUITests {
+    @Test(arguments: [ReviewMonitorUpdatePreview.Scenario.waiting, .installing, .failed, .resumed])
+    func updatePreviewUsesStoreTransitionsInTheSidebar(scenario: ReviewMonitorUpdatePreview.Scenario) async throws {
+        let preview = ReviewMonitorUpdatePreview()
+        let harness = makeWindowHarness(store: preview.store)
+        defer { harness.window.close() }
+        harness.viewController.splitViewItems.first?.isCollapsed = false
+        let run = Task { await preview.run(scenario) }
+        do {
+            try await waitForCondition {
+                switch scenario {
+                case .waiting: return harness.viewController.sidebarUpdateToolbarTitleForTesting == "Waiting" && preview.store.jobs.contains { $0.core.lifecycle.status == .queued }
+                case .installing: return harness.viewController.sidebarUpdateToolbarTitleForTesting == "Updating" && preview.store.jobs.contains { $0.core.lifecycle.status == .queued }
+                case .failed: return harness.viewController.sidebarUpdateToolbarTitleForTesting == "Retry"
+                case .resumed:
+                    return preview.store.jobs.contains { $0.isTerminal } && preview.store.codexUpdateState == .idle
+                }
+            }
+            switch scenario {
+            case .waiting, .installing:
+                #expect(harness.viewController.sidebarUpdateToolbarIsEnabledForTesting == false)
+                #expect(preview.store.jobs.contains { $0.core.lifecycle.status == .queued })
+            case .failed:
+                #expect(harness.viewController.sidebarUpdateToolbarIsEnabledForTesting)
+            case .resumed:
+                #expect(harness.viewController.sidebarUpdateToolbarItemIsHiddenForTesting)
+            }
+        } catch {
+            await preview.stop()
+            await run.value
+            throw error
+        }
+        await preview.stop()
+        await run.value
+    }
+
     @Test func updateAvailabilityNotificationControlsToolbarPresentation() async throws {
         let notificationCenter = NotificationCenter()
         let harness = makeWindowHarness(

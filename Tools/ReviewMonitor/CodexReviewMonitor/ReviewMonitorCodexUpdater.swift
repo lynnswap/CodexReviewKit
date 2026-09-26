@@ -1,189 +1,174 @@
-import AppKit
 import Foundation
-import OSLog
-
-private let codexUpdateLogger = Logger(
-    subsystem: "CodexReviewMonitor",
-    category: "codex-update"
-)
+import Observation
+@_spi(ApplicationHostSupport) import CodexReview
 
 @MainActor
+@Observable
 final class ReviewMonitorCodexUpdater {
-    typealias Check = @MainActor @Sendable () async throws -> CodexCommandUpdateCheckResult
-    typealias Wait = @Sendable () async throws -> Void
-    typealias PublishAvailability = @MainActor (Bool) -> Void
-    typealias RunUpdate = @MainActor (CodexCommandUpdatePlan) async throws -> Void
-    typealias ScheduleRelaunch = @MainActor (_ reportsFailure: Bool) throws -> Void
-    typealias PresentFailure = @MainActor (_ title: String, _ message: String) -> Void
+    enum CheckState: Equatable {
+        case notChecked
+        case checking
+        case available(CodexCommandUpdatePlan)
+        case upToDate
+        case unavailable(String)
+        case failed(String)
+    }
 
-    private let check: Check
-    private let wait: Wait
-    private let publishAvailability: PublishAvailability
-    private let prepareForUpdate: @MainActor () async -> Bool
-    private let runUpdate: RunUpdate
-    private let scheduleRelaunch: ScheduleRelaunch
-    private let requestApplicationTermination: @MainActor () -> Void
-    private let presentFailure: PresentFailure
-    private var monitorTask: Task<Void, Never>?
+    typealias Check = @MainActor @Sendable () async throws -> CodexCommandUpdateCheckResult
+    typealias RunUpdate = @MainActor @Sendable (CodexCommandUpdatePlan) async throws -> Void
+    typealias ChooseTiming = @MainActor () async -> CodexReviewStore.CodexUpdateTiming?
+
+    private(set) var checkState = CheckState.notChecked
+    private(set) var lastCheckedAt: Date?
+    let store: CodexReviewStore
+    @ObservationIgnored private let check: Check
+    @ObservationIgnored private let now: @MainActor () -> ContinuousClock.Instant
+    @ObservationIgnored private let date: @MainActor () -> Date
+    @ObservationIgnored private let sleepUntil: @MainActor (ContinuousClock.Instant) async throws -> Void
+    @ObservationIgnored private let publishAvailability: @MainActor (Bool) -> Void
+    @ObservationIgnored private let chooseTiming: ChooseTiming
+    @ObservationIgnored private let runUpdate: RunUpdate
+    @ObservationIgnored private let presentFailure: @MainActor (String, String) -> Void
+    @ObservationIgnored private var monitorTask: Task<Void, Never>?
+    @ObservationIgnored private var checkTask: Task<Void, Never>?
     private var updateTask: Task<Void, Never>?
-    private var availablePlan: CodexCommandUpdatePlan?
+    @ObservationIgnored private var stopping = false
 
     init(
+        store: CodexReviewStore,
         check: @escaping Check,
-        wait: @escaping Wait = {
-            try await Task.sleep(for: .seconds(20 * 60 * 60))
+        now: @escaping @MainActor () -> ContinuousClock.Instant = { .now },
+        date: @escaping @MainActor () -> Date = { .now },
+        sleepUntil: @escaping @MainActor (ContinuousClock.Instant) async throws -> Void = {
+            try await ContinuousClock().sleep(until: $0)
         },
-        publishAvailability: @escaping PublishAvailability,
-        prepareForUpdate: @escaping @MainActor () async -> Bool,
+        publishAvailability: @escaping @MainActor (Bool) -> Void,
+        chooseTiming: @escaping ChooseTiming,
         runUpdate: @escaping RunUpdate = ReviewMonitorCodexUpdateProcess.run,
-        scheduleRelaunch: @escaping ScheduleRelaunch = ReviewMonitorApplicationRelauncher.schedule,
-        requestApplicationTermination: @escaping @MainActor () -> Void,
-        presentFailure: @escaping PresentFailure
+        presentFailure: @escaping @MainActor (String, String) -> Void
     ) {
+        self.store = store
         self.check = check
-        self.wait = wait
+        self.now = now
+        self.date = date
+        self.sleepUntil = sleepUntil
         self.publishAvailability = publishAvailability
-        self.prepareForUpdate = prepareForUpdate
+        self.chooseTiming = chooseTiming
         self.runUpdate = runUpdate
-        self.scheduleRelaunch = scheduleRelaunch
-        self.requestApplicationTermination = requestApplicationTermination
         self.presentFailure = presentFailure
     }
 
+    var isBusy: Bool { checkState == .checking || updateTask != nil }
+
     func start() {
-        startMonitoring(checkImmediately: true)
-    }
-
-    private func startMonitoring(checkImmediately: Bool) {
-        guard monitorTask == nil, updateTask == nil else {
-            return
-        }
+        guard monitorTask == nil, stopping == false else { return }
+        let origin = now()
         monitorTask = Task { @MainActor [weak self] in
-            await self?.monitorForUpdate(checkImmediately: checkImmediately)
-            self?.monitorTask = nil
+            guard let self else { return }
+            while Task.isCancelled == false, stopping == false {
+                // Every installation ends with one check, including requests due during it.
+                if updateTask == nil { await performCheck() }
+                guard Task.isCancelled == false, stopping == false else { return }
+                let elapsed = max(0, origin.duration(to: now()).components.seconds)
+                let nextSlot = elapsed / (8 * 60 * 60) + 1
+                let deadline = origin.advanced(by: .seconds(nextSlot * 8 * 60 * 60))
+                do { try await sleepUntil(deadline) } catch { return }
+            }
         }
     }
 
-    func stopAndWait() async {
-        let monitorTask = monitorTask
-        let updateTask = updateTask
+    /// Stop read-only checking before Store shutdown cancels a deferred update or joins installation.
+    func stopChecking() async {
+        stopping = true
         monitorTask?.cancel()
-        self.monitorTask = nil
+        checkTask?.cancel()
+        await checkTask?.value
         await monitorTask?.value
-        await updateTask?.value
-        let successorMonitorTask = self.monitorTask
-        successorMonitorTask?.cancel()
-        self.monitorTask = nil
-        await successorMonitorTask?.value
+        monitorTask = nil
     }
 
-    func requestUpdate() {
-        guard updateTask == nil,
-              availablePlan != nil else {
+    func checkForUpdates() async {
+        guard stopping == false else { return }
+        if let updateTask {
+            await updateTask.value
             return
         }
-        publishAvailability(false)
-        let monitorTask = monitorTask
-        monitorTask?.cancel()
-        updateTask = Task { @MainActor [weak self] in
-            guard let self else {
-                return
-            }
-            await monitorTask?.value
-            let plan: CodexCommandUpdatePlan
-            do {
-                guard case .available(let currentPlan) = try await check() else {
-                    availablePlan = nil
-                    updateTask = nil
-                    startMonitoring(checkImmediately: false)
-                    return
-                }
-                plan = currentPlan
-                availablePlan = currentPlan
-            } catch {
-                updateTask = nil
-                publishAvailability(true)
-                startMonitoring(checkImmediately: false)
-                presentFailure(
-                    "Codex Update Could Not Start",
-                    "ReviewMonitor could not confirm that the Codex update is still available. \(error.localizedDescription)"
-                )
-                return
-            }
-            guard await prepareForUpdate() else {
-                updateTask = nil
-                publishAvailability(true)
-                startMonitoring(checkImmediately: false)
-                return
-            }
-            availablePlan = nil
-            let updateFailure: (any Error)?
-            do {
-                try await runUpdate(plan)
-                updateFailure = nil
-            } catch {
-                codexUpdateLogger.error(
-                    "Codex update failed: \(error.localizedDescription, privacy: .public)"
-                )
-                updateFailure = error
-            }
-            do {
-                try scheduleRelaunch(updateFailure != nil)
-                updateTask = nil
-                requestApplicationTermination()
-            } catch {
-                updateTask = nil
-                if let updateFailure {
-                    presentFailure(
-                        "Codex Could Not Be Updated",
-                        "\(updateFailure.localizedDescription) ReviewMonitor also could not schedule an automatic restart. Quit and reopen the app. \(error.localizedDescription)"
-                    )
-                } else {
-                    presentFailure(
-                        "ReviewMonitor Could Not Restart",
-                        "Codex was updated, but ReviewMonitor could not restart automatically. Quit and reopen the app. \(error.localizedDescription)"
-                    )
-                }
-            }
-        }
+        await performCheck()
     }
 
-    private func monitorForUpdate(checkImmediately: Bool) async {
-        if checkImmediately == false {
-            do {
-                try await wait()
-            } catch {
-                return
-            }
-        }
-        while Task.isCancelled == false, updateTask == nil {
-            do {
-                switch try await check() {
-                case .disabled:
-                    availablePlan = nil
-                    publishAvailability(false)
-                    return
-                case .unavailable:
-                    availablePlan = nil
-                    publishAvailability(false)
-                case .available(let plan):
-                    availablePlan = plan
-                    publishAvailability(true)
+    @discardableResult
+    func requestUpdate() -> Task<Void, Never>? {
+        guard stopping == false else { return nil }
+        if let updateTask { return updateTask }
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { updateTask = nil }
+            if case .failed = store.codexUpdateState, case .failed = store.serverState {
+                await store.start()
+                if stopping == false {
+                    if case .failed(let message) = store.serverState {
+                        presentFailure("Codex Could Not Restart", message)
+                    }
+                    await performCheck()
                 }
-            } catch is CancellationError {
                 return
-            } catch {
-                codexUpdateLogger.error(
-                    "Failed to check for Codex updates: \(error.localizedDescription, privacy: .public)"
-                )
             }
-
+            await performCheck()
+            guard stopping == false else { return }
+            switch checkState {
+            case .failed(let message), .unavailable(let message):
+                presentFailure("Codex Update Could Not Start", message)
+                return
+            default: break
+            }
+            guard case .available(let plan) = checkState,
+                  let timing = await chooseTiming(), stopping == false else { return }
             do {
-                try await wait()
+                let runUpdate = runUpdate
+                try await store.updateCodex(when: timing) { try await runUpdate(plan) }
+            } catch is CancellationError {
             } catch {
-                return
+                if stopping == false {
+                    presentFailure("Codex Could Not Be Updated", error.localizedDescription)
+                }
             }
+            if stopping == false { await performCheck() }
         }
+        updateTask = task
+        return task
+    }
+
+    private func performCheck() async {
+        guard stopping == false else { return }
+        if let checkTask {
+            await checkTask.value
+            return
+        }
+        let previousState = checkState
+        checkState = .checking
+        publishAvailability(false)
+        let task = Task { @MainActor [self] in
+            defer { checkTask = nil }
+            do {
+                let result = try await check()
+                try Task.checkCancellation()
+                switch result {
+                case .available(let plan): checkState = .available(plan)
+                case .upToDate: checkState = .upToDate
+                case .unavailable(let message): checkState = .unavailable(message)
+                }
+                lastCheckedAt = date()
+            } catch is CancellationError {
+                checkState = previousState
+            } catch {
+                checkState = .failed(error.localizedDescription)
+                lastCheckedAt = date()
+            }
+            if case .available = checkState { publishAvailability(true) }
+            else { publishAvailability(false) }
+        }
+        checkTask = task
+        await task.value
     }
 }
 
@@ -222,60 +207,6 @@ private enum ReviewMonitorCodexUpdateProcessError: LocalizedError {
         switch self {
         case .failed(let status, let reason):
             "`codex update` terminated with status \(status) (\(reason))."
-        }
-    }
-}
-
-@MainActor
-enum ReviewMonitorApplicationRelauncher {
-    nonisolated static let failedUpdateLaunchArgument = "--review-monitor-codex-update-failed"
-
-    static func schedule(reportsFailure: Bool) throws {
-        let applicationURL = Bundle.main.bundleURL.standardizedFileURL
-        guard applicationURL.pathExtension == "app" else {
-            throw ReviewMonitorApplicationRelaunchError.invalidApplicationBundle(
-                applicationURL.path
-            )
-        }
-
-        let helper = Process()
-        helper.executableURL = URL(fileURLWithPath: "/bin/sh")
-        helper.arguments = helperArguments(
-            applicationURL: applicationURL,
-            processIdentifier: ProcessInfo.processInfo.processIdentifier,
-            reportsFailure: reportsFailure
-        )
-        helper.environment = ProcessInfo.processInfo.environment
-        helper.currentDirectoryURL = FileManager.default.temporaryDirectory
-        helper.standardInput = FileHandle.nullDevice
-        helper.standardOutput = FileHandle.nullDevice
-        helper.standardError = FileHandle.nullDevice
-        try helper.run()
-    }
-
-    static func helperArguments(
-        applicationURL: URL,
-        processIdentifier: pid_t,
-        reportsFailure: Bool
-    ) -> [String] {
-        [
-            "-c",
-            "while /bin/kill -0 \"$1\" 2>/dev/null; do /bin/sleep 0.1; done; if [ -n \"$3\" ]; then exec /usr/bin/open \"$2\" --args \"$3\"; else exec /usr/bin/open \"$2\"; fi",
-            "reviewmonitor-relaunch",
-            String(processIdentifier),
-            applicationURL.path,
-            reportsFailure ? failedUpdateLaunchArgument : "",
-        ]
-    }
-}
-
-private enum ReviewMonitorApplicationRelaunchError: LocalizedError {
-    case invalidApplicationBundle(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .invalidApplicationBundle(let path):
-            "ReviewMonitor cannot relaunch because its application bundle is invalid: \(path)"
         }
     }
 }

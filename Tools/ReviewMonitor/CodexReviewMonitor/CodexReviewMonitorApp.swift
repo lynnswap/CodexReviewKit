@@ -79,10 +79,6 @@ struct ReviewMonitorLaunchContext: Sendable {
             && isolatedTestConfiguration?.validationFailure == nil
     }
 
-    var reportsFailedCodexUpdate: Bool {
-        arguments.contains(ReviewMonitorApplicationRelauncher.failedUpdateLaunchArgument)
-    }
-
     fileprivate var isolatedTestConfiguration: ReviewMonitorIsolatedTestConfiguration? {
         ReviewMonitorLaunchEnvironment.isolatedTestConfiguration(
             environment: environment,
@@ -411,9 +407,9 @@ final class ReviewMonitorLifecycleController {
         let store = store
         let prepareForApplicationTermination = prepareForApplicationTermination
         terminationTask = Task { @MainActor [weak self] in
-            await launchTask?.value
             await prepareForApplicationTermination()
             await store.shutdown()
+            await launchTask?.value
             self?.terminationTask = nil
             application.replyToApplicationShouldTerminate(true)
         }
@@ -454,7 +450,7 @@ struct ReviewMonitorAppComposition {
         CodexReviewStore,
         @escaping @MainActor () -> Void
     ) -> NSWindowController
-    var makeSettingsWindowController: () -> NSWindowController
+    var makeSettingsWindowController: (ReviewMonitorCodexUpdater?) -> NSWindowController
 
     init(
         makeStore: @escaping (
@@ -477,9 +473,10 @@ struct ReviewMonitorAppComposition {
             CodexReviewStore,
             @escaping @MainActor () -> Void
         ) -> NSWindowController,
-        makeSettingsWindowController: @escaping () -> NSWindowController = {
+        makeSettingsWindowController: @escaping (ReviewMonitorCodexUpdater?) -> NSWindowController = { updater in
             ReviewMonitorSettingsWindowController(
-                runtimePreferencesStore: CodexReviewRuntime.UserDefaultsPreferencesStore()
+                runtimePreferencesStore: CodexReviewRuntime.UserDefaultsPreferencesStore(),
+                updater: updater
             )
         }
     ) {
@@ -572,9 +569,10 @@ struct ReviewMonitorAppComposition {
                     showSettings: showSettings
                 )
             },
-            makeSettingsWindowController: {
+            makeSettingsWindowController: { updater in
                 ReviewMonitorSettingsWindowController(
-                    runtimePreferencesStore: runtimePreferencesStore
+                    runtimePreferencesStore: runtimePreferencesStore,
+                    updater: updater
                 )
             }
         )
@@ -601,7 +599,7 @@ final class ReviewMonitorAppDelegate: NSObject, NSApplicationDelegate {
     lazy var lifecycle: ReviewMonitorLifecycleController = {
         let lifecycle = composition.makeLifecycleController(store, launchContext)
         lifecycle.setApplicationTerminationPreparation { [weak self] in
-            await self?.codexUpdater?.stopAndWait()
+            await self?.codexUpdater?.stopChecking()
         }
         return lifecycle
     }()
@@ -611,6 +609,7 @@ final class ReviewMonitorAppDelegate: NSObject, NSApplicationDelegate {
         }
         let store = store
         return ReviewMonitorCodexUpdater(
+            store: store,
             check: checker.check,
             publishAvailability: { available in
                 NotificationCenter.default.post(
@@ -621,14 +620,8 @@ final class ReviewMonitorAppDelegate: NSObject, NSApplicationDelegate {
                     ]
                 )
             },
-            prepareForUpdate: { [weak self] in
-                guard let self else {
-                    return false
-                }
-                return await prepareForCodexUpdate(store: store)
-            },
-            requestApplicationTermination: {
-                NSApp.terminate(nil)
+            chooseTiming: { [weak self] in
+                self?.codexUpdateTiming(store: store)
             },
             presentFailure: { [weak self] title, message in
                 self?.presentCodexUpdateFailure(title: title, message: message)
@@ -643,7 +636,7 @@ final class ReviewMonitorAppDelegate: NSObject, NSApplicationDelegate {
         presentationAnchorSource.window = windowController.window
         return windowController
     }()
-    lazy var settingsWindowController = composition.makeSettingsWindowController()
+    lazy var settingsWindowController = composition.makeSettingsWindowController(codexUpdater)
 
     override init() {
         launchContextProvider = {
@@ -686,12 +679,6 @@ final class ReviewMonitorAppDelegate: NSObject, NSApplicationDelegate {
         if launchMode == .application {
             NSApp.activate(ignoringOtherApps: true)
         }
-        if launchContext.reportsFailedCodexUpdate {
-            presentCodexUpdateFailure(
-                title: "Codex Could Not Be Updated",
-                message: "ReviewMonitor restarted without updating Codex. Run `codex update` in Terminal for details."
-            )
-        }
         startCodexUpdateMonitoring()
         lifecycle.applicationDidFinishLaunching(
             launchMode: launchMode
@@ -723,22 +710,24 @@ final class ReviewMonitorAppDelegate: NSObject, NSApplicationDelegate {
         windowController.window?.makeKeyAndOrderFront(sender)
     }
 
-    private func prepareForCodexUpdate(
-        store: CodexReviewStore
-    ) async -> Bool {
-        if store.hasRunningJobs {
-            let alert = NSAlert()
-            alert.alertStyle = .warning
-            alert.messageText = "Stop Active Reviews and Update Codex?"
-            alert.informativeText = "Active and queued reviews will be cancelled. ReviewMonitor will restart after Codex is updated."
-            alert.addButton(withTitle: "Stop Reviews and Update").hasDestructiveAction = true
-            alert.addButton(withTitle: "Cancel")
-            guard alert.runModal() == .alertFirstButtonReturn else {
-                return false
-            }
+    private func codexUpdateTiming(store: CodexReviewStore) -> CodexReviewStore.CodexUpdateTiming? {
+        guard store.hasRunningJobs else { return .immediately }
+        let response = Self.makeCodexUpdateAlert().runModal()
+        switch response {
+        case .alertFirstButtonReturn: return .afterCurrentReviews
+        case .alertSecondButtonReturn: return .immediately
+        default: return nil
         }
-        await store.shutdown()
-        return true
+    }
+
+    static func makeCodexUpdateAlert() -> NSAlert {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Update Codex After Reviews?"
+        alert.informativeText = "Let current reviews finish, or stop them to update now. New requests will wait in the queue. ReviewMonitor will stay open."
+        alert.addButton(withTitle: "Update After Reviews")
+        alert.addButton(withTitle: "Stop Reviews and Update").hasDestructiveAction = true
+        return alert
     }
 
     private func startCodexUpdateMonitoring() {

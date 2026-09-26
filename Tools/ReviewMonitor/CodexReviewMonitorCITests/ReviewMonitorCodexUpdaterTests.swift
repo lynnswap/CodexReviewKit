@@ -1,382 +1,291 @@
 import Foundation
+import AppKit
+import SwiftUI
+import CodexReviewHost
 import Testing
-@_spi(ApplicationHostSupport) import CodexReviewHost
+@_spi(ApplicationHostSupport) import CodexReview
+@_spi(PreviewSupport) import ReviewUI
 @testable import CodexReviewMonitor
 
 @Suite("ReviewMonitor Codex updater", .serialized)
 @MainActor
 struct ReviewMonitorCodexUpdaterTests {
-    @Test func checksAtLaunchAndAgainAfterTheSchedule() async {
-        let plan = updatePlan()
-        var results: [CodexCommandUpdateCheckResult] = [
-            .unavailable,
-            .available(plan),
-        ]
-        var checkCount = 0
-        var publishedAvailability: [Bool] = []
-        let available = TestSignal()
-        let scheduledAfterAvailable = TestSignal()
-        let waitCount = UpdateTestCounter()
-        let updater = ReviewMonitorCodexUpdater(
-            check: {
-                checkCount += 1
-                return results.removeFirst()
-            },
-            wait: {
-                if await waitCount.increment() == 2 {
-                    await scheduledAfterAvailable.signal()
-                    try await Task.sleep(for: .seconds(60))
-                }
-            },
-            publishAvailability: { value in
-                publishedAvailability.append(value)
-                if value {
-                    Task { await available.signal() }
-                }
-            },
-            prepareForUpdate: { true },
-            requestApplicationTermination: {},
-            presentFailure: { _, _ in }
-        )
-
+    @Test func launchAndEightHourChecksStayAnchoredAcrossManualChecks() async {
+        let clock = UpdateTestClock()
+        var checks = 0
+        let updater = makeUpdater(clock: clock, check: { checks += 1; return .upToDate })
         updater.start()
-        await available.wait()
-        await scheduledAfterAvailable.wait()
-
-        #expect(checkCount == 2)
-        #expect(await waitCount.value == 2)
-        #expect(publishedAvailability == [false, true])
-        await updater.stopAndWait()
+        updater.start()
+        #expect(await waitUntil { checks == 1 && clock.waiterCount == 1 })
+        clock.advance(by: .seconds(3 * 3600))
+        await updater.checkForUpdates()
+        #expect(checks == 2)
+        clock.advance(by: .seconds(5 * 3600))
+        #expect(await waitUntil { checks == 3 && clock.deadlines.last == 16 * 3600 })
+        clock.advance(by: .seconds(8 * 3600))
+        #expect(await waitUntil { checks == 4 && clock.deadlines.last == 24 * 3600 })
+        let expectedDeadlines: [Int64] = [8 * 3600, 16 * 3600, 24 * 3600]
+        #expect(clock.deadlines == expectedDeadlines)
+        await updater.stopChecking()
+        #expect(clock.waiterCount == 0)
     }
 
-    @Test func disabledCheckStopsWithoutSchedulingAnotherCheck() async {
-        let checkCompleted = TestSignal()
-        let waitCount = UpdateTestCounter()
-        let updater = ReviewMonitorCodexUpdater(
-            check: { .disabled },
-            wait: {
-                await waitCount.increment()
-            },
-            publishAvailability: { _ in
-                Task { await checkCompleted.signal() }
-            },
-            prepareForUpdate: { true },
-            requestApplicationTermination: {},
-            presentFailure: { _, _ in }
-        )
-
+    @Test func wakingAfterSeveralIntervalsChecksOnce() async {
+        let clock = UpdateTestClock()
+        var checks = 0
+        let updater = makeUpdater(clock: clock, check: { checks += 1; return .upToDate })
         updater.start()
-        await checkCompleted.wait()
+        #expect(await waitUntil { checks == 1 && clock.waiterCount == 1 })
+        clock.advance(by: .seconds(26 * 3600))
+        #expect(await waitUntil { checks == 2 && clock.deadlines.last == 32 * 3600 })
+        await updater.stopChecking()
+        #expect(checks == 2)
+    }
+
+    @Test func manualAndAutomaticChecksJoinTheSameRequest() async {
+        let clock = UpdateTestClock()
+        let entered = TestSignal()
+        let release = TestGate()
+        var checks = 0
+        let updater = makeUpdater(clock: clock, check: {
+            checks += 1
+            await entered.signal()
+            await release.wait()
+            return .upToDate
+        })
+        let manual = Task { await updater.checkForUpdates() }
+        await entered.wait()
+        let second = Task { await updater.checkForUpdates() }
+        updater.start()
+        await release.open()
+        await manual.value
+        await second.value
+        #expect(await waitUntil { clock.waiterCount == 1 })
+        #expect(checks == 1)
+        #expect(updater.checkState == .upToDate)
+        await updater.stopChecking()
+    }
+
+    @Test func updateKeepsTheStoreAliveAndCoalescesChecksUntilInstallationFinishes() async throws {
+        let clock = UpdateTestClock()
+        let store = ReviewMonitorUpdatePreview().store
+        await store.start()
+        let plan = updatePlan()
+        var checks = 0
+        var installations = 0
+        let entered = TestSignal()
+        let release = TestGate()
+        let updater = makeUpdater(store: store, clock: clock, check: {
+            checks += 1
+            return checks <= 2 ? .available(plan) : .upToDate
+        }, runUpdate: { received in
+            #expect(received == plan)
+            installations += 1
+            await entered.signal()
+            await release.wait()
+        })
+        updater.start()
+        #expect(await waitUntil { checks == 1 && clock.waiterCount == 1 })
+        let update = try #require(updater.requestUpdate())
+        await entered.wait()
+        let duplicate = try #require(updater.requestUpdate())
+        let manual = Task { await updater.checkForUpdates() }
+        clock.advance(by: .seconds(8 * 3600))
+        #expect(await waitUntil { clock.deadlines.last == 16 * 3600 })
+        #expect(checks == 2)
+        await release.open()
+        await update.value
+        await duplicate.value
+        await manual.value
+        #expect(installations == 1)
+        #expect(checks == 3)
+        #expect(updater.checkState == .upToDate)
+        #expect(store.serverState == .running)
+        #expect(store.codexUpdateState == .idle)
+        await updater.stopChecking()
+        await store.shutdown()
+    }
+
+    @Test func stoppingChecksDoesNotWaitForAnUpdateThatStoreShutdownOwns() async throws {
+        let store = ReviewMonitorUpdatePreview().store
+        await store.start()
+        let entered = TestSignal()
+        let release = TestGate()
+        var observedCancellation = false
+        let updater = makeUpdater(store: store, check: { .available(updatePlan()) }, runUpdate: { _ in
+            await entered.signal()
+            await release.wait()
+            observedCancellation = Task.isCancelled
+        })
+        let update = try #require(updater.requestUpdate())
+        await entered.wait()
+        await updater.stopChecking()
+        var stopped = false
+        let shutdown = Task { await store.shutdown(); stopped = true }
         await Task.yield()
-
-        #expect(await waitCount.value == 0)
+        #expect(stopped == false)
+        await release.open()
+        await update.value
+        await shutdown.value
+        #expect(observedCancellation == false)
+        #expect(store.serverState == .stopped)
     }
 
-    @Test func acceptedUpdateSchedulesOneHelperBeforeRequestingTermination() async {
-        let plan = updatePlan()
-        let available = TestSignal()
-        var publishedAvailability: [Bool] = []
-        var preparedUpdateCount = 0
-        var updatedPlans: [CodexCommandUpdatePlan] = []
-        var scheduledFailureValues: [Bool] = []
-        var terminationRequestCount = 0
-        let terminationRequested = TestSignal()
-        let updater = ReviewMonitorCodexUpdater(
-            check: { .available(plan) },
-            publishAvailability: { value in
-                publishedAvailability.append(value)
-                if value {
-                    Task { await available.signal() }
-                }
-            },
-            prepareForUpdate: {
-                preparedUpdateCount += 1
-                return true
-            },
-            runUpdate: { updatedPlans.append($0) },
-            scheduleRelaunch: { scheduledFailureValues.append($0) },
-            requestApplicationTermination: {
-                terminationRequestCount += 1
-                Task { await terminationRequested.signal() }
-            },
-            presentFailure: { _, _ in }
-        )
-        updater.start()
-        await available.wait()
-
-        updater.requestUpdate()
-        updater.requestUpdate()
-        await terminationRequested.wait()
-
-        #expect(preparedUpdateCount == 1)
-        #expect(updatedPlans == [plan])
-        #expect(scheduledFailureValues == [false])
-        #expect(terminationRequestCount == 1)
-        #expect(publishedAvailability == [true, false])
-        await updater.stopAndWait()
+    @Test func checkResultsAndAttemptTimeDistinguishFailureAndUnsupportedInstallations() async {
+        let clock = UpdateTestClock()
+        var checks = 0
+        let updater = makeUpdater(clock: clock, check: {
+            checks += 1
+            if checks == 1 { throw UpdateTestFailure.offline }
+            if checks == 2 { return .unavailable("Manual installation") }
+            return .upToDate
+        })
+        await updater.checkForUpdates()
+        #expect(updater.checkState == .failed("Offline"))
+        #expect(updater.lastCheckedAt == clock.date)
+        clock.advance(by: .seconds(5))
+        await updater.checkForUpdates()
+        #expect(updater.checkState == .unavailable("Manual installation"))
+        #expect(updater.lastCheckedAt == clock.date)
+        await updater.checkForUpdates()
+        #expect(updater.checkState == .upToDate)
+        await updater.stopChecking()
     }
 
-    @Test func stalePlanIsDiscardedBeforeTheStoreShutsDown() async {
-        let plan = updatePlan()
-        let available = TestSignal()
-        let waitCount = UpdateTestCounter()
-        var results: [CodexCommandUpdateCheckResult] = [
-            .available(plan),
-            .unavailable,
-            .available(plan),
-        ]
-        var checkCount = 0
-        var publishedAvailability: [Bool] = []
-        var prepareForUpdateCount = 0
-        var runUpdateCount = 0
-        let updater = ReviewMonitorCodexUpdater(
-            check: {
-                checkCount += 1
-                return results.removeFirst()
-            },
-            wait: {
-                let count = await waitCount.increment()
-                if count != 2 {
-                    try await Task.sleep(for: .seconds(60))
-                }
-            },
-            publishAvailability: { value in
-                publishedAvailability.append(value)
-                if value {
-                    Task { await available.signal() }
-                }
-            },
-            prepareForUpdate: {
-                prepareForUpdateCount += 1
-                return true
-            },
-            runUpdate: { _ in runUpdateCount += 1 },
-            requestApplicationTermination: {},
-            presentFailure: { _, _ in }
-        )
-        updater.start()
-        await available.wait()
-
-        updater.requestUpdate()
-        for _ in 0..<100 where checkCount < 3 {
-            await Task.yield()
-        }
-
-        #expect(checkCount == 3)
-        #expect(prepareForUpdateCount == 0)
-        #expect(runUpdateCount == 0)
-        #expect(publishedAvailability.filter { $0 }.count == 2)
-        await updater.stopAndWait()
+    @Test func updateFailureKeepsItsStoreErrorAndReportsItWithoutRelaunching() async throws {
+        let store = ReviewMonitorUpdatePreview().store
+        await store.start()
+        var failures: [String] = []
+        let updater = makeUpdater(store: store, check: { .available(updatePlan()) },
+            runUpdate: { _ in throw UpdateTestFailure.offline },
+            presentFailure: { _, message in failures.append(message) })
+        await updater.requestUpdate()?.value
+        #expect(failures == ["Offline"])
+        #expect(store.codexUpdateState == .failed("Offline"))
+        #expect(store.serverState == .running)
+        await updater.stopChecking()
+        await store.shutdown()
     }
 
-    @Test func reviewArrivingDuringRevalidationRequiresFreshConfirmation() async {
-        let plan = updatePlan()
-        let available = TestSignal()
-        let revalidationStarted = TestSignal()
-        let releaseRevalidation = TestGate()
-        let preparationRejected = TestSignal()
-        var checkCount = 0
-        var publishedAvailability: [Bool] = []
-        var runUpdateCount = 0
-        let updater = ReviewMonitorCodexUpdater(
-            check: {
-                checkCount += 1
-                if checkCount == 1 {
-                    return .available(plan)
-                }
-                await revalidationStarted.signal()
-                await releaseRevalidation.wait()
-                return .available(plan)
-            },
-            publishAvailability: { value in
-                publishedAvailability.append(value)
-                if value, publishedAvailability.count == 1 {
-                    Task { await available.signal() }
-                }
-            },
-            prepareForUpdate: {
-                await preparationRejected.signal()
-                return false
-            },
-            runUpdate: { _ in runUpdateCount += 1 },
-            requestApplicationTermination: {},
-            presentFailure: { _, _ in }
-        )
-        updater.start()
-        await available.wait()
-        updater.requestUpdate()
-        await revalidationStarted.wait()
-
-        await releaseRevalidation.open()
-        await preparationRejected.wait()
-
-        #expect(checkCount == 2)
-        #expect(runUpdateCount == 0)
-        #expect(publishedAvailability == [true, false, true])
-        await updater.stopAndWait()
+    @Test func updateAlertOffersDeferredAndImmediateChoices() {
+        let alert = ReviewMonitorAppDelegate.makeCodexUpdateAlert()
+        #expect(alert.buttons.map(\.title) == ["Update After Reviews", "Stop Reviews and Update"])
+        #expect(alert.buttons[1].hasDestructiveAction)
     }
 
-    @Test func updateAndRelaunchFailuresPreserveThePrimaryUpdateError() async {
-        let plan = updatePlan()
-        let available = TestSignal()
-        var publishedAvailability: [Bool] = []
-        var terminationRequestCount = 0
-        var failures: [(String, String)] = []
-        let failurePresented = TestSignal()
-        let updater = ReviewMonitorCodexUpdater(
-            check: { .available(plan) },
-            publishAvailability: { value in
-                publishedAvailability.append(value)
-                if value, publishedAvailability.count == 1 {
-                    Task { await available.signal() }
-                }
-            },
-            prepareForUpdate: { true },
-            runUpdate: { _ in throw UpdateTestFailure.injected },
-            scheduleRelaunch: { _ in throw UpdateTestFailure.injected },
-            requestApplicationTermination: {
-                terminationRequestCount += 1
-            },
-            presentFailure: {
-                failures.append(($0, $1))
-                Task { await failurePresented.signal() }
-            }
+    @Test func settingsPaneSharesTheUpdaterAndDoesNotStartCheckingOnOpen() {
+        var checks = 0
+        let updater = makeUpdater(check: { checks += 1; return .upToDate })
+        let controller = ReviewMonitorSettingsWindowController(
+            runtimePreferencesStore: CodexReviewRuntime.UserDefaultsPreferencesStore(),
+            updater: updater
         )
-        updater.start()
-        await available.wait()
-
-        updater.requestUpdate()
-        await failurePresented.wait()
-
-        #expect(terminationRequestCount == 0)
-        #expect(publishedAvailability == [true, false])
-        #expect(failures.count == 1)
-        #expect(failures.first?.0 == "Codex Could Not Be Updated")
-        #expect(failures.first?.1.contains("also could not schedule") == true)
-        await updater.stopAndWait()
+        let tabs = controller.contentViewController as? NSTabViewController
+        #expect(tabs?.tabViewItems.map(\.label) == ["Runtime", "Updates"])
+        let pane = tabs?.tabViewItems.last?.viewController as? ReviewMonitorUpdateSettingsViewController
+        #expect(pane?.rootView.updater === updater)
+        #expect(checks == 0)
     }
 
-    @Test func updateFailureIsReportedToTheRelaunchedApplication() async {
-        let plan = updatePlan()
-        let available = TestSignal()
-        let terminationRequested = TestSignal()
-        var scheduledFailureValues: [Bool] = []
-        let updater = ReviewMonitorCodexUpdater(
-            check: { .available(plan) },
-            publishAvailability: { value in
-                if value {
-                    Task { await available.signal() }
-                }
-            },
-            prepareForUpdate: { true },
-            runUpdate: { _ in throw UpdateTestFailure.injected },
-            scheduleRelaunch: { scheduledFailureValues.append($0) },
-            requestApplicationTermination: {
-                Task { await terminationRequested.signal() }
-            },
-            presentFailure: { _, _ in }
-        )
-        updater.start()
-        await available.wait()
-
-        updater.requestUpdate()
-        await terminationRequested.wait()
-
-        #expect(scheduledFailureValues == [true])
-        await updater.stopAndWait()
+    @Test func explicitUpdateReportsCheckFailureWithoutInstalling() async {
+        var failures: [String] = []
+        var installations = 0
+        let updater = makeUpdater(check: { throw UpdateTestFailure.offline },
+            runUpdate: { _ in installations += 1 },
+            presentFailure: { _, message in failures.append(message) })
+        await updater.requestUpdate()?.value
+        #expect(installations == 0)
+        #expect(failures == ["Offline"])
+        #expect(updater.checkState == .failed("Offline"))
+        await updater.stopChecking()
     }
 
-    @Test func applicationTerminationWaitsForAnUncancelledUpdate() async {
-        let plan = updatePlan()
-        let available = TestSignal()
-        let updateStarted = TestSignal()
-        let releaseUpdate = TestGate()
-        let stopCompleted = UpdateTestCounter()
-        var updateObservedCancellation: [Bool] = []
-        let updater = ReviewMonitorCodexUpdater(
-            check: { .available(plan) },
-            publishAvailability: { value in
-                if value {
-                    Task { await available.signal() }
-                }
-            },
-            prepareForUpdate: { true },
-            runUpdate: { _ in
-                await updateStarted.signal()
-                await releaseUpdate.wait()
-                updateObservedCancellation.append(Task.isCancelled)
-            },
-            scheduleRelaunch: { _ in },
-            requestApplicationTermination: {},
-            presentFailure: { _, _ in }
-        )
-        updater.start()
-        await available.wait()
-        updater.requestUpdate()
-        await updateStarted.wait()
-
-        let stop = Task { @MainActor in
-            await updater.stopAndWait()
-            await stopCompleted.increment()
-        }
-        await Task.yield()
-        #expect(await stopCompleted.value == 0)
-
-        await releaseUpdate.open()
-        await stop.value
-        #expect(updateObservedCancellation == [false])
+    @Test func retryRecoversTheRuntimeWithoutInstallingAgain() async {
+        let preview = ReviewMonitorUpdatePreview()
+        await preview.run(.failed)
+        var installations = 0
+        let updater = makeUpdater(store: preview.store, check: { .upToDate },
+            runUpdate: { _ in installations += 1 })
+        await updater.requestUpdate()?.value
+        #expect(installations == 0)
+        #expect(preview.store.serverState == .running)
+        await updater.stopChecking()
+        await preview.stop()
     }
 
-    @Test func helperWaitsForThisAppThenRelaunchesWithTheResult() {
-        let applicationURL = URL(fileURLWithPath: "/Applications/ReviewMonitor.app")
-
-        let arguments = ReviewMonitorApplicationRelauncher.helperArguments(
-            applicationURL: applicationURL,
-            processIdentifier: 42,
-            reportsFailure: true
+    private func makeUpdater(
+        store: CodexReviewStore? = nil,
+        clock: UpdateTestClock = UpdateTestClock(),
+        check: @escaping ReviewMonitorCodexUpdater.Check,
+        runUpdate: @escaping ReviewMonitorCodexUpdater.RunUpdate = { _ in },
+        presentFailure: @escaping @MainActor (String, String) -> Void = { _, _ in }
+    ) -> ReviewMonitorCodexUpdater {
+        ReviewMonitorCodexUpdater(
+            store: store ?? ReviewMonitorUpdatePreview().store,
+            check: check,
+            now: { clock.instant },
+            date: { clock.date },
+            sleepUntil: { try await clock.sleep(until: $0) },
+            publishAvailability: { _ in },
+            chooseTiming: { .afterCurrentReviews },
+            runUpdate: runUpdate,
+            presentFailure: presentFailure
         )
-
-        #expect(arguments[0] == "-c")
-        #expect(arguments[2...] == [
-            "reviewmonitor-relaunch",
-            "42",
-            applicationURL.path,
-            ReviewMonitorApplicationRelauncher.failedUpdateLaunchArgument,
-        ])
-        #expect(arguments[1].contains("/usr/bin/open \"$2\""))
-    }
-
-    @Test func failedUpdateRelaunchArgumentIsRecognizedByLaunchContext() {
-        let context = ReviewMonitorLaunchContext(
-            environment: [:],
-            arguments: [
-                "ReviewMonitor",
-                ReviewMonitorApplicationRelauncher.failedUpdateLaunchArgument,
-            ],
-            launchMode: .application
-        )
-
-        #expect(context.reportsFailedCodexUpdate)
     }
 
     private func updatePlan() -> CodexCommandUpdatePlan {
-        CodexCommandUpdatePlan(
-            executableURL: URL(fileURLWithPath: "/opt/homebrew/bin/codex"),
-            environment: ["PATH": "/opt/homebrew/bin:/usr/bin:/bin"]
-        )
+        .init(executableURL: URL(fileURLWithPath: "/opt/homebrew/bin/codex"), environment: [:])
     }
 }
 
-private enum UpdateTestFailure: Error {
-    case injected
+private enum UpdateTestFailure: LocalizedError {
+    case offline
+    var errorDescription: String? { "Offline" }
 }
 
-private actor UpdateTestCounter {
-    private(set) var value = 0
+@MainActor
+private final class UpdateTestClock {
+    let origin = ContinuousClock.now
+    var instant: ContinuousClock.Instant
+    private var waiters: [UUID: (ContinuousClock.Instant, CheckedContinuation<Void, any Error>)] = [:]
+    private(set) var deadlines: [Int64] = []
+    var waiterCount: Int { waiters.count }
+    var date: Date { Date(timeIntervalSince1970: Double(origin.duration(to: instant).components.seconds)) }
 
-    @discardableResult
-    func increment() -> Int {
-        value += 1
-        return value
+    init() { instant = origin }
+
+    func advance(by duration: Duration) {
+        instant = instant.advanced(by: duration)
+        let due = waiters.filter { $0.value.0 <= instant }
+        for (id, waiter) in due {
+            waiters.removeValue(forKey: id)
+            waiter.1.resume()
+        }
     }
+
+    func sleep(until deadline: ContinuousClock.Instant) async throws {
+        let id = UUID()
+        deadlines.append(origin.duration(to: deadline).components.seconds)
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            try await withCheckedThrowingContinuation { continuation in
+                if deadline <= instant { continuation.resume() }
+                else { waiters[id] = (deadline, continuation) }
+            }
+        } onCancel: {
+            Task { @MainActor in
+                self.waiters.removeValue(forKey: id)?.1.resume(throwing: CancellationError())
+            }
+        }
+    }
+}
+
+@MainActor
+private func waitUntil(_ condition: () -> Bool) async -> Bool {
+    let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+    while condition() == false {
+        if ContinuousClock.now >= deadline { return false }
+        await Task.yield()
+    }
+    return true
 }

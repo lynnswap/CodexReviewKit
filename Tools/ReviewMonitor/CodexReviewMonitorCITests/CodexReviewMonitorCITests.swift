@@ -94,7 +94,7 @@ struct CodexReviewMonitorCITests {
         #expect(responder.replies == [true])
     }
 
-    @Test func terminationCancelsAndAwaitsLaunchBeforeShutdown() async {
+    @Test func terminationStartsShutdownBeforeJoiningCancelledLaunch() async {
         let store = FakeLifecycleStore(blocksStart: true)
         let lifecycle = ReviewMonitorLifecycleController(store: store)
         let responder = TerminationReplyRecorder()
@@ -106,15 +106,15 @@ struct CodexReviewMonitorCITests {
         #expect(store.shutdownCallCount == 0)
         #expect(responder.replies.isEmpty)
 
-        await store.startGate.open()
         await store.shutdownStartedSignal.wait()
-
-        #expect(store.startObservedCancellation == [true])
+        #expect(store.startObservedCancellation.isEmpty)
         #expect(store.shutdownCallCount == 1)
         #expect(responder.replies.isEmpty)
 
         await store.shutdownGate.open()
+        await store.startGate.open()
         #expect(await responder.waitForReply() == true)
+        #expect(store.startObservedCancellation == [true])
     }
 
     @Test func appDelegateUsesInjectedCompositionForStartupDependencies() {
@@ -142,7 +142,7 @@ struct CodexReviewMonitorCITests {
                 capturedShowSettings = showSettings
                 return recorder.makeWindowController()
             },
-            makeSettingsWindowController: {
+            makeSettingsWindowController: { _ in
                 settingsWindowController
             }
         )
@@ -242,7 +242,7 @@ struct CodexReviewMonitorCITests {
             makeWindowController: { _, _ in
                 CountingWindowController()
             },
-            makeSettingsWindowController: {
+            makeSettingsWindowController: { _ in
                 settingsWindowController
             }
         )

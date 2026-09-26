@@ -148,7 +148,7 @@ struct CodexCommandUpdateCheckerTests {
             }
         )
 
-        #expect(try await checker.check() == .unavailable)
+        if case .unavailable = try await checker.check() {} else { Issue.record("Expected an unsupported installation") }
     }
 
     @Test func explicitRuntimeHomeOwnsDoctorAndPlanEnvironment() async throws {
@@ -175,19 +175,19 @@ struct CodexCommandUpdateCheckerTests {
         ].joined(separator: ":"))
     }
 
-    @Test func disabledSettingWinsWithoutUpdateProbeDetails() async throws {
+    @Test func startupPreferenceDoesNotDisableMonitorChecks() async throws {
         let result = try await makeChecker(
-            output: report(enabled: "false")
+            output: report(enabled: "false", latestStatus: "newer version is available", action: "brew upgrade --cask codex")
         ).check()
-        #expect(result == .disabled)
+        if case .available = result {} else { Issue.record("Expected a Monitor update despite the CLI startup preference") }
     }
 
-    @Test func currentAndUnsupportedActionsAreUnavailable() async throws {
+    @Test func currentAndUnsupportedActionsHaveDifferentResults() async throws {
         let current = try await makeChecker(output: report(
             enabled: "true",
             latestStatus: "current version is not older"
         )).check()
-        #expect(current == .unavailable)
+        #expect(current == .upToDate)
 
         for action in [
             "manual or unknown",
@@ -200,22 +200,30 @@ struct CodexCommandUpdateCheckerTests {
                 latestStatus: "newer version is available",
                 action: action
             )).check()
-            #expect(unsupported == .unavailable)
+            if case .unavailable = unsupported {} else { Issue.record("Expected an unsupported update action") }
         }
     }
 
-    @Test func malformedContractValuesThrow() async {
+    @Test func missingOrUnknownUpdateStatusThrows() async {
         let reports = [
-            report(enabled: "TRUE"),
             report(enabled: "true", latestStatus: "unknown"),
-            #"{"schemaVersion":2,"checks":{}}"#,
-            #"{"schemaVersion":1,"checks":{}}"#,
-            #"{"schemaVersion":1,"checks":{"updates.status":{"details":{"check for update on startup":["true","false"]}}}}"#,
+            #"{"checks":{}}"#,
+            #"{"checks":{"updates.status":{"details":{"latest version status":["current version is not older","newer version is available"]}}}}"#,
         ]
         for output in reports {
             await #expect(throws: (any Error).self) {
                 try await makeChecker(output: output).check()
             }
+        }
+    }
+
+    @Test func failedVersionProbePreservesItsReason() async {
+        let report = #"{"checks":{"updates.status":{"details":{"latest version probe":"network offline"}}}}"#
+        do {
+            _ = try await makeChecker(output: report).check()
+            Issue.record("Expected a failed check")
+        } catch {
+            #expect(error.localizedDescription.contains("network offline"))
         }
     }
 

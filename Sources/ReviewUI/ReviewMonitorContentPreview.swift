@@ -85,3 +85,32 @@ private struct ReviewMonitorContentPreviewHost: NSViewControllerRepresentable {
     }
 }
 #endif
+
+#if DEBUG
+#Preview("Update Waiting") { ReviewMonitorUpdateScenarioPreview(scenario: .waiting) }
+#Preview("Updating Codex") { ReviewMonitorUpdateScenarioPreview(scenario: .installing) }
+#Preview("Update Recovery") { ReviewMonitorUpdateScenarioPreview(scenario: .failed) }
+#Preview("Reviews Resumed") { ReviewMonitorUpdateScenarioPreview(scenario: .resumed) }
+
+@MainActor
+private struct ReviewMonitorUpdateScenarioPreview: View {
+    let scenario: ReviewMonitorUpdatePreview.Scenario
+    @State private var preview = ReviewMonitorUpdatePreview()
+
+    var body: some View {
+        UpdateController(store: preview.store, available: scenario != .resumed)
+            .frame(width: 860, height: 560)
+            .task { await preview.run(scenario) }
+            .onDisappear { Task { await preview.stop() } }
+    }
+
+    private struct UpdateController: NSViewControllerRepresentable {
+        let store: CodexReviewStore
+        let available: Bool
+        func makeNSViewController(context: Context) -> ReviewMonitorRootViewController {
+            makeReviewMonitorPreviewContentViewControllerForPreview(previewStore: store, isCodexUpdateAvailable: available)
+        }
+        func updateNSViewController(_ controller: ReviewMonitorRootViewController, context: Context) {}
+    }
+}
+#endif
