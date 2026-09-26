@@ -620,6 +620,12 @@ public final class CodexReviewStore {
         let pendingHistoryStarts = requestHistoryStartCancellations(
             cancellation: intent.reviewCancellation
         )
+        let queuedJobIDs = orderedJobs.filter { queuedReviewStarts[$0.id] != nil }.map(\.id)
+        for id in queuedJobIDs {
+            if let job = job(id: id) {
+                try? completeCancellationLocally(jobID: id, sessionID: job.sessionID, cancellation: intent.reviewCancellation)
+            }
+        }
         let generation = previousState.generation.successor()
         if case .replacing(let replacement, _) = previousState {
             replacement.finish(.superseded(runtimeTransitionPurpose(for: intent)))
@@ -632,6 +638,7 @@ public final class CodexReviewStore {
                 return
             }
             await self.waitForHistoryStarts(pendingHistoryStarts)
+            for id in queuedJobIDs { await self.waitForHistoryTerminalCommitIfNeeded(jobID: id) }
             await self.performRuntimeTeardown(
                 previousState: previousState,
                 generation: generation,

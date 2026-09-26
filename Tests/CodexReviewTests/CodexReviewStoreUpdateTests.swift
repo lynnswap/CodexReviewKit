@@ -336,6 +336,46 @@ struct CodexReviewStoreUpdateTests {
         await store.stop()
     }
 
+    @Test(arguments: [false, true])
+    func stopCancelsQueuedCallsAfterUpdateMCPStartupFails(failActivation: Bool) async throws {
+        let mcp = FailingUpdateMCPServer(failActivation: failActivation)
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend(), mcpServerLifecycle: mcp)
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        var requestTask: Task<CodexReviewAPI.Read.Result, any Error>?
+        do {
+            try await store.updateCodex(when: .immediately) {
+                requestTask = Task { try await store.startReview(sessionID: "owner", request: request("queued")) }
+                try #require(await waitUntil { store.jobs.isEmpty == false })
+            }
+            Issue.record("Expected MCP startup failure")
+        } catch { #expect(error.localizedDescription.contains("MCP startup failed")) }
+        let accepted = try #require(store.jobs.first)
+        #expect(accepted.core.lifecycle.status == .queued)
+        await store.stop()
+        #expect(accepted.core.lifecycle.status == .cancelled)
+        #expect(try await requestTask?.value.core.lifecycle.status == .cancelled)
+        #expect(store.queuedReviewStarts.isEmpty)
+    }
+
+    @Test(arguments: [false, true])
+    func stopOwnsQueueBeforeRuntimePublication(starting: Bool) async throws {
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        let release = AsyncGate()
+        backend.holdRuntimePreparation(with: release)
+        let start: Task<Void, Never>? = starting ? Task { await store.start() } : nil
+        if starting { await backend.waitForRuntimePreparation() }
+        store.suspendReviewStarts()
+        let queued = Task { try await store.startReview(sessionID: "owner", request: request("queued")) }
+        try #require(await waitUntil { store.jobs.isEmpty == false })
+        let stop = Task { await store.stop() }
+        try #require(await waitUntil { store.queuedReviewStarts.isEmpty })
+        await release.open()
+        await start?.value
+        await stop.value
+        #expect(try await queued.value.core.lifecycle.status == .cancelled)
+    }
+
     private func request(_ name: String) -> CodexReviewAPI.Start.Request {
         .init(cwd: "/tmp/\(name)", target: .uncommittedChanges)
     }
@@ -355,4 +395,23 @@ private func waitUntil(condition: () -> Bool) async -> Bool {
         await Task.yield()
     }
     return true
+}
+
+@MainActor
+private final class FailingUpdateMCPServer: MCPServerLifecycleOwner {
+    private let failActivation: Bool
+    private let owner = TestingMCPServerLifecycleOwner()
+
+    init(failActivation: Bool) { self.failActivation = failActivation }
+
+    func prepare() async throws -> PreparedMCPServer {
+        if failActivation == false { throw CodexReviewAPI.Error.io("MCP startup failed") }
+        return try await owner.prepare()
+    }
+
+    func activate(_ preparation: PreparedMCPServer) async throws -> MCPServerPublicationSnapshot {
+        throw CodexReviewAPI.Error.io("MCP startup failed")
+    }
+
+    func stop() async throws { try await owner.stop() }
 }
