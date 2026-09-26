@@ -449,6 +449,44 @@ struct CodexReviewStoreUpdateTests {
         #expect(await reviews.recordedCommands().contains { if case .startReview = $0 { true } else { false } } == false)
     }
 
+    @Test func recoveryRequestsCloseForFailureAfterRuntimePublication() async throws {
+        let reviews = FakeCodexReviewBackend()
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: reviews)
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+        let accountEntered = AsyncGate()
+        let accountRelease = AsyncGate()
+        var account: Task<Void, any Error>?
+        var queuedID: String?
+        do {
+            try await store.updateCodex(when: .immediately) {
+                queuedID = try await store.startReview(sessionID: "owner", request: request("queued"), waitTimeout: .zero).jobID
+                account = Task { try await store.performRuntimeAccountChange { _ in
+                    await accountEntered.open()
+                    await accountRelease.wait()
+                } }
+                #expect(await waitUntil { store.runtimeAccountOperations.isEmpty == false })
+                throw UpdateTestError.install
+            }
+            Issue.record("Expected install failure")
+        } catch { #expect(error.localizedDescription.contains("install failed")) }
+        await accountEntered.wait()
+        let runtime = try #require(backend.lastPreparedRuntimeHandle)
+        #expect(runtime.closePurposes.isEmpty)
+        #expect(store.requestRuntimeFailure(handle: runtime, cause: "late runtime failure"))
+        await accountRelease.open()
+        try await account?.value
+        let id = try #require(queuedID)
+        #expect(store.job(id: id)?.core.lifecycle.status == .queued)
+        await store.restart()
+        #expect(store.serverState == .running)
+        #expect(runtime.closePurposes == [.restartSameAccount])
+        try await reviews.waitForStartReview(timeout: .seconds(2))
+        await reviews.yield(.completed(summary: "Done", result: "No findings."))
+        #expect(try await store.awaitReview(sessionID: "owner", jobID: id).core.lifecycle.status == .succeeded)
+        await store.stop()
+    }
+
     private func request(_ name: String) -> CodexReviewAPI.Start.Request {
         .init(cwd: "/tmp/\(name)", target: .uncommittedChanges)
     }
