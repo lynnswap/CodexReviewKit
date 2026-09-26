@@ -268,7 +268,9 @@ func makeReviewMonitorPreviewContentViewControllerForPreview(
     authPhase: CodexReviewAuthModel.Phase = .signedOut,
     account: CodexAccount? = nil,
     serverState: CodexReviewServerState = .running,
-    previewStore: CodexReviewStore? = nil
+    previewStore: CodexReviewStore? = nil,
+    sidebarSelection: SidebarPickerSelection = .workspace,
+    isCodexUpdateAvailable: Bool = false
 ) -> ReviewMonitorRootViewController {
     let store: CodexReviewStore
     switch serverState {
@@ -285,6 +287,8 @@ func makeReviewMonitorPreviewContentViewControllerForPreview(
     store.auth.applyPersistedAccountStates(previewAccounts.map(savedAccountPayload(from:)))
     store.auth.selectPersistedAccount(resolvedAccount?.id)
     let uiState = ReviewMonitorUIState(auth: store.auth)
+    uiState.sidebarSelection = sidebarSelection
+    uiState.isCodexUpdateAvailable = isCodexUpdateAvailable
     if case .running = serverState,
        let previewJob = store.orderedJobs
            .first(where: { $0.core.lifecycle.status == .running })
