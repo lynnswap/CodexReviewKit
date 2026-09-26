@@ -59,6 +59,43 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func diagnosticsPublishRunningReviewWhileBackendStartIsHeld() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let diagnosticsURL = directory.appendingPathComponent("diagnostics.json")
+        let backend = FakeCodexReviewBackend()
+        await backend.holdStartReview(with: AsyncGate())
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            diagnosticsURL: diagnosticsURL
+        )
+        store.suspendReviewStarts()
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            let queued = try await store.startReview(
+                sessionID: "session", request: .init(cwd: "/tmp/queued", target: .uncommittedChanges),
+                waitTimeout: .zero
+            )
+            func diagnosticJob() throws -> [String: Any] {
+                let snapshot = try #require(
+                    JSONSerialization.jsonObject(with: Data(contentsOf: diagnosticsURL)) as? [String: Any]
+                )
+                return try #require((snapshot["jobs"] as? [[String: Any]])?.first)
+            }
+            #expect(try diagnosticJob()["status"] as? String == "queued")
+            #expect(try diagnosticJob()["startedAt"] == nil)
+
+            store.resumeReviewStarts()
+            try await backend.waitForStartReview(timeout: .seconds(2))
+            let runningSnapshot = Result { try diagnosticJob() }
+            try await store.cancelAllRunningJobs()
+            let running = try runningSnapshot.get()
+            #expect(running["id"] as? String == queued.jobID)
+            #expect(running["status"] as? String == "running")
+            #expect(running["startedAt"] != nil)
+            #expect(running["summary"] as? String == "Review started.")
+        }
+    }
+
     @Test func queuedReviewCanBeReadAwaitedAndCancelledBeforeDispatch() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(

@@ -107,6 +107,7 @@ extension CodexReviewStore {
                 ) else { throw CancellationError() }
                 reviewWorkerTasks[job.id] = worker
                 dispatchedWorker = worker
+                writeDiagnosticsIfNeeded()
             } catch {
                 if job.isTerminal == false {
                     if error is CancellationError || Task.isCancelled {
