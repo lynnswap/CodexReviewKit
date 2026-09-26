@@ -83,6 +83,11 @@ struct AccountRateLimitsSectionView: View {
     let account: CodexAccount?
 
     var body: some View {
+        if let message = account?.lastRateLimitError {
+            Section("Usage Update Failed") {
+                Text(message)
+            }
+        }
         ForEach(rateLimits) { window in
             GroupBox{
                 rateLimitsRow(window)
