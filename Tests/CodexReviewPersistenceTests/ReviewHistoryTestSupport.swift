@@ -29,8 +29,8 @@ enum ReviewHistoryTestSupport {
         target: CodexReviewAPI.Target = .uncommittedChanges,
         model: String? = "gpt-5.6-sol",
         startedAt: Date = startedAt
-    ) throws -> StartedReviewRecord {
-        try StartedReviewRecord(
+    ) throws -> AcceptedReviewRecord {
+        try AcceptedReviewRecord(
             id: id,
             cwd: cwd,
             workspaceMetadata: workspaceMetadata,
@@ -38,6 +38,7 @@ enum ReviewHistoryTestSupport {
             sortOrder: sortOrder,
             target: target,
             model: model,
+            acceptedAt: startedAt,
             startedAt: startedAt
         )
     }
@@ -86,12 +87,12 @@ enum ReviewHistoryTestSupport {
     }
 
     static func record(
-        started: StartedReviewRecord,
+        started: AcceptedReviewRecord,
         terminal: TerminalReviewRecord,
         in database: ReviewHistoryDatabase,
         retentionPolicy: ReviewHistoryRetentionPolicy = .default
     ) async throws -> ReviewHistoryMutationResult {
-        try await database.recordStarted(started)
+        try await database.recordAccepted(started)
         return try await database.recordTerminal(
             terminal,
             retentionPolicy: retentionPolicy

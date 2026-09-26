@@ -146,6 +146,10 @@ public final class CodexReviewStore {
     @ObservationIgnored package var applicationShutdownTask: Task<Void, Never>?
     @ObservationIgnored package var reviewAttemptOwnerships: [String: StoreReviewAttemptOwnership] = [:]
     @ObservationIgnored package var reviewWorkerTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored package var queuedReviewStarts: [String: QueuedReviewStart] = [:]
+    @ObservationIgnored package var reviewStartsAreSuspended = false
+    @ObservationIgnored package var queuedReviewDispatchTask: Task<Void, Never>?
+
     @ObservationIgnored package var runtimeStopDetachedReviewWorkerTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored package var reviewTerminalWaiters: [String: [ReviewTerminalWaiter]] = [:]
     @ObservationIgnored package var nextCancellationRequestOrdinal: UInt64 = 0

@@ -200,13 +200,14 @@ struct ReviewUIHistoryTests {
         id: String,
         sortOrder: Double = 0
     ) throws -> RestoredReviewRecord {
-        let started = try StartedReviewRecord(
+        let started = try AcceptedReviewRecord(
             id: id,
             cwd: "/tmp/workspace",
             workspaceSortOrder: 0,
             sortOrder: sortOrder,
             target: .uncommittedChanges,
             model: "gpt-5.6-sol",
+            acceptedAt: Date(timeIntervalSince1970: 100),
             startedAt: Date(timeIntervalSince1970: 100)
         )
         let terminal = try TerminalReviewRecord(
@@ -241,7 +242,9 @@ private actor ReviewUIHistoryPersistence: ReviewHistoryPersistence {
         records
     }
 
-    func recordStarted(_: StartedReviewRecord) async throws {}
+    func recordAccepted(_: AcceptedReviewRecord) async throws {}
+
+    func recordExecutionStarted(id: String, at date: Date) async throws {}
 
     func recordTerminal(
         _: TerminalReviewRecord,

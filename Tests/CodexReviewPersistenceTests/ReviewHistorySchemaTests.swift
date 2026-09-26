@@ -84,6 +84,7 @@ struct ReviewHistorySchemaTests {
             "targetCommitTitle",
             "targetInstructions",
             "startedModel",
+            "acceptedAt",
             "startedAt",
             "phase",
             "terminalModel",
@@ -314,7 +315,17 @@ struct ReviewHistorySchemaTests {
 
         let recordsBefore = try await writer.read { db in
             try #sql(
-                "SELECT *, NULL AS \"reviewThreadID\", NULL AS \"threadID\" FROM \"review_records\"",
+                """
+                SELECT "id", "cwd", "sortOrder", "targetKind",
+                  "targetBranch", "targetCommitSHA", "targetCommitTitle", "targetInstructions",
+                  "startedModel", "startedAt" AS "acceptedAt", "startedAt", "phase",
+                  "terminalModel", "terminalKind", "interruptionKind", "cancellationSource",
+                  "cancellationMessage", "terminalMessage", "endedAt", "summary",
+                  "canonicalReview", "parsedState", "parsedFindingCount", "parsedSource",
+                  "parserVersion", "terminalCommittedAt", "createdAt", "updatedAt",
+                  NULL AS "reviewThreadID", NULL AS "threadID"
+                FROM "review_records"
+                """,
                 as: ReviewRecordRow.self
             )
             .fetchAll(db).sorted { $0.id < $1.id }
@@ -410,7 +421,7 @@ struct ReviewHistorySchemaTests {
             "missing-cancellation-source",
         ]
         for (index, id) in validActiveIDs.enumerated() {
-            try await database.recordStarted(ReviewHistoryTestSupport.started(
+            try await database.recordAccepted(ReviewHistoryTestSupport.started(
                 id: id,
                 sortOrder: Double(index)
             ))
@@ -426,10 +437,10 @@ struct ReviewHistorySchemaTests {
                     try #sql(
                         """
                         INSERT INTO review_records (
-                          id, cwd, sortOrder, targetKind, startedAt, phase, createdAt, updatedAt
+                          id, cwd, sortOrder, targetKind, acceptedAt, startedAt, phase, createdAt, updatedAt
                         ) VALUES (
                           \(bind: id), \(bind: "/tmp/workspace"), 0, \(bind: targetKind),
-                          0, 'active', 0, 0
+                          0, 0, 'active', 0, 0
                         )
                         """
                     )
@@ -763,7 +774,7 @@ struct ReviewHistorySchemaTests {
         let started = try ReviewHistoryTestSupport.started(id: "live-review")
 
         let first = ReviewHistoryDatabase(databaseURL: url)
-        try await first.recordStarted(started)
+        try await first.recordAccepted(started)
         let second = ReviewHistoryDatabase(databaseURL: url)
         await #expect(throws: ReviewHistoryDatabaseError.databaseInUse) {
             _ = try await second.load(retentionPolicy: .default)

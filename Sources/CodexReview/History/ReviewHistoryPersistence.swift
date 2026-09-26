@@ -70,7 +70,8 @@ package protocol ReviewHistoryPersistence: Sendable {
         retentionPolicy: ReviewHistoryRetentionPolicy
     ) async throws -> [RestoredReviewRecord]
 
-    func recordStarted(_ record: StartedReviewRecord) async throws
+    func recordAccepted(_ record: AcceptedReviewRecord) async throws
+    func recordExecutionStarted(id: String, at date: Date) async throws
 
     func recordTerminal(
         _ record: TerminalReviewRecord,
@@ -97,7 +98,9 @@ package struct DisabledReviewHistoryPersistence: ReviewHistoryPersistence {
         []
     }
 
-    package func recordStarted(_: StartedReviewRecord) async throws {}
+    package func recordAccepted(_: AcceptedReviewRecord) async throws {}
+
+    package func recordExecutionStarted(id: String, at date: Date) async throws {}
 
     package func recordTerminal(
         _: TerminalReviewRecord,

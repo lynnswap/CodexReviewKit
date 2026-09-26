@@ -3764,13 +3764,14 @@ struct ReviewUITests {
         let cancellation = ReviewCancellation.sessionClosed(message: " \t")
         let summary = "Session closed."
         let restored = try RestoredReviewRecord(
-            started: StartedReviewRecord(
+            started: AcceptedReviewRecord(
                 id: "job-restored-cancellation",
                 cwd: "/tmp/workspace-alpha",
                 workspaceSortOrder: 0,
                 sortOrder: 0,
                 target: .uncommittedChanges,
                 model: "gpt-5",
+                acceptedAt: Date(timeIntervalSince1970: 200),
                 startedAt: Date(timeIntervalSince1970: 200)
             ),
             terminal: TerminalReviewRecord(

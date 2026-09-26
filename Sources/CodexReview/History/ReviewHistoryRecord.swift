@@ -12,7 +12,7 @@ package struct ReviewHistoryRecordError: LocalizedError, Sendable, Equatable {
     }
 }
 
-package struct StartedReviewRecord: Sendable, Hashable {
+package struct AcceptedReviewRecord: Sendable, Hashable {
     package var id: String
     package var cwd: String
     package var workspaceMetadata: ReviewWorkspaceMetadata?
@@ -20,7 +20,8 @@ package struct StartedReviewRecord: Sendable, Hashable {
     package var sortOrder: Double
     package var target: CodexReviewAPI.Target
     package var model: String?
-    package var startedAt: Date
+    package var acceptedAt: Date
+    package var startedAt: Date?
 
     package init(
         id: String,
@@ -30,7 +31,8 @@ package struct StartedReviewRecord: Sendable, Hashable {
         sortOrder: Double,
         target: CodexReviewAPI.Target,
         model: String?,
-        startedAt: Date
+        acceptedAt: Date,
+        startedAt: Date? = nil
     ) throws {
         guard id.nilIfEmpty != nil else {
             throw ReviewHistoryRecordError("A persisted review requires a stable ID.")
@@ -56,6 +58,7 @@ package struct StartedReviewRecord: Sendable, Hashable {
         self.sortOrder = sortOrder
         self.target = target
         self.model = model?.nilIfEmpty
+        self.acceptedAt = acceptedAt
         self.startedAt = startedAt
     }
 }
@@ -209,11 +212,11 @@ package struct TerminalReviewRecord: Sendable, Hashable {
 }
 
 package struct RestoredReviewRecord: Sendable, Hashable {
-    package var started: StartedReviewRecord
+    package var started: AcceptedReviewRecord
     package var terminal: TerminalReviewRecord
 
     package init(
-        started: StartedReviewRecord,
+        started: AcceptedReviewRecord,
         terminal: TerminalReviewRecord
     ) throws {
         guard started.id == terminal.id else {
@@ -245,7 +248,7 @@ package struct RestoredReviewRecord: Sendable, Hashable {
             target: started.target,
             origin: .restoredHistory,
             core: core,
-            logEntries: terminal.compactLogEntries(startedAt: started.startedAt)
+            logEntries: terminal.compactLogEntries(startedAt: started.startedAt ?? started.acceptedAt)
         )
     }
 }
@@ -266,7 +269,7 @@ private extension PersistedParsedReviewResult.Finding {
 }
 
 private extension TerminalReviewRecord {
-    func lifecycle(startedAt: Date) -> ReviewJobCore.Lifecycle {
+    func lifecycle(startedAt: Date?) -> ReviewJobCore.Lifecycle {
         let status: ReviewJobState
         let cancellation: ReviewCancellation?
         let errorMessage: String?

@@ -7,6 +7,42 @@ import CodexReviewTesting
 @Suite("review history store", .serialized)
 @MainActor
 struct CodexReviewStoreHistoryTests {
+    @Test func executionPersistenceFailureReturnsTheAcceptedJobWithoutDispatch() async throws {
+        let history = ReviewHistoryPersistenceProbe(executionWriteFailure: "Execution start could not be saved.")
+        let backend = FakeCodexReviewBackend()
+        let store = makeStore(history: history, backend: backend)
+        let result = try await store.startReview(
+            sessionID: "session", request: .init(cwd: "/tmp/queued", target: .uncommittedChanges)
+        )
+        #expect(result.core.lifecycle.status == .failed)
+        #expect(result.core.lifecycle.errorMessage == "Execution start could not be saved.")
+        #expect(store.queuedReviewStarts.isEmpty)
+        #expect(await backend.recordedCommands().isEmpty)
+        #expect(await history.terminalRecords().map(\.id) == [result.jobID])
+    }
+
+    @Test func suspensionDuringAcceptancePersistenceKeepsTheRequestQueued() async throws {
+        let entered = AsyncGate()
+        let release = AsyncGate()
+        let history = ReviewHistoryPersistenceProbe(startedWriteEntered: entered, startedWriteRelease: release)
+        let backend = FakeCodexReviewBackend()
+        let store = makeStore(history: history, backend: backend)
+        let request = Task {
+            try await store.startReview(
+                sessionID: "session", request: .init(cwd: "/tmp/queued", target: .uncommittedChanges),
+                waitTimeout: .zero
+            )
+        }
+        await entered.wait()
+        store.suspendReviewStarts()
+        await release.open()
+        let queued = try await request.value
+        #expect(queued.core.lifecycle.status == .queued)
+        #expect(queued.core.lifecycle.startedAt == nil)
+        #expect(await backend.recordedCommands().isEmpty)
+        _ = try await store.cancelReview(jobID: queued.jobID, sessionID: "session")
+    }
+
     @Test func loadOnceRestoresCompactApplicationHistoryWithoutSessionAuthority() async throws {
         let startedAt = Date(timeIntervalSince1970: 100)
         let history = ReviewHistoryPersistenceProbe(records: [
@@ -143,7 +179,7 @@ struct CodexReviewStoreHistoryTests {
         await backend.waitForStartReview()
         let startedRecord = try #require(await history.startedRecords().first)
         #expect(startedRecord.target == .commit(sha: "abc123", title: "Persist me"))
-        #expect(startedRecord.startedAt.timeIntervalSince1970 > 0)
+        #expect(try #require(startedRecord.startedAt).timeIntervalSince1970 > 0)
 
         await backend.yield(.completed(summary: "Done", result: "No findings."))
         #expect(try await review.value.core.lifecycle.status == .succeeded)
@@ -1076,6 +1112,7 @@ struct CodexReviewStoreHistoryTests {
             waitTimeout: .zero
         )
         await backend.waitForStartReview()
+        try #require(await waitForHistoryTestCondition { store.reviewAttemptOwnerships[first.jobID]?.run != nil })
         let firstRun = try #require(store.reviewAttemptOwnerships[first.jobID]?.run)
         await backend.yield(
             .completed(summary: "First", result: "First result"),
@@ -1159,6 +1196,7 @@ struct CodexReviewStoreHistoryTests {
             waitTimeout: .zero
         )
         await backend.waitForStartReview()
+        try #require(await waitForHistoryTestCondition { store.reviewAttemptOwnerships[first.jobID]?.run != nil })
         let firstRun = try #require(store.reviewAttemptOwnerships[first.jobID]?.run)
         await backend.yield(
             .completed(summary: "First", result: "First result"),
@@ -1858,7 +1896,7 @@ struct CodexReviewStoreHistoryTests {
         else {
             throw ReviewHistoryRecordError("History test fixture requires a terminal and start time.")
         }
-        let started = try StartedReviewRecord(
+        let started = try AcceptedReviewRecord(
             id: id,
             cwd: cwd,
             workspaceMetadata: workspaceMetadata,
@@ -1866,6 +1904,7 @@ struct CodexReviewStoreHistoryTests {
             sortOrder: sortOrder,
             target: target,
             model: "gpt-5",
+            acceptedAt: startedAt,
             startedAt: startedAt
         )
         let completed = terminal == .completed
@@ -1950,11 +1989,12 @@ private actor ReviewHistoryPersistenceProbe: ReviewHistoryPersistence {
     private let orderingWriteRelease: AsyncGate?
     private let loadFailure: String?
     private let startedWriteFailure: String?
+    private let executionWriteFailure: String?
     private let terminalWriteFailure: String?
     private let orderingWriteFailure: String?
     private var terminalMutations: [ReviewHistoryMutationResult]
     private var loadCalls = 0
-    private var started: [StartedReviewRecord] = []
+    private var started: [AcceptedReviewRecord] = []
     private var terminals: [TerminalReviewRecord] = []
     private var savedOrderings: [ReviewHistoryOrdering] = []
     private var mutationOperationLog: [String] = []
@@ -1973,6 +2013,7 @@ private actor ReviewHistoryPersistenceProbe: ReviewHistoryPersistence {
         orderingWriteRelease: AsyncGate? = nil,
         loadFailure: String? = nil,
         startedWriteFailure: String? = nil,
+        executionWriteFailure: String? = nil,
         terminalWriteFailure: String? = nil,
         orderingWriteFailure: String? = nil,
         terminalMutation: ReviewHistoryMutationResult = .init(),
@@ -1989,6 +2030,7 @@ private actor ReviewHistoryPersistenceProbe: ReviewHistoryPersistence {
         self.orderingWriteRelease = orderingWriteRelease
         self.loadFailure = loadFailure
         self.startedWriteFailure = startedWriteFailure
+        self.executionWriteFailure = executionWriteFailure
         self.terminalWriteFailure = terminalWriteFailure
         self.orderingWriteFailure = orderingWriteFailure
         self.terminalMutations = terminalMutations ?? [terminalMutation]
@@ -2006,7 +2048,7 @@ private actor ReviewHistoryPersistenceProbe: ReviewHistoryPersistence {
         return records
     }
 
-    func recordStarted(_ record: StartedReviewRecord) async throws {
+    func recordAccepted(_ record: AcceptedReviewRecord) async throws {
         await startedWriteEntered?.open()
         await startedWriteRelease?.waitIgnoringCancellation()
         if let startedWriteFailure {
@@ -2014,6 +2056,15 @@ private actor ReviewHistoryPersistenceProbe: ReviewHistoryPersistence {
         }
         mutationOperationLog.append("started")
         started.append(record)
+    }
+
+    func recordExecutionStarted(id: String, at date: Date) async throws {
+        if let executionWriteFailure {
+            throw ReviewHistoryPersistenceProbeError(message: executionWriteFailure)
+        }
+        if let index = started.firstIndex(where: { $0.id == id }) {
+            started[index].startedAt = date
+        }
     }
 
     func recordTerminal(
@@ -2073,7 +2124,7 @@ private actor ReviewHistoryPersistenceProbe: ReviewHistoryPersistence {
     }
 
     func loadCallCount() -> Int { loadCalls }
-    func startedRecords() -> [StartedReviewRecord] { started }
+    func startedRecords() -> [AcceptedReviewRecord] { started }
     func terminalRecords() -> [TerminalReviewRecord] { terminals }
     func orderings() -> [ReviewHistoryOrdering] { savedOrderings }
     func deleteAllCallCount() -> Int { deleteAllCalls }

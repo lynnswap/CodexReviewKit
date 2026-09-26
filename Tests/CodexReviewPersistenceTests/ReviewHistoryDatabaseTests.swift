@@ -6,6 +6,47 @@ import Testing
 
 @Suite("ReviewHistoryDatabase")
 struct ReviewHistoryDatabaseTests {
+    @Test("persists queue acceptance independently of execution start")
+    @MainActor
+    func queuedReviewPersistsWithoutAnExecutionTimestamp() async throws {
+        let (database, writer) = try ReviewHistoryTestSupport.database()
+        let acceptedAt = ReviewHistoryTestSupport.startedAt
+        let queued = try AcceptedReviewRecord(
+            id: "queued", cwd: "/tmp/queued", workspaceSortOrder: 0, sortOrder: 0,
+            target: .uncommittedChanges, model: "gpt-5", acceptedAt: acceptedAt
+        )
+        try await database.recordAccepted(queued)
+        let row = try await writer.read { db in try ReviewRecordRow.find("queued").fetchOne(db) }
+        #expect(row?.phase == "queued")
+        #expect(row?.startedAt == nil)
+        #expect(row?.acceptedAt == ReviewHistoryTimestamp.encode(acceptedAt))
+
+        let executionDate = acceptedAt.addingTimeInterval(120)
+        try await database.recordExecutionStarted(id: queued.id, at: executionDate)
+        _ = try await database.recordTerminal(
+            ReviewHistoryTestSupport.completed(id: queued.id, endedAt: executionDate.addingTimeInterval(10)),
+            retentionPolicy: .default
+        )
+        let restored = try #require(try await database.load(retentionPolicy: .default).first)
+        #expect(restored.started.acceptedAt == acceptedAt)
+        #expect(restored.started.startedAt == executionDate)
+        #expect(restored.makeRestoredJob().core.lifecycle.startedAt == executionDate)
+    }
+
+    @Test("restores an undispatched queue entry as interrupted without inventing execution")
+    @MainActor
+    func queuedReviewIsNotAutomaticallyReplayedAfterProcessExit() async throws {
+        let (database, _) = try ReviewHistoryTestSupport.database()
+        try await database.recordAccepted(AcceptedReviewRecord(
+            id: "queued", cwd: "/tmp/queued", workspaceSortOrder: 0, sortOrder: 0,
+            target: .uncommittedChanges, model: nil, acceptedAt: ReviewHistoryTestSupport.startedAt
+        ))
+        let restored = try #require(try await database.load(retentionPolicy: .default).first)
+        #expect(restored.terminal.terminal == .interrupted(.previousProcessExit))
+        #expect(restored.started.startedAt == nil)
+        #expect(restored.makeRestoredJob().core.lifecycle.startedAt == nil)
+    }
+
     @Test("preserves deep-link identities across a file-backed relaunch", arguments: [
         (nil, nil),
         (nil, "thread"),
@@ -338,7 +379,7 @@ struct ReviewHistoryDatabaseTests {
     @Test("converts abandoned active rows without inventing an end time")
     func orphanConversion() async throws {
         let (database, _) = try ReviewHistoryTestSupport.database()
-        try await database.recordStarted(ReviewHistoryTestSupport.started(id: "orphan"))
+        try await database.recordAccepted(ReviewHistoryTestSupport.started(id: "orphan"))
 
         let restored = try await database.load(retentionPolicy: .default)
         let orphan = try #require(restored.first)
@@ -351,14 +392,14 @@ struct ReviewHistoryDatabaseTests {
     @Test("rejects duplicate application-wide order on start insertion")
     func duplicateStartOrder() async throws {
         let (database, writer) = try ReviewHistoryTestSupport.database()
-        try await database.recordStarted(ReviewHistoryTestSupport.started(
+        try await database.recordAccepted(ReviewHistoryTestSupport.started(
             id: "first",
             cwd: "/tmp/first",
             sortOrder: 0
         ))
 
         await #expect(throws: ReviewHistoryDatabaseError.self) {
-            try await database.recordStarted(ReviewHistoryTestSupport.started(
+            try await database.recordAccepted(ReviewHistoryTestSupport.started(
                 id: "duplicate",
                 cwd: "/tmp/duplicate",
                 sortOrder: 0
@@ -499,7 +540,7 @@ struct ReviewHistoryDatabaseTests {
     @Test("terminal commit preserves admission identity and latest manual order")
     func terminalPreservesStartedFields() async throws {
         let (database, _) = try ReviewHistoryTestSupport.database()
-        try await database.recordStarted(ReviewHistoryTestSupport.started(
+        try await database.recordAccepted(ReviewHistoryTestSupport.started(
             id: "ordered",
             cwd: "/tmp/original",
             workspaceSortOrder: 1,
@@ -527,7 +568,7 @@ struct ReviewHistoryDatabaseTests {
     @Test("recording a start preserves current workspace order")
     func startPreservesWorkspaceOrder() async throws {
         let (database, writer) = try ReviewHistoryTestSupport.database()
-        try await database.recordStarted(ReviewHistoryTestSupport.started(
+        try await database.recordAccepted(ReviewHistoryTestSupport.started(
             id: "existing",
             cwd: "/tmp/shared",
             workspaceSortOrder: 1,
@@ -538,13 +579,13 @@ struct ReviewHistoryDatabaseTests {
             reviews: [.init(id: "existing", sortOrder: 30)]
         ))
 
-        try await database.recordStarted(ReviewHistoryTestSupport.started(
+        try await database.recordAccepted(ReviewHistoryTestSupport.started(
             id: "new-shared",
             cwd: "/tmp/shared",
             workspaceSortOrder: 1,
             sortOrder: 31
         ))
-        try await database.recordStarted(ReviewHistoryTestSupport.started(
+        try await database.recordAccepted(ReviewHistoryTestSupport.started(
             id: "new-workspace",
             cwd: "/tmp/new",
             workspaceSortOrder: 40,
@@ -659,13 +700,13 @@ struct ReviewHistoryDatabaseTests {
             displayTitle: "New",
             kind: .linkedWorktree
         )
-        try await database.recordStarted(ReviewHistoryTestSupport.started(
+        try await database.recordAccepted(ReviewHistoryTestSupport.started(
             id: "old-generation",
             cwd: "/tmp/reused",
             workspaceMetadata: oldMetadata,
             workspaceSortOrder: 20
         ))
-        try await database.recordStarted(ReviewHistoryTestSupport.started(
+        try await database.recordAccepted(ReviewHistoryTestSupport.started(
             id: "new-generation",
             cwd: "/tmp/reused",
             workspaceMetadata: newMetadata,
@@ -715,7 +756,7 @@ struct ReviewHistoryDatabaseTests {
     @Test("terminal-only batch deletes preserve active rows and return exact membership")
     func terminalDeletionSemantics() async throws {
         let (database, writer) = try ReviewHistoryTestSupport.database()
-        try await database.recordStarted(ReviewHistoryTestSupport.started(
+        try await database.recordAccepted(ReviewHistoryTestSupport.started(
             id: "active",
             cwd: "/tmp/active",
             sortOrder: 0
@@ -788,7 +829,7 @@ struct ReviewHistoryDatabaseTests {
     @Test("delete-all removes only terminal rows and reports every removed ID")
     func deleteAllTerminalReviews() async throws {
         let (database, writer) = try ReviewHistoryTestSupport.database()
-        try await database.recordStarted(ReviewHistoryTestSupport.started(
+        try await database.recordAccepted(ReviewHistoryTestSupport.started(
             id: "active",
             sortOrder: 0
         ))
@@ -822,7 +863,7 @@ struct ReviewHistoryDatabaseTests {
             _ = try await database.load(retentionPolicy: .default)
         }
         await #expect(throws: ReviewHistoryDatabaseError.closed) {
-            try await database.recordStarted(ReviewHistoryTestSupport.started(id: "closed"))
+            try await database.recordAccepted(ReviewHistoryTestSupport.started(id: "closed"))
         }
         await #expect(throws: ReviewHistoryDatabaseError.closed) {
             _ = try await database.recordTerminal(

@@ -120,8 +120,12 @@ package actor OwnedReviewHistoryPersistence: ReviewHistoryPersistence {
         try await database.load(retentionPolicy: retentionPolicy)
     }
 
-    package func recordStarted(_ record: StartedReviewRecord) async throws {
-        try await database.recordStarted(record)
+    package func recordAccepted(_ record: AcceptedReviewRecord) async throws {
+        try await database.recordAccepted(record)
+    }
+
+    package func recordExecutionStarted(id: String, at date: Date) async throws {
+        try await database.recordExecutionStarted(id: id, at: date)
     }
 
     package func recordTerminal(
@@ -194,7 +198,11 @@ package struct UnavailableReviewHistoryPersistence: ReviewHistoryPersistence {
         throw failure
     }
 
-    package func recordStarted(_: StartedReviewRecord) async throws {
+    package func recordAccepted(_: AcceptedReviewRecord) async throws {
+        throw failure
+    }
+
+    package func recordExecutionStarted(id: String, at date: Date) async throws {
         throw failure
     }
 

@@ -12,13 +12,13 @@ struct EncodedTerminalReview {
 }
 
 enum DecodedReviewHistoryRow {
-    case active(StartedReviewRecord)
+    case active(AcceptedReviewRecord)
     case terminal(RestoredReviewRecord)
 }
 
 enum ReviewHistoryRecordCodec {
     static func encodeStarted(
-        _ record: StartedReviewRecord,
+        _ record: AcceptedReviewRecord,
         createdAt: Date,
         updatedAt: Date
     ) throws -> EncodedStartedReview {
@@ -42,8 +42,9 @@ enum ReviewHistoryRecordCodec {
                 targetCommitTitle: targetColumns.commitTitle,
                 targetInstructions: targetColumns.instructions,
                 startedModel: record.model,
-                startedAt: ReviewHistoryTimestamp.encode(record.startedAt),
-                phase: "active",
+                acceptedAt: ReviewHistoryTimestamp.encode(record.acceptedAt),
+                startedAt: record.startedAt.map(ReviewHistoryTimestamp.encode),
+                phase: record.startedAt == nil ? "queued" : "active",
                 terminalModel: nil,
                 terminalKind: nil,
                 interruptionKind: nil,
@@ -114,7 +115,7 @@ enum ReviewHistoryRecordCodec {
         findings: [ReviewFindingRow]
     ) throws -> DecodedReviewHistoryRow {
         switch row.phase {
-        case "active":
+        case "queued", "active":
             guard findings.isEmpty else {
                 throw invalid(row.id, "active row contains terminal findings")
             }
@@ -133,15 +134,15 @@ enum ReviewHistoryRecordCodec {
     static func decodeStarted(
         _ row: ReviewRecordRow,
         workspace: ReviewWorkspaceRow
-    ) throws -> StartedReviewRecord {
+    ) throws -> AcceptedReviewRecord {
         guard row.cwd == workspace.cwd else {
             throw invalid(row.id, "workspace foreign key does not match loaded workspace")
         }
         let target = try decodeTarget(row)
         let workspaceMetadata = try decodeWorkspaceMetadata(workspace, reviewID: row.id)
-        let started: StartedReviewRecord
+        let started: AcceptedReviewRecord
         do {
-            started = try StartedReviewRecord(
+            started = try AcceptedReviewRecord(
                 id: row.id,
                 cwd: row.cwd,
                 workspaceMetadata: workspaceMetadata,
@@ -149,7 +150,8 @@ enum ReviewHistoryRecordCodec {
                 sortOrder: row.sortOrder,
                 target: target,
                 model: row.startedModel,
-                startedAt: ReviewHistoryTimestamp.decode(row.startedAt)
+                acceptedAt: ReviewHistoryTimestamp.decode(row.acceptedAt),
+                startedAt: row.startedAt.map(ReviewHistoryTimestamp.decode)
             )
         } catch {
             throw invalid(row.id, error.localizedDescription)
@@ -158,7 +160,7 @@ enum ReviewHistoryRecordCodec {
             throw invalid(row.id, "started model is not canonical")
         }
 
-        if row.phase == "active" {
+        if row.phase == "active" || row.phase == "queued" {
             let reencoded = try encodeStarted(
                 started,
                 createdAt: ReviewHistoryTimestamp.decode(row.createdAt),

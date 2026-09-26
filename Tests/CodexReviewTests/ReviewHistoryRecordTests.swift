@@ -7,13 +7,14 @@ import Testing
 struct ReviewHistoryRecordTests {
     @Test func phaseSpecificRecordsRejectIncompatiblePayloads() throws {
         #expect(throws: ReviewHistoryRecordError.self) {
-            try StartedReviewRecord(
+            try AcceptedReviewRecord(
                 id: "",
                 cwd: "/tmp/project",
                 workspaceSortOrder: 0,
                 sortOrder: 0,
                 target: .uncommittedChanges,
                 model: nil,
+                acceptedAt: Date(timeIntervalSince1970: 1),
                 startedAt: Date(timeIntervalSince1970: 1)
             )
         }
@@ -89,13 +90,14 @@ struct ReviewHistoryRecordTests {
         let endedAt = Date(timeIntervalSince1970: 2)
         let parsed = ParsedReviewResult.parse(finalReviewText: "No findings.")
         let restored = try RestoredReviewRecord(
-            started: StartedReviewRecord(
+            started: AcceptedReviewRecord(
                 id: "review-1",
                 cwd: "/tmp/project",
                 workspaceSortOrder: 3,
                 sortOrder: 4,
                 target: .baseBranch("main"),
                 model: "gpt-5",
+                acceptedAt: startedAt,
                 startedAt: startedAt
             ),
             terminal: TerminalReviewRecord(
@@ -125,13 +127,14 @@ struct ReviewHistoryRecordTests {
     @Test func previousProcessExitRestoresUnknownEndWithoutLiveTimerState() throws {
         let startedAt = Date(timeIntervalSince1970: 1)
         let restored = try RestoredReviewRecord(
-            started: StartedReviewRecord(
+            started: AcceptedReviewRecord(
                 id: "review-1",
                 cwd: "/tmp/project",
                 workspaceSortOrder: 0,
                 sortOrder: 0,
                 target: .uncommittedChanges,
                 model: nil,
+                acceptedAt: startedAt,
                 startedAt: startedAt
             ),
             terminal: TerminalReviewRecord(
@@ -157,13 +160,14 @@ struct ReviewHistoryRecordTests {
     @Test func requestedCancellationRestoresTypedTerminalWithoutSyntheticLog() throws {
         let cancellation = ReviewCancellation.mcpClient(message: "Stop review.")
         let restored = try RestoredReviewRecord(
-            started: StartedReviewRecord(
+            started: AcceptedReviewRecord(
                 id: "review-1",
                 cwd: "/tmp/project",
                 workspaceSortOrder: 0,
                 sortOrder: 0,
                 target: .uncommittedChanges,
                 model: nil,
+                acceptedAt: Date(timeIntervalSince1970: 1),
                 startedAt: Date(timeIntervalSince1970: 1)
             ),
             terminal: TerminalReviewRecord(

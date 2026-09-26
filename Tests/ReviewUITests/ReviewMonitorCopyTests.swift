@@ -85,7 +85,7 @@ struct ReviewMonitorCopyTests {
         let job = try RestoredReviewRecord(
             started: .init(
                 id: "job", cwd: "/tmp/repo", workspaceSortOrder: 0, sortOrder: 0,
-                target: .uncommittedChanges, model: nil, startedAt: .distantPast
+                target: .uncommittedChanges, model: nil, acceptedAt: .distantPast, startedAt: .distantPast
             ),
             terminal: .init(
                 id: "job", model: nil, reviewThreadID: reviewThreadID, threadID: threadID,

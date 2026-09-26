@@ -16,13 +16,14 @@ struct CodexReviewStoreDiagnosticsTests {
         )
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        let started = try StartedReviewRecord(
+        let started = try AcceptedReviewRecord(
             id: "review-1",
             cwd: "/tmp/workspace",
             workspaceSortOrder: 0,
             sortOrder: 0,
             target: .uncommittedChanges,
             model: "gpt-5.6-sol",
+            acceptedAt: Date(timeIntervalSince1970: 100),
             startedAt: Date(timeIntervalSince1970: 100)
         )
         let parsedResult = try PersistedParsedReviewResult(

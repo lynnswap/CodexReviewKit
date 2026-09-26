@@ -10,6 +10,38 @@ import CodexReviewTesting
 @Suite("MCP Streamable HTTP server")
 @MainActor
 struct CodexReviewMCPHTTPServerTests {
+    @Test func reviewStartRemainsPendingAcrossKitQueueWithoutClientResubmission() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "queued-job" })
+        )
+        store.suspendReviewStarts()
+        try await withHTTPServer(store: store) { server in
+            let endpoint = await server.url
+            let sessionID = try await initializeSession(endpoint: endpoint)
+            let body = try makeReviewStartBody(id: 2)
+            var returned = false
+            let request = Task {
+                defer { returned = true }
+                return try await postJSONRPCData(endpoint: endpoint, sessionID: sessionID, bodyData: body)
+            }
+            defer { request.cancel() }
+            try #require(await waitUntil(timeout: .seconds(2)) {
+                store.job(id: "queued-job")?.core.lifecycle.status == .queued
+            })
+            #expect(returned == false)
+            #expect(store.activeJobIDs(for: sessionID) == ["queued-job"])
+            #expect(await backend.recordedCommands().contains { if case .startReview = $0 { true } else { false } } == false)
+            store.resumeReviewStarts()
+            try await backend.waitForStartReview(timeout: .seconds(2))
+            await backend.yield(.completed(summary: "Done", result: "No findings."))
+            let result = try decodeSSEJSON(from: try await request.value)
+            #expect(result.value(for: ["result", "structuredContent", "jobId"]) as? String == "queued-job")
+            #expect(result.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String == "succeeded")
+        }
+    }
+
     @Test func streamableHTTPInitializesAndListsTools() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
