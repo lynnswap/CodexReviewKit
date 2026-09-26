@@ -26,7 +26,7 @@ extension CodexReviewStore {
             try await task.value
             return
         }
-        guard applicationShutdownRequested == false else { throw CancellationError() }
+        guard applicationShutdownRequested == false, pendingRuntimeStopCount == 0 else { throw CancellationError() }
         let previousAccountOperations = Array(runtimeAccountOperations.values)
         let previousRuntimeTask: Task<Void, Never>? = switch runtimeState {
         case .acquiring(_, _, let task), .replacing(_, let task), .tearingDown(_, _, _, _, let task): task
@@ -40,8 +40,9 @@ extension CodexReviewStore {
                 if Task.isCancelled == false { resumeReviewsAfterCodexUpdateIfPossible() }
             }
             do {
-                for operation in previousAccountOperations { _ = try? await operation.value }
-                await previousRuntimeTask?.value
+                try await Self.waitForPrecedingRuntimeWork(
+                    accountOperations: previousAccountOperations, runtimeTask: previousRuntimeTask
+                )
                 try await performCodexUpdate(when: timing, install: install)
                 codexUpdate = .idle
             } catch {
@@ -55,6 +56,30 @@ extension CodexReviewStore {
         }
         codexUpdateTask = task
         try await task.value
+    }
+
+    private static func waitForPrecedingRuntimeWork(
+        accountOperations: [Task<Void, any Error>],
+        runtimeTask: Task<Void, Never>?
+    ) async throws {
+        // Cancelling the update abandons its join, not the predecessor's lifecycle ownership.
+        let (completion, continuation) = AsyncStream<Void>.makeStream()
+        let waiter = Task {
+            for operation in accountOperations {
+                _ = try? await operation.value
+                guard Task.isCancelled == false else { return }
+            }
+            await runtimeTask?.value
+            continuation.yield(())
+            continuation.finish()
+        }
+        defer {
+            waiter.cancel()
+            continuation.finish()
+        }
+        var iterator = completion.makeAsyncIterator()
+        _ = await iterator.next()
+        try Task.checkCancellation()
     }
 
     private func performCodexUpdate(
@@ -132,6 +157,7 @@ extension CodexReviewStore {
 
     package func resumeReviewsAfterCodexUpdateIfPossible() {
         guard runtimeAccountOperations.isEmpty, applicationShutdownRequested == false,
+              pendingRuntimeStopCount == 0,
               case .running = runtimeState else { return }
         resumeReviewStarts()
     }

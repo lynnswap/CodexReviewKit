@@ -91,6 +91,7 @@ public final class CodexReviewStore {
     package var codexUpdate: CodexUpdateState = .idle
     @_spi(ApplicationHostSupport) public var codexUpdateState: CodexUpdateState { codexUpdate }
     @ObservationIgnored package var codexUpdateRuntimeFailure: String?
+    @ObservationIgnored package var pendingRuntimeStopCount = 0
     @ObservationIgnored package var codexUpdateTask: Task<Void, any Error>?
     @ObservationIgnored package var runtimeAccountOperations: [UUID: Task<Void, any Error>] = [:]
     @ObservationIgnored package var unclosedCodexUpdateRuntime: PreparedRuntime?
@@ -402,6 +403,8 @@ public final class CodexReviewStore {
     }
 
     package func stop(intent: ReviewRuntimeTeardownIntent) async {
+        pendingRuntimeStopCount += 1
+        defer { pendingRuntimeStopCount -= 1 }
         let update = codexUpdateTask
         if codexUpdate == .waitingForReviews {
             update?.cancel()

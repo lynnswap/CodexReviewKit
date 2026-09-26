@@ -376,6 +376,79 @@ struct CodexReviewStoreUpdateTests {
         #expect(try await queued.value.core.lifecycle.status == .cancelled)
     }
 
+    @Test func stopCancelsUpdateJoinWhileEarlierAccountOperationRemainsPending() async throws {
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+        let accountEntered = AsyncGate()
+        let accountRelease = AsyncGate()
+        let account = Task { try await store.performRuntimeAccountChange { _ in
+            await accountEntered.open()
+            await accountRelease.wait()
+        } }
+        await accountEntered.wait()
+        var installs = 0
+        let update = Task { try await store.updateCodex(when: .afterCurrentReviews) { installs += 1 } }
+        #expect(await waitUntil { store.codexUpdateState == .waitingForReviews })
+        var stopped = false
+        let stop = Task { await store.stop(); stopped = true }
+        let stoppedBeforeAccountFinished = await waitUntil { stopped }
+        await accountRelease.open()
+        try await account.value
+        await stop.value
+        do { try await update.value; Issue.record("Expected cancellation") }
+        catch { #expect(error is CancellationError) }
+        #expect(stoppedBeforeAccountFinished)
+        #expect(installs == 0)
+    }
+
+    @Test func cancelledUpdateCanLeaveItsPrecedingRuntimeTaskWithItsOwner() async throws {
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        let release = AsyncGate()
+        backend.holdRuntimePreparation(with: release)
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        let startup = Task { await store.start() }
+        await backend.waitForRuntimePreparation()
+        var updateReturned = false
+        let update = Task {
+            defer { updateReturned = true }
+            try await store.updateCodex(when: .afterCurrentReviews) { Issue.record("Unexpected install") }
+        }
+        #expect(await waitUntil { store.codexUpdateTask != nil })
+        store.codexUpdateTask?.cancel()
+        let returnedBeforeRuntimeStarted = await waitUntil { updateReturned }
+        await release.open()
+        await startup.value
+        do { try await update.value; Issue.record("Expected cancellation") }
+        catch { #expect(error is CancellationError) }
+        #expect(returnedBeforeRuntimeStarted)
+        await store.stop()
+    }
+
+    @Test func pendingStopPreventsQueueDispatchAfterInstallation() async throws {
+        let reviews = FakeCodexReviewBackend()
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: reviews)
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await store.start()
+        let entered = AsyncGate()
+        let release = AsyncGate()
+        let update = Task { try await store.updateCodex(when: .immediately) {
+            await entered.open()
+            await release.wait()
+        } }
+        await entered.wait()
+        let queued = try await store.startReview(sessionID: "owner", request: request("queued"), waitTimeout: .zero)
+        var stopRequested = false
+        let stop = Task { stopRequested = true; await store.stop() }
+        #expect(await waitUntil { stopRequested })
+        await release.open()
+        try await update.value
+        await stop.value
+        #expect(store.job(id: queued.jobID)?.core.lifecycle.status == .cancelled)
+        #expect(store.job(id: queued.jobID)?.core.lifecycle.startedAt == nil)
+        #expect(await reviews.recordedCommands().contains { if case .startReview = $0 { true } else { false } } == false)
+    }
+
     private func request(_ name: String) -> CodexReviewAPI.Start.Request {
         .init(cwd: "/tmp/\(name)", target: .uncommittedChanges)
     }
