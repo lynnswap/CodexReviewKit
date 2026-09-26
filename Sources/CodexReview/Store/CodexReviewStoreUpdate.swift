@@ -99,11 +99,24 @@ extension CodexReviewStore {
                 preservingQueuedReviews: true,
                 install: installation
             )
-        case .stopped, .failed:
+        case .stopped(let generation), .failed(let generation, nil, _):
             try await closeUnclosedCodexUpdateRuntimeIfNeeded()
             await installation()
-            guard let start = admitRuntimeStart(forceRestartIfNeeded: false) else { throw CancellationError() }
-            operation = start
+            let preparation = try await backend.mcpServerLifecycle.prepare()
+            let snapshot: MCPServerPublicationSnapshot
+            do {
+                snapshot = try await backend.mcpServerLifecycle.activate(preparation)
+            } catch {
+                var message = error.localizedDescription
+                do { try await backend.mcpServerLifecycle.stop() }
+                catch { message += "; MCP cleanup failed: \(error.localizedDescription)" }
+                throw CodexReviewAPI.Error.io(message)
+            }
+            operation = admitRuntimeReplacement(
+                sourceGeneration: generation, retiringRuntime: nil,
+                retainedMCP: RetainedMCPServer(serverURL: snapshot.serverURL),
+                preservingQueuedReviews: true
+            )
         case .acquiring, .replacing, .tearingDown:
             throw CodexReviewAPI.Error.io("The Codex runtime changed while waiting to update.")
         }

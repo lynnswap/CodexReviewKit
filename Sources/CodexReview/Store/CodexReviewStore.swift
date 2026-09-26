@@ -306,6 +306,7 @@ public final class CodexReviewStore {
         }
         let sourceCloseJoin = operation.sourceCloseReceiptOwner?.sourceCloseJoin()
         await operation.task.value
+        if hasQueuedCodexUpdateRecovery { resumeReviewsAfterCodexUpdateIfPossible() }
         guard let replacement = operation.sourceCloseReceiptOwner,
               let sourceCloseJoin
         else {
@@ -319,7 +320,7 @@ public final class CodexReviewStore {
         }
     }
 
-    package func admitRuntimeStart(
+    private func admitRuntimeStart(
         forceRestartIfNeeded: Bool
     ) -> RuntimeStartOperation? {
         let previousState = runtimeState
@@ -425,7 +426,12 @@ public final class CodexReviewStore {
     ) -> Bool {
         if codexUpdateTask != nil || hasQueuedCodexUpdateRecovery {
             switch runtimeState {
-            case .running(_, let runtime, _) where runtime.handle === handle:
+            case .running(let generation, let runtime, let mcp) where runtime.handle === handle:
+                if codexUpdate != .waitingForReviews {
+                    runtime.handle.closeAdmission()
+                    unclosedCodexUpdateRuntime = runtime
+                    runtimeState = .failed(generation: generation, retainedMCP: mcp, failureIncident: nil)
+                }
                 for job in jobs where job.isTerminal == false && queuedReviewStarts[job.id] == nil {
                     markReviewFailed(job, message: cause, terminal: .interrupted(.transport(message: cause)))
                 }
@@ -1511,9 +1517,6 @@ public final class CodexReviewStore {
     private func publishRuntime(serverURL: URL?) {
         storeWorkRegistry.openReviewAdmission()
         transitionToRunning(serverURL: serverURL)
-        if hasQueuedCodexUpdateRecovery, codexUpdateTask == nil {
-            resumeReviewsAfterCodexUpdateIfPossible()
-        }
         startAccountRateLimitAutoRefresh()
     }
 

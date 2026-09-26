@@ -313,6 +313,29 @@ struct CodexReviewStoreUpdateTests {
         await store.stop()
     }
 
+    @Test func updateFromStoppedRuntimeRetainsQueueWhenPublicationFails() async throws {
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        backend.runOnNextRuntimePublication {
+            if let handle = backend.lastPreparedRuntimeHandle {
+                #expect(store.requestRuntimeFailure(handle: handle, cause: "initial publication failed"))
+            }
+        }
+        var queuedID: String?
+        do {
+            try await store.updateCodex(when: .immediately) {
+                queuedID = try await store.startReview(sessionID: "owner", request: request("queued"), waitTimeout: .zero).jobID
+            }
+            Issue.record("Expected initial publication failure")
+        } catch { #expect(error.localizedDescription.contains("initial publication failed")) }
+        let id = try #require(queuedID)
+        #expect(store.job(id: id)?.core.lifecycle.status == .queued)
+        #expect(store.serverState == .failed("initial publication failed"))
+        await store.start()
+        #expect(store.serverState == .running)
+        await store.stop()
+    }
+
     private func request(_ name: String) -> CodexReviewAPI.Start.Request {
         .init(cwd: "/tmp/\(name)", target: .uncommittedChanges)
     }
