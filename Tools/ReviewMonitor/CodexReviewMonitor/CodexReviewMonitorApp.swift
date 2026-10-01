@@ -644,7 +644,7 @@ final class ReviewMonitorAppDelegate: NSObject, NSApplicationDelegate {
                 )
             },
             chooseTiming: { [weak self] in
-                self?.codexUpdateTiming(store: store)
+                await self?.codexUpdateTiming(store: store)
             },
             runUpdate: runUpdate,
             presentFailure: { [weak self] title, message in
@@ -734,9 +734,15 @@ final class ReviewMonitorAppDelegate: NSObject, NSApplicationDelegate {
         windowController.window?.makeKeyAndOrderFront(sender)
     }
 
-    private func codexUpdateTiming(store: CodexReviewStore) -> CodexReviewStore.CodexUpdateTiming? {
+    func codexUpdateTiming(store: CodexReviewStore) async -> CodexReviewStore.CodexUpdateTiming? {
         guard store.hasRunningJobs else { return .immediately }
-        let response = Self.makeCodexUpdateAlert().runModal()
+        let alert = Self.makeCodexUpdateAlert()
+        let response: NSApplication.ModalResponse
+        if let window = presentationAnchorSource.window, window.isVisible {
+            response = await alert.beginSheetModal(for: window)
+        } else {
+            response = alert.runModal()
+        }
         switch response {
         case .alertFirstButtonReturn: return .afterCurrentReviews
         case .alertSecondButtonReturn: return .immediately
@@ -765,7 +771,7 @@ final class ReviewMonitorAppDelegate: NSObject, NSApplicationDelegate {
                 queue: .main
             ) { [weak updater] _ in
                 MainActor.assumeIsolated {
-                    updater?.requestUpdate()
+                    _ = updater?.requestUpdate()
                 }
             }
         }

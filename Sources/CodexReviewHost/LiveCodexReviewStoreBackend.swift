@@ -772,16 +772,17 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
         let resolvedFactory = appServerRuntimeFactory ?? Self.makeAppServerRuntimeFactory()
         self.appServerRuntimeFactory = { codexHomeURL in
             // Resolve for each new process so CLI installations and upgrades are visible.
-            let executableURL: URL
-            switch executableDependency {
-            case .resolvedForTesting(let url):
-                executableURL = url
-            case .resolver(let resolver):
-                executableURL = try resolver.resolve(
-                    configuredPath: runtimePreferences.codexExecutablePath,
-                    environment: environment
-                )
-            }
+            let executableURL = try await Task.detached(priority: .userInitiated) {
+                switch executableDependency {
+                case .resolvedForTesting(let url):
+                    return url
+                case .resolver(let resolver):
+                    return try resolver.resolve(
+                        configuredPath: runtimePreferences.codexExecutablePath,
+                        environment: environment
+                    )
+                }
+            }.value
             return try await resolvedFactory(codexHomeURL, executableURL)
         }
         let registry = CodexReviewAccountRegistry.load(

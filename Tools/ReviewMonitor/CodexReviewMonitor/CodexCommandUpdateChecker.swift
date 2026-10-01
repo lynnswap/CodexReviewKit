@@ -54,6 +54,7 @@ struct CodexCommandUpdateChecker: Sendable {
         self.run = run
     }
 
+    @concurrent
     func check() async throws -> CodexCommandUpdateCheckResult {
         guard let installation = try resolver.resolve(
             configuredPath: runtimePreferences.codexExecutablePath,

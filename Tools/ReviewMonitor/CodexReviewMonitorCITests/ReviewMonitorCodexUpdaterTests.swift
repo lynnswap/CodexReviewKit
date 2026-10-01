@@ -239,6 +239,43 @@ struct ReviewMonitorCodexUpdaterTests {
         #expect(alert.buttons[1].hasDestructiveAction)
     }
 
+    @Test(arguments: [false, true])
+    func updateTimingSheetLetsTheMainActorContinue(stopReviews: Bool) async throws {
+        let store = ReviewMonitorPreviewContent.makeStore(streamInterval: nil)
+        #expect(store.hasRunningJobs)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 400),
+            styleMask: [.titled, .closable], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let delegate = ReviewMonitorAppDelegate(
+            launchContextProvider: { ReviewMonitorLaunchContext(environment: [:], arguments: [], launchMode: .application) },
+            composition: ReviewMonitorAppComposition(
+                makeStore: { _, _ in store },
+                makeWindowController: { _, _ in NSWindowController(window: window) }
+            )
+        )
+        delegate.windowController.showWindow(nil)
+        let choice = Task { await delegate.codexUpdateTiming(store: store) }
+        #expect(await waitUntil { window.attachedSheet != nil })
+        let sheet = try #require(window.attachedSheet)
+        window.endSheet(sheet, returnCode: stopReviews ? .alertSecondButtonReturn : .alertFirstButtonReturn)
+        let timing = await choice.value
+        if stopReviews {
+            guard case .immediately? = timing else {
+                Issue.record("Expected the immediate update choice.")
+                return
+            }
+        } else {
+            guard case .afterCurrentReviews? = timing else {
+                Issue.record("Expected the deferred update choice.")
+                return
+            }
+        }
+        await store.shutdown()
+    }
+
     @Test func settingsPaneSharesTheUpdaterAndDoesNotStartCheckingOnOpen() {
         var checks = 0
         let updater = makeUpdater(check: { checks += 1; return .upToDate })

@@ -11,6 +11,42 @@ struct CodexCommandUpdateCheckerTests {
         fileURLWithPath: "/opt/homebrew/Caskroom/codex/1.2.3/bin/codex"
     )
 
+    @Test @MainActor func updateCheckKeepsFileResolutionAndDoctorWorkOffTheMainThread() async throws {
+        let executableURL = executableURL
+        let expectBackgroundWork: @Sendable () -> Void = { #expect(Thread.isMainThread == false) }
+        let resolver = CodexHomebrewInstallationResolver(configuration: .init(
+            homeDirectory: URL(fileURLWithPath: "/users/reviewer", isDirectory: true),
+            fallbackBinDirectories: [],
+            fileSystem: .init(
+                canonicalURL: { _ in
+                    expectBackgroundWork()
+                    return executableURL
+                },
+                isExecutableRegularFile: { _ in
+                    expectBackgroundWork()
+                    return true
+                }
+            )
+        ))
+        let output = report(
+            enabled: "true", latestStatus: "newer version is available",
+            action: "brew upgrade --cask codex"
+        )
+        let checker = CodexCommandUpdateChecker(
+            environment: ["PATH": "/opt/homebrew/bin"],
+            resolver: resolver,
+            run: { _, _, _ in
+                expectBackgroundWork()
+                return Data(output.utf8)
+            }
+        )
+        let check: ReviewMonitorCodexUpdater.Check = checker.check
+        guard case .available = try await check() else {
+            Issue.record("Expected an available update from the MainActor check callback.")
+            return
+        }
+    }
+
     @Test func homebrewUpdateReturnsOneReusablePlanWithAStableEnvironment() async throws {
         let checker = makeChecker(
             environment: [

@@ -5724,6 +5724,40 @@ struct CodexReviewHostTests {
         #expect(methods.filter { $0 == "thread/delete" }.count == 1)
     }
 
+    @Test func liveStoreResolvesExecutablesOffTheMainThread() async throws {
+        let homeURL = try temporaryHome()
+        let resolver = CodexExecutableResolver(configuration: .init(
+            homeDirectory: homeURL,
+            fallbackBinDirectories: [],
+            fileSystem: .init(
+                canonicalURL: { url in
+                    #expect(Thread.isMainThread == false)
+                    return url
+                },
+                isExecutableRegularFile: { _ in
+                    #expect(Thread.isMainThread == false)
+                    return false
+                }
+            )
+        ))
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            codexExecutableResolver: resolver,
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            resolvedTransportFactory: { _, _ in
+                Issue.record("No transport should be created for a missing executable.")
+                return FakeJSONRPCTransport()
+            }
+        )
+        await store.start()
+        guard case .failed = store.serverState else {
+            Issue.record("Expected a missing executable to fail runtime preparation.")
+            await store.shutdown()
+            return
+        }
+        await store.shutdown()
+    }
+
     @Test func liveStoreReplaysExecutableResolutionFailureWithoutTransportSearch() async throws {
         let homeURL = try temporaryHome()
         var transportFactoryCalls = 0
