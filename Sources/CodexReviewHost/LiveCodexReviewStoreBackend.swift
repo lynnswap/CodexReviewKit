@@ -783,6 +783,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend, MCPSer
                     )
                 }
             }.value
+            try Task.checkCancellation()
             return try await resolvedFactory(codexHomeURL, executableURL)
         }
         let registry = CodexReviewAccountRegistry.load(

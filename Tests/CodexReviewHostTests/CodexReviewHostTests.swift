@@ -5724,6 +5724,54 @@ struct CodexReviewHostTests {
         #expect(methods.filter { $0 == "thread/delete" }.count == 1)
     }
 
+    @Test func stoppingDuringExecutableResolutionDoesNotLaunchARuntime() async throws {
+        let homeURL = try temporaryHome()
+        let resolutionEntered = DispatchSemaphore(value: 0)
+        let releaseResolution = DispatchSemaphore(value: 0)
+        defer { releaseResolution.signal() }
+        let resolver = CodexExecutableResolver(configuration: .init(
+            homeDirectory: homeURL,
+            fallbackBinDirectories: [],
+            fileSystem: .init(
+                canonicalURL: { url in
+                    resolutionEntered.signal()
+                    releaseResolution.wait()
+                    return url
+                },
+                isExecutableRegularFile: { _ in true }
+            )
+        ))
+        var transportFactoryCalls = 0
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            runtimePreferences: .init(codexExecutablePath: homeURL.appendingPathComponent("codex").path),
+            codexExecutableResolver: resolver,
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            resolvedTransportFactory: { _, _ in
+                transportFactoryCalls += 1
+                return FakeJSONRPCTransport()
+            }
+        )
+        let start = Task { await store.start() }
+        let hasEnteredResolution: @Sendable () -> Bool = {
+            resolutionEntered.wait(timeout: .now()) == .success
+        }
+        try #require(await waitUntil(timeout: .seconds(2)) { hasEnteredResolution() })
+        guard case .acquiring(_, _, let acquisition) = store.runtimeState else {
+            Issue.record("Expected a runtime acquisition during executable resolution.")
+            return
+        }
+        let stop = Task { await store.stop() }
+        try #require(await waitUntil(timeout: .seconds(2)) { acquisition.isCancelled })
+        releaseResolution.signal()
+        await start.value
+        await stop.value
+
+        #expect(transportFactoryCalls == 0)
+        #expect(store.serverState == .stopped)
+        await store.shutdown()
+    }
+
     @Test func liveStoreResolvesExecutablesOffTheMainThread() async throws {
         let homeURL = try temporaryHome()
         let resolver = CodexExecutableResolver(configuration: .init(
