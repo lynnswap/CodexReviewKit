@@ -10,6 +10,72 @@ import Testing
 @Suite("ReviewMonitor Codex updater", .serialized)
 @MainActor
 struct ReviewMonitorCodexUpdaterTests {
+    @Test func simulatedUpdateUsesTheStoreLifecycleAndKeepsTheMainActorResponsive() async throws {
+        let store = ReviewMonitorUpdatePreview().store
+        await store.start()
+        let simulation = ReviewMonitorCodexUpdateSimulation(checkDelay: 0.05, installationDelay: 0.3)
+        var failures: [String] = []
+        let updater = ReviewMonitorCodexUpdater(
+            store: store,
+            check: simulation.check,
+            publishAvailability: { _ in },
+            chooseTiming: { .immediately },
+            runUpdate: simulation.run,
+            presentFailure: { _, message in failures.append(message) }
+        )
+        await updater.checkForUpdates()
+        guard case .available(let plan) = updater.checkState else {
+            Issue.record("Expected the simulated update to be available.")
+            await store.shutdown()
+            return
+        }
+        #expect(plan.executableURL.path == "/bin/sleep")
+        let update = try #require(updater.requestUpdate())
+        #expect(await waitUntil { store.codexUpdateState == .installing })
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(store.codexUpdateState == .installing)
+        #expect(store.serverState == .starting)
+        await update.value
+        #expect(failures.isEmpty)
+        #expect(store.serverState == .running)
+        #expect(store.codexUpdateState == .idle)
+        #expect(updater.checkState == .upToDate)
+        await updater.checkForUpdates()
+        #expect(updater.checkState == .upToDate)
+        await updater.stopChecking()
+        await store.shutdown()
+    }
+
+    @Test func simulationLaunchSelectsSimulatedCommandsBeforeTheLiveChecker() async throws {
+        let context = ReviewMonitorLaunchContext(
+            environment: [ReviewMonitorLaunchEnvironment.simulatedCodexUpdateKey: "1"],
+            arguments: [],
+            launchMode: .application
+        )
+        #expect(context.requestsSimulatedCodexUpdate)
+        #expect(context.shouldStartEmbeddedServer)
+        var liveCheckerRequests = 0
+        let store = ReviewMonitorUpdatePreview().store
+        let delegate = ReviewMonitorAppDelegate(
+            launchContextProvider: { context },
+            composition: ReviewMonitorAppComposition(
+                makeStore: { _, _ in store },
+                makeCodexUpdateChecker: { _ in liveCheckerRequests += 1; return nil },
+                makeWindowController: { _, _ in NSWindowController() }
+            )
+        )
+        let updater = try #require(delegate.codexUpdater)
+        await updater.checkForUpdates()
+        #expect(liveCheckerRequests == 0)
+        if case .available(let plan) = updater.checkState {
+            #expect(plan.executableURL.path == "/bin/sleep")
+        } else {
+            Issue.record("Expected the environment flag to enable the simulated updater.")
+        }
+        await updater.stopChecking()
+        await store.shutdown()
+    }
+
     @Test func launchAndEightHourChecksStayAnchoredAcrossManualChecks() async {
         let clock = UpdateTestClock()
         var checks = 0

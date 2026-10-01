@@ -64,6 +64,16 @@ remains visible in Settings. If Codex cannot restart, the queue is retained and
 quitting the app cancels queued reviews; an installation already in progress is
 allowed to finish before the app exits.
 
+To investigate UI responsiveness during updates, enable
+`REVIEW_MONITOR_SIMULATE_CODEX_UPDATE=1` in the Xcode scheme's **Run → Arguments →
+Environment Variables**, then launch the app. The normal **Update** button appears
+after a one-second simulated check. Installation waits ten seconds using the same
+subprocess runner as a real update, while the existing Codex runtime stops and
+restarts normally. Codex and Homebrew packages are not changed. Settings reports
+**Up to Date** afterward; relaunch the app to repeat the simulation. Use this mode
+with the live runtime, with `REVIEW_MONITOR_MOCK_JOBS` and
+`REVIEW_MONITOR_REVIEW_MODE` disabled.
+
 ## Timeout Setup
 
 Long reviews can exceed the default MCP client timeout. `codex mcp add` does
