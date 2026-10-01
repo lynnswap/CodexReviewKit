@@ -55,6 +55,7 @@ struct ReviewMonitorLaunchContext: Sendable {
     var arguments: [String]
     var launchMode: ReviewMonitorLaunchMode
     var requestsPreviewContent: Bool
+    var requestsSimulatedCodexUpdate: Bool
 
     init(
         environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -70,6 +71,9 @@ struct ReviewMonitorLaunchContext: Sendable {
         requestsPreviewContent = ReviewMonitorLaunchEnvironment.requestsPreviewContent(
             environment: environment,
             arguments: arguments
+        )
+        requestsSimulatedCodexUpdate = ReviewMonitorLaunchEnvironment.requestsSimulatedCodexUpdate(
+            environment: environment
         )
     }
 
@@ -90,6 +94,7 @@ struct ReviewMonitorLaunchContext: Sendable {
 enum ReviewMonitorLaunchEnvironment {
     static let reviewModeKey = CodexReviewStoreTestEnvironment.reviewModeKey
     static let mockJobsKey = CodexReviewStoreTestEnvironment.mockJobsKey
+    static let simulatedCodexUpdateKey = "REVIEW_MONITOR_SIMULATE_CODEX_UPDATE"
     static let xctestConfigurationKey = "XCTestConfigurationFilePath"
     static let xctestBundlePathKey = "XCTestBundlePath"
     static let xcInjectBundleIntoKey = "XCInjectBundleInto"
@@ -149,6 +154,10 @@ enum ReviewMonitorLaunchEnvironment {
             || arguments.contains(reviewModeArgument)
             || isEnabledFlag(environment[mockJobsKey])
             || arguments.contains(mockJobsArgument)
+    }
+
+    static func requestsSimulatedCodexUpdate(environment: [String: String]) -> Bool {
+        isEnabledFlag(environment[simulatedCodexUpdateKey])
     }
 
     static func isRunningUnderXCTest(
@@ -604,13 +613,27 @@ final class ReviewMonitorAppDelegate: NSObject, NSApplicationDelegate {
         return lifecycle
     }()
     lazy var codexUpdater: ReviewMonitorCodexUpdater? = {
-        guard let checker = composition.makeCodexUpdateChecker(launchContext) else {
+        guard launchContext.launchMode == .application,
+              launchContext.requestsPreviewContent == false else {
             return nil
+        }
+        let check: ReviewMonitorCodexUpdater.Check
+        let runUpdate: ReviewMonitorCodexUpdater.RunUpdate
+        if launchContext.requestsSimulatedCodexUpdate {
+            let simulation = ReviewMonitorCodexUpdateSimulation()
+            check = simulation.check
+            runUpdate = simulation.run
+        } else {
+            guard let checker = composition.makeCodexUpdateChecker(launchContext) else {
+                return nil
+            }
+            check = checker.check
+            runUpdate = ReviewMonitorCodexUpdateProcess.run
         }
         let store = store
         return ReviewMonitorCodexUpdater(
             store: store,
-            check: checker.check,
+            check: check,
             publishAvailability: { available in
                 NotificationCenter.default.post(
                     name: ReviewMonitorCodexUpdateNotification.availabilityChanged,
@@ -621,8 +644,9 @@ final class ReviewMonitorAppDelegate: NSObject, NSApplicationDelegate {
                 )
             },
             chooseTiming: { [weak self] in
-                self?.codexUpdateTiming(store: store)
+                await self?.codexUpdateTiming(store: store)
             },
+            runUpdate: runUpdate,
             presentFailure: { [weak self] title, message in
                 self?.presentCodexUpdateFailure(title: title, message: message)
             }
@@ -710,9 +734,15 @@ final class ReviewMonitorAppDelegate: NSObject, NSApplicationDelegate {
         windowController.window?.makeKeyAndOrderFront(sender)
     }
 
-    private func codexUpdateTiming(store: CodexReviewStore) -> CodexReviewStore.CodexUpdateTiming? {
+    func codexUpdateTiming(store: CodexReviewStore) async -> CodexReviewStore.CodexUpdateTiming? {
         guard store.hasRunningJobs else { return .immediately }
-        let response = Self.makeCodexUpdateAlert().runModal()
+        let alert = Self.makeCodexUpdateAlert()
+        let response: NSApplication.ModalResponse
+        if let window = presentationAnchorSource.window, window.isVisible {
+            response = await alert.beginSheetModal(for: window)
+        } else {
+            response = alert.runModal()
+        }
         switch response {
         case .alertFirstButtonReturn: return .afterCurrentReviews
         case .alertSecondButtonReturn: return .immediately
@@ -741,7 +771,7 @@ final class ReviewMonitorAppDelegate: NSObject, NSApplicationDelegate {
                 queue: .main
             ) { [weak updater] _ in
                 MainActor.assumeIsolated {
-                    updater?.requestUpdate()
+                    _ = updater?.requestUpdate()
                 }
             }
         }

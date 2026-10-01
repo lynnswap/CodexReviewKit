@@ -172,17 +172,60 @@ final class ReviewMonitorCodexUpdater {
     }
 }
 
-private enum ReviewMonitorCodexUpdateProcess {
+@MainActor
+final class ReviewMonitorCodexUpdateSimulation {
+    private let checkDelay: TimeInterval
+    private let installationDelay: TimeInterval
+    private var installed = false
+    private let plan = CodexCommandUpdatePlan(
+        executableURL: URL(fileURLWithPath: "/bin/sleep"),
+        environment: [:]
+    )
+
+    init(checkDelay: TimeInterval = 1, installationDelay: TimeInterval = 10) {
+        self.checkDelay = checkDelay
+        self.installationDelay = installationDelay
+    }
+
+    func check() async throws -> CodexCommandUpdateCheckResult {
+        _ = try await CodexCommandUpdateChecker.runDoctor(
+            executableURL: plan.executableURL,
+            arguments: [String(checkDelay)],
+            environment: plan.environment
+        )
+        return installed ? .upToDate : .available(plan)
+    }
+
+    func run(_ plan: CodexCommandUpdatePlan) async throws {
+        try await ReviewMonitorCodexUpdateProcess.run(
+            executableURL: plan.executableURL,
+            arguments: [String(installationDelay)],
+            environment: plan.environment
+        )
+        installed = true
+    }
+}
+
+enum ReviewMonitorCodexUpdateProcess {
     @MainActor
     static func run(_ plan: CodexCommandUpdatePlan) async throws {
+        try await run(
+            executableURL: plan.executableURL,
+            arguments: ["update"],
+            environment: plan.environment
+        )
+    }
+
+    @MainActor
+    static func run(executableURL: URL, arguments: [String], environment: [String: String]) async throws {
         // `codex update` owns a package mutation and only reports completion after
         // its package-manager child exits. Cancelling or timing it out would make
         // the installation state unknowable.
         try await Task.detached(priority: .utility) {
             let process = Process()
-            process.executableURL = plan.executableURL
-            process.arguments = ["update"]
-            process.environment = plan.environment
+            process.executableURL = executableURL
+            process.arguments = arguments
+            process.environment = environment
             process.currentDirectoryURL = FileManager.default.temporaryDirectory
             process.standardInput = FileHandle.nullDevice
             process.standardOutput = FileHandle.nullDevice
