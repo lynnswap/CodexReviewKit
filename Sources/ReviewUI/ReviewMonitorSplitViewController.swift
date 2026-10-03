@@ -312,19 +312,11 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
     }
 
     private func makeSidebarUpdateToolbarItem() -> NSToolbarItem {
-        let button = NSButton(title: "Update", target: self, action: #selector(handleCodexUpdate(_:)))
-        button.bezelStyle = .toolbar
-        button.controlSize = .extraLarge
-        button.setButtonType(.onOff)
-        button.state = .on
-        button.setAccessibilityLabel("Update Codex")
-
         let item = NSToolbarItem(itemIdentifier: Self.sidebarUpdateToolbarItemIdentifier)
         item.label = "Update"
         item.paletteLabel = "Update Codex"
         item.toolTip = "A Codex update is available"
         item.visibilityPriority = .high
-        item.view = button
         let menuItem = NSMenuItem(
             title: "Update Codex",
             action: #selector(handleCodexUpdate(_:)),
@@ -360,10 +352,30 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
     }
 
     private func applyCodexUpdatePresentation(to item: NSToolbarItem) {
-        guard let presentation = codexUpdatePresentation, let button = item.view as? NSButton else { return }
-        button.title = presentation.title
-        button.isEnabled = presentation.enabled
-        button.setAccessibilityLabel(store.codexUpdateState == .waitingForReviews ? "Waiting to Update Codex" : presentation.title + " Codex")
+        guard let presentation = codexUpdatePresentation else { return }
+        switch store.codexUpdateState {
+        case .stoppingRuntime, .installing, .restarting:
+            let progress = (item.view as? CodexUpdateProgressView) ?? CodexUpdateProgressView()
+            progress.titleLabel.stringValue = presentation.title
+            progress.invalidateIntrinsicContentSize()
+            progress.setAccessibilityLabel(presentation.title + " Codex")
+            progress.toolTip = presentation.help
+            item.view = progress
+            progress.indicator.startAnimation(nil)
+        default:
+            (item.view as? CodexUpdateProgressView)?.indicator.stopAnimation(nil)
+            let button = (item.view as? NSButton) ?? NSButton(
+                title: presentation.title, target: self, action: #selector(handleCodexUpdate(_:))
+            )
+            button.bezelStyle = .toolbar
+            button.controlSize = .extraLarge
+            button.setButtonType(.onOff)
+            button.state = .on
+            button.title = presentation.title
+            button.isEnabled = presentation.enabled
+            button.setAccessibilityLabel(store.codexUpdateState == .waitingForReviews ? "Waiting to Update Codex" : presentation.title + " Codex")
+            item.view = button
+        }
         item.label = presentation.title
         item.toolTip = presentation.help
         item.menuFormRepresentation?.title = presentation.title + " Codex"
@@ -589,11 +601,19 @@ extension ReviewMonitorSplitViewController {
     }
 
     var sidebarUpdateToolbarTitleForTesting: String? {
-        (sidebarUpdateToolbarItemForTesting?.view as? NSButton)?.title
+        sidebarUpdateToolbarItemForTesting?.label
     }
 
     var sidebarUpdateToolbarAccessibilityLabelForTesting: String? {
-        (sidebarUpdateToolbarItemForTesting?.view as? NSButton)?.accessibilityLabel()
+        sidebarUpdateToolbarItemForTesting?.view?.accessibilityLabel()
+    }
+
+    var sidebarUpdateToolbarShowsProgressForTesting: Bool {
+        sidebarUpdateToolbarItemForTesting?.view is CodexUpdateProgressView
+    }
+
+    var sidebarUpdateToolbarProgressSizeForTesting: NSSize? {
+        (sidebarUpdateToolbarItemForTesting?.view as? CodexUpdateProgressView)?.intrinsicContentSize
     }
 
     var sidebarUpdateToolbarIsEnabledForTesting: Bool {
@@ -741,3 +761,38 @@ extension ReviewMonitorSplitViewController {
     }
 }
 #endif
+
+@MainActor
+private final class CodexUpdateProgressView: NSView {
+    let indicator = NSProgressIndicator()
+    let titleLabel = NSTextField(labelWithString: "")
+    private let stackView = NSStackView()
+
+    override var intrinsicContentSize: NSSize {
+        let size = stackView.fittingSize
+        return NSSize(width: size.width, height: max(28, size.height))
+    }
+
+    init() {
+        super.init(frame: .zero)
+        stackView.orientation = .horizontal
+        stackView.alignment = .centerY
+        stackView.spacing = 6
+        indicator.style = .spinning
+        indicator.controlSize = .small
+        indicator.isIndeterminate = true
+        stackView.addArrangedSubview(indicator)
+        stackView.addArrangedSubview(titleLabel)
+        stackView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stackView)
+        NSLayoutConstraint.activate([
+            stackView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stackView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stackView.topAnchor.constraint(equalTo: topAnchor),
+            stackView.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { nil }
+}
