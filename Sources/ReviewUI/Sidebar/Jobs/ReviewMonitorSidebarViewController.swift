@@ -1900,6 +1900,9 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         case .reorderWorkspaceSection(let id, let cwds, let storeIndex, let displayIndex):
             let store = store
             startHistoryAction { [weak self] in
+                guard self?.uiState.sidebarWorkspaceSortOrder == .manual else {
+                    return
+                }
                 guard await store.reorderWorkspaces(cwds: cwds, toIndex: storeIndex),
                       let self,
                       self.uiState.sidebarWorkspaceSortOrder == .manual

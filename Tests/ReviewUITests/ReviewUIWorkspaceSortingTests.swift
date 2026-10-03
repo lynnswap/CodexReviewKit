@@ -188,7 +188,7 @@ extension ReviewUITests {
         try await waitForCondition {
             sidebar.displayedSectionTitlesForTesting == ["workspace-alpha", "workspace-beta"]
         }
-        #expect(store.orderedWorkspaces.map(\.cwd) == [betaWorkspace.cwd, alphaWorkspace.cwd])
+        #expect(store.orderedWorkspaces.map(\.cwd) == [alphaWorkspace.cwd, betaWorkspace.cwd])
 
         sidebar.selectJobForTesting(firstJob)
         #expect(sidebar.selectedJobCanStartDragForTesting(firstJob))
@@ -201,8 +201,62 @@ extension ReviewUITests {
         uiState.sidebarWorkspaceSortOrder = .manual
         #expect(sidebar.workspaceSectionCanStartDragForTesting(containing: alphaWorkspace))
         try await waitForCondition {
-            sidebar.displayedSectionTitlesForTesting == ["workspace-beta", "workspace-alpha"]
+            sidebar.displayedSectionTitlesForTesting == ["workspace-alpha", "workspace-beta"]
         }
+    }
+
+    @Test func workspaceDropStartedInManualKeepsAutomaticOrderWhenPersistenceCompletes() async throws {
+        let alphaWorkspace = CodexReviewWorkspace(cwd: "/tmp/workspace-alpha")
+        let betaWorkspace = CodexReviewWorkspace(cwd: "/tmp/workspace-beta")
+        let gammaWorkspace = CodexReviewWorkspace(cwd: "/tmp/workspace-gamma")
+        let saveEntered = AsyncGate()
+        let saveRelease = AsyncGate()
+        let history = WorkspaceOrderingPersistence(saveEntered: saveEntered, saveRelease: saveRelease)
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend()),
+            historyPersistence: history
+        )
+        await store.loadReviewHistoryIfNeeded()
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [alphaWorkspace, betaWorkspace, gammaWorkspace],
+            jobs: [
+                makeWorkspaceSortJob(id: "sort-pending-alpha", cwd: alphaWorkspace.cwd, acceptedAt: 200),
+                makeWorkspaceSortJob(id: "sort-pending-beta", cwd: betaWorkspace.cwd, acceptedAt: 100),
+                makeWorkspaceSortJob(id: "sort-pending-gamma", cwd: gammaWorkspace.cwd, acceptedAt: 300),
+            ]
+        )
+        let uiState = ReviewMonitorUIState(auth: store.auth)
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        viewController.loadViewIfNeeded()
+        let sidebar = viewController.sidebarViewControllerForTesting
+        #expect(sidebar.performWorkspaceDropForTesting(alphaWorkspace, toIndex: 3))
+
+        do {
+            try await saveEntered.wait(timeout: .seconds(2), operation: "workspace ordering persistence")
+            uiState.sidebarWorkspaceSortOrder = .latestJobAccepted
+            try await waitForCondition {
+                sidebar.displayedSectionTitlesForTesting == ["workspace-gamma", "workspace-alpha", "workspace-beta"]
+            }
+            await saveRelease.open()
+            await sidebar.waitForHistoryActionsForTesting()
+            #expect(store.orderedWorkspaces.map(\.cwd) == [betaWorkspace.cwd, gammaWorkspace.cwd, alphaWorkspace.cwd])
+            let savedOrdering = try #require(await history.savedOrdering)
+            #expect(savedOrdering.workspaces.sorted { $0.sortOrder > $1.sortOrder }.map(\.cwd) == [
+                betaWorkspace.cwd, gammaWorkspace.cwd, alphaWorkspace.cwd,
+            ])
+            #expect(sidebar.displayedSectionTitlesForTesting == ["workspace-gamma", "workspace-alpha", "workspace-beta"])
+
+            uiState.sidebarWorkspaceSortOrder = .manual
+            try await waitForCondition {
+                sidebar.displayedSectionTitlesForTesting == ["workspace-beta", "workspace-gamma", "workspace-alpha"]
+            }
+        } catch {
+            await saveRelease.open()
+            await store.shutdown()
+            throw error
+        }
+        await store.shutdown()
     }
 
     @Test func latestAcceptedWorkspaceOrderUsesManualOrderForTiesAndEmptyWorkspaces() {
@@ -228,6 +282,48 @@ extension ReviewUITests {
             "workspace-beta", "workspace-alpha", "workspace-older", "empty-first", "empty-second",
         ])
     }
+}
+
+private actor WorkspaceOrderingPersistence: ReviewHistoryPersistence {
+    private let saveEntered: AsyncGate
+    private let saveRelease: AsyncGate
+    private(set) var savedOrdering: ReviewHistoryOrdering?
+
+    init(saveEntered: AsyncGate, saveRelease: AsyncGate) {
+        self.saveEntered = saveEntered
+        self.saveRelease = saveRelease
+    }
+
+    func load(retentionPolicy _: ReviewHistoryRetentionPolicy) async throws -> [RestoredReviewRecord] {
+        []
+    }
+
+    func recordAccepted(_: AcceptedReviewRecord) async throws {}
+
+    func recordExecutionStarted(id: String, at date: Date) async throws {}
+
+    func recordTerminal(
+        _: TerminalReviewRecord,
+        retentionPolicy _: ReviewHistoryRetentionPolicy
+    ) async throws -> ReviewHistoryMutationResult {
+        .init()
+    }
+
+    func saveOrdering(_ ordering: ReviewHistoryOrdering) async throws {
+        await saveEntered.open()
+        await saveRelease.wait()
+        savedOrdering = ordering
+    }
+
+    func deleteTerminalReviews(withIDs _: Set<String>) async throws -> ReviewHistoryMutationResult {
+        .init()
+    }
+
+    func deleteAllTerminalReviews() async throws -> ReviewHistoryMutationResult {
+        .init()
+    }
+
+    func close() async throws {}
 }
 
 @MainActor
