@@ -468,31 +468,45 @@ struct CodexReviewStoreHistoryTests {
                 waitTimeout: .zero
             )
         }
-        try await historyEntered.wait(timeout: .seconds(2), operation: "first history start write")
-        let second = Task { @MainActor in
-            try await store.startReview(
-                sessionID: "session-1",
-                request: .init(cwd: "/tmp/project-worktree", target: .baseBranch("main")),
-                waitTimeout: .zero
-            )
-        }
-        try #require(await waitForHistoryTestCondition {
-            store.historyStartReceipts.count == 2
-        })
-        #expect(store.jobs.isEmpty)
-        #expect(store.hasRunningJobs)
-        let reserved = store.historyStartReceipts.values
-            .map(\.started)
-            .sorted { $0.sortOrder < $1.sortOrder }
-        #expect(reserved.map(\.id) == ["job-1", "job-2"])
-        #expect(reserved.map(\.sortOrder) == [0, 1])
-        #expect(Set(reserved.map(\.workspaceSortOrder)) == Set([0.0, 1.0]))
+        var second: Task<CodexReviewAPI.Read.Result, any Error>?
+        let close: ReviewStoreSessionCloseReceipt
+        do {
+            try await historyEntered.wait(timeout: .seconds(2), operation: "first history start write")
+            second = Task { @MainActor in
+                try await store.startReview(
+                    sessionID: "session-1",
+                    request: .init(cwd: "/tmp/project-worktree", target: .baseBranch("main")),
+                    waitTimeout: .zero
+                )
+            }
+            try #require(await waitForHistoryTestCondition {
+                store.historyStartReceipts.count == 2
+            })
+            #expect(store.jobs.isEmpty)
+            #expect(store.hasRunningJobs)
+            let reserved = store.historyStartReceipts.values
+                .map(\.started)
+                .sorted { $0.sortOrder < $1.sortOrder }
+            #expect(reserved.map(\.id) == ["job-1", "job-2"])
+            #expect(reserved.map(\.sortOrder) == [0, 1])
+            #expect(Set(reserved.map(\.workspaceSortOrder)) == Set([0.0, 1.0]))
 
-        let close = Task { @MainActor in await store.closeSession("session-1") }
+            close = try #require(await store.beginCloseSession("session-1"))
+        } catch {
+            first.cancel()
+            second?.cancel()
+            let cleanup = await store.beginCloseSession("session-1")
+            await historyRelease.open()
+            await cleanup?.waitUntilClosed()
+            _ = await first.result
+            _ = await second?.result
+            throw error
+        }
+
         await historyRelease.open()
-        await close.value
+        await close.waitUntilClosed()
         _ = await first.result
-        _ = await second.result
+        _ = await second?.result
         #expect(await backend.recordedCommands().contains {
             if case .startReview = $0 { true } else { false }
         } == false)
@@ -552,13 +566,21 @@ struct CodexReviewStoreHistoryTests {
                 return Result<CodexReviewAPI.Read.Result, any Error>.failure(error)
             }
         }
-        try await entered.wait(timeout: .seconds(2), operation: "history persistence operation")
-        let close = Task { @MainActor in
-            await store.closeSession("session-1")
+        let close: ReviewStoreSessionCloseReceipt
+        do {
+            try await entered.wait(timeout: .seconds(2), operation: "history persistence operation")
+            close = try #require(await store.beginCloseSession("session-1"))
+        } catch {
+            start.cancel()
+            let cleanup = await store.beginCloseSession("session-1")
+            await release.open()
+            await cleanup?.waitUntilClosed()
+            _ = await start.value
+            throw error
         }
 
         await release.open()
-        await close.value
+        await close.waitUntilClosed()
         #expect(await start.value.isFailure)
         #expect(await backend.recordedCommands().contains {
             if case .startReview = $0 { true } else { false }
@@ -592,11 +614,24 @@ struct CodexReviewStoreHistoryTests {
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
         }
-        try await entered.wait(timeout: .seconds(2), operation: "history persistence operation")
-        let stop = Task { @MainActor in await store.stop() }
+        var stop: Task<Void, Never>?
+        do {
+            try await entered.wait(timeout: .seconds(2), operation: "history persistence operation")
+            stop = Task { @MainActor in await store.stop() }
+            try #require(await waitForHistoryTestCondition {
+                store.historyStartReceipts["job-1"]?.cancellation != nil
+            })
+        } catch {
+            start.cancel()
+            let cleanup = stop ?? Task { @MainActor in await store.stop() }
+            await release.open()
+            await cleanup.value
+            _ = await start.value
+            throw error
+        }
 
         await release.open()
-        await stop.value
+        await stop?.value
         _ = await start.value
         #expect(store.serverState == .stopped)
         #expect(await backend.recordedCommands().contains {
