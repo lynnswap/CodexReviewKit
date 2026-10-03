@@ -218,6 +218,30 @@ struct ReviewMonitorCodexUpdaterTests {
         await updater.stopChecking()
     }
 
+    @Test func manualUpdateKeepsAvailabilityAndNeverRunsInstallation() async throws {
+        let store = ReviewMonitorUpdatePreview().store
+        let message = "A newer version requires manual installation."
+        var published: [Bool] = []
+        var installations = 0
+        let updater = ReviewMonitorCodexUpdater(
+            store: store,
+            check: { .manualUpdate(message) },
+            publishAvailability: { published.append($0) },
+            chooseTiming: { .immediately },
+            runUpdate: { _ in installations += 1 },
+            presentFailure: { _, received in #expect(received == message) }
+        )
+        await updater.checkForUpdates()
+        #expect(updater.checkState == .manualUpdate(message))
+        #expect(updater.lastCheckedAt != nil)
+        #expect(published.last == false)
+        let update = try #require(updater.requestUpdate())
+        await update.value
+        #expect(installations == 0)
+        #expect(store.codexUpdateState == .idle)
+        await updater.stopChecking()
+    }
+
     @Test func updateFailureKeepsItsStoreErrorAndReportsItWithoutRelaunching() async throws {
         let store = ReviewMonitorUpdatePreview().store
         await store.start()

@@ -488,6 +488,11 @@ struct ReviewMonitorUpdateSettingsForm: View {
         case .notChecked: Text("Not Checked")
         case .checking: Text("Checking…")
         case .available: Text("Update Available")
+        case .manualUpdate(let message):
+            VStack(alignment: .leading) {
+                Text("Update Available")
+                Text(message).font(.callout).foregroundStyle(.secondary)
+            }
         case .upToDate: Text("Up to Date")
         case .unavailable(let message):
             VStack(alignment: .leading) {

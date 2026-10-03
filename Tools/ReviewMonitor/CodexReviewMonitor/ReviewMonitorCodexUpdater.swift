@@ -9,6 +9,7 @@ final class ReviewMonitorCodexUpdater {
         case notChecked
         case checking
         case available(CodexCommandUpdatePlan)
+        case manualUpdate(String)
         case upToDate
         case unavailable(String)
         case failed(String)
@@ -116,7 +117,7 @@ final class ReviewMonitorCodexUpdater {
             await performCheck()
             guard stopping == false else { return }
             switch checkState {
-            case .failed(let message), .unavailable(let message):
+            case .failed(let message), .unavailable(let message), .manualUpdate(let message):
                 presentFailure("Codex Update Could Not Start", message)
                 return
             default: break
@@ -154,6 +155,7 @@ final class ReviewMonitorCodexUpdater {
                 try Task.checkCancellation()
                 switch result {
                 case .available(let plan): checkState = .available(plan)
+                case .manualUpdate(let message): checkState = .manualUpdate(message)
                 case .upToDate: checkState = .upToDate
                 case .unavailable(let message): checkState = .unavailable(message)
                 }

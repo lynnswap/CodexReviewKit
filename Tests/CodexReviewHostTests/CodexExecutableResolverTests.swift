@@ -72,6 +72,9 @@ struct CodexExecutableResolverTests {
             canonical: ["/link/codex": "/real/codex"]
         )
         #expect(try selected.resolve(configuredPath: nil, environment: ["PATH": "/link"]).path == "/real/codex")
+        let selection = try selected.resolveSelection(configuredPath: nil, environment: ["PATH": "/link"])
+        #expect(selection.launcherURL.path == "/link/codex")
+        #expect(selection.executableURL.path == "/real/codex")
         let failed = makeResolver(canonical: [
             "/link/codex": "/real/missing",
             "/home/.local/bin/codex": "/real/missing",

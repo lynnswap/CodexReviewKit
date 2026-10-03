@@ -49,14 +49,20 @@ ReviewMonitor checks the selected Codex installation at launch and every eight
 hours. Use **Settings → Updates → Check for Updates** for a manual check and its
 last-check time. Manual checks do not change the automatic schedule and do not
 install an update. Unsupported installations and failed checks are reported
-separately from **Up to Date**. Automatic installation currently supports the
-stable Homebrew Codex cask.
+separately from **Up to Date**. Automatic installation supports the stable
+Homebrew Codex cask and standalone installations selected through their stable
+launcher. Update checks and installation use the selected CLI's installation
+home, including custom standalone homes; reviews keep using `~/.codex_review`.
+When a newer version is available for an installation that cannot be updated
+automatically, Settings reports **Update Available** with manual update guidance.
 
 When an update is available, choose **Update** in the sidebar toolbar. During a
 review, **Update After Reviews** lets current reviews finish and queues new
 requests inside ReviewMonitor. **Stop Reviews and Update** cancels current
 reviews and updates immediately. ReviewMonitor and its MCP sessions stay open;
 queued requests resume after Codex restarts, without being resubmitted.
+The toolbar shows a spinner and the update stage while Codex is stopping,
+installing, or restarting.
 
 If updating fails but Codex can restart, queued reviews resume and the error
 remains visible in Settings. If Codex cannot restart, the queue is retained and

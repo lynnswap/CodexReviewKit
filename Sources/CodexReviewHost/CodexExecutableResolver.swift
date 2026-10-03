@@ -72,6 +72,11 @@ package struct CodexExecutableResolver: Sendable {
     package func resolve(
         configuredPath: String?, environment: [String: String]
     ) throws(CodexExecutableResolutionError) -> URL {
+        try resolveSelection(configuredPath: configuredPath, environment: environment).executableURL
+    }
+    package func resolveSelection(
+        configuredPath: String?, environment: [String: String]
+    ) throws(CodexExecutableResolutionError) -> (launcherURL: URL, executableURL: URL) {
         var search = Search(configuration: configuration)
         if let configuredPath { return try search.explicitPath(configuredPath) }
         let path = Self.pathDirectories(environment["PATH"])
@@ -114,7 +119,7 @@ package struct CodexExecutableResolver: Sendable {
         var configuration: Configuration
         var seen: Set<String> = []
         var trace: [CodexExecutableResolutionError.Trace] = []
-        mutating func explicitPath(_ value: String) throws(CodexExecutableResolutionError) -> URL {
+        mutating func explicitPath(_ value: String) throws(CodexExecutableResolutionError) -> (launcherURL: URL, executableURL: URL) {
             let path = value.trimmingCharacters(in: .whitespacesAndNewlines)
             guard path.hasPrefix("/") else { try failExplicit(.configuredPath, value, "not absolute") }
             if let url = candidate(URL(fileURLWithPath: path), .configuredPath) { return url }
@@ -122,7 +127,7 @@ package struct CodexExecutableResolver: Sendable {
         }
         mutating func environmentCommand(
             _ value: String, key: String, path: [URL]
-        ) throws(CodexExecutableResolutionError) -> URL {
+        ) throws(CodexExecutableResolutionError) -> (launcherURL: URL, executableURL: URL) {
             let command = value.trimmingCharacters(in: .whitespacesAndNewlines)
             let source = CodexExecutableResolutionError.Source.environment(key)
             if command.contains("/") {
@@ -138,22 +143,23 @@ package struct CodexExecutableResolver: Sendable {
             }
             throw .init(kind: .invalidExplicit, trace: trace)
         }
-        mutating func candidate(_ rawURL: URL, _ source: CodexExecutableResolutionError.Source) -> URL? {
+        mutating func candidate(_ rawURL: URL, _ source: CodexExecutableResolutionError.Source) -> (launcherURL: URL, executableURL: URL)? {
             let fs = configuration.fileSystem
             let url = fs.canonicalURL(rawURL).standardizedFileURL
             guard seen.insert(url.path).inserted else {
-                return reject(source, rawURL.path, "duplicate of \(url.path)")
+                reject(source, rawURL.path, "duplicate of \(url.path)")
+                return nil
             }
             guard fs.isExecutableRegularFile(url) else {
-                return reject(source, url.path, "not an executable regular file")
+                reject(source, url.path, "not an executable regular file")
+                return nil
             }
-            return url
+            return (rawURL.standardizedFileURL, url)
         }
         mutating func reject(
             _ source: CodexExecutableResolutionError.Source, _ candidate: String, _ reason: String
-        ) -> URL? {
+        ) {
             trace.append(.init(source: source, candidate: candidate, reason: reason))
-            return nil
         }
         mutating func failExplicit(
             _ source: CodexExecutableResolutionError.Source, _ candidate: String, _ reason: String
@@ -161,5 +167,17 @@ package struct CodexExecutableResolver: Sendable {
             trace.append(.init(source: source, candidate: candidate, reason: reason))
             throw .init(kind: .invalidExplicit, trace: trace)
         }
+    }
+}
+
+public extension CodexReviewRuntime {
+    /// Selects the CLI using the review runtime's precedence, preserving the launcher for updates.
+    @_spi(ApplicationHostSupport)
+    static func resolveExecutable(
+        configuredPath: String?, environment: [String: String]
+    ) throws -> (launcherURL: URL, executableURL: URL) {
+        try CodexExecutableResolver(configuration: .live()).resolveSelection(
+            configuredPath: configuredPath, environment: environment
+        )
     }
 }

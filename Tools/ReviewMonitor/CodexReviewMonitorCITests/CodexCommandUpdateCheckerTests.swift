@@ -14,27 +14,16 @@ struct CodexCommandUpdateCheckerTests {
     @Test @MainActor func updateCheckKeepsFileResolutionAndDoctorWorkOffTheMainThread() async throws {
         let executableURL = executableURL
         let expectBackgroundWork: @Sendable () -> Void = { #expect(Thread.isMainThread == false) }
-        let resolver = CodexHomebrewInstallationResolver(configuration: .init(
-            homeDirectory: URL(fileURLWithPath: "/users/reviewer", isDirectory: true),
-            fallbackBinDirectories: [],
-            fileSystem: .init(
-                canonicalURL: { _ in
-                    expectBackgroundWork()
-                    return executableURL
-                },
-                isExecutableRegularFile: { _ in
-                    expectBackgroundWork()
-                    return true
-                }
-            )
-        ))
         let output = report(
             enabled: "true", latestStatus: "newer version is available",
             action: "brew upgrade --cask codex"
         )
         let checker = CodexCommandUpdateChecker(
             environment: ["PATH": "/opt/homebrew/bin"],
-            resolver: resolver,
+            resolve: { _, _ in
+                expectBackgroundWork()
+                return (URL(fileURLWithPath: "/opt/homebrew/bin/codex"), executableURL)
+            },
             run: { _, _, _ in
                 expectBackgroundWork()
                 return Data(output.utf8)
@@ -64,14 +53,12 @@ struct CodexCommandUpdateCheckerTests {
             inspect: { executableURL, arguments, environment in
                 #expect(executableURL.path == "/opt/homebrew/Caskroom/codex/1.2.3/bin/codex")
                 #expect(arguments == ["doctor", "--json"])
-                #expect(environment["CODEX_HOME"] == "/users/reviewer/.codex_review")
-                #expect(environment["CODEX_SQLITE_HOME"] == "/users/reviewer/.codex_review/sqlite")
+                #expect(environment["CODEX_HOME"] == "/users/reviewer/.codex")
+                #expect(environment["CODEX_SQLITE_HOME"] == "/users/reviewer/.codex/sqlite")
                 #expect(environment["CODEX_MANAGED_BY_NPM"] == nil)
                 #expect(environment["CODEX_MANAGED_BY_FUTURE"] == nil)
                 #expect(environment["CODEX_MANAGED_PACKAGE_ROOT"] == nil)
-                #expect(environment["PATH"] == [
-                    "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin",
-                ].joined(separator: ":"))
+                #expect(environment["PATH"] == "relative:/custom/bin:/usr/bin:/custom/bin")
             }
         )
 
@@ -80,7 +67,7 @@ struct CodexCommandUpdateCheckerTests {
             return
         }
         #expect(plan.executableURL == launcherURL)
-        #expect(plan.environment["CODEX_HOME"] == "/users/reviewer/.codex_review")
+        #expect(plan.environment["CODEX_HOME"] == "/users/reviewer/.codex")
         #expect(plan.environment["CODEX_MANAGED_BY_NPM"] == nil)
     }
 
@@ -100,14 +87,9 @@ struct CodexCommandUpdateCheckerTests {
                 "HOME": "/users/reviewer",
                 "PATH": "/opt/homebrew/bin:/usr/local/bin",
             ],
-            resolver: makeHomebrewResolver(
-                executables: [executableURL.path],
-                canonical: [launcherURL.path: executableURL.path]
-            ),
+            resolve: { _, _ in (launcherURL, executableURL) },
             run: { _, _, environment in
-                #expect(environment["PATH"] == [
-                    "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin",
-                ].joined(separator: ":"))
+                #expect(environment["PATH"] == "/opt/homebrew/bin:/usr/local/bin")
                 return output
             }
         )
@@ -120,56 +102,6 @@ struct CodexCommandUpdateCheckerTests {
         #expect(plan.environment["PATH"]?.contains("/opt/homebrew/bin") == false)
     }
 
-    @Test func runtimeSelectionDoesNotSkipEarlierNonHomebrewExecutables() throws {
-        let customExecutable = "/custom/bin/codex"
-        let resolver = makeHomebrewResolver(
-            executables: [customExecutable, executableURL.path],
-            canonical: [launcherURL.path: executableURL.path]
-        )
-
-        #expect(try resolver.resolve(
-            configuredPath: customExecutable,
-            environment: ["PATH": "/opt/homebrew/bin"]
-        ) == nil)
-        #expect(try resolver.resolve(
-            configuredPath: nil,
-            environment: [
-                "CODEX_APP_SERVER_CODEX_EXECUTABLE": customExecutable,
-                "PATH": "/opt/homebrew/bin",
-            ]
-        ) == nil)
-        #expect(try resolver.resolve(
-            configuredPath: nil,
-            environment: ["PATH": "/custom/bin:/opt/homebrew/bin"]
-        ) == nil)
-
-        let resolvedInstallation = try resolver.resolve(
-            configuredPath: nil,
-            environment: ["PATH": "/opt/homebrew/bin"]
-        )
-        let installation = try #require(resolvedInstallation)
-        #expect(installation.launcherURL == launcherURL)
-        #expect(installation.executableURL == executableURL)
-        #expect(installation.binURL.path == "/opt/homebrew/bin")
-    }
-
-    @Test func homeCommandPrecedesHomebrewFallbackAndApplicationDoesNot() throws {
-        let homeExecutable = "/home/.local/bin/codex"
-        let appBundle = "/Applications/Codex.app"
-        let appExecutable = "\(appBundle)/Contents/Resources/codex"
-        let homeResolver = makeHomebrewResolver(
-            executables: [homeExecutable, executableURL.path],
-            canonical: [launcherURL.path: executableURL.path]
-        )
-        #expect(try homeResolver.resolve(configuredPath: nil, environment: [:]) == nil)
-
-        let appResolver = makeHomebrewResolver(
-            executables: [appExecutable, executableURL.path],
-            canonical: [launcherURL.path: executableURL.path]
-        )
-        #expect(try appResolver.resolve(configuredPath: nil, environment: ["PATH": "/usr/bin:/bin"])?.launcherURL == launcherURL)
-    }
-
     @Test func versionPinnedHomebrewExecutableIsNotOfferedAnAutomaticUpdate() async throws {
         let pinnedExecutableURL = URL(
             fileURLWithPath: "/opt/homebrew/Caskroom/codex/1.2.3/bin/codex"
@@ -177,17 +109,17 @@ struct CodexCommandUpdateCheckerTests {
         let checker = CodexCommandUpdateChecker(
             runtimePreferences: .init(codexExecutablePath: pinnedExecutableURL.path),
             environment: ["HOME": "/users/reviewer", "PATH": "/opt/homebrew/bin"],
-            resolver: makeHomebrewResolver(executables: [pinnedExecutableURL.path]),
+            resolve: { _, _ in (pinnedExecutableURL, pinnedExecutableURL) },
             run: { _, _, _ in
-                Issue.record("A pinned executable must not run the automatic update check.")
-                return Data()
+                Data(report(enabled: "true", latestStatus: "newer version is available",
+                            action: "brew upgrade --cask codex").utf8)
             }
         )
 
-        if case .unavailable = try await checker.check() {} else { Issue.record("Expected an unsupported installation") }
+        if case .manualUpdate = try await checker.check() {} else { Issue.record("Expected a newer version requiring manual installation") }
     }
 
-    @Test func explicitRuntimeHomeOwnsDoctorAndPlanEnvironment() async throws {
+    @Test func reviewRuntimeHomeDoesNotOverrideInstallationEnvironment() async throws {
         let checker = makeChecker(
             preferences: .init(
                 codexHomePath: "/runtime/codex",
@@ -204,8 +136,8 @@ struct CodexCommandUpdateCheckerTests {
             Issue.record("Expected an available update.")
             return
         }
-        #expect(plan.environment["CODEX_HOME"] == "/runtime/codex")
-        #expect(plan.environment["CODEX_SQLITE_HOME"] == "/runtime/codex/sqlite")
+        #expect(plan.environment["CODEX_HOME"] == "/ignored")
+        #expect(plan.environment["CODEX_SQLITE_HOME"] == "/ignored/sqlite")
         #expect(plan.environment["PATH"] == [
             "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin",
         ].joined(separator: ":"))
@@ -236,7 +168,34 @@ struct CodexCommandUpdateCheckerTests {
                 latestStatus: "newer version is available",
                 action: action
             )).check()
-            if case .unavailable = unsupported {} else { Issue.record("Expected an unsupported update action") }
+            if case .manualUpdate = unsupported {} else { Issue.record("Expected a newer version requiring manual installation") }
+        }
+    }
+
+    @Test func scriptBasedCheckRetainsInterpreterLookupFromTheSourcePath() async throws {
+        let manager = FileManager.default
+        let directory = manager.temporaryDirectory.appendingPathComponent("codex-node-\(UUID())")
+        defer { try? manager.removeItem(at: directory) }
+        let launcher = directory.appendingPathComponent("commands/codex")
+        let interpreter = directory.appendingPathComponent("node/bin/node")
+        let json = report(
+            enabled: "true", latestStatus: "newer version is available",
+            action: "npm install -g @openai/codex"
+        )
+        for (executable, script) in [
+            (launcher, "#!/usr/bin/env node\n"),
+            (interpreter, "#!/bin/sh\nprintf '%s' '\(json)'\n"),
+        ] {
+            try manager.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data(script.utf8).write(to: executable)
+            try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        }
+        let result = try await CodexCommandUpdateChecker(
+            runtimePreferences: .init(codexExecutablePath: launcher.path),
+            environment: ["HOME": directory.path, "PATH": interpreter.deletingLastPathComponent().path]
+        ).check()
+        if case .manualUpdate = result {} else {
+            Issue.record("Expected a successfully probed version with manual npm installation.")
         }
     }
 
@@ -329,6 +288,89 @@ struct CodexCommandUpdateCheckerTests {
         #expect(errno == ESRCH)
     }
 
+    @Test(arguments: [false, true])
+    func standaloneChecksAndUpdatesUseInstallationHome(customHome: Bool) async throws {
+        let fixture = try StandaloneUpdateFixture(customHome: customHome)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let preferences = CodexReviewRuntime.Preferences(
+            codexHomePath: fixture.directory.appendingPathComponent("review-home").path,
+            codexExecutablePath: fixture.launcher.path
+        )
+        let installationHome = fixture.installationHome
+        let checker = CodexCommandUpdateChecker(
+            runtimePreferences: preferences,
+            environment: [
+                "HOME": fixture.directory.path,
+                "CODEX_HOME": preferences.codexHomePath!,
+                "CODEX_SQLITE_HOME": "/review/sqlite",
+                "CODEX_INSTALL_DIR": "/wrong/bin",
+                "UPDATE_LOG": fixture.directory.appendingPathComponent("update-environment").path,
+            ],
+            run: { executable, arguments, environment in
+                #expect(executable.path.hasPrefix(installationHome.path + "/packages/standalone/releases/"))
+                #expect(arguments == ["doctor", "--json"])
+                #expect(environment["CODEX_HOME"] == installationHome.path)
+                #expect(environment["CODEX_SQLITE_HOME"] == installationHome.appendingPathComponent("sqlite").path)
+                return Data(report(enabled: "true", latestStatus: "newer version is available",
+                                   action: "standalone installer").utf8)
+            }
+        )
+        guard case .available(let plan) = try await checker.check() else {
+            Issue.record("Expected a standalone update.")
+            return
+        }
+        #expect(plan.executableURL == fixture.launcher)
+        #expect(plan.environment["CODEX_INSTALL_DIR"] == fixture.launcher.deletingLastPathComponent().path)
+        try await ReviewMonitorCodexUpdateProcess.run(plan)
+        let environment = try String(
+            contentsOf: fixture.directory.appendingPathComponent("update-environment"), encoding: .utf8
+        )
+        #expect(environment == installationHome.path + "\n" + fixture.launcher.deletingLastPathComponent().path + "\n")
+        let restarted = try CodexReviewRuntime.resolveExecutable(
+            configuredPath: preferences.codexExecutablePath, environment: plan.environment
+        )
+        #expect(restarted.launcherURL == fixture.launcher)
+        #expect(restarted.executableURL.path.contains("/releases/2.0.0/bin/codex"))
+        #expect(FileManager.default.fileExists(atPath: preferences.codexHomePath!) == false)
+    }
+
+    @Test(arguments: [false, true])
+    func standalonePinnedAliasAndPackageLauncherRequireManualInstallation(packageLauncher: Bool) async throws {
+        let fixture = try StandaloneUpdateFixture(customHome: true)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        try FileManager.default.removeItem(at: fixture.launcher)
+        try FileManager.default.createSymbolicLink(
+            at: fixture.launcher, withDestinationURL: fixture.firstExecutable
+        )
+        let result = try await CodexCommandUpdateChecker(
+            runtimePreferences: .init(codexExecutablePath: packageLauncher
+                ? fixture.installationHome.appendingPathComponent("packages/standalone/current/bin/codex").path
+                : fixture.launcher.path),
+            environment: [:],
+            run: { _, _, _ in Data(report(enabled: "true", latestStatus: "newer version is available",
+                                          action: "standalone installer").utf8) }
+        ).check()
+        if case .manualUpdate = result {} else { Issue.record("Expected a newer version requiring a stable launcher.") }
+    }
+
+    @Test func standaloneFailedProbePreservesFailure() async throws {
+        let fixture = try StandaloneUpdateFixture(customHome: true)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let checker = CodexCommandUpdateChecker(
+            runtimePreferences: .init(codexExecutablePath: fixture.launcher.path),
+            environment: ["CODEX_HOME": "/review/home"],
+            run: { _, _, _ in
+                Data(#"{"checks":{"updates.status":{"details":{"latest version probe":"network offline"}}}}"#.utf8)
+            }
+        )
+        do {
+            _ = try await checker.check()
+            Issue.record("Expected a failed standalone probe.")
+        } catch {
+            #expect(error.localizedDescription.contains("network offline"))
+        }
+    }
+
     private func makeChecker(
         preferences: CodexReviewRuntime.Preferences = .init(
             codexExecutablePath: "/opt/homebrew/bin/codex"
@@ -343,10 +385,7 @@ struct CodexCommandUpdateCheckerTests {
         CodexCommandUpdateChecker(
             runtimePreferences: preferences,
             environment: environment,
-            resolver: makeHomebrewResolver(
-                executables: [executableURL.path],
-                canonical: [launcherURL.path: executableURL.path]
-            ),
+            resolve: { _, _ in (launcherURL, executableURL) },
             run: { executableURL, arguments, environment in
                 inspect(executableURL, arguments, environment)
                 return Data(output.utf8)
@@ -370,24 +409,52 @@ struct CodexCommandUpdateCheckerTests {
     }
 }
 
-private func makeHomebrewResolver(
-    executables: Set<String> = [],
-    canonical: [String: String] = [:]
-) -> CodexHomebrewInstallationResolver {
-    let fileSystem = CodexHomebrewInstallationResolver.FileSystem(
-        canonicalURL: {
-            URL(fileURLWithPath: canonical[$0.standardizedFileURL.path]
-                ?? $0.standardizedFileURL.path)
-        },
-        isExecutableRegularFile: { executables.contains($0.path) }
-    )
-    return .init(configuration: .init(
-        homeDirectory: URL(fileURLWithPath: "/home", isDirectory: true),
-        fallbackBinDirectories: [
-            URL(fileURLWithPath: "/opt/homebrew/bin", isDirectory: true),
-            URL(fileURLWithPath: "/usr/local/bin", isDirectory: true),
-            URL(fileURLWithPath: "/usr/bin", isDirectory: true),
-        ],
-        fileSystem: fileSystem
-    ))
+private struct StandaloneUpdateFixture {
+    let directory: URL
+    let installationHome: URL
+    let launcher: URL
+    let firstExecutable: URL
+
+    init(customHome: Bool) throws {
+        let manager = FileManager.default
+        directory = manager.temporaryDirectory.appendingPathComponent("codex-standalone-\(UUID())")
+        installationHome = directory.appendingPathComponent(customHome ? "custom installation/home" : ".codex")
+        launcher = directory.appendingPathComponent("commands/codex")
+        let root = installationHome.appendingPathComponent("packages/standalone")
+        firstExecutable = root.appendingPathComponent("releases/1.0.0/bin/codex")
+        let nextExecutable = root.appendingPathComponent("releases/2.0.0/bin/codex")
+        do {
+            for executable in [firstExecutable, nextExecutable] {
+                try manager.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+                let script = """
+                #!/bin/sh
+                if [ "$1" = update ]; then
+                    printf '%s\\n%s\\n' "$CODEX_HOME" "$CODEX_INSTALL_DIR" > "$UPDATE_LOG"
+                    /bin/ln -sfn "$CODEX_HOME/packages/standalone/releases/2.0.0" "$CODEX_HOME/packages/standalone/current"
+                fi
+                """
+                try Data(script.utf8).write(to: executable)
+                try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+            }
+            try manager.createSymbolicLink(
+                at: root.appendingPathComponent("current"),
+                withDestinationURL: root.appendingPathComponent("releases/1.0.0")
+            )
+            try manager.createDirectory(at: launcher.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let visibleHome: URL
+            if customHome {
+                visibleHome = directory.appendingPathComponent("home-alias")
+                try manager.createSymbolicLink(at: visibleHome, withDestinationURL: installationHome)
+            } else {
+                visibleHome = installationHome
+            }
+            try manager.createSymbolicLink(
+                at: launcher,
+                withDestinationURL: visibleHome.appendingPathComponent("packages/standalone/current/bin/codex")
+            )
+        } catch {
+            try? manager.removeItem(at: directory)
+            throw error
+        }
+    }
 }

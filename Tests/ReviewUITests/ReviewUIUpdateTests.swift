@@ -31,6 +31,12 @@ extension ReviewUITests {
             case .resumed:
                 #expect(harness.viewController.sidebarUpdateToolbarItemIsHiddenForTesting)
             }
+            #expect(harness.viewController.sidebarUpdateToolbarShowsProgressForTesting == (scenario == .installing))
+            if scenario == .installing {
+                let progressSize = try #require(harness.viewController.sidebarUpdateToolbarProgressSizeForTesting)
+                #expect(progressSize.width > 0)
+                #expect(progressSize.height > 0)
+            }
         } catch {
             await preview.stop()
             await run.value
