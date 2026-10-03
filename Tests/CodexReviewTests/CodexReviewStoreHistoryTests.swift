@@ -128,6 +128,9 @@ struct CodexReviewStoreHistoryTests {
         #expect(queued.core.lifecycle.status == .queued)
         #expect(queued.core.lifecycle.startedAt == nil)
         #expect(await backend.recordedCommands().isEmpty)
+        let record = try #require(await history.startedRecords().first)
+        let job = try #require(store.job(id: queued.jobID))
+        #expect(job.acceptedAt == record.acceptedAt)
         _ = try await store.cancelReview(jobID: queued.jobID, sessionID: "session")
     }
 

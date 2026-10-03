@@ -54,6 +54,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
                 id: "row-height-measurement",
                 sessionID: "row-height-measurement",
                 cwd: "/tmp/workspace",
+                acceptedAt: Date(timeIntervalSince1970: 0),
                 targetSummary: "Uncommitted changes",
                 core: .init(
                     run: .init(model: "gpt-5.5"),
@@ -414,8 +415,10 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
 
         let initialFilter = uiState.sidebarJobFilter
+        let initialSortOrder = uiState.sidebarWorkspaceSortOrder
         sidebarFilterObservation = withPortableContinuousObservation { [weak self, uiState] event in
             let filter = uiState.sidebarJobFilter
+            let sortOrder = uiState.sidebarWorkspaceSortOrder
             guard event.kind != .initial else {
                 return
             }
@@ -423,18 +426,21 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             Task { @MainActor [weak self] in
                 self?.bindSidebarStoreTopologyObservation(
                     filter: filter,
+                    sortOrder: sortOrder,
                     animatedInitialDelivery: animatedInitialDelivery
                 )
             }
         }
         bindSidebarStoreTopologyObservation(
             filter: initialFilter,
+            sortOrder: initialSortOrder,
             animatedInitialDelivery: false
         )
     }
 
     private func bindSidebarStoreTopologyObservation(
         filter: SidebarJobFilter,
+        sortOrder: SidebarWorkspaceSortOrder,
         animatedInitialDelivery: Bool
     ) {
         sidebarTopologyObservation?.cancel()
@@ -445,7 +451,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             let workspaceTopologies = self.sidebarWorkspaceTopologies()
             let rootTopologies = self.sidebarRootTopologies(
                 from: workspaceTopologies,
-                filter: filter
+                filter: filter,
+                sortOrder: sortOrder
             )
             let animated = event.kind == .initial ? animatedInitialDelivery : true
             self.applySidebarTopology(
@@ -496,7 +503,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
     private func sidebarRootTopologies(
         from workspaceTopologies: [SidebarWorkspaceTopology],
-        filter: SidebarJobFilter
+        filter: SidebarJobFilter,
+        sortOrder: SidebarWorkspaceSortOrder
     ) -> [SidebarRootTopology] {
         let presentationsByCWD = ReviewMonitorWorkspaceSectioning.presentations(
             for: workspaceTopologies.map(\.workspace)
@@ -515,6 +523,27 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             }
             sectionIdentityByID[identity.id] = identity
             topologiesBySectionID[identity.id, default: []].append(topology)
+        }
+
+        if sortOrder == .latestJobAccepted {
+            sectionOrder = sectionOrder.enumerated().map { index, id in
+                (
+                    id: id,
+                    manualIndex: index,
+                    acceptedAt: topologiesBySectionID[id]?.flatMap(\.jobs).map(\.acceptedAt).max()
+                )
+            }.sorted { lhs, rhs in
+                switch (lhs.acceptedAt, rhs.acceptedAt) {
+                case let (lhsDate?, rhsDate?) where lhsDate != rhsDate:
+                    return lhsDate > rhsDate
+                case (_?, nil):
+                    return true
+                case (nil, _?):
+                    return false
+                default:
+                    return lhs.manualIndex < rhs.manualIndex
+                }
+            }.map(\.id)
         }
 
         var renderedSectionIDs: Set<String> = []
@@ -1434,6 +1463,9 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
     private func dragPayload(for item: Any) -> SidebarDragPayload? {
         if let section = workspaceSection(from: item) {
+            guard uiState.sidebarWorkspaceSortOrder == .manual else {
+                return nil
+            }
             return .workspaceSection(id: section.id)
         }
         if let job = job(from: item) {
@@ -1505,7 +1537,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         proposedItem: Any?,
         proposedChildIndex index: Int
     ) -> SidebarResolvedDrop? {
-        guard let section = workspaceSection(id: id),
+        guard uiState.sidebarWorkspaceSortOrder == .manual,
+              let section = workspaceSection(id: id),
               let sourceRootIndex = rootIndex(forRootItem: section),
               let sourceStoreIndex = section.workspaces.compactMap({ workspaceIndex(cwd: $0.cwd) }).min(),
               let destination = resolvedWorkspaceDropDestination(
@@ -1867,8 +1900,12 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         case .reorderWorkspaceSection(let id, let cwds, let storeIndex, let displayIndex):
             let store = store
             startHistoryAction { [weak self] in
+                guard self?.uiState.sidebarWorkspaceSortOrder == .manual else {
+                    return
+                }
                 guard await store.reorderWorkspaces(cwds: cwds, toIndex: storeIndex),
-                      let self
+                      let self,
+                      self.uiState.sidebarWorkspaceSortOrder == .manual
                 else {
                     return
                 }

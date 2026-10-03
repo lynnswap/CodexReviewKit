@@ -243,6 +243,7 @@ package struct RestoredReviewRecord: Sendable, Hashable {
             id: started.id,
             sessionID: "history:\(started.id)",
             cwd: started.cwd,
+            acceptedAt: started.acceptedAt,
             sortOrder: started.sortOrder,
             targetSummary: started.target.displaySummary,
             target: started.target,

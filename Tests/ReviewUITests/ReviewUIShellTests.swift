@@ -382,6 +382,10 @@ extension ReviewUITests {
             "-",
             "Running",
             "Latest Finished",
+            "-",
+            "Workspace Order",
+            "Manual",
+            "Latest Job First",
         ])
         #expect(viewController.sidebarJobFilterToolbarShowsActiveBackgroundForTesting == false)
         #expect(viewController.selectedToolbarItemIdentifierForTesting == nil)
@@ -391,7 +395,7 @@ extension ReviewUITests {
             viewController.sidebarJobFilterToolbarShowsActiveBackgroundForTesting
         }
         #expect(viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .running)
-        #expect(viewController.sidebarJobFilterToolbarSelectedMenuItemTitlesForTesting == ["Running"])
+        #expect(viewController.sidebarJobFilterToolbarSelectedMenuItemTitlesForTesting == ["Running", "Manual"])
         #expect(viewController.selectedToolbarItemIdentifierForTesting == nil)
 
         viewController.selectSidebarJobFilterForTesting(.latestFinished)
@@ -400,7 +404,7 @@ extension ReviewUITests {
             viewController.sidebarJobFilterToolbarSelectedFilterForTesting == combinedFilter
         }
         #expect(viewController.sidebarJobFilterToolbarShowsActiveBackgroundForTesting)
-        #expect(viewController.sidebarJobFilterToolbarSelectedMenuItemTitlesForTesting == ["Running", "Latest Finished"])
+        #expect(viewController.sidebarJobFilterToolbarSelectedMenuItemTitlesForTesting == ["Running", "Latest Finished", "Manual"])
         #expect(viewController.selectedToolbarItemIdentifierForTesting == nil)
 
         viewController.selectSidebarJobFilterForTesting(.running)
@@ -408,7 +412,7 @@ extension ReviewUITests {
             viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .latestFinished
         }
         #expect(viewController.sidebarJobFilterToolbarShowsActiveBackgroundForTesting)
-        #expect(viewController.sidebarJobFilterToolbarSelectedMenuItemTitlesForTesting == ["Latest Finished"])
+        #expect(viewController.sidebarJobFilterToolbarSelectedMenuItemTitlesForTesting == ["Latest Finished", "Manual"])
         #expect(viewController.selectedToolbarItemIdentifierForTesting == nil)
 
         viewController.setSidebarJobFilterForTesting(.all)
@@ -416,11 +420,48 @@ extension ReviewUITests {
             viewController.sidebarJobFilterToolbarShowsActiveBackgroundForTesting == false
         }
         #expect(viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .all)
-        #expect(viewController.sidebarJobFilterToolbarSelectedMenuItemTitlesForTesting == ["All Items"])
+        #expect(viewController.sidebarJobFilterToolbarSelectedMenuItemTitlesForTesting == ["All Items", "Manual"])
         #expect(viewController.selectedToolbarItemIdentifierForTesting == nil)
     }
 
-    @Test func sidebarJobFilterPersistsMenuSelectionAcrossWindowControllers() async throws {
+    @Test func sidebarWorkspaceSortMenuSelectsOneOrderIndependentlyOfJobFilter() async throws {
+        let store = CodexReviewStore.makePreviewStore()
+        let harness = makeWindowHarness(store: store)
+        let viewController = harness.viewController
+        defer { harness.window.close() }
+        let sidebarItem = try #require(viewController.splitViewItems.first)
+        sidebarItem.isCollapsed = false
+
+        #expect(viewController.sidebarWorkspaceSortToolbarSelectedSortOrderForTesting == .manual)
+        #expect(viewController.sidebarJobFilterToolbarSelectedMenuItemTitlesForTesting == ["All Items", "Manual"])
+        #expect(viewController.sidebarJobFilterToolbarShowsActiveBackgroundForTesting == false)
+
+        viewController.selectSidebarWorkspaceSortOrderForTesting(.latestJobAccepted)
+        #expect(viewController.sidebarWorkspaceSortToolbarSelectedSortOrderForTesting == .latestJobAccepted)
+        #expect(viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .all)
+        #expect(viewController.sidebarJobFilterToolbarSelectedMenuItemTitlesForTesting == ["All Items", "Latest Job First"])
+        #expect(viewController.sidebarJobFilterToolbarShowsActiveBackgroundForTesting)
+
+        viewController.selectSidebarWorkspaceSortOrderForTesting(.latestJobAccepted)
+        #expect(viewController.sidebarWorkspaceSortToolbarSelectedSortOrderForTesting == .latestJobAccepted)
+        #expect(viewController.sidebarJobFilterToolbarSelectedMenuItemTitlesForTesting == ["All Items", "Latest Job First"])
+
+        viewController.selectSidebarJobFilterForTesting(.running)
+        #expect(viewController.sidebarWorkspaceSortToolbarSelectedSortOrderForTesting == .latestJobAccepted)
+        #expect(viewController.sidebarJobFilterToolbarSelectedMenuItemTitlesForTesting == ["Running", "Latest Job First"])
+
+        viewController.setSidebarWorkspaceSortOrderForTesting(.manual)
+        try await waitForCondition {
+            viewController.sidebarJobFilterToolbarSelectedMenuItemTitlesForTesting == ["Running", "Manual"]
+        }
+        #expect(viewController.sidebarJobFilterToolbarShowsActiveBackgroundForTesting)
+
+        viewController.selectSidebarJobFilterForTesting(.all)
+        #expect(viewController.sidebarJobFilterToolbarSelectedMenuItemTitlesForTesting == ["All Items", "Manual"])
+        #expect(viewController.sidebarJobFilterToolbarShowsActiveBackgroundForTesting == false)
+    }
+
+    @Test func sidebarPreferencesPersistMenuSelectionsAcrossWindowControllers() async throws {
         let defaultsContext = try makeSidebarJobFilterDefaultsForTesting()
         let defaults = defaultsContext.defaults
         defer {
@@ -441,6 +482,7 @@ extension ReviewUITests {
             try await waitForCondition {
                 viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .all
             }
+            #expect(viewController.sidebarWorkspaceSortToolbarSelectedSortOrderForTesting == .manual)
             viewController.selectSidebarJobFilterForTesting(.running)
             try await waitForCondition {
                 viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .running
@@ -452,6 +494,11 @@ extension ReviewUITests {
             #expect(
                 defaults.string(forKey: ReviewMonitorSidebar.JobFilterPersistence.defaultsKey)
                     == combinedFilter.persistedValue
+            )
+            viewController.selectSidebarWorkspaceSortOrderForTesting(.latestJobAccepted)
+            #expect(
+                defaults.string(forKey: ReviewMonitorSidebar.WorkspaceSortOrderPersistence.defaultsKey)
+                    == SidebarWorkspaceSortOrder.latestJobAccepted.rawValue
             )
             harness.window.close()
         }
@@ -469,6 +516,7 @@ extension ReviewUITests {
             try await waitForCondition {
                 viewController.sidebarJobFilterToolbarSelectedFilterForTesting == combinedFilter
             }
+            #expect(viewController.sidebarWorkspaceSortToolbarSelectedSortOrderForTesting == .latestJobAccepted)
             viewController.selectSidebarJobFilterForTesting(.all)
             try await waitForCondition {
                 viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .all
@@ -476,6 +524,13 @@ extension ReviewUITests {
             #expect(
                 defaults.string(forKey: ReviewMonitorSidebar.JobFilterPersistence.defaultsKey)
                     == SidebarJobFilter.all.persistedValue
+            )
+            #expect(viewController.sidebarWorkspaceSortToolbarSelectedSortOrderForTesting == .latestJobAccepted)
+            #expect(viewController.sidebarJobFilterToolbarShowsActiveBackgroundForTesting)
+            viewController.selectSidebarWorkspaceSortOrderForTesting(.manual)
+            #expect(
+                defaults.string(forKey: ReviewMonitorSidebar.WorkspaceSortOrderPersistence.defaultsKey)
+                    == SidebarWorkspaceSortOrder.manual.rawValue
             )
             harness.window.close()
         }
@@ -494,16 +549,18 @@ extension ReviewUITests {
             try await waitForCondition {
                 viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .all
             }
+            #expect(viewController.sidebarWorkspaceSortToolbarSelectedSortOrderForTesting == .manual)
         }
     }
 
-    @Test func sidebarJobFilterDefaultsToAllForInvalidPersistedValue() async throws {
+    @Test func sidebarPreferencesUseDefaultsForInvalidPersistedValues() async throws {
         let defaultsContext = try makeSidebarJobFilterDefaultsForTesting()
         let defaults = defaultsContext.defaults
         defer {
             defaults.removePersistentDomain(forName: defaultsContext.suiteName)
         }
         defaults.set("invalid-filter", forKey: ReviewMonitorSidebar.JobFilterPersistence.defaultsKey)
+        defaults.set("invalid-order", forKey: ReviewMonitorSidebar.WorkspaceSortOrderPersistence.defaultsKey)
 
         let store = CodexReviewStore.makePreviewStore()
         let harness = makeWindowHarness(
@@ -518,6 +575,7 @@ extension ReviewUITests {
         try await waitForCondition {
             viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .all
         }
+        #expect(viewController.sidebarWorkspaceSortToolbarSelectedSortOrderForTesting == .manual)
     }
 
     @Test func sidebarJobFilterToolbarItemOnlyShowsForWorkspaceSidebar() async throws {

@@ -86,6 +86,7 @@ struct ReviewHistoryRecordTests {
     }
 
     @Test func restoredSuccessBuildsOneCanonicalDetailWithoutSessionAuthority() throws {
+        let acceptedAt = Date(timeIntervalSince1970: 0)
         let startedAt = Date(timeIntervalSince1970: 1)
         let endedAt = Date(timeIntervalSince1970: 2)
         let parsed = ParsedReviewResult.parse(finalReviewText: "No findings.")
@@ -97,7 +98,7 @@ struct ReviewHistoryRecordTests {
                 sortOrder: 4,
                 target: .baseBranch("main"),
                 model: "gpt-5",
-                acceptedAt: startedAt,
+                acceptedAt: acceptedAt,
                 startedAt: startedAt
             ),
             terminal: TerminalReviewRecord(
@@ -114,6 +115,8 @@ struct ReviewHistoryRecordTests {
         let job = restored.makeRestoredJob()
 
         #expect(job.origin == .restoredHistory)
+        #expect(job.acceptedAt == acceptedAt)
+        #expect(job.core.lifecycle.startedAt == startedAt)
         #expect(job.belongs(toLiveSession: "history:review-1") == false)
         #expect(job.target == .baseBranch("main"))
         #expect(job.core.lifecycle.terminal == .completed)
@@ -155,6 +158,36 @@ struct ReviewHistoryRecordTests {
         #expect(job.isTerminal)
         #expect(job.logEntries.map(\.kind) == [.error])
         #expect(job.logEntries.first?.timestamp == startedAt)
+    }
+
+    @Test func restoredQueuedReviewPreservesAcceptanceWithoutExecutionStart() throws {
+        let acceptedAt = Date(timeIntervalSince1970: 1)
+        let restored = try RestoredReviewRecord(
+            started: AcceptedReviewRecord(
+                id: "review-queued",
+                cwd: "/tmp/project",
+                workspaceSortOrder: 0,
+                sortOrder: 0,
+                target: .uncommittedChanges,
+                model: nil,
+                acceptedAt: acceptedAt
+            ),
+            terminal: TerminalReviewRecord(
+                id: "review-queued",
+                model: nil,
+                terminal: .interrupted(.previousProcessExit),
+                endedAt: nil,
+                summary: "Interrupted",
+                canonicalReview: nil,
+                parsedResult: nil
+            )
+        )
+
+        let job = restored.makeRestoredJob()
+
+        #expect(job.acceptedAt == acceptedAt)
+        #expect(job.core.lifecycle.startedAt == nil)
+        #expect(job.logEntries.first?.timestamp == acceptedAt)
     }
 
     @Test func requestedCancellationRestoresTypedTerminalWithoutSyntheticLog() throws {

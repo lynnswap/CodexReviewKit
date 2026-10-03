@@ -12,7 +12,8 @@ struct ReviewMonitorCopyTests {
             status: .running, summary: "Running"
         )
         let clicked = CodexReviewJob(
-            id: "clicked", sessionID: "session", cwd: "/tmp/日本語 workspace", targetSummary: "Clicked review",
+            id: "clicked", sessionID: "session", cwd: "/tmp/日本語 workspace", acceptedAt: .distantPast,
+            targetSummary: "Clicked review",
             core: .init(
                 run: .init(reviewThreadID: "review-thread", threadID: "parent-thread"),
                 lifecycle: .init(status: .running),
