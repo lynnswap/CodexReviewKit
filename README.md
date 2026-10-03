@@ -1,20 +1,18 @@
 # CodexReviewKit
 
-CodexReviewKit is the native macOS companion app for Codex review.
+CodexReviewMonitor is a macOS app for running Codex reviews. Start reviews from
+Codex or Claude Code through MCP, then read the output and findings in the app.
+It requires macOS 26 or newer and the Codex CLI installed on your Mac.
 
-Launch `CodexReviewMonitor.app`, register its MCP endpoint with Codex, then run
-reviews through the `codex_review` tools while the app keeps the review state
-visible.
-
-## Quick Start
+## Quick start
 
 1. Download the signed and notarized DMG from the
    [latest release](https://github.com/lynnswap/CodexReviewKit/releases/latest).
-
 2. Open `CodexReviewMonitor_<version>.dmg`, drag `CodexReviewMonitor.app` to
-   Applications, then launch the app.
-
-3. Register the local MCP endpoint in the client you use.
+   Applications, and launch it.
+3. Sign in from the app with **Sign in with ChatGPT**, or choose
+   **Sign in another way** to use an API key.
+4. Register the app's MCP endpoint with your client.
 
    Codex CLI:
 
@@ -28,62 +26,18 @@ visible.
    claude mcp add --transport http codex_review http://localhost:9417/mcp
    ```
 
-4. Use the review tools from Codex:
+5. Ask your client to review a repository. It uses `review_start` to start a job
+   and `review_await` if the review needs more time. `review_list`, `review_read`,
+   and `review_cancel` let you inspect or cancel jobs.
 
-   - `review_start`
-   - `review_await`
-   - `review_list`
-   - `review_read`
-   - `review_cancel`
+Keep the app running while you use the tools. It hosts
+`http://localhost:9417/mcp` and runs `codex app-server` for the reviews.
+ReviewMonitor uses `~/.codex_review` as its Codex home.
 
-## What Runs Locally
+### Allow time for long reviews
 
-- `CodexReviewMonitor.app` shows review jobs, output, and findings.
-- `http://localhost:9417/mcp` is the app-managed MCP endpoint.
-- `codex app-server` runs behind CodexReviewMonitor as the live review backend.
-- `~/.codex_review` is the dedicated Codex home used by CodexReviewMonitor.
-
-## Codex Updates
-
-ReviewMonitor checks the selected Codex installation at launch and every eight
-hours. Use **Settings → Updates → Check for Updates** for a manual check and its
-last-check time. Manual checks do not change the automatic schedule and do not
-install an update. Unsupported installations and failed checks are reported
-separately from **Up to Date**. Automatic installation supports the stable
-Homebrew Codex cask and standalone installations selected through their stable
-launcher. Update checks and installation use the selected CLI's installation
-home, including custom standalone homes; reviews keep using `~/.codex_review`.
-When a newer version is available for an installation that cannot be updated
-automatically, Settings reports **Update Available** with manual update guidance.
-
-When an update is available, choose **Update** in the sidebar toolbar. During a
-review, **Update After Reviews** lets current reviews finish and queues new
-requests inside ReviewMonitor. **Stop Reviews and Update** cancels current
-reviews and updates immediately. ReviewMonitor and its MCP sessions stay open;
-queued requests resume after Codex restarts, without being resubmitted.
-The toolbar shows a spinner and the update stage while Codex is stopping,
-installing, or restarting.
-
-If updating fails but Codex can restart, queued reviews resume and the error
-remains visible in Settings. If Codex cannot restart, the queue is retained and
-**Retry** in the sidebar attempts runtime recovery without reinstalling. Explicitly
-quitting the app cancels queued reviews; an installation already in progress is
-allowed to finish before the app exits.
-
-To investigate UI responsiveness during updates, enable
-`REVIEW_MONITOR_SIMULATE_CODEX_UPDATE=1` in the Xcode scheme's **Run → Arguments →
-Environment Variables**, then launch the app. The normal **Update** button appears
-after a one-second simulated check. Installation waits ten seconds using the same
-subprocess runner as a real update, while the existing Codex runtime stops and
-restarts normally. Codex and Homebrew packages are not changed. Settings reports
-**Up to Date** afterward; relaunch the app to repeat the simulation. Use this mode
-with the live runtime, with `REVIEW_MONITOR_MOCK_JOBS` and
-`REVIEW_MONITOR_REVIEW_MODE` disabled.
-
-## Timeout Setup
-
-Long reviews can exceed the default MCP client timeout. `codex mcp add` does
-not currently expose timeout flags, so add them manually after registration:
+Add these timeout settings to the calling Codex client's configuration after
+registering the endpoint. `codex mcp add` does not expose timeout flags.
 
 ```toml
 [mcp_servers.codex_review]
@@ -92,50 +46,55 @@ startup_timeout_sec = 1200.0
 tool_timeout_sec = 1200.0
 ```
 
-This config belongs to the Codex client that calls the MCP server. It is
-separate from CodexReviewMonitor's dedicated runtime home at `~/.codex_review`.
+This is the client's configuration, separate from ReviewMonitor's
+`~/.codex_review` home. See the [MCP reference](Docs/mcp.md) for tool arguments,
+results, and session behavior.
 
-## Build from Source
+## Update Codex
 
-To build a local DMG from the current checkout, run from the repository root
-using Python 3.10 or newer:
+ReviewMonitor checks for Codex updates at launch and every eight hours. You can
+also check in **Settings → Updates → Check for Updates**, which shows the last
+check time. A manual check only checks availability; it keeps the automatic
+schedule and leaves installation to you.
+Settings distinguishes unsupported installations and failed checks from
+**Up to Date**.
+
+Choose **Update** in the sidebar when a new version is available. If reviews are
+running, choose **Update After Reviews** to finish them first, or
+**Stop Reviews and Update** to cancel them and update now. New review requests
+wait in ReviewMonitor's queue and resume after Codex restarts. The app and MCP
+sessions stay open, and you do not need to resubmit requests.
+
+Automatic installation supports the stable Homebrew Codex cask and standalone
+installations selected through their stable launcher. Other installations show
+manual update guidance when an update is available. Checks and installation use
+the selected CLI's installation home, including custom standalone homes;
+reviews use `~/.codex_review`.
+
+If installation fails but Codex restarts, queued reviews resume and Settings
+shows the error. If Codex cannot restart, the queue stays available and **Retry**
+attempts recovery without reinstalling. Quitting the app cancels queued reviews
+and waits for any installation already in progress.
+
+## Build from source
+
+On an Apple silicon Mac with Xcode 26.4 or newer and Python 3.10 or newer, run
+this command from the repository root:
 
 ```bash
 python3 scripts/build_review_monitor.py
 ```
 
-The command creates `dist/CodexReviewMonitor_yymmdd_hhmm.dmg`, using the local
-build-start time. It applies an ad-hoc hardened-runtime signature to the app and
-verifies the DMG's contents. Build caches remain
-in `.build` for subsequent builds. The first run prepares the pinned DMG tools
-in `.build/release-tools` and may download the locked package dependencies.
+It creates `dist/CodexReviewMonitor_yymmdd_hhmm.dmg` with an ad-hoc signature for
+local use. You can keep ReviewMonitor running during the build. Once reviews
+finish, quit the app, open the DMG, and drag the new app to Applications. Choose
+**Replace**, then launch it.
 
-Keep CodexReviewMonitor running while building. When the DMG is ready and reviews
-have finished, quit the app, open the DMG, and drag `CodexReviewMonitor.app` to
-Applications. Choose **Replace**, then launch the installed app. There is no need
-to delete the existing app first. Builds started in the same minute replace the
-same DMG only after the new image passes validation; older filenames are retained.
+See [local build details](Docs/releases.md#local-builds) for signing identities,
+build caches, and packaging behavior.
 
-The local build requires an Apple silicon Mac and Xcode 26.4 or newer; the app
-requires macOS 26 or newer. The command does not modify or launch installed apps.
+## Documentation
 
-The default ad-hoc signature is for local use and does not make a redistributable
-or notarized app. If the Mac's management policy requires an approved local
-identity, pass it explicitly; the command never falls back to another
-identity:
-
-```bash
-python3 scripts/build_review_monitor.py \
-  --signing-identity 'Apple Development: Developer Name (TEAMID)'
-```
-
-Device-management policy can still prohibit locally signed apps. The command
-does not disable Gatekeeper or remove quarantine metadata.
-
-## More Detail
-
-- [Architecture](Docs/architecture.md): ownership boundaries and runtime flow.
-- [MCP reference](Docs/mcp.md): tool schemas, discovery resources, session
-  behavior, and runtime files.
-- [Release guide](Docs/releases.md): maintainer signing setup, Draft Release
-  preparation and publication, validation builds, and repository protection.
+- [Architecture](Docs/architecture.md): targets, review flow, and runtime updates.
+- [MCP reference](Docs/mcp.md): tool arguments, results, and runtime files.
+- [Release guide](Docs/releases.md): signing, validation, and publication.

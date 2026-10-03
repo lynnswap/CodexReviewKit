@@ -27,9 +27,8 @@ package enum ReviewAttemptRecoveryTrigger: Equatable, Sendable {
     }
 }
 
-/// Exhaustively classifies why an admitted review event stream ended without a
-/// product terminal. Recovery policy is derived from this value once, at the
-/// attempt admission boundary.
+/// The reason a review's event stream ended without a final result.
+/// The attempt admission uses this reason once to decide whether recovery is allowed.
 package enum ReviewAttemptStreamFailure: LocalizedError, Equatable, Sendable {
     case recoverableNetwork(ReviewRuntimeCloseFailure)
     case modelCapacity(message: String?)
@@ -105,8 +104,8 @@ package struct ReviewRecoveryCandidateAlreadyPrepared: LocalizedError, Equatable
     }
 }
 
-/// Copies share one preparation owner. Exactly one caller can turn a resolved
-/// attempt into a handoff, even when preparation is requested concurrently.
+/// A resolved attempt that can prepare one recovery handoff.
+/// Copies share the preparation state, so concurrent callers cannot prepare it twice.
 package struct ReviewRecoveryCandidate: Equatable, Sendable {
     package let resolved: ReviewResolvedAttemptTerminal
     package let trigger: ReviewAttemptRecoveryTrigger
@@ -197,8 +196,8 @@ package enum ReviewRecoveryStagingFailure: LocalizedError, Equatable, Sendable {
     }
 }
 
-/// Copies share one consumption owner, so a resume token can be consumed or
-/// discarded exactly once even when concurrent callers retain the value.
+/// A recovery token that can be consumed or discarded once.
+/// Copies share that state, including when used by concurrent callers.
 package struct ReviewRecoveryHandoff: Equatable, Sendable {
     package struct Consumption: Equatable, Sendable {
         package let candidate: ReviewRecoveryCandidate
@@ -262,8 +261,8 @@ private actor ReviewRecoveryHandoffConsumptionOwner {
     }
 }
 
-/// Identifies the exact source attempt and runtime generation owned by one
-/// backend recovery route. Mutable route state remains backend-owned.
+/// Identifies the source attempt and runtime generation for a backend recovery route.
+/// The backend keeps the route's mutable state.
 package final class ReviewRecoveryRouteReceipt: Sendable {
     package let sourceRun: CodexReviewBackendModel.Review.Run
     package let sourceGeneration: ReviewRuntimeGeneration

@@ -11,7 +11,7 @@ public enum CodexReviewNativeAuthentication {}
 public extension CodexReviewNativeAuthentication {
     struct Configuration: Sendable {
         public enum BrowserSessionPolicy: Sendable {
-            /// Allows the authentication session to share the browser's cookies and browsing data.
+            /// Uses a browser session that can share cookies and browsing data.
             case shared
             case ephemeral
         }

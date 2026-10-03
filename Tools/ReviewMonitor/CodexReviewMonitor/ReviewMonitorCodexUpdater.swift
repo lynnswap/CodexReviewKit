@@ -78,7 +78,7 @@ final class ReviewMonitorCodexUpdater {
         }
     }
 
-    /// Stop read-only checking before Store shutdown cancels a deferred update or joins installation.
+    /// Stops update checks before store shutdown cancels a deferred update or waits for installation.
     func stopChecking() async {
         stopping = true
         monitorTask?.cancel()

@@ -15,9 +15,10 @@ extension CodexReviewStore {
         case failed(String)
     }
 
-    /// Keeps MCP sessions and accepted jobs alive while replacing the Codex runtime.
-    /// Concurrent callers join the existing operation; only its installation closure runs.
-    /// An installation failure is thrown even when the runtime recovers and jobs resume.
+    /// Updates Codex and restarts its runtime, preserving MCP sessions and accepted jobs.
+    ///
+    /// Concurrent calls wait for the same update, using the first call's installation
+    /// closure. Throws installation errors even if the runtime restarts and jobs resume.
     @_spi(ApplicationHostSupport) public func updateCodex(
         when timing: CodexUpdateTiming,
         install: @escaping @MainActor @Sendable () async throws -> Void

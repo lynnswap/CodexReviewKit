@@ -324,7 +324,8 @@ package final class DirectoryCapability: Sendable {
         )
     }
 
-    /// Returns `nil` only when absolute descriptor acquisition reports `ENOENT`.
+    /// Opens the directory, returning `nil` only if opening its absolute path reports `ENOENT`.
+    /// Validation failures and other errors are thrown.
     package static func openExistingIfPresent(
         at absoluteURL: URL,
         requirements: Requirements
@@ -459,7 +460,8 @@ package final class DirectoryCapability: Sendable {
         }
     }
 
-    /// Creates an empty `0600` file, or validates and preserves an existing regular file unchanged.
+    /// Creates an empty file with mode `0600` if it is missing.
+    /// Validates an existing regular file without changing it.
     package func createFileIfMissing(named name: Name) throws {
         try withBorrowedDescriptor { parent in
             try Self.validateOwned(parent, capability: self)
@@ -608,13 +610,13 @@ package final class DirectoryCapability: Sendable {
         }
     }
 
-    /// Recursively removes a directory after descriptor-relative identity validation, without
-    /// following symbolic links. A root missing at initial inspection is a no-op; observable identity
-    /// changes, mount boundaries, and unsupported entries fail after any completed removals.
+    /// Removes a directory tree after checking identities relative to the parent descriptor.
+    /// Symbolic links are not followed. A root missing at the first check is a no-op.
+    /// Identity changes, mount boundaries, or unsupported entries throw an error;
+    /// removals already completed are not rolled back.
     ///
-    /// This operation does not provide identity-conditional unlink against a malicious same-UID
-    /// process that renames an entry in the final `fstatat`-to-`unlinkat` window. Callers requiring
-    /// that stronger guarantee must not use this API.
+    /// A process with the same UID can still replace an entry between the final `fstatat`
+    /// and `unlinkat`. Use this only where malicious replacements are outside the threat model.
     package func removeDirectoryRecursively(
         named name: Name,
         expectedIdentity: Identity
@@ -632,12 +634,11 @@ package final class DirectoryCapability: Sendable {
         }
     }
 
-    /// Removes a regular-file entry after descriptor-relative identity and type revalidation.
-    /// Descriptor-relative `ENOENT` is a no-op.
+    /// Removes a regular file after rechecking its identity and type relative to the parent descriptor.
+    /// A missing entry (`ENOENT`) is a no-op.
     ///
-    /// This operation does not provide identity-conditional unlink against a malicious same-UID
-    /// process that renames an entry in the final `fstatat`-to-`unlinkat` window. Callers requiring
-    /// that stronger guarantee must not use this API.
+    /// A process with the same UID can still replace an entry between the final `fstatat`
+    /// and `unlinkat`. Use this only where malicious replacements are outside the threat model.
     package func removeFile(named name: Name) throws {
         try withBorrowedDescriptor { parent in
             try Self.validateOwned(parent, capability: self)

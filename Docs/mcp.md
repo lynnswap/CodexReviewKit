@@ -1,204 +1,134 @@
-# MCP
+# MCP reference
 
-ReviewMonitor exposes Codex review over its app-managed MCP Streamable HTTP
-endpoint.
-
-## Server Behavior
-
-- App-managed Streamable HTTP MCP endpoint at `http://localhost:9417/mcp`
-- Multi-session
-- Session-scoped review jobs
-- One long-lived `codex app-server` backend process
-- One shared internal transport to the backend process
-- Review jobs run concurrently across sessions and within the same session
-
-## Lifecycle Responses
-
-`review_start`, `review_await`, `review_read`, and `review_cancel` return a
-`lifecycle` object. Each `review_list.items` entry contains the same object.
-
-`lifecycle.status` is the broad job state: `queued`, `running`, `succeeded`,
-`failed`, or `cancelled`. `lifecycle.terminal` is the authoritative terminal
-classification and is `null` while the job is queued or running. Terminal
-values have one of these shapes:
-
-- Completed: `{"kind":"completed"}`
-- Failed: `{"kind":"failed","message":<string-or-null>}`
-- Interrupted: `{"kind":"interrupted","cause":<cause>}`
-
-An interruption `cause` has a `kind`, `source`, and `message`:
-
-- `requested`: `source` is `userInterface`, `mcpClient`, `sessionClosed`, or
-  `system`; `message` contains the cancellation reason.
-- `server`: `source` is `null`; `message` may contain a server-provided reason.
-- `transport`: `source` is `null`; `message` describes the transport failure.
-- `previousProcessExit`: `source` and `message` are `null`.
-
-The current contract pairs `completed` with `status: "succeeded"`, a requested
-interruption with `status: "cancelled"`, and the other terminal forms with
-`status: "failed"`.
-
-`lifecycle.cancellation` records cancellation intent and its source.
-`lifecycle.terminal` records the authoritative outcome. Do not infer an
-interrupted terminal from `cancellation` alone.
+ReviewMonitor hosts a Streamable HTTP MCP server at
+`http://localhost:9417/mcp`. It shares one long-lived `codex app-server` process
+across sessions. Reviews can run concurrently within a session and across
+sessions, but each session can access only its own jobs.
 
 ## Tools
 
+| Tool | Use |
+| --- | --- |
+| `review_start` | Start a review and wait for its result |
+| `review_await` | Continue waiting for a queued or running review |
+| `review_read` | Read a job snapshot and a page of logs |
+| `review_list` | List jobs in the current session |
+| `review_cancel` | Cancel a job in the current session |
+
 ### `review_start`
 
-Runs a review through the shared long-lived `codex app-server` backend.
-
-Key inputs:
-
-- `cwd`
-- `target`
-
-`target` uses the app-server review target model:
+Pass `cwd` and a `target`. The target takes one of these forms:
 
 - `{"type":"uncommittedChanges"}`
 - `{"type":"baseBranch","branch":"main"}`
 - `{"type":"commit","sha":"abc1234","title":"Optional title"}`
 - `{"type":"custom","instructions":"Free-form review instructions"}`
 
-Returns:
+The call waits up to 540 seconds, including time spent queued during a Codex
+update. If the returned status is still `queued` or `running`, call
+`review_await` with the returned `jobId`.
 
-- `jobId`
-- `run`
-  - `reviewThreadId`
-  - `threadId`
-  - `turnId`
-  - `model` effective resolved review model
-- `lifecycle`
-  - `status`
-  - `exitCode`
-  - `startedAt`
-  - `endedAt`
-  - `elapsedSeconds`
-  - `cancellable`
-  - `cancellation` when cancellation metadata is available
-  - `errorMessage`
-  - `terminal` authoritative terminal classification, or `null` before a
-    terminal result; see [Lifecycle Responses](#lifecycle-responses)
-- `output`
-  - `summary`
-  - `review`
-  - `hasFinalReview`
-  - `lastAgentMessage`
-  - `reviewResult` parsed finding state (`hasFindings`, `noFindings`, or `unknown`) with title/body/location fields when available
+The response contains `jobId`, `run`, `lifecycle`, and `output`, described
+[below](#response-fields). ReviewMonitor starts with its settings model and
+reports `thread/start.model` when the server supplies it. Otherwise, it keeps
+the requested model.
 
-Notes:
-
-- `review_start` is the primary client flow. Every client waits up to 540
-  seconds; if the job is still running, call `review_await` with the returned
-  `jobId`.
-- A terminal result is returned after its history commit is durable. Backend
-  cleanup continues independently, and a later cleanup failure is available as
-  a developer diagnostic through `review_read` with `logFilter: "all"`.
-- ReviewMonitor starts a job with its effective settings model. After thread
-  creation, it reports `thread/start.model` when available and otherwise keeps
-  that requested model.
-- Use `review_read` to fetch paged, ordered `logs`. `rawLogText` is the
-  diagnostic/raw projection and is not a full log transcript.
+The store waits for the terminal history commit before returning the result.
+Backend cleanup continues separately. A later cleanup failure appears in
+`review_read` with `logFilter: "all"`.
 
 ### `review_await`
 
-Waits for a running review job owned by the current MCP session. The wait is
-bounded to 540 seconds so clients with fixed activity watchdogs can continue
-waiting with another tool call.
+Pass `jobId` or `jobID` for a job in the current session. Each call waits up to
+540 seconds and returns the same fields as `review_start`. Call it again if the
+job is still queued or running.
 
-Inputs:
-
-- `jobId` or `jobID`
-
-Returns the same lightweight shape as `review_start`: `jobId`, `run`,
-`lifecycle`, and `output`. It does not include `logs` or `rawLogText`; use
-`review_read` when log pages are needed.
-
-If the job is still running after the bounded wait, call `review_await` again
-with the same `jobId`.
+Use `review_read` for logs; start and await responses contain neither `logs`
+nor `rawLogText`.
 
 ### `review_read`
 
-Reads the current or final state of a review job owned by the current MCP session.
-Use this to fetch log pages or to refresh a job snapshot independently of the
-bounded `review_start` / `review_await` flow.
+Pass `jobId` or `jobID` to read a job independently of start or await.
 
-Inputs:
+| Optional argument | Meaning |
+| --- | --- |
+| `logOffset` | Zero-based offset; omitting it selects the latest page |
+| `logLimit` | Page size, default `100`, maximum `500` |
+| `logFilter` | `default` excludes command output and developer entries; `all` includes both |
 
-- `jobId` or `jobID`
+The response adds `logs`, `logsPage`, and `rawLogText` to the common fields.
+Before paging, the server folds grouped replacements and deltas into their
+current values. Developer entries have `audience: "developer"`; product entries
+omit `audience`.
 
-Optional paging inputs:
-
-- `logOffset` 0-based log page offset. If omitted, `review_read` returns the
-  latest page.
-- `logLimit` page size, default `100`, max `500`
-- `logFilter` `default` excludes command output and developer-only entries;
-  `all` includes both
-
-Returns:
-
-- `jobId`
-- `run`
-- `lifecycle`
-- `output`
-- `logs` paged read projection. Grouped replacement/delta entries are folded
-  into their current value before paging. Developer-only entries returned by
-  `logFilter: "all"` include `audience: "developer"`; product entries omit
-  `audience`.
-- `logsPage`
-  - `total`
-  - `offset`
-  - `limit`
-  - `returned`
-  - `hasMoreBefore`
-  - `hasMoreAfter`
-  - `previousOffset`
-  - `nextOffset`
-- `rawLogText` diagnostic/raw projection, not a full transcript
+`logsPage` contains `total`, `offset`, `limit`, `returned`, `hasMoreBefore`,
+`hasMoreAfter`, `previousOffset`, and `nextOffset`. Use the offsets to fetch
+adjacent pages. `rawLogText` contains raw diagnostic text, not a full transcript;
+use `logs` for ordered log entries.
 
 ### `review_list`
 
-Lists review jobs owned by the current MCP session.
+Lists jobs in the current session.
 
-Optional inputs:
+| Optional argument | Meaning |
+| --- | --- |
+| `cwd` | Filter by working directory |
+| `statuses` | Filter by lifecycle status |
+| `limit` | Number of jobs, default `20`, maximum `100` |
 
-- `cwd`
-- `statuses`
-- `limit` default `20`, max `100`
-
-Returns:
-
-- `items`
-  - `jobId`
-  - `cwd`
-  - `targetSummary`
-  - `run`
-  - `lifecycle`
-  - `output`
+Each entry in `items` contains `jobId`, `cwd`, `targetSummary`, `run`,
+`lifecycle`, and `output`.
 
 ### `review_cancel`
 
-Cancels a review job owned by the current MCP session.
+Pass `jobId` to cancel one job, or use `cwd` and `statuses` to select jobs in the
+current session. A working directory can match more than one job.
 
-Inputs:
+The response includes cancellation source and message when available.
+Cancellations from the app use `source: "userInterface"`.
 
-- exact:
-  - `jobId`
-- selector:
-  - `cwd`
-  - `statuses`
+## Response fields
 
-Notes:
+Start, await, read, and cancel responses share these fields. List entries use
+the same `run`, `lifecycle`, and `output` objects.
 
-- `cwd` is a search key, not a unique identifier.
-- Without `jobId`, `review_cancel` searches only the current MCP session.
-- Responses include `lifecycle.cancellation.source` and `lifecycle.cancellation.message` when cancellation metadata is available. UI-triggered cancellations use `source: "userInterface"`.
+| Object | Fields |
+| --- | --- |
+| `run` | `reviewThreadId`, `threadId`, `turnId`, `model` (effective review model) |
+| `lifecycle` | `status`, `exitCode`, `startedAt`, `endedAt`, `elapsedSeconds`, `cancellable`, `cancellation`, `errorMessage`, `terminal` |
+| `output` | `summary`, `review`, `hasFinalReview`, `lastAgentMessage`, `reviewResult` |
 
-## Discovery Resources
+`reviewResult` describes parsed findings as `hasFindings`, `noFindings`, or
+`unknown`. Findings include title, body, and location fields when available.
 
-ReviewMonitor exposes onboarding/discovery resources over MCP. Clients can use `resources/list` and `resources/read` to inspect supported review flows without relying on the README.
+### Lifecycle responses
 
-Useful resources:
+`status` is `queued`, `running`, `succeeded`, `failed`, or `cancelled`.
+`terminal` is `null` while the job is queued or running. Once it ends, the
+terminal object records its outcome:
+
+| Outcome | Terminal object | Status |
+| --- | --- | --- |
+| Completed | `{"kind":"completed"}` | `succeeded` |
+| Failed | `{"kind":"failed","message":<string-or-null>}` | `failed` |
+| Interrupted | `{"kind":"interrupted","cause":<cause>}` | `cancelled` for requested interruption; otherwise `failed` |
+
+An interruption cause contains `kind`, `source`, and `message`:
+
+| `kind` | `source` | `message` |
+| --- | --- | --- |
+| `requested` | `userInterface`, `mcpClient`, `sessionClosed`, or `system` | Cancellation reason |
+| `server` | `null` | Server reason, when supplied |
+| `transport` | `null` | Transport failure |
+| `previousProcessExit` | `null` | `null` |
+
+`cancellation` records a cancellation request and its source. A request may
+arrive before the review's final outcome, so use `terminal` to determine how
+it ended.
+
+## Help resources
+
+Use `resources/list` and `resources/read` to read help from the server:
 
 - `codex-review://help/overview`
 - `codex-review://help/tools/review_start`
@@ -208,14 +138,14 @@ Useful resources:
 - `codex-review://help/targets/commit`
 - `codex-review://help/targets/custom`
 
-## Resource Templates
+`resources/templates/list` also provides templates for tool and target help.
 
-ReviewMonitor also exposes MCP resource templates for tool-specific and target-specific help. Clients can discover them via `resources/templates/list`.
+## Runtime files
 
-## Runtime Files
+ReviewMonitor keeps its Codex runtime files in `~/.codex_review`:
 
-ReviewMonitor uses `~/.codex_review` as its dedicated Codex home.
-
-- `config.toml` stores backend settings for this dedicated home
-- `review_mcp_endpoint.json` records the current HTTP/SSE endpoint
-- `review_mcp_runtime_state.json` records internal server/runtime ownership state
+| File | Contents |
+| --- | --- |
+| `config.toml` | Backend settings |
+| `review_mcp_endpoint.json` | Current HTTP/SSE endpoint |
+| `review_mcp_runtime_state.json` | Server and runtime ownership state |

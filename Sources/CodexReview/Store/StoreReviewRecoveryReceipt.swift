@@ -20,9 +20,9 @@ package struct StoreReviewActiveAttempt: Sendable {
     }
 }
 
-/// Store must retain this receipt through a joined suppression or committed
-/// promotion. `isolated deinit` cancels only as a synchronous misuse backstop;
-/// it cannot join work or discard an exact backend resource.
+/// Keeps recovery work alive until the store finishes suppressing or committing it.
+/// The store must retain this receipt and wait for that work. `isolated deinit`
+/// only cancels tasks; it cannot wait for them or discard backend resources.
 @MainActor
 package final class StoreReviewRecoveryReceipt {
     package enum Completion {
