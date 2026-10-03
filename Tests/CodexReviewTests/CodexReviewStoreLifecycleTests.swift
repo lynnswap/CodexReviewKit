@@ -542,6 +542,16 @@ struct CodexReviewStoreLifecycleTests {
         restart.cancel()
         let stop = Task { @MainActor in await store.stop() }
 
+        do {
+            try await waitForTeardownFinalState(.stopped, store: store)
+        } catch {
+            await writeGate.open()
+            await oldWrite.value
+            await restart.value
+            await stop.value
+            throw error
+        }
+
         await writeGate.open()
         await oldWrite.value
         await restart.value
@@ -738,6 +748,15 @@ struct CodexReviewStoreLifecycleTests {
         await preparationGate.open()
         await reviewBackend.waitForSettingsUpdate()
         let stop = Task { @MainActor in await store.stop() }
+
+        do {
+            try await waitForTeardownFinalState(.stopped, store: store)
+        } catch {
+            await commitGate.open()
+            await stop.value
+            await restart.value
+            throw error
+        }
 
         await commitGate.open()
         await stop.value
