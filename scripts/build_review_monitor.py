@@ -92,7 +92,8 @@ def build(repo_root: Path, output_dir: Path, signing_identity: str = "-") -> Pat
             pending_archive = stage_root / archive_name
             run(
                 [str(python), str(repo_root / "scripts" / "build_dmg.py"),
-                 str(app), str(pending_archive)]
+                 str(app), str(pending_archive)],
+                env=environment,
             )
 
             staged_app = output_dir / "arm64" / APP_BUNDLE_NAME

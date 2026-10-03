@@ -138,6 +138,8 @@ class LocalBuildTests(unittest.TestCase):
         command, kwargs = next(call for call in self.commands.calls if Path(call[0][0]).name == "ditto")
         self.assertTrue({"--rsrc", "--extattr", "--acl", "--qtn"}.issubset(command))
         self.assertNotIn("DITTONORSRC", kwargs["env"])
+        _, packaging_kwargs = next(call for call in self.commands.calls if call[0][1].endswith("build_dmg.py"))
+        self.assertEqual(packaging_kwargs["env"], kwargs["env"])
 
     def test_help_does_not_build_or_prepare_dependencies(self):
         with self.assertRaises(SystemExit) as result:
@@ -151,6 +153,68 @@ class LocalBuildTests(unittest.TestCase):
     "set RUN_LOCAL_BUILD_INTEGRATION=1 to build and validate a real local DMG",
 )
 class LocalBuildIntegrationTests(unittest.TestCase):
+    def test_dmg_preserves_resource_metadata_when_dittonorsrc_is_set(self):
+        native_run = subprocess.run
+        attribute = "com.example.codex-review-local-fixture"
+        metadata = b"local DMG metadata fixture"
+        with tempfile.TemporaryDirectory(prefix="local-build-metadata-") as directory:
+            root = Path(directory)
+            repo = root / "checkout"
+            (repo / "scripts").mkdir(parents=True)
+            (repo / "scripts/build_dmg.py").symlink_to(SCRIPTS / "build_dmg.py")
+
+            def build_fixture(arguments, **kwargs):
+                command = [str(argument) for argument in arguments]
+                if Path(command[0]).name != "xcodebuild":
+                    return native_run(arguments, **kwargs)
+                derived_data = Path(command[command.index("-derivedDataPath") + 1])
+                app = derived_data / "Build/Products/Release" / builder.APP_BUNDLE_NAME
+                (app / "Contents/MacOS").mkdir(parents=True)
+                with (app / "Contents/Info.plist").open("wb") as file:
+                    plistlib.dump({
+                        "CFBundleExecutable": builder.APP_NAME,
+                        "CFBundleIdentifier": "com.example.codex-review-local-fixture",
+                        "CFBundlePackageType": "APPL",
+                        "CFBundleVersion": "1",
+                    }, file)
+                resource = app / "Contents/Resources/metadata.txt"
+                resource.parent.mkdir()
+                resource.write_text("metadata fixture\n")
+                native_run(["/usr/bin/xattr", "-w", attribute, metadata.decode(), str(resource)], check=True)
+                native_run(
+                    ["/usr/bin/xcrun", "clang", "-arch", "arm64", "-x", "c", "-", "-o",
+                     str(app / "Contents/MacOS" / builder.APP_NAME)],
+                    input="int main(void) { return 0; }\n", text=True, check=True,
+                )
+                return subprocess.CompletedProcess(command, 0)
+
+            python = builder.packaging_python(SCRIPTS.parent)
+            with mock.patch.dict(os.environ, {"DITTONORSRC": "1"}), \
+                    mock.patch.object(builder, "packaging_python", return_value=python), \
+                    mock.patch.object(builder.subprocess, "run", side_effect=build_fixture):
+                archive = builder.build(repo, root / "dist")
+
+            staged_resource = root / "dist/arm64" / builder.APP_BUNDLE_NAME / "Contents/Resources/metadata.txt"
+            self.assertEqual(
+                subprocess.check_output(["/usr/bin/xattr", "-p", attribute, str(staged_resource)]).rstrip(b"\n"),
+                metadata,
+            )
+            mount = root / "mount"
+            mount.mkdir()
+            try:
+                native_run(
+                    ["hdiutil", "attach", "-readonly", "-nobrowse", "-mountpoint", str(mount), str(archive)],
+                    check=True,
+                )
+                resource = mount / builder.APP_BUNDLE_NAME / "Contents/Resources/metadata.txt"
+                self.assertEqual(
+                    subprocess.check_output(["/usr/bin/xattr", "-p", attribute, str(resource)]).rstrip(b"\n"),
+                    metadata,
+                )
+            finally:
+                if os.path.ismount(mount):
+                    native_run(["hdiutil", "detach", "-force", str(mount)], check=True)
+
     def test_real_build_sign_and_dmg(self):
         repo_root = SCRIPTS.parent
         with tempfile.TemporaryDirectory(prefix="local-build-integration-") as directory:
