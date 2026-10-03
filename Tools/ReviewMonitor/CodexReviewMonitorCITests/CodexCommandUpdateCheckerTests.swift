@@ -258,7 +258,7 @@ struct CodexCommandUpdateCheckerTests {
         trap 'exit 0' TERM
         printf %s $$ > "$1"
         : > "$2"
-        while :; do :; done
+        exec /bin/sleep 60
         """
         let task = Task {
             try await CodexCommandUpdateChecker.runDoctor(
@@ -269,8 +269,11 @@ struct CodexCommandUpdateCheckerTests {
         }
         defer { task.cancel() }
         let deadline = ContinuousClock.now + .seconds(2)
-        while FileManager.default.fileExists(atPath: readyURL.path) == false,
-              ContinuousClock.now < deadline {
+        while FileManager.default.fileExists(atPath: readyURL.path) == false {
+            try #require(
+                ContinuousClock.now < deadline,
+                "Doctor process did not report readiness before the deadline."
+            )
             try await Task.sleep(for: .milliseconds(10))
         }
         let processIdentifier = try #require(pid_t(
