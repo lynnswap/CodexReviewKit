@@ -7,7 +7,6 @@ import argparse
 import fcntl
 import os
 import shlex
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -96,11 +95,6 @@ def build(repo_root: Path, output_dir: Path, signing_identity: str = "-") -> Pat
                 env=environment,
             )
 
-            staged_app = output_dir / "arm64" / APP_BUNDLE_NAME
-            staged_app.parent.mkdir(parents=True, exist_ok=True)
-            if staged_app.exists():
-                shutil.rmtree(staged_app)
-            app.replace(staged_app)
             archive = output_dir / archive_name
             pending_archive.replace(archive)
 

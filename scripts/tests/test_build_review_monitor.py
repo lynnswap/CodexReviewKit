@@ -94,9 +94,19 @@ class LocalBuildTests(unittest.TestCase):
         self.assertEqual(archive.read_bytes(), b"validated image")
         self.assertEqual(older_archive.read_bytes(), b"older image")
         self.assertEqual((installed_app / "Contents/marker").read_text(), "installed")
-        self.assertEqual((self.dist / "arm64" / builder.APP_BUNDLE_NAME / "Contents/marker").read_text(), "new")
+        self.assertEqual(set(self.dist.iterdir()), {older_archive, self.archive})
         commands = [command for command, _ in self.commands.calls]
         self.assertFalse(any(Path(command[0]).name in {"pgrep", "open", "killall"} for command in commands))
+        self.assertFalse(list(self.dist.glob(".build-review-monitor-*")))
+
+    def test_build_preserves_existing_release_app(self):
+        previous_app = self.dist / "arm64" / builder.APP_BUNDLE_NAME
+        create_app(previous_app, marker="previous")
+
+        archive = builder.build(self.repo, self.dist)
+
+        self.assertEqual(archive.read_bytes(), b"validated image")
+        self.assertEqual((previous_app / "Contents/marker").read_text(), "previous")
         self.assertFalse(list(self.dist.glob(".build-review-monitor-*")))
 
     def test_rebuild_keeps_caches_and_reuses_packaging_environment(self):
@@ -123,6 +133,41 @@ class LocalBuildTests(unittest.TestCase):
                 self.assertEqual(self.archive.read_bytes(), b"previous image")
                 self.assertEqual((previous_app / "Contents/marker").read_text(), "previous")
                 self.assertFalse(list(self.dist.glob(".build-review-monitor-*")))
+
+    def test_archive_destination_directory_is_preserved(self):
+        previous_app = self.dist / "arm64" / builder.APP_BUNDLE_NAME
+        create_app(previous_app, marker="previous")
+        self.archive.mkdir()
+        collision_marker = self.archive / "marker"
+        collision_marker.write_text("existing directory")
+
+        with self.assertRaises(OSError):
+            builder.build(self.repo, self.dist)
+
+        self.assertEqual(collision_marker.read_text(), "existing directory")
+        self.assertEqual((previous_app / "Contents/marker").read_text(), "previous")
+        self.assertFalse(list(self.dist.glob(".build-review-monitor-*")))
+
+    def test_archive_publication_failure_preserves_previous_outputs(self):
+        previous_app = self.dist / "arm64" / builder.APP_BUNDLE_NAME
+        create_app(previous_app, marker="previous")
+        self.archive.write_bytes(b"previous image")
+        failure = PermissionError("archive publication denied")
+        native_replace = Path.replace
+
+        def replace(source, destination):
+            if destination == self.archive:
+                raise failure
+            return native_replace(source, destination)
+
+        with mock.patch.object(Path, "replace", autospec=True, side_effect=replace):
+            with self.assertRaises(PermissionError) as error:
+                builder.build(self.repo, self.dist)
+
+        self.assertIs(error.exception, failure)
+        self.assertEqual(self.archive.read_bytes(), b"previous image")
+        self.assertEqual((previous_app / "Contents/marker").read_text(), "previous")
+        self.assertFalse(list(self.dist.glob(".build-review-monitor-*")))
 
     def test_explicit_signing_identity_is_one_argument(self):
         identity = "Apple Development: Developer Name (TEAMID)"
@@ -165,6 +210,13 @@ class LocalBuildIntegrationTests(unittest.TestCase):
 
             def build_fixture(arguments, **kwargs):
                 command = [str(argument) for argument in arguments]
+                if len(command) > 1 and command[1].endswith("build_dmg.py"):
+                    resource = Path(command[2]) / "Contents/Resources/metadata.txt"
+                    attributes = native_run(
+                        ["/usr/bin/xattr", "-p", attribute, str(resource)],
+                        capture_output=True, check=True,
+                    )
+                    self.assertEqual(attributes.stdout.rstrip(b"\n"), metadata)
                 if Path(command[0]).name != "xcodebuild":
                     return native_run(arguments, **kwargs)
                 derived_data = Path(command[command.index("-derivedDataPath") + 1])
@@ -194,11 +246,6 @@ class LocalBuildIntegrationTests(unittest.TestCase):
                     mock.patch.object(builder.subprocess, "run", side_effect=build_fixture):
                 archive = builder.build(repo, root / "dist")
 
-            staged_resource = root / "dist/arm64" / builder.APP_BUNDLE_NAME / "Contents/Resources/metadata.txt"
-            self.assertEqual(
-                subprocess.check_output(["/usr/bin/xattr", "-p", attribute, str(staged_resource)]).rstrip(b"\n"),
-                metadata,
-            )
             mount = root / "mount"
             mount.mkdir()
             try:

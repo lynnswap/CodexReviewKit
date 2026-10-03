@@ -105,8 +105,8 @@ python3 scripts/build_review_monitor.py
 ```
 
 The command creates `dist/CodexReviewMonitor_yymmdd_hhmm.dmg`, using the local
-build-start time, and stages the signed app in `dist/arm64`. It applies an ad-hoc
-hardened-runtime signature and verifies the DMG's contents. Build caches remain
+build-start time. It applies an ad-hoc hardened-runtime signature to the app and
+verifies the DMG's contents. Build caches remain
 in `.build` for subsequent builds. The first run prepares the pinned DMG tools
 in `.build/release-tools` and may download the locked package dependencies.
 
