@@ -174,8 +174,8 @@ jobs:
             --no-parallel \
             --filter "$test_filter"
 
-  local-installer-tests:
-    name: Local Installer Tests (Xcode 27)
+  local-build-tests:
+    name: Local Build Tests (Xcode 27)
     # GitHub-hosted Xcode 27 image: actions/runner-images#14404.
     runs-on: xcode-27
     timeout-minutes: 10
@@ -183,12 +183,12 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Run local installer tests
+      - name: Run local build tests
         timeout-minutes: 2
         run: >-
           python3 -m unittest discover
           --start-directory scripts/tests
-          --pattern 'test_install_review_monitor.py'
+          --pattern 'test_build_review_monitor.py'
           --verbose
 
       - name: Show Xcode environment
@@ -196,14 +196,14 @@ jobs:
           xcodebuild -version
           xcodebuild -showsdks
 
-      - name: Run local installer integration test
+      - name: Run local build integration test
         timeout-minutes: 8
         env:
-          RUN_INSTALLER_INTEGRATION: '1'
+          RUN_LOCAL_BUILD_INTEGRATION: '1'
         run: >-
           python3 -m unittest discover
           --start-directory scripts/tests
-          --pattern 'test_install_review_monitor.py'
+          --pattern 'test_build_review_monitor.py'
           --verbose
 
       - name: Test remote release contracts

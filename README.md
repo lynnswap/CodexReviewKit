@@ -97,44 +97,39 @@ separate from CodexReviewMonitor's dedicated runtime home at `~/.codex_review`.
 
 ## Build from Source
 
-To build, install, and launch CodexReviewMonitor from the current checkout, run
-the installer from the repository root:
+To build a local DMG from the current checkout, run from the repository root
+using Python 3.10 or newer:
 
 ```bash
-./scripts/install_review_monitor.py --launch
+python3 scripts/build_review_monitor.py
 ```
 
-The installer builds the current checkout, applies an ad-hoc hardened-runtime
-signature, validates the app, and deploys it to
-`/Applications/CodexReviewMonitor.app`. Installing there requires write access.
+The command creates `dist/CodexReviewMonitor_yymmdd_hhmm.dmg`, using the local
+build-start time, and stages the signed app in `dist/arm64`. It applies an ad-hoc
+hardened-runtime signature and verifies the DMG's contents. Build caches remain
+in `.build` for subsequent builds. The first run prepares the pinned DMG tools
+in `.build/release-tools` and may download the locked package dependencies.
 
-The local installer requires macOS 26 or newer, an Apple silicon Mac, and
-Xcode 26.4 or newer. The first build may download the package versions locked
-by the repository.
+Keep CodexReviewMonitor running while building. When the DMG is ready and reviews
+have finished, quit the app, open the DMG, and drag `CodexReviewMonitor.app` to
+Applications. Choose **Replace**, then launch the installed app. There is no need
+to delete the existing app first. Builds started in the same minute replace the
+same DMG only after the new image passes validation; older filenames are retained.
 
-Quit CodexReviewMonitor before installing. If the default destination already
-exists, the installer stops before building; remove the app manually before
-rerunning it. The destination is checked again before deployment. To install
-only for the current user, select `~/Applications` explicitly:
-
-```bash
-./scripts/install_review_monitor.py \
-  --destination ~/Applications/CodexReviewMonitor.app \
-  --launch
-```
+The local build requires an Apple silicon Mac and Xcode 26.4 or newer; the app
+requires macOS 26 or newer. The command does not modify or launch installed apps.
 
 The default ad-hoc signature is for local use and does not make a redistributable
 or notarized app. If the Mac's management policy requires an approved local
-identity, pass it explicitly; the installer never falls back to another
+identity, pass it explicitly; the command never falls back to another
 identity:
 
 ```bash
-./scripts/install_review_monitor.py \
-  --signing-identity 'Apple Development: Developer Name (TEAMID)' \
-  --launch
+python3 scripts/build_review_monitor.py \
+  --signing-identity 'Apple Development: Developer Name (TEAMID)'
 ```
 
-Device-management policy can still prohibit locally signed apps. The installer
+Device-management policy can still prohibit locally signed apps. The command
 does not disable Gatekeeper or remove quarantine metadata.
 
 ## More Detail
