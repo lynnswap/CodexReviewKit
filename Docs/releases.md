@@ -1,22 +1,12 @@
-# Releasing CodexReviewMonitor
+# Release and build guide
 
-This guide is for maintainers preparing signed release DMGs or validating the
-release build. For app installation and client setup, see the
-[README](../README.md#quick-start). Run the shell commands below from the
-repository root.
+For installation and MCP setup, see the [README](../README.md#quick-start).
+Run the commands in this guide from the repository root.
 
-## Publish a Release
+## Publish a release
 
-After the [one-time signing setup](#one-time-signing-setup), approve the version,
-release notes, and source commit before starting publication. CI runs checks and
-the build, then waits for your approval of the `release-signing` Environment.
-After you approve in GitHub, CI performs Developer ID signing, notarization,
-asset upload, and publication automatically.
-A successful run publishes the existing draft without changing its title or notes.
-No local process or LLM needs to watch the run.
-
-To create the draft and start CI in one operation, save the approved notes in a
-UTF-8 file and run:
+Complete the [signing setup](#one-time-signing-setup), then approve the version,
+notes, and source commit. Save the approved notes in a UTF-8 file and run:
 
 ```bash
 python3 scripts/prepare_release.py start \
@@ -25,75 +15,84 @@ python3 scripts/prepare_release.py start \
   --notes-file /path/to/release-notes.md
 ```
 
-Add `--prerelease` for a prerelease. The command targets the current remote `main`
-commit, creates a draft with the supplied notes, dispatches the workflow, and
-returns immediately. It does not create a tag or wait for CI. If dispatch cannot
-be confirmed, the draft remains available; check Actions before retrying the
-workflow to avoid starting it twice.
+Add `--prerelease` for a prerelease. The command creates a draft targeting the
+current remote `main` commit, starts CI, and returns. It leaves tag creation to
+publication. If workflow dispatch is uncertain, check Actions before retrying;
+the draft remains available.
 
-To use a draft already prepared in GitHub, save its version, title, notes, and
-prerelease setting with `main` as the target. Then open
+CI checks and builds the app, then waits for approval of the `release-signing`
+Environment in GitHub. After approval, it signs with Developer ID, notarizes,
+verifies and uploads the assets, and publishes the same draft. The draft's title
+and notes are preserved. Publication continues without a local process watching
+the run.
+
+### Use an existing draft
+
+Save the version, title, notes, and prerelease setting in GitHub, with `main` as
+the target. Open
 [Publish Release](https://github.com/lynnswap/CodexReviewKit/actions/workflows/release.yml),
-choose **Run workflow** on `main`, and enter the draft's tag. This requests
-publication after CI succeeds and you approve signing.
-[Draft creation and editing do not trigger Actions](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#release),
-so this one dispatch is necessary. An API-created draft can target the full
-workflow commit SHA instead of `main`; a different commit is not silently substituted.
+choose **Run workflow** on `main`, and enter the draft's tag.
+[Creating or editing a draft does not trigger Actions](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#release),
+so dispatch the workflow once. An API-created draft can instead target the full
+workflow commit SHA; the workflow rejects a different commit.
 
-The workflow pins the draft to its full source SHA before building. All CI checks
-must pass before signing. Signing runs separately from the build, uses native
-Apple tools and an ephemeral keychain, and does not execute the app. The final
-job verifies and uploads the DMG, `release-info.json`, and `SHA256SUMS`, then
-publishes that same draft. GitHub creates the tag at publication time.
-Only those three verified assets may be attached at publication; remove any
-unintended draft attachments before retrying a failed publication.
+### Assets and retries
 
-Failures before publication leave the release as a draft. Rerun failed jobs to
-reuse successfully built and signed artifacts. Matching uploads are retained;
-different bytes under an existing asset name stop publication instead of being
-overwritten. If publication succeeded but its confirmation failed, rerunning the
-publish job confirms the same assets and tag without changing the public release.
-If rerunning the entire workflow creates different artifacts, inspect
-the draft's existing assets before removing them and retrying. Keep the tag,
-target commit, and prerelease setting unchanged while a run is active; title and
-release-note edits are preserved. Notarization can continue at Apple after a
-workflow timeout; diagnostics include its submission ID.
+The workflow pins the draft to its full source SHA before building. Checks pass
+before signing, which runs separately with native Apple tools and a temporary
+keychain. The signing job does not run the app. The publication job verifies
+these three assets:
 
-The numeric part of the tag sets the app's marketing version: `v1.2.3-beta.1`
-produces version `1.2.3`, with the full tag retained in the filename and metadata.
-The workflow run number sets the build version. Retrying the same run keeps its
-build number.
+- The DMG
+- `release-info.json`
+- `SHA256SUMS`
+
+Only those assets may be attached when the draft is published. Remove unintended
+attachments before retrying. GitHub creates the tag at publication time.
+
+A failure before publication leaves the draft unpublished. Rerun failed jobs to
+reuse completed build and signing artifacts. An uploaded asset with matching
+bytes is kept; different bytes under the same name stop publication. If
+publication succeeded but confirmation failed, rerunning the publication job
+checks the existing assets and tag without changing the release.
+
+Rerunning the whole workflow can produce different artifacts. Inspect existing
+draft assets before removing them and retrying. While a run is active, keep its
+tag, source commit, and prerelease setting fixed. You can edit the title and
+notes. Apple may continue notarization after a workflow timeout; use the
+submission ID in the diagnostics to identify it.
+
+The tag's numeric part sets the marketing version: `v1.2.3-beta.1` becomes
+`1.2.3`. Filenames and metadata retain the full tag. The workflow run number is
+the build version, and a retry of the same run keeps that number.
 
 ## One-time signing setup
 
-Use **Settings → Environments → release-signing** for these values. Its branch
-policy must allow only the `main` branch, with a required reviewer for signing.
-Leave **Prevent self-review** off when the maintainer starting the workflow also
-approves it. The maintainer approves this Environment in GitHub; CI publishes
-automatically after the approved signing job and all checks succeed.
+In **Settings → Environments → release-signing**, allow only `main` and require
+a reviewer. Leave **Prevent self-review** off if the maintainer starting the run
+will also approve signing. CI publishes after approval and successful checks.
 
 | Environment secret | Value |
 | --- | --- |
-| `DEVELOPER_ID_P12_BASE64` | Base64 encoding of a password-protected `.p12` containing only the intended Developer ID Application certificate and private key |
-| `DEVELOPER_ID_P12_PASSWORD` | The `.p12` export password |
-| `NOTARY_API_PRIVATE_KEY` | The full contents of the App Store Connect Team API key's `.p8` file |
+| `DEVELOPER_ID_P12_BASE64` | Base64-encoded, password-protected `.p12` with the intended Developer ID Application certificate and private key |
+| `DEVELOPER_ID_P12_PASSWORD` | Export password for the `.p12` |
+| `NOTARY_API_PRIVATE_KEY` | Full contents of the App Store Connect Team API key's `.p8` file |
 
 | Environment variable | Value |
 | --- | --- |
-| `APPLE_TEAM_ID` | The Apple Developer Team ID matching the signing certificate |
-| `NOTARY_API_KEY_ID` | The App Store Connect API key ID |
-| `NOTARY_API_ISSUER_ID` | The issuer UUID for the Team API key |
+| `APPLE_TEAM_ID` | Team ID matching the signing certificate |
+| `NOTARY_API_KEY_ID` | App Store Connect API key ID |
+| `NOTARY_API_ISSUER_ID` | Team API key issuer UUID |
 
-Export the intended **Developer ID Application** signing identity, including its
-private key, as a password-protected `.p12`. An `Apple Development` certificate
-does not work for this distribution channel. Keep a secure backup of the signing
-identity. For notarization, create a dedicated **Team API key** with the
-**Developer** role; this role permits notarization but is not limited to it or to
-this app. See [Apple's Developer ID guide](https://developer.apple.com/help/account/certificates/create-developer-id-certificates/)
+Export one valid **Developer ID Application** identity, including its private
+key, to the password-protected `.p12`, and keep a secure backup. An
+`Apple Development` certificate cannot sign this distribution. For
+notarization, create a dedicated **Team API key** with the **Developer** role.
+That role also permits operations beyond notarization and this app. See
+[Apple's Developer ID guide](https://developer.apple.com/help/account/certificates/create-developer-id-certificates/)
 and [API key management](https://developer.apple.com/help/app-store-connect/get-started/app-store-connect-api/).
 
-With an authenticated GitHub CLI, secrets can be uploaded from local files
-without putting their contents in command arguments:
+With GitHub CLI authenticated, upload secrets from local files:
 
 ```bash
 base64 < /secure/path/DeveloperID.p12 | gh secret set DEVELOPER_ID_P12_BASE64 \
@@ -104,33 +103,32 @@ gh secret set NOTARY_API_PRIVATE_KEY \
   --repo lynnswap/CodexReviewKit --env release-signing < /secure/path/AuthKey.p8
 ```
 
-The password command prompts for its value. Enter the three non-secret variables
-in the Environment's Variables section. The signing step imports the identity
-into a temporary keychain, verifies its team and certificate type, and removes
-the keychain and decoded key files when it finishes. The `.p12` must contain only
-one valid signing identity. Keep credentials out of repository files and build
-artifacts; update or revoke them through Apple and GitHub when needed.
+The password command prompts for its value. Add the three variables in the
+Environment's Variables section. The signing step checks the imported
+certificate's team and type, then removes the temporary keychain and decoded
+key files when it finishes. Keep credentials out of the repository and build
+artifacts; update or revoke them through Apple and GitHub.
 
-## Release Build Validation
+## Release build validation
 
-Maintainers can build a validation DMG entirely on GitHub Actions. Open
+Open
 [Release Build](https://github.com/lynnswap/CodexReviewKit/actions/workflows/release-build.yml),
-choose **Run workflow** on `main`, and enter a version label such as
-`v0.0.0-validation`. The same build also runs for pushes to `main`.
+choose **Run workflow** on `main`, and enter a label such as
+`v0.0.0-validation`. The build also runs on pushes to `main`.
 
-The workflow builds the selected commit with the runner's default Xcode, creates
-the DMG without Finder or Apple credentials, and verifies the mounted app.
-Download the DMG, `build-info.json`, and `SHA256SUMS` from the run's artifact. The metadata records
-the source commit, version label, Xcode version, and workflow run. Artifacts are
-retained for seven days. The numeric part of the version label sets the app's
-marketing version; the workflow run number sets its build version.
+The workflow uses the runner's default Xcode, packages the selected commit
+without Finder or Apple credentials, and verifies the mounted app. Download the
+DMG, `build-info.json`, and `SHA256SUMS` from its artifact, retained for seven
+days. The metadata records the commit, version label, Xcode version, and run.
+The label's numeric part sets the marketing version; the run number sets the
+build version.
 
-These artifacts are for build and packaging validation. The app is ad-hoc signed;
-the DMG is not Developer ID signed or notarized. The workflow creates no tag or
-GitHub Release. Use the signed and notarized public release for installation.
+Validation artifacts use an ad-hoc app signature. The DMG has no Developer ID
+signature or notarization, and the workflow creates no tag or GitHub Release.
+Use a signed public release for installation.
 
-To run the same packaging locally, create a Python 3.10 or newer virtual
-environment and install the pinned DMG tools:
+For the same packaging locally, prepare Python 3.10 or newer and the pinned
+DMG tools:
 
 ```bash
 python3 -m venv .build/release-tools
@@ -141,17 +139,49 @@ scripts/build-release.sh --version v0.0.0-validation
 scripts/package-release.sh --version v0.0.0-validation
 ```
 
-Local validation defaults to build number `1`; pass `--build-number` to the build
-script to use another positive integer.
+Local validation uses build number `1`. Pass `--build-number` to the build
+script for another positive integer.
+
+## Local builds
+
+For a local app build, use an Apple silicon Mac with Xcode 26.4 or newer and
+Python 3.10 or newer:
+
+```bash
+python3 scripts/build_review_monitor.py
+```
+
+The script creates `dist/CodexReviewMonitor_yymmdd_hhmm.dmg`, named with the local
+build-start time. It applies an ad-hoc hardened-runtime signature and verifies
+the DMG contents. Caches stay in `.build`; the first run prepares the pinned
+DMG tools in `.build/release-tools` and may download locked package dependencies.
+
+ReviewMonitor can stay open during the build. When reviews finish, quit the
+app, open the DMG, drag the app to Applications, choose **Replace**, and relaunch.
+You can replace the app without deleting it first. The script leaves installed
+apps alone. Builds started in the same minute replace the same DMG only after
+the new image passes validation; older filenames are kept.
+
+The ad-hoc signature is for local use. To select an approved local identity,
+pass it explicitly:
+
+```bash
+python3 scripts/build_review_monitor.py \
+  --signing-identity 'Apple Development: Developer Name (TEAMID)'
+```
+
+The script uses that identity or fails; it never falls back to another one.
+Local signing does not notarize the app or make it suitable for redistribution.
+Device-management policy can still prohibit it. The script leaves Gatekeeper
+and quarantine metadata in place. The app requires macOS 26 or newer.
 
 ## Repository protection
 
-The `main` ruleset requires a pull request, resolved review threads, and passing
-GitHub Actions checks against the current base branch. Deletion and force pushes
-are blocked. No additional human approval is required, allowing a solo maintainer
-to merge a reviewed PR. CI runs for documentation-only changes too, so required
-checks can finish on every PR.
+The `main` ruleset requires a PR, resolved review threads, and passing GitHub
+Actions checks against the current base branch. It blocks deletion and force
+pushes. A solo maintainer can merge a reviewed PR without another human approval.
+CI also runs for documentation changes so required checks can finish on every PR.
 
-The `release-signing` Environment allows only the `main` branch. The validation
-workflow does not use this Environment or Apple secrets. The signing workflow
-also binds its input artifact ID and file digest to the build in the same run.
+Only `main` can use `release-signing`. Build validation uses neither that
+Environment nor Apple secrets. Signing checks that its input artifact ID and
+file digest belong to the build in the same workflow run.

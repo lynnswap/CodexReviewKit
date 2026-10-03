@@ -1,53 +1,60 @@
-# Review history application E2E
+# Test review history across an app restart
 
-`run.sh` is the isolated macOS semantic gate for durable ReviewMonitor history. It builds
-the app into a dedicated DerivedData directory, runs an actual review through
-`/opt/homebrew/bin/codex`, gracefully quits the exact app PID, relaunches against
-the same SQLite database, and checks restored Store diagnostics plus MCP session
-isolation. Complete app acceptance also requires the visible UI/accessibility
-inspection and screenshot described below; diagnostics do not prove that the
-sidebar or detail renderer is correct.
+`run.sh` builds ReviewMonitor, runs a real Codex review, quits that app instance,
+and relaunches it with the same SQLite database. It checks that the store restores
+the result and that a new MCP session cannot access the restored job. A full
+acceptance run also includes the UI inspection below.
 
-The application composition root must implement all four explicit test inputs:
+## Before running
+
+Authenticate `/opt/homebrew/bin/codex` in ReviewMonitor's Codex home, normally
+`~/.codex_review`. The script uses that login and creates a temporary Git fixture
+with an unsafe uncommitted change to produce a finding.
+
+The app's composition root must support these isolated test inputs:
 
 - `REVIEW_MONITOR_TEST_PORT`
 - `REVIEW_MONITOR_TEST_CODEX_COMMAND`
 - `REVIEW_MONITOR_TEST_DIAGNOSTICS_PATH`
 - `REVIEW_MONITOR_TEST_HISTORY_PATH`
 
-The script fails when that integration is absent. It never changes `HOME`, never
-uses port `9417`, and never falls back to the production history location. The
-fixture is a new temporary Git repository with one intentionally unsafe
-uncommitted change so the real review produces a structured finding. The
-effective ReviewMonitor Codex home (default `~/.codex_review`) must already be
-authenticated for `/opt/homebrew/bin/codex`; the gate does not perform login or
-redirect `HOME`.
+The script fails if those inputs are unavailable. It uses a dedicated
+DerivedData directory, port, and history path. It leaves `HOME`, port `9417`,
+and the production history database unchanged.
 
-Run the gate from the repository root:
+## Run the automated checks
+
+From the repository root:
 
 ```bash
 scripts/review-history-e2e/run.sh
 ```
 
-Every run retains its artifact directory, including build/app logs, MCP requests
-and responses, semantic diagnostics, SQLite schema/rows, and a final summary. A
-failure prints that directory and gracefully terminates only the exact app PID it
-started; a verified process that ignores graceful termination is checked again by
-executable path before an exact signal fallback.
+Each run keeps an artifact directory with build and app logs, MCP requests and
+responses, store diagnostics, SQLite schema and rows, and `e2e-summary.json`.
 
-For the required final visible UI inspection, leave the verified second instance running:
+On failure, the script prints that directory and terminates the exact app PID
+it started. It first requests a graceful quit. If the process stays alive, it
+checks the executable path again before sending a signal.
+
+## Inspect the restored UI
+
+Run with the second app instance left open:
 
 ```bash
 scripts/review-history-e2e/run.sh --keep-restored-app-running
 ```
 
-The output and `e2e-summary.json` identify the restored app PID, rebuilt binary,
-diagnostics, database, fixture, and job. Inspect the rebuilt process through the
-macOS accessibility tree, select the restored row, and verify its target,
-terminal state, duration, canonical review, and `AccessGate.swift` finding. Save
-a screenshot as `ui-restored.png` in the artifact directory, record the inspected
-accessibility state beside it, and change `uiEvidenceStatus` from `pending` only
-after both checks pass. Finally, run the exact termination command printed by the
-script. The script intentionally remains attached until that exact app process
-terminates, so a non-interactive runner can inspect the UI without the child being
-re-launched outside the isolated environment.
+The output and `e2e-summary.json` identify the app PID, rebuilt binary,
+diagnostics, database, fixture, and job. Use that process's accessibility tree to
+select the restored row. Check its target, terminal state, duration, final
+review, and `AccessGate.swift` finding in the sidebar and detail view.
+
+Save `ui-restored.png` in the artifact directory and record the inspected
+accessibility state beside it. Set `uiEvidenceStatus` from `pending` only after
+both the screenshot and accessibility checks pass; store diagnostics alone do
+not verify rendering.
+
+Finish with the exact termination command printed by the script. The script
+waits for that app process to exit, keeping it in the isolated environment
+throughout the inspection.

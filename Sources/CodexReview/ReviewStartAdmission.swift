@@ -176,9 +176,9 @@ package struct ReviewStartAdmissionContractFailure: LocalizedError, Equatable, S
     }
 }
 
-/// Owns the request admissions that create and interrupt one backend review run.
-/// A dispatched request stays outcome-unknown until its response, an explicit
-/// rejection, or a typed terminal resolves it.
+/// Tracks requests that start or interrupt one backend review run.
+/// After dispatch, a request's outcome stays unknown until a response, explicit
+/// rejection, or terminal event resolves it.
 package actor ReviewStartAdmission {
     package struct CancellationRequestRegistration: Equatable, Sendable {
         package enum Disposition: Equatable, Sendable {
@@ -238,8 +238,8 @@ package actor ReviewStartAdmission {
             preparedRun: CodexReviewBackendModel.Review.Run,
             dispatch: RequestDispatch
         )
-        /// The source thread may have been loaded and subscribed by `thread/resume`.
-        /// Retain its cleanup owner until the response is acknowledged.
+        /// `thread/resume` may already have loaded and subscribed to the source thread.
+        /// Keep responsibility for its cleanup until the response is acknowledged.
         case resumingRecovery(
             predecessorRun: CodexReviewBackendModel.Review.Run
         )
@@ -420,9 +420,8 @@ package actor ReviewStartAdmission {
         }
     }
 
-    /// Installs an already-existing source thread for a replacement attempt.
-    /// Unlike `recordPreparedThread`, this transition proves that no new
-    /// `thread/start` request is part of the replacement.
+    /// Prepares a replacement attempt on an existing source thread.
+    /// Use this when recovery creates no new thread with `thread/start`.
     package func recordPreparedRecoveryRun(
         _ run: CodexReviewBackendModel.Review.Run
     ) throws {

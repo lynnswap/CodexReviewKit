@@ -171,7 +171,7 @@ package struct CodexExecutableResolver: Sendable {
 }
 
 public extension CodexReviewRuntime {
-    /// Selects the CLI using the review runtime's precedence, preserving the launcher for updates.
+    /// Selects the review runtime's CLI and keeps its launcher path for updates.
     @_spi(ApplicationHostSupport)
     static func resolveExecutable(
         configuredPath: String?, environment: [String: String]
