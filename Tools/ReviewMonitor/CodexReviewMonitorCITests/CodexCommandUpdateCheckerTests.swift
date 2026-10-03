@@ -253,26 +253,40 @@ struct CodexCommandUpdateCheckerTests {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: directory) }
         let processIdentifierURL = directory.appendingPathComponent("pid")
-        let script = "printf %s $$ > \"$1\"; trap 'exit 0' TERM; while :; do :; done"
+        let readyURL = directory.appendingPathComponent("ready")
+        let script = """
+        trap 'exit 0' TERM
+        printf %s $$ > "$1"
+        : > "$2"
+        exec /bin/sleep 60
+        """
         let task = Task {
             try await CodexCommandUpdateChecker.runDoctor(
                 executableURL: URL(fileURLWithPath: "/bin/sh"),
-                arguments: ["-c", script, "codex-doctor", processIdentifierURL.path],
+                arguments: ["-c", script, "codex-doctor", processIdentifierURL.path, readyURL.path],
                 environment: ["PATH": "/usr/bin:/bin"]
             )
         }
         defer { task.cancel() }
         let deadline = ContinuousClock.now + .seconds(2)
-        while FileManager.default.fileExists(atPath: processIdentifierURL.path) == false,
-              ContinuousClock.now < deadline {
+        while FileManager.default.fileExists(atPath: readyURL.path) == false {
+            try #require(
+                ContinuousClock.now < deadline,
+                "Doctor process did not report readiness before the deadline."
+            )
             try await Task.sleep(for: .milliseconds(10))
         }
         let processIdentifier = try #require(pid_t(
             String(contentsOf: processIdentifierURL, encoding: .utf8)
         ))
         let watchdog = Task.detached {
-            try? await Task.sleep(for: .seconds(2))
+            do {
+                try await Task.sleep(for: .seconds(2))
+            } catch {
+                return false
+            }
             _ = Darwin.kill(processIdentifier, SIGKILL)
+            return true
         }
         defer { watchdog.cancel() }
 
@@ -284,8 +298,11 @@ struct CodexCommandUpdateCheckerTests {
             #expect(error is CancellationError)
         }
         watchdog.cancel()
-        #expect(Darwin.kill(processIdentifier, 0) == -1)
-        #expect(errno == ESRCH)
+        #expect(await watchdog.value == false, "Doctor required SIGKILL after cancellation.")
+        let processStatus = Darwin.kill(processIdentifier, 0)
+        let processError = errno
+        #expect(processStatus == -1)
+        #expect(processError == ESRCH)
     }
 
     @Test(arguments: [false, true])
