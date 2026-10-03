@@ -8,6 +8,7 @@ import SwiftUI
 final class ReviewMonitorUIState {
     let auth: CodexReviewAuthModel
     private let persistSidebarJobFilter: (SidebarJobFilter) -> Void
+    private let persistSidebarWorkspaceSortOrder: (SidebarWorkspaceSortOrder) -> Void
     var selection: ReviewMonitorSelection?
     var sidebarSelection = SidebarPickerSelection.workspace
     var isCodexUpdateAvailable = false
@@ -19,15 +20,27 @@ final class ReviewMonitorUIState {
             persistSidebarJobFilter(sidebarJobFilter)
         }
     }
+    var sidebarWorkspaceSortOrder: SidebarWorkspaceSortOrder {
+        didSet {
+            guard sidebarWorkspaceSortOrder != oldValue else {
+                return
+            }
+            persistSidebarWorkspaceSortOrder(sidebarWorkspaceSortOrder)
+        }
+    }
 
     init(
         auth: CodexReviewAuthModel,
         sidebarJobFilter: SidebarJobFilter = .all,
-        persistSidebarJobFilter: @escaping (SidebarJobFilter) -> Void = { _ in }
+        persistSidebarJobFilter: @escaping (SidebarJobFilter) -> Void = { _ in },
+        sidebarWorkspaceSortOrder: SidebarWorkspaceSortOrder = .manual,
+        persistSidebarWorkspaceSortOrder: @escaping (SidebarWorkspaceSortOrder) -> Void = { _ in }
     ) {
         self.auth = auth
         self.sidebarJobFilter = sidebarJobFilter
         self.persistSidebarJobFilter = persistSidebarJobFilter
+        self.sidebarWorkspaceSortOrder = sidebarWorkspaceSortOrder
+        self.persistSidebarWorkspaceSortOrder = persistSidebarWorkspaceSortOrder
     }
 
     var selectedJobEntry: CodexReviewJob? {
@@ -59,6 +72,20 @@ final class ReviewMonitorUIState {
             return .contentView
         }
         return .signInView
+    }
+}
+
+enum SidebarWorkspaceSortOrder: String, CaseIterable, Hashable, Sendable {
+    case manual
+    case latestJobAccepted
+
+    var localized: LocalizedStringResource {
+        switch self {
+        case .manual:
+            "Manual"
+        case .latestJobAccepted:
+            "Latest Job First"
+        }
     }
 }
 

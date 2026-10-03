@@ -451,6 +451,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
     public nonisolated let id: String
     public let sessionID: String
     public let cwd: String
+    package let acceptedAt: Date
     package let origin: CodexReviewJobOrigin
     package let target: CodexReviewAPI.Target
     /// A distinct application-wide manual-order position. Higher values sort first.
@@ -504,6 +505,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
         id: String,
         sessionID: String,
         cwd: String,
+        acceptedAt: Date,
         sortOrder: Double = 0,
         targetSummary: String,
         target: CodexReviewAPI.Target = .uncommittedChanges,
@@ -516,6 +518,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
         self.id = id
         self.sessionID = sessionID
         self.cwd = cwd
+        self.acceptedAt = acceptedAt
         self.origin = origin ?? .live(sessionID: sessionID)
         self.target = target
         self.sortOrder = sortOrder

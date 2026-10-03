@@ -102,6 +102,7 @@ struct CodexReviewMCPServerTests {
             id: "restored-review",
             sessionID: "session-1",
             cwd: "/tmp/project",
+            acceptedAt: .distantPast,
             targetSummary: "Uncommitted changes",
             target: .uncommittedChanges,
             origin: .restoredHistory,

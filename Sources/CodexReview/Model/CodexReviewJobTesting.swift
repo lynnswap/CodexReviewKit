@@ -13,6 +13,7 @@ extension CodexReviewJob {
         status: ReviewJobState,
         cancellationRequested: Bool = false,
         cancellation: ReviewCancellation? = nil,
+        acceptedAt: Date? = nil,
         startedAt: Date? = nil,
         endedAt: Date? = nil,
         summary: String,
@@ -27,6 +28,7 @@ extension CodexReviewJob {
             id: id,
             sessionID: sessionID,
             cwd: cwd,
+            acceptedAt: acceptedAt ?? startedAt ?? .now,
             targetSummary: targetSummary,
             core: ReviewJobCore(
                 run: .init(

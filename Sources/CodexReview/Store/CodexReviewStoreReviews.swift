@@ -160,6 +160,7 @@ extension CodexReviewStore {
             id: jobID,
             sessionID: sessionID,
             cwd: started.cwd,
+            acceptedAt: started.acceptedAt,
             sortOrder: started.sortOrder,
             targetSummary: started.target.displaySummary,
             target: started.target,

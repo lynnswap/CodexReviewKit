@@ -692,6 +692,21 @@ extension ReviewMonitorSplitViewController {
         sidebarJobFilterToolbarItem?.selectedFilterForTesting
     }
 
+    var sidebarWorkspaceSortToolbarSelectedSortOrderForTesting: SidebarWorkspaceSortOrder? {
+        sidebarJobFilterToolbarItem?.selectedWorkspaceSortOrderForTesting
+    }
+
+    func setSidebarWorkspaceSortOrderForTesting(_ sortOrder: SidebarWorkspaceSortOrder) {
+        uiState.sidebarWorkspaceSortOrder = sortOrder
+    }
+
+    func selectSidebarWorkspaceSortOrderForTesting(_ sortOrder: SidebarWorkspaceSortOrder) {
+        guard let sidebarJobFilterToolbarItem else {
+            fatalError("Sidebar job filter toolbar item is not configured yet.")
+        }
+        sidebarJobFilterToolbarItem.selectWorkspaceSortOrderForTesting(sortOrder)
+    }
+
     func setSidebarJobFilterForTesting(_ filter: SidebarJobFilter) {
         uiState.sidebarJobFilter = filter
     }

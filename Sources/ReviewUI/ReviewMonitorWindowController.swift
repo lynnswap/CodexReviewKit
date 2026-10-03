@@ -153,6 +153,10 @@ public final class ReviewMonitorWindowController: NSWindowController {
             sidebarJobFilter: ReviewMonitorSidebar.JobFilterPersistence.load(from: sidebarJobFilterDefaults),
             persistSidebarJobFilter: { filter in
                 ReviewMonitorSidebar.JobFilterPersistence.save(filter, to: sidebarJobFilterDefaults)
+            },
+            sidebarWorkspaceSortOrder: ReviewMonitorSidebar.WorkspaceSortOrderPersistence.load(from: sidebarJobFilterDefaults),
+            persistSidebarWorkspaceSortOrder: { sortOrder in
+                ReviewMonitorSidebar.WorkspaceSortOrderPersistence.save(sortOrder, to: sidebarJobFilterDefaults)
             }
         )
     }
@@ -183,6 +187,23 @@ enum JobFilterPersistence {
 
     static func save(_ filter: SidebarJobFilter, to defaults: UserDefaults) {
         defaults.set(filter.persistedValue, forKey: defaultsKey)
+    }
+}
+
+enum WorkspaceSortOrderPersistence {
+    static let defaultsKey = "CodexReviewKit.ReviewMonitor.sidebarWorkspaceSortOrder"
+
+    static func load(from defaults: UserDefaults) -> SidebarWorkspaceSortOrder {
+        guard let rawValue = defaults.string(forKey: defaultsKey),
+              let sortOrder = SidebarWorkspaceSortOrder(rawValue: rawValue)
+        else {
+            return .manual
+        }
+        return sortOrder
+    }
+
+    static func save(_ sortOrder: SidebarWorkspaceSortOrder, to defaults: UserDefaults) {
+        defaults.set(sortOrder.rawValue, forKey: defaultsKey)
     }
 }
 }
