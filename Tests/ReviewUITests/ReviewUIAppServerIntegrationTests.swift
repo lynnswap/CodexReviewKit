@@ -452,10 +452,14 @@ extension ReviewUITests {
                     item: .command(id: "command-1", status: "completed", exitCode: 0)
                 )
             )
-            _ = try await awaitTransportRender(contentPane) { snapshot in
-                snapshot.log.contains("codex_review.review_read completed.")
-                    && snapshot.log.contains("Ran git diff")
-            }
+            try #require(await StoreSnapshotProbe(store: store).waitUntilLogs(jobID: job.id) { logs in
+                logs.contains {
+                    $0.kind == .command
+                        && $0.metadata?.itemID == "command-1"
+                        && $0.metadata?.commandStatus == "completed"
+                }
+            } != nil)
+            _ = try await awaitTransportRender(contentPane)
             contentPane.completeLogWordGlowAnimationsForTesting()
             let wordFadeInvalidationCountBeforeFinalAnswer =
                 contentPane.logWordFadeDisplayInvalidationCountForTesting
