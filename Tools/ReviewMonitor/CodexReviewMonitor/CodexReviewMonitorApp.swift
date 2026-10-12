@@ -595,7 +595,7 @@ final class ReviewMonitorAppDelegate: NSObject, NSApplicationDelegate {
     private let composition: ReviewMonitorAppComposition
     private let presentationAnchorSource = ReviewMonitorPresentationAnchorSource()
     private var codexUpdateRequestObserver: NSObjectProtocol?
-    private var launchPreparationTask: Task<Void, Never>?
+    private(set) var launchPreparationTask: Task<Void, Never>?
 
     private lazy var launchContext = launchContextProvider()
     private var launchMode: ReviewMonitorLaunchMode {

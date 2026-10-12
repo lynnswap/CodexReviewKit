@@ -160,7 +160,8 @@ struct CodexReviewMonitorCITests {
         )
 
         delegate.applicationDidFinishLaunching(Notification(name: .init("ci-test-launch")))
-        try #require(await waitUntil { recorder.makeCallCount == 1 })
+        await delegate.launchPreparationTask?.value
+        try #require(recorder.makeCallCount == 1)
 
         guard let capturedContext else {
             Issue.record("Expected the store factory to receive a launch context.")
@@ -209,7 +210,8 @@ struct CodexReviewMonitorCITests {
         )
 
         delegate.applicationDidFinishLaunching(Notification(name: .init("ci-test-launch")))
-        try #require(await waitUntil { NSApp.mainMenu !== previousMainMenu })
+        await delegate.launchPreparationTask?.value
+        try #require(NSApp.mainMenu !== previousMainMenu)
 
         guard let appMenu = NSApp.mainMenu?.items.first?.submenu else {
             Issue.record("Expected the application menu to be installed.")
@@ -706,7 +708,8 @@ struct CodexReviewMonitorCITests {
         )
 
         delegate.applicationDidFinishLaunching(Notification(name: .init("ci-test-launch")))
-        try #require(await waitUntil { NSApp.mainMenu !== previousMainMenu })
+        await delegate.launchPreparationTask?.value
+        try #require(NSApp.mainMenu !== previousMainMenu)
 
         guard let editMenu = NSApp.mainMenu?.items.compactMap(\.submenu).first(where: { $0.title == "Edit" }),
               let findMenu = editMenu.item(withTitle: "Find")?.submenu
