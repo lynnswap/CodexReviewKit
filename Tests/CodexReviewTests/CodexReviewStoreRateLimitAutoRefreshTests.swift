@@ -8,6 +8,10 @@ import CodexReviewTesting
 struct CodexReviewStoreRateLimitAutoRefreshTests {
     private let now = Date(timeIntervalSince1970: 1_800_000_000)
 
+    init() async throws {
+        try await CodexReviewStore.prepareObservationTracking()
+    }
+
     @Test func selectedRunningAccountRefreshesAfterOneMinute() {
         let account = makeAccount(lastFetchAt: now)
 

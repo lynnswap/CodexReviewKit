@@ -7,6 +7,10 @@ import Testing
 @Suite(.serialized)
 @MainActor
 struct ReviewUIHistoryTests {
+    init() async throws {
+        try await CodexReviewStore.prepareObservationTracking()
+    }
+
     @Test func selectedTerminalContextMenuDeletesOneDurableBatch() async throws {
         let first = try restoredRecord(id: "review-history-first", sortOrder: 0)
         let second = try restoredRecord(id: "review-history-second", sortOrder: 1)
