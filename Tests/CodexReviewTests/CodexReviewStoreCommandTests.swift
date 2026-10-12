@@ -3710,7 +3710,11 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
+            await backend.yield(.log("Review stream ready."))
+            try #require(await StoreSnapshotProbe(store: store).waitUntilLogs(
+                jobID: "job-1",
+                matching: { $0.contains { $0.text == "Review stream ready." } }
+            ) != nil)
             store.recordActiveReviewCancellationRequestsForRuntimeStop(reason: .system(message: "Runtime owner stopped."))
             await backend.finishEvents(throwing: CancellationError())
             let read = try await result
