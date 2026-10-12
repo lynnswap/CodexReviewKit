@@ -591,12 +591,12 @@ extension CodexReviewStore {
             }
             switch input {
             case .reviewEvent(let event) where active.matches(event.source):
-                guard let terminal = reviewTerminalRecord(for: event.event) else { continue }
-                let resolution = try await active.admission.recordCanonicalTerminal(
-                    terminal,
+                guard let resolution = try await recordReviewEventTerminal(
+                    event.event,
                     for: active.run,
+                    admission: active.admission,
                     cancellationRequest: cancellationRequest
-                )
+                ) else { continue }
                 if let job {
                     _ = handleReviewEvent(
                         event.event,
@@ -1459,37 +1459,38 @@ extension CodexReviewStore {
         var modelCapacityRetryState = ReviewModelCapacityRetryState()
         var activeEventSubscriptionID: Int? = inputs.initialEventSubscriptionID
         while let input = await inputs.next() {
-            if Task.isCancelled { throw CancellationError() }
+            // A delivered terminal must reach its admission before cancellation
+            // transfers control to cleanup, which joins that authoritative result.
+            switch input {
+            case .reviewEvent, .reviewStreamTerminal:
+                break
+            default:
+                try Task.checkCancellation()
+            }
             if job.isTerminal {
                 return
             }
             switch input {
             case .reviewEvent(let event):
                 guard activeEventSubscriptionID == event.subscriptionID else { continue }
+                let terminalResolution: ReviewInterruptResolution?
+                do {
+                    terminalResolution = try await recordReviewEventTerminal(
+                        event.event,
+                        for: event.source.run,
+                        admission: event.source.admission,
+                        cancellationRequest: job.pendingCancellationRequest
+                    )
+                } catch {
+                    try await throwTerminalRecordFailure(
+                        error,
+                        source: event.source,
+                        jobID: job.id
+                    )
+                }
+                try Task.checkCancellation()
                 if event.event.confirmsModelCapacityRecovery {
                     modelCapacityRetryState.reset()
-                }
-                let terminal = reviewTerminalRecord(for: event.event)
-                let terminalCancellationRequest = terminal == nil
-                    ? nil
-                    : job.pendingCancellationRequest
-                let terminalResolution: ReviewInterruptResolution?
-                if let terminal {
-                    do {
-                        terminalResolution = try await event.source.admission.recordCanonicalTerminal(
-                            terminal,
-                            for: event.source.run,
-                            cancellationRequest: terminalCancellationRequest
-                        )
-                    } catch {
-                        try await throwTerminalRecordFailure(
-                            error,
-                            source: event.source,
-                            jobID: job.id
-                        )
-                    }
-                } else {
-                    terminalResolution = nil
                 }
                 switch reviewAttemptOwnerships[job.id] {
                 case .active(let active) where active.matches(event.source):
@@ -1502,7 +1503,7 @@ extension CodexReviewStore {
                     )
                     if job.isTerminal { return }
                 case .recovering(let receipt) where receipt.source.matches(event.source):
-                    guard terminal != nil,
+                    guard terminalResolution != nil,
                           let dispositionJoin = try receipt.reserveDispositionJoinIfPresent()
                     else { continue }
                     activeEventSubscriptionID = nil
@@ -1558,6 +1559,7 @@ extension CodexReviewStore {
                         jobID: job.id
                     )
                 }
+                try Task.checkCancellation()
                 switch reviewAttemptOwnerships[job.id] {
                 case .active(let active) where active.matches(streamTerminal.source):
                     if let cancellation = recordedStreamCancellation(
@@ -2772,6 +2774,21 @@ private actor ReviewWorkerEventSource {
             kind: kind
         )))
     }
+}
+
+@MainActor
+package func recordReviewEventTerminal(
+    _ event: CodexReviewBackendModel.Review.Event,
+    for run: CodexReviewBackendModel.Review.Run,
+    admission: ReviewStartAdmission,
+    cancellationRequest: ReviewCancellationRequestReceipt? = nil
+) async throws -> ReviewInterruptResolution? {
+    guard let terminal = reviewTerminalRecord(for: event) else { return nil }
+    return try await admission.recordCanonicalTerminal(
+        terminal,
+        for: run,
+        cancellationRequest: cancellationRequest
+    )
 }
 
 private func reviewTerminalRecord(
