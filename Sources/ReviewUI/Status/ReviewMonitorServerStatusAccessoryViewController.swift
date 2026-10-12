@@ -314,13 +314,13 @@ struct ReviewMonitorHistoryStatusPresentation: Equatable {
 
 #if DEBUG
 
-#Preview("Signed In") {
+#Preview("Signed In", traits: .modifier(ReviewMonitorObservationPreviewModifier())) {
     let store = makeStatusPreviewStore()
     StatusView(store: store)
         .padding()
 }
 
-#Preview("Server Failed") {
+#Preview("Server Failed", traits: .modifier(ReviewMonitorObservationPreviewModifier())) {
     let store = makeStatusPreviewStore(
         serverState: .failed("The embedded server stopped responding.")
     )

@@ -117,7 +117,7 @@ struct CodexReviewMonitorCITests {
         #expect(store.startObservedCancellation == [true])
     }
 
-    @Test func appDelegateUsesInjectedCompositionForStartupDependencies() {
+    @Test func appDelegateUsesInjectedCompositionForStartupDependencies() async throws {
         let previousMainMenu = NSApp.mainMenu
         let previousServicesMenu = NSApp.servicesMenu
         let previousWindowsMenu = NSApp.windowsMenu
@@ -160,6 +160,7 @@ struct CodexReviewMonitorCITests {
         )
 
         delegate.applicationDidFinishLaunching(Notification(name: .init("ci-test-launch")))
+        try #require(await waitUntil { recorder.makeCallCount == 1 })
 
         guard let capturedContext else {
             Issue.record("Expected the store factory to receive a launch context.")
@@ -178,7 +179,7 @@ struct CodexReviewMonitorCITests {
         #expect(settingsWindowController.showWindowCallCount == 1)
     }
 
-    @Test func appDelegateInstallsSettingsMenuItem() {
+    @Test func appDelegateInstallsSettingsMenuItem() async throws {
         let previousMainMenu = NSApp.mainMenu
         let previousServicesMenu = NSApp.servicesMenu
         let previousWindowsMenu = NSApp.windowsMenu
@@ -208,6 +209,7 @@ struct CodexReviewMonitorCITests {
         )
 
         delegate.applicationDidFinishLaunching(Notification(name: .init("ci-test-launch")))
+        try #require(await waitUntil { NSApp.mainMenu !== previousMainMenu })
 
         guard let appMenu = NSApp.mainMenu?.items.first?.submenu else {
             Issue.record("Expected the application menu to be installed.")
@@ -674,7 +676,7 @@ struct CodexReviewMonitorCITests {
         #expect(!formState.canRestoreDefaults)
     }
 
-    @Test func appDelegateInstallsFindMenuWithoutLiveServices() {
+    @Test func appDelegateInstallsFindMenuWithoutLiveServices() async throws {
         let previousMainMenu = NSApp.mainMenu
         let previousServicesMenu = NSApp.servicesMenu
         let previousWindowsMenu = NSApp.windowsMenu
@@ -704,6 +706,7 @@ struct CodexReviewMonitorCITests {
         )
 
         delegate.applicationDidFinishLaunching(Notification(name: .init("ci-test-launch")))
+        try #require(await waitUntil { NSApp.mainMenu !== previousMainMenu })
 
         guard let editMenu = NSApp.mainMenu?.items.compactMap(\.submenu).first(where: { $0.title == "Edit" }),
               let findMenu = editMenu.item(withTitle: "Find")?.submenu

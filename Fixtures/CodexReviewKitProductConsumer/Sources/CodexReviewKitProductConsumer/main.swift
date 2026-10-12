@@ -7,7 +7,7 @@ import TextTransitions
 @main
 @MainActor
 struct CodexReviewKitProductConsumer {
-    static func main() {
+    static func main() async throws {
         let lifecycleInitializer: (
             ReviewJobState,
             Int?,
@@ -56,6 +56,7 @@ struct CodexReviewKitProductConsumer {
             fatalError("CodexReviewHost public preferences contract drifted.")
         }
 
+        try await CodexReviewStore.prepareObservationTracking()
         let store = CodexReviewStore.makePreviewStore()
         let windowController = ReviewMonitorWindowController(store: store)
         guard windowController.window != nil else {
