@@ -19,7 +19,7 @@ jobs:
   package-tests:
     name: Swift Package Tests (macOS)
     runs-on: macos-26
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       XCODE_MAJOR: '26'
     steps:
@@ -62,7 +62,7 @@ jobs:
           xcodebuild -showsdks
 
       - name: Build Swift package tests
-        timeout-minutes: 8
+        timeout-minutes: 12
         run: >-
           swift build
           --build-tests
@@ -178,7 +178,7 @@ jobs:
     name: Local Build Tests (Xcode 27)
     # GitHub-hosted Xcode 27 image: actions/runner-images#14404.
     runs-on: xcode-27
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -197,7 +197,7 @@ jobs:
           xcodebuild -showsdks
 
       - name: Run local build integration test
-        timeout-minutes: 8
+        timeout-minutes: 12
         env:
           RUN_LOCAL_BUILD_INTEGRATION: '1'
         run: >-
