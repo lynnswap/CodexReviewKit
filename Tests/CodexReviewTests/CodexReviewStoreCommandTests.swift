@@ -1113,6 +1113,8 @@ struct CodexReviewStoreCommandTests {
 
     @Test(arguments: [
         ReviewInterruptTerminal.canonical(.interrupted(.requested(.mcpClient(message: "Stop")))),
+        .canonical(.completed),
+        .canonical(.failed(message: "Review failed.")),
         .stream(.ownerCancellation),
     ])
     func cancelledWorkerJoinsAuthoritativeTerminalBeforeCleanup(
@@ -1155,7 +1157,11 @@ struct CodexReviewStoreCommandTests {
             #expect(try store.readReview(jobID: "job-1").core.lifecycle.status == .running)
 
             switch expectedTerminal {
-            case .canonical:
+            case .canonical(.completed):
+                await backend.yield(.completed(summary: "Done", result: "No findings."), for: active.run)
+            case .canonical(.failed(let message)):
+                await backend.yield(.failed(message), for: active.run)
+            case .canonical(.interrupted):
                 await backend.yield(.cancelled("Stop"), for: active.run)
             case .stream(let failure):
                 await backend.finishEvents(throwing: failure, for: active.run)
@@ -1166,14 +1172,23 @@ struct CodexReviewStoreCommandTests {
             await backend.waitForCleanupReview()
             let terminal = try #require(await active.admission.activeTerminalResolution())
             #expect(terminal.terminal == expectedTerminal)
-            #expect(try store.readReview(jobID: "job-1").core.lifecycle.status == .cancelled)
+            let expectedStatus: ReviewJobState = switch expectedTerminal {
+            case .canonical(.completed): .succeeded
+            case .canonical(.failed): .failed
+            case .canonical(.interrupted), .connection, .stream: .cancelled
+            }
+            #expect(try store.readReview(jobID: "job-1").core.lifecycle.status == expectedStatus)
             await cleanupGate.open()
 
             let cancel = try await cancellation.value
             let final = try await result
-            #expect(cancel.cancelled)
-            #expect(final.core.lifecycle.status == .cancelled)
-            #expect(final.core.lifecycle.cancellation?.message == "Stop")
+            #expect(cancel.cancelled == (expectedStatus == .cancelled))
+            #expect(final.core.lifecycle.status == expectedStatus)
+            #expect(final.core.lifecycle.cancellation?.message == (expectedStatus == .cancelled ? "Stop" : nil))
+            if expectedStatus == .succeeded {
+                #expect(final.core.output.lastAgentMessage == "No findings.")
+                #expect(final.core.output.hasFinalReview)
+            }
             #expect(store.reviewAttemptOwnerships["job-1"] == nil)
             #expect(store.reviewWorkerTasks["job-1"] == nil)
         }

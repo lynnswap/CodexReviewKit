@@ -1488,6 +1488,23 @@ extension CodexReviewStore {
                         jobID: job.id
                     )
                 }
+                if Task.isCancelled, let terminalResolution {
+                    // The terminal record does not retain a completed event's final text.
+                    let currentRun: CodexReviewBackendModel.Review.Run? = switch reviewAttemptOwnerships[job.id] {
+                    case .active(let active) where active.matches(event.source): active.run
+                    case .recovering(let receipt) where receipt.source.matches(event.source): receipt.source.run
+                    case .starting, .active, .recovering, nil: nil
+                    }
+                    if let currentRun {
+                        _ = handleReviewEvent(
+                            event.event,
+                            job: job,
+                            sourceRun: event.source.run,
+                            currentRun: currentRun,
+                            recordedTerminal: terminalResolution
+                        )
+                    }
+                }
                 try Task.checkCancellation()
                 if event.event.confirmsModelCapacityRecovery {
                     modelCapacityRetryState.reset()
