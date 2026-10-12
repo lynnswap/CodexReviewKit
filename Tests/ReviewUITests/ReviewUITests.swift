@@ -21,6 +21,9 @@ private extension CodexReviewAuthModel {
 @Suite(.serialized)
 @MainActor
 struct ReviewUITests {
+    init() async throws {
+        try await CodexReviewStore.prepareObservationTracking()
+    }
 
     @Test func splitViewSectionsByWorkspace() {
         let workspaceAlphaJob = makeJob(

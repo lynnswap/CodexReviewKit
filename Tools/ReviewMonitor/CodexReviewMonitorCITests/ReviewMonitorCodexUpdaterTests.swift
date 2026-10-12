@@ -408,7 +408,7 @@ private final class UpdateTestClock {
 }
 
 @MainActor
-private func waitUntil(_ condition: () -> Bool) async -> Bool {
+func waitUntil(_ condition: () -> Bool) async -> Bool {
     let deadline = ContinuousClock.now.advanced(by: .seconds(2))
     while condition() == false {
         if ContinuousClock.now >= deadline { return false }

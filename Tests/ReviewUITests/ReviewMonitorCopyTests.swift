@@ -6,6 +6,10 @@ import Testing
 @Suite(.serialized)
 @MainActor
 struct ReviewMonitorCopyTests {
+    init() async throws {
+        try await CodexReviewStore.prepareObservationTracking()
+    }
+
     @Test func copySubmenuUsesClickedReviewAndCurrentMarkdownWithoutChangingSelection() throws {
         let selected = CodexReviewJob.makeForTesting(
             id: "selected", cwd: "/tmp/selected", targetSummary: "Selected review",

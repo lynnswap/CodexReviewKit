@@ -1054,7 +1054,72 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func cancelledWorkerJoinsAuthoritativeTerminalBeforeCleanup() async throws {
+    @Test(arguments: [
+        (
+            CodexReviewBackendModel.Review.Event.completed(summary: "Done", result: "No findings."),
+            ReviewTerminalRecord.completed
+        ),
+        (.failed("Review failed."), .failed(message: "Review failed.")),
+        (.cancelled("Server interruption."), .interrupted(.requested(.mcpClient(message: "Stop")))),
+    ])
+    func cancelledWorkerRecordsDeliveredTerminalForCleanup(
+        event: CodexReviewBackendModel.Review.Event,
+        expectedTerminal: ReviewTerminalRecord
+    ) async throws {
+        let backend = FakeCodexReviewBackend()
+        let admission = ReviewStartAdmission()
+        let attempt = try await backend.startReview(
+            .init(
+                jobID: "job-1",
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            ),
+            admission: admission
+        )
+        let cancellation = ReviewCancellation.mcpClient(message: "Stop")
+        await admission.recordCancellation(cancellation)
+        await backend.yield(event, for: attempt.run)
+        let deliveredEvent = try #require(try await attempt.events.next())
+        let entry = AsyncGate()
+        let worker = Task { @MainActor in
+            await entry.waitIgnoringCancellation()
+            #expect(Task.isCancelled)
+            let resolution = try #require(try await recordReviewEventTerminal(
+                deliveredEvent,
+                for: attempt.run,
+                admission: admission
+            ))
+            #expect(resolution.terminal == .canonical(expectedTerminal))
+            try Task.checkCancellation()
+        }
+        worker.cancel()
+        await entry.open()
+        await #expect(throws: CancellationError.self) { try await worker.value }
+
+        let terminal = try #require(await admission.activeTerminalResolution())
+        #expect(terminal.terminal == .canonical(expectedTerminal))
+        let cleanupTerminal = try await admission.interrupt(
+            attempt.run,
+            cancellation: cancellation
+        ) { request, reason in
+            try await backend.interruptReview(request, reason: reason)
+        }
+        #expect(cleanupTerminal == terminal)
+        try await backend.cleanupReview(attempt.run)
+        let commands = await backend.recordedCommands()
+        #expect(commands.contains(.cleanupReview(attempt.run)))
+        #expect(commands.contains { if case .interruptReviewAdmission = $0 { true } else { false } } == false)
+    }
+
+    @Test(arguments: [
+        ReviewInterruptTerminal.canonical(.interrupted(.requested(.mcpClient(message: "Stop")))),
+        .canonical(.completed),
+        .canonical(.failed(message: "Review failed.")),
+        .stream(.ownerCancellation),
+    ])
+    func cancelledWorkerJoinsAuthoritativeTerminalBeforeCleanup(
+        expectedTerminal: ReviewInterruptTerminal
+    ) async throws {
         let backend = FakeCodexReviewBackend()
         let cleanupGate = AsyncGate()
         await backend.holdCleanupReview(with: cleanupGate)
@@ -1071,6 +1136,11 @@ struct CodexReviewStoreCommandTests {
                 "attempt-1",
                 jobID: "job-1"
             ))
+            await backend.yield(.log("Review stream ready."))
+            try #require(await StoreSnapshotProbe(store: store).waitUntilLogs(
+                jobID: "job-1",
+                matching: { $0.contains { $0.text == "Review stream ready." } }
+            ) != nil)
             let cancellation = Task { @MainActor in
                 try await store.cancelReview(
                     jobID: "job-1",
@@ -1086,20 +1156,39 @@ struct CodexReviewStoreCommandTests {
             #expect(await active.admission.activeTerminalResolution() == nil)
             #expect(try store.readReview(jobID: "job-1").core.lifecycle.status == .running)
 
-            await backend.yield(.cancelled("Stop"), for: active.run)
+            switch expectedTerminal {
+            case .canonical(.completed):
+                await backend.yield(.completed(summary: "Done", result: "No findings."), for: active.run)
+            case .canonical(.failed(let message)):
+                await backend.yield(.failed(message), for: active.run)
+            case .canonical(.interrupted):
+                await backend.yield(.cancelled("Stop"), for: active.run)
+            case .stream(let failure):
+                await backend.finishEvents(throwing: failure, for: active.run)
+            case .connection:
+                Issue.record("Expected a canonical or stream terminal.")
+                return
+            }
             await backend.waitForCleanupReview()
             let terminal = try #require(await active.admission.activeTerminalResolution())
-            #expect(terminal.terminal == .canonical(.interrupted(.requested(
-                .mcpClient(message: "Stop")
-            ))))
-            #expect(try store.readReview(jobID: "job-1").core.lifecycle.status == .cancelled)
+            #expect(terminal.terminal == expectedTerminal)
+            let expectedStatus: ReviewJobState = switch expectedTerminal {
+            case .canonical(.completed): .succeeded
+            case .canonical(.failed): .failed
+            case .canonical(.interrupted), .connection, .stream: .cancelled
+            }
+            #expect(try store.readReview(jobID: "job-1").core.lifecycle.status == expectedStatus)
             await cleanupGate.open()
 
             let cancel = try await cancellation.value
             let final = try await result
-            #expect(cancel.cancelled)
-            #expect(final.core.lifecycle.status == .cancelled)
-            #expect(final.core.lifecycle.cancellation?.message == "Stop")
+            #expect(cancel.cancelled == (expectedStatus == .cancelled))
+            #expect(final.core.lifecycle.status == expectedStatus)
+            #expect(final.core.lifecycle.cancellation?.message == (expectedStatus == .cancelled ? "Stop" : nil))
+            if expectedStatus == .succeeded {
+                #expect(final.core.output.lastAgentMessage == "No findings.")
+                #expect(final.core.output.hasFinalReview)
+            }
             #expect(store.reviewAttemptOwnerships["job-1"] == nil)
             #expect(store.reviewWorkerTasks["job-1"] == nil)
         }
@@ -3710,7 +3799,11 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
+            await backend.yield(.log("Review stream ready."))
+            try #require(await StoreSnapshotProbe(store: store).waitUntilLogs(
+                jobID: "job-1",
+                matching: { $0.contains { $0.text == "Review stream ready." } }
+            ) != nil)
             store.recordActiveReviewCancellationRequestsForRuntimeStop(reason: .system(message: "Runtime owner stopped."))
             await backend.finishEvents(throwing: CancellationError())
             let read = try await result

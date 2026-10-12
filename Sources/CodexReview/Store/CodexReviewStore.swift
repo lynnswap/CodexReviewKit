@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import ObservationBridge
 import OSLog
 
 private let runtimeLifecycleLogger = Logger(
@@ -239,6 +240,19 @@ public final class CodexReviewStore {
                 waiter.continuation.resume()
             }
         }
+    }
+
+    /// Prepares continuous observation for the current application process.
+    ///
+    /// Call this during application setup and await completion before creating
+    /// ReviewUI window or view controllers. Concurrent calls share preparation,
+    /// and successful calls reuse the prepared runtime.
+    /// ``start(forceRestartIfNeeded:)`` also prepares observation before starting
+    /// the store's automatic rate limit refresh.
+    ///
+    /// - Throws: The error encountered while preparing the Observation runtime.
+    public static func prepareObservationTracking() async throws {
+        try await PortableObservationTracking.prepare()
     }
 
     public static func makePreviewStore(diagnosticsURL: URL? = nil) -> CodexReviewStore {
@@ -1035,6 +1049,7 @@ public final class CodexReviewStore {
         do {
             let token = try await settingsService.beginRuntimeCutover()
             cutoverToken = token
+            try await Self.prepareObservationTracking()
 
             if let previousState = context.takeRecyclingState() {
                 await performRuntimeTeardown(
@@ -1199,6 +1214,7 @@ public final class CodexReviewStore {
         do {
             let token = try await settingsService.beginRuntimeCutover()
             cutoverToken = token
+            try await Self.prepareObservationTracking()
 
             if preservingQueuedReviews {
                 try await closeRetiringRuntimeForCodexUpdate(replacement)

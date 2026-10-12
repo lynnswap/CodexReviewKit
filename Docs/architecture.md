@@ -21,6 +21,18 @@ ReviewMonitor is the app entry point. The package exports `CodexReview`,
 `CodexReviewHost`, `ReviewUI`, and `TextTransitions` as libraries; the other
 production targets support those libraries internally.
 
+Before creating ReviewUI controllers, prepare observation tracking during
+asynchronous application setup:
+
+```swift
+try await CodexReviewStore.prepareObservationTracking()
+```
+
+ReviewMonitor and its Xcode previews await preparation before constructing the
+UI. `CodexReviewStore.start()` also prepares tracking before starting the runtime
+and reports preparation failures through the store's failed state. Preparation
+is shared across concurrent calls and reused for the lifetime of the process.
+
 ## Review flow
 
 Both UI actions and MCP tools call the store. `CodexReviewStoreBackend` supplies

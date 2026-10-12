@@ -31,6 +31,10 @@ public final class ReviewMonitorWindowController: NSWindowController {
     private let notificationCenter: NotificationCenter
     private var codexUpdateAvailabilityObserver: NSObjectProtocol?
 
+    /// Creates a monitor window for the store.
+    ///
+    /// Await `CodexReviewStore.prepareObservationTracking()` during application
+    /// setup before creating this controller.
     public convenience init(store: CodexReviewStore) {
         self.init(
             store: store,
@@ -39,6 +43,10 @@ public final class ReviewMonitorWindowController: NSWindowController {
         )
     }
 
+    /// Creates a monitor window with a settings action.
+    ///
+    /// Await `CodexReviewStore.prepareObservationTracking()` during application
+    /// setup before creating this controller.
     @_spi(PreviewSupport)
     public convenience init(
         store: CodexReviewStore,
