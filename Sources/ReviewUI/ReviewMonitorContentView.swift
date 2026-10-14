@@ -20,6 +20,10 @@ final class ReviewMonitorRootViewController: NSViewController {
     private var windowCancellable: AnyCancellable?
     private var presentedContentKind: ReviewMonitorContentKind?
 
+    var observationError: (any Error)? {
+        observation?.error
+    }
+
     private lazy var splitViewController = ReviewMonitorSplitViewController(
         store: store,
         uiState: uiState,

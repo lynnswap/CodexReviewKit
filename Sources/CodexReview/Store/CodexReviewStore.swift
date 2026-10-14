@@ -242,11 +242,12 @@ public final class CodexReviewStore {
         }
     }
 
-    /// Prepares continuous observation for the current application process.
+    /// Optionally warms up continuous observation for the current application process.
     ///
-    /// Call this during application setup and await completion before creating
-    /// ReviewUI window or view controllers. Concurrent calls share preparation,
-    /// and successful calls reuse the prepared runtime.
+    /// ReviewUI controllers can be created before this method is called or completes.
+    /// Synchronous observation startup resolves the runtime on demand and may block
+    /// the caller. Use this method during asynchronous setup to warm up that work.
+    /// Concurrent calls share preparation, and successful calls reuse the runtime.
     /// ``start(forceRestartIfNeeded:)`` also prepares observation before starting
     /// the store's automatic rate limit refresh.
     ///

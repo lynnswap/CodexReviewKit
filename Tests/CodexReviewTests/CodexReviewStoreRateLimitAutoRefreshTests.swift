@@ -8,10 +8,6 @@ import CodexReviewTesting
 struct CodexReviewStoreRateLimitAutoRefreshTests {
     private let now = Date(timeIntervalSince1970: 1_800_000_000)
 
-    init() async throws {
-        try await CodexReviewStore.prepareObservationTracking()
-    }
-
     @Test func selectedRunningAccountRefreshesAfterOneMinute() {
         let account = makeAccount(lastFetchAt: now)
 
@@ -190,6 +186,36 @@ struct CodexReviewStoreRateLimitAutoRefreshTests {
         #expect(store.accountRateLimitAutoRefreshTargets(now: now) == [
             .init(accountKey: account.accountKey, kind: .selectedIdleInterval, dueAt: now.addingTimeInterval(15 * 60)),
         ])
+    }
+
+    @Test func serverStateChangesTriggerAutoRefreshWithoutExplicitPreparation() async throws {
+        let account = makeAccount(lastFetchAt: now.addingTimeInterval(-15 * 60))
+        let backend = NoProgressRateLimitRefreshBackend(account: account)
+        let store = CodexReviewStore.makeTestingStore(
+            backend: backend,
+            clock: .init(now: { now })
+        )
+        store.loadForTesting(
+            serverState: .stopped,
+            authPhase: .signedOut,
+            account: account,
+            persistedAccounts: [account],
+            workspaces: []
+        )
+        store.startAccountRateLimitAutoRefresh()
+        defer { store.accountRateLimitAutoRefreshDriver?.cancel() }
+        #expect(backend.refreshedAccountKeys.isEmpty)
+
+        store.loadForTesting(
+            serverState: .running,
+            authPhase: .signedOut,
+            account: account,
+            persistedAccounts: [account],
+            workspaces: []
+        )
+        try await waitForCondition {
+            backend.refreshedAccountKeys == [account.accountKey]
+        }
     }
 
     @Test func storeInFlightRefreshDoesNotStartDuplicateRequestForSameAccount() async throws {
