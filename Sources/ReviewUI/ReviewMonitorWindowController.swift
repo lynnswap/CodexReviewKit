@@ -31,6 +31,15 @@ public final class ReviewMonitorWindowController: NSWindowController {
     private let notificationCenter: NotificationCenter
     private var codexUpdateAvailabilityObserver: NSObjectProtocol?
 
+    /// The failure reported by the window's continuous observation, if any.
+    ///
+    /// A failed observation cannot keep the window up to date. The application
+    /// owns error presentation and decides whether to close the window or exit.
+    @_spi(PreviewSupport)
+    public var observationError: (any Error)? {
+        rootViewController.observationError
+    }
+
     /// Creates a monitor window for the store.
     ///
     /// Observation tracking starts on demand. You can optionally call

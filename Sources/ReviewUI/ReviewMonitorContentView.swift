@@ -20,6 +20,10 @@ final class ReviewMonitorRootViewController: NSViewController {
     private var windowCancellable: AnyCancellable?
     private var presentedContentKind: ReviewMonitorContentKind?
 
+    var observationError: (any Error)? {
+        observation?.error
+    }
+
     private lazy var splitViewController = ReviewMonitorSplitViewController(
         store: store,
         uiState: uiState,
@@ -72,9 +76,6 @@ final class ReviewMonitorRootViewController: NSViewController {
         observation = withPortableContinuousObservation { [weak self, uiState] event in
             let kind = uiState.contentKind
             self?.setContentViewController(kind, animated: event.kind != .initial)
-        }
-        if let error = observation?.error {
-            presentError(error)
         }
     }
 

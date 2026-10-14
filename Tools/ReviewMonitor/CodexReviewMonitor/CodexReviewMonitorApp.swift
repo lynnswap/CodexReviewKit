@@ -700,6 +700,11 @@ final class ReviewMonitorAppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         installStandardMainMenuIfNeeded()
         showMainWindow(nil)
+        if let error = (windowController as? ReviewMonitorWindowController)?.observationError {
+            NSApp.presentError(error)
+            NSApp.terminate(nil)
+            return
+        }
         if launchMode == .application {
             NSApp.activate(ignoringOtherApps: true)
         }
