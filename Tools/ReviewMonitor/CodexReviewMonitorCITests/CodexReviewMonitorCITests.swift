@@ -117,7 +117,7 @@ struct CodexReviewMonitorCITests {
         #expect(store.startObservedCancellation == [true])
     }
 
-    @Test func appDelegateUsesInjectedCompositionForStartupDependencies() async throws {
+    @Test func appDelegateUsesInjectedCompositionForStartupDependencies() throws {
         let previousMainMenu = NSApp.mainMenu
         let previousServicesMenu = NSApp.servicesMenu
         let previousWindowsMenu = NSApp.windowsMenu
@@ -160,7 +160,6 @@ struct CodexReviewMonitorCITests {
         )
 
         delegate.applicationDidFinishLaunching(Notification(name: .init("ci-test-launch")))
-        await delegate.launchPreparationTask?.value
         try #require(recorder.makeCallCount == 1)
 
         guard let capturedContext else {
@@ -180,7 +179,7 @@ struct CodexReviewMonitorCITests {
         #expect(settingsWindowController.showWindowCallCount == 1)
     }
 
-    @Test func appDelegateInstallsSettingsMenuItem() async throws {
+    @Test func appDelegateInstallsSettingsMenuItem() throws {
         let previousMainMenu = NSApp.mainMenu
         let previousServicesMenu = NSApp.servicesMenu
         let previousWindowsMenu = NSApp.windowsMenu
@@ -210,7 +209,6 @@ struct CodexReviewMonitorCITests {
         )
 
         delegate.applicationDidFinishLaunching(Notification(name: .init("ci-test-launch")))
-        await delegate.launchPreparationTask?.value
         try #require(NSApp.mainMenu !== previousMainMenu)
 
         guard let appMenu = NSApp.mainMenu?.items.first?.submenu else {
@@ -678,7 +676,7 @@ struct CodexReviewMonitorCITests {
         #expect(!formState.canRestoreDefaults)
     }
 
-    @Test func appDelegateInstallsFindMenuWithoutLiveServices() async throws {
+    @Test func appDelegateInstallsFindMenuWithoutLiveServices() throws {
         let previousMainMenu = NSApp.mainMenu
         let previousServicesMenu = NSApp.servicesMenu
         let previousWindowsMenu = NSApp.windowsMenu
@@ -708,7 +706,6 @@ struct CodexReviewMonitorCITests {
         )
 
         delegate.applicationDidFinishLaunching(Notification(name: .init("ci-test-launch")))
-        await delegate.launchPreparationTask?.value
         try #require(NSApp.mainMenu !== previousMainMenu)
 
         guard let editMenu = NSApp.mainMenu?.items.compactMap(\.submenu).first(where: { $0.title == "Edit" }),

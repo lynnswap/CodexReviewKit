@@ -595,7 +595,6 @@ final class ReviewMonitorAppDelegate: NSObject, NSApplicationDelegate {
     private let composition: ReviewMonitorAppComposition
     private let presentationAnchorSource = ReviewMonitorPresentationAnchorSource()
     private var codexUpdateRequestObserver: NSObjectProtocol?
-    private(set) var launchPreparationTask: Task<Void, Never>?
 
     private lazy var launchContext = launchContextProvider()
     private var launchMode: ReviewMonitorLaunchMode {
@@ -610,7 +609,6 @@ final class ReviewMonitorAppDelegate: NSObject, NSApplicationDelegate {
         let lifecycle = composition.makeLifecycleController(store, launchContext)
         lifecycle.setApplicationTerminationPreparation { [weak self] in
             await self?.codexUpdater?.stopChecking()
-            await self?.launchPreparationTask?.value
         }
         return lifecycle
     }()
@@ -673,7 +671,6 @@ final class ReviewMonitorAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     isolated deinit {
-        launchPreparationTask?.cancel()
         if let codexUpdateRequestObserver {
             NotificationCenter.default.removeObserver(codexUpdateRequestObserver)
         }
@@ -700,21 +697,6 @@ final class ReviewMonitorAppDelegate: NSObject, NSApplicationDelegate {
             lifecycle.applicationDidFinishLaunching(launchMode: launchMode)
             return
         }
-        launchPreparationTask = Task { @MainActor [weak self] in
-            defer { self?.launchPreparationTask = nil }
-            do {
-                try await CodexReviewStore.prepareObservationTracking()
-                try Task.checkCancellation()
-                self?.finishLaunching()
-            } catch {
-                guard self != nil, Task.isCancelled == false else { return }
-                NSApplication.shared.presentError(error)
-                NSApplication.shared.terminate(nil)
-            }
-        }
-    }
-
-    private func finishLaunching() {
         NSApp.setActivationPolicy(.regular)
         installStandardMainMenuIfNeeded()
         showMainWindow(nil)
@@ -728,15 +710,11 @@ final class ReviewMonitorAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        launchPreparationTask?.cancel()
         return lifecycle.applicationShouldTerminate(replyingTo: sender)
     }
 
     func applicationShouldHandleReopen(_: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         guard launchMode == .application else {
-            return false
-        }
-        guard launchPreparationTask == nil else {
             return false
         }
         guard flag == false else {

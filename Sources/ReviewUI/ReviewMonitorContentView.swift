@@ -73,6 +73,9 @@ final class ReviewMonitorRootViewController: NSViewController {
             let kind = uiState.contentKind
             self?.setContentViewController(kind, animated: event.kind != .initial)
         }
+        if let error = observation?.error {
+            presentError(error)
+        }
     }
 
     func applyInitialWindowPresentationIfPossible() {

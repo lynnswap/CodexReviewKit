@@ -161,7 +161,7 @@ extension ReviewJobState {
 }
 
 #if DEBUG
-#Preview(traits: .modifier(ReviewMonitorObservationPreviewModifier())) {
+#Preview {
     @Previewable @State var store = ReviewMonitorPreviewContent.makeStore()
     NavigationSplitView {
         List {

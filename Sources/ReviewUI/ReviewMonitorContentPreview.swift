@@ -3,35 +3,25 @@ import AppKit
 import CodexReview
 import SwiftUI
 
-struct ReviewMonitorObservationPreviewModifier: PreviewModifier {
-    static func makeSharedContext() async throws {
-        try await CodexReviewStore.prepareObservationTracking()
-    }
-
-    func body(content: Content, context: Void) -> some View {
-        content
-    }
-}
-
-#Preview("Normal", traits: .modifier(ReviewMonitorObservationPreviewModifier())) {
+#Preview("Normal") {
     ReviewMonitorContentPreviewHost()
 }
 
-#Preview("Server Failed", traits: .modifier(ReviewMonitorObservationPreviewModifier())) {
+#Preview("Server Failed") {
     ReviewMonitorContentPreviewHost(
         serverState: .failed("The embedded server stopped responding.")
     )
 }
 
-#Preview("Command Output", traits: .modifier(ReviewMonitorObservationPreviewModifier())) {
+#Preview("Command Output") {
     ReviewMonitorContentPreviewHost(previewScenario: .commandOutput)
 }
 
-#Preview("Update in Accounts", traits: .modifier(ReviewMonitorObservationPreviewModifier())) {
+#Preview("Update in Accounts") {
     ReviewMonitorContentPreviewHost(sidebarSelection: .account, isCodexUpdateAvailable: true)
 }
 
-#Preview("Update in Workspaces", traits: .modifier(ReviewMonitorObservationPreviewModifier())) {
+#Preview("Update in Workspaces") {
     ReviewMonitorContentPreviewHost(isCodexUpdateAvailable: true)
 }
 
@@ -97,16 +87,16 @@ private struct ReviewMonitorContentPreviewHost: NSViewControllerRepresentable {
 #endif
 
 #if DEBUG
-#Preview("Update Waiting", traits: .modifier(ReviewMonitorObservationPreviewModifier())) {
+#Preview("Update Waiting") {
     ReviewMonitorUpdateScenarioPreview(scenario: .waiting)
 }
-#Preview("Updating Codex", traits: .modifier(ReviewMonitorObservationPreviewModifier())) {
+#Preview("Updating Codex") {
     ReviewMonitorUpdateScenarioPreview(scenario: .installing)
 }
-#Preview("Update Recovery", traits: .modifier(ReviewMonitorObservationPreviewModifier())) {
+#Preview("Update Recovery") {
     ReviewMonitorUpdateScenarioPreview(scenario: .failed)
 }
-#Preview("Reviews Resumed", traits: .modifier(ReviewMonitorObservationPreviewModifier())) {
+#Preview("Reviews Resumed") {
     ReviewMonitorUpdateScenarioPreview(scenario: .resumed)
 }
 
