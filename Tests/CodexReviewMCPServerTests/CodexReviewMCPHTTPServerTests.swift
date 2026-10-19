@@ -1145,6 +1145,7 @@ struct CodexReviewMCPHTTPServerTests {
         try await server.start()
         let endpoint = await server.url
         let sessionID = try await initializeSession(endpoint: endpoint)
+        await server.waitUntilSessionRequestsDrainForTesting(sessionID: sessionID)
         await server.holdNextWriterFinalizationForTesting()
         let response = Task {
             try await postJSONRPCData(
@@ -1263,6 +1264,7 @@ struct CodexReviewMCPHTTPServerTests {
         try await server.start()
         let endpoint = await server.url
         let sessionID = try await initializeSession(endpoint: endpoint)
+        await server.waitUntilSessionRequestsDrainForTesting(sessionID: sessionID)
         await server.holdNextWriterCompletionForTesting()
         var request = URLRequest(url: endpoint)
         request.httpMethod = "GET"
@@ -1330,6 +1332,7 @@ struct CodexReviewMCPHTTPServerTests {
         try await server.start()
         let endpoint = await server.url
         let sessionID = try await initializeSession(endpoint: endpoint)
+        await server.waitUntilSessionRequestsDrainForTesting(sessionID: sessionID)
         await server.holdNextResponseEndAcknowledgementForTesting()
         let response = Task {
             try await postJSONRPCData(
@@ -1395,6 +1398,41 @@ struct CodexReviewMCPHTTPServerTests {
                 .flatMap(\.requests).isEmpty == true
         })
         try await server.stop()
+    }
+
+    @Test func heldResponseEndWriteDoesNotBlockAnotherConnection() async throws {
+        let server = makeHTTPServer()
+        try await server.start()
+        let endpoint = await server.url
+        await server.holdNextResponseEndWriteForTesting()
+        let first = try await RawHTTPConnection.connect(to: endpoint)
+        let second = try await RawHTTPConnection.connect(to: endpoint)
+        defer {
+            first.close()
+            second.close()
+        }
+        let request = try rawHTTPRequest(
+            endpoint: endpoint,
+            sessionID: nil,
+            headers: [("Connection", "close")],
+            body: makeToolsListBody(id: 36)
+        )
+        try await first.send(request)
+        await server.waitUntilResponseEndWriteIsHeldForTesting()
+
+        do {
+            try await second.send(request)
+            #expect(try await second.readResponseHead().contains(" 400 "))
+            _ = try await second.readUntilEOF()
+            await server.releaseResponseEndWriteForTesting()
+            #expect(try await first.readResponseHead().contains(" 400 "))
+            _ = try await first.readUntilEOF()
+            try await server.stop()
+        } catch {
+            await server.releaseResponseEndWriteForTesting()
+            try? await server.stop()
+            throw error
+        }
     }
 
     @Test func nonStreamRequestRemainsOwnedUntilFinalEndWrite() async throws {

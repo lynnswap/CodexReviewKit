@@ -171,19 +171,19 @@ private actor MCPHTTPLifecycleCompletionGate {
         guard shouldHoldNextCompletion else {
             return
         }
+        shouldHoldNextCompletion = false
         let waiters = holdWaiters
         holdWaiters.removeAll(keepingCapacity: false)
         for waiter in waiters {
             waiter.resume()
         }
         if releaseWasRequested {
-            reset()
+            releaseWasRequested = false
             return
         }
         await withCheckedContinuation { continuation in
             self.continuation = continuation
         }
-        reset()
     }
 
     func waitUntilHolding() async {
@@ -200,20 +200,12 @@ private actor MCPHTTPLifecycleCompletionGate {
     }
 
     func release() {
-        guard shouldHoldNextCompletion else {
-            return
-        }
         if let continuation {
             self.continuation = nil
             continuation.resume()
-        } else {
+        } else if shouldHoldNextCompletion {
             releaseWasRequested = true
         }
-    }
-
-    private func reset() {
-        shouldHoldNextCompletion = false
-        releaseWasRequested = false
     }
 }
 
