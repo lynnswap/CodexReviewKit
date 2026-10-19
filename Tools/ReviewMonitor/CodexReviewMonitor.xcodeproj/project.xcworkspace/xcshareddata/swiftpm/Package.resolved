@@ -1,13 +1,13 @@
 {
-  "originHash" : "c7e515c2f34646a7e5951051e50e318b730fcaee5233362953cab293150fe212",
+  "originHash" : "0d0cfb2f0281af38550fb4cefa8c8efaf74f7141cf6b263baf33740a846c2c29",
   "pins" : [
     {
       "identity" : "abibridge",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/lynnswap/ABIBridge.git",
       "state" : {
-        "revision" : "c5e3500bf31fd1e2a8058d4fcba7332b5e8ebe8f",
-        "version" : "0.12.0"
+        "revision" : "600b7762c41e351532c6021701a2cacaf0f0046a",
+        "version" : "0.12.1"
       }
     },
     {
@@ -60,8 +60,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/lynnswap/ObservationBridge.git",
       "state" : {
-        "revision" : "1ec765e3ae3a1ca2b28dbf3b42b7654c698d7b7d",
-        "version" : "0.15.1"
+        "revision" : "b85931071f4aa9214b7a71384a6bfd1bd134dd6e",
+        "version" : "0.15.2"
       }
     },
     {
@@ -278,15 +278,6 @@
       "state" : {
         "revision" : "869129b7bf4ecc57b97d0193ad29690ca2134750",
         "version" : "1.8.1"
-      }
-    },
-    {
-      "identity" : "xctest-dynamic-overlay",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/pointfreeco/xctest-dynamic-overlay",
-      "state" : {
-        "revision" : "d9308ad679143c26a30dec52daefe82f54af2b82",
-        "version" : "1.13.1"
       }
     },
     {
