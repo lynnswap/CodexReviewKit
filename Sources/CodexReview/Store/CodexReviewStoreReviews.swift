@@ -85,7 +85,9 @@ extension CodexReviewStore {
                     workAdmission: workAdmission
                 )
             }
-            await reviewWorkerTasks[jobID]?.value
+            if Task.isCancelled {
+                await reviewWorkerTasks[jobID]?.value
+            }
             return try readReview(sessionID: sessionID, jobID: jobID)
         }
         _ = try await awaitReview(

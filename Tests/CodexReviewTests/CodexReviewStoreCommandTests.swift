@@ -242,6 +242,7 @@ struct CodexReviewStoreCommandTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         )
+        await store.reviewWorkerTasks["job-1"]?.value
 
         #expect(result.core.lifecycle.status == .failed)
         #expect(backend.cleanedRuns == [returnedRun])
@@ -4333,6 +4334,7 @@ struct CodexReviewStoreCommandTests {
             await interruptGate.open()
             await backend.yield(.cancelled("Stop"), for: activeRun)
             let read = try await result
+            await store.reviewWorkerTasks["job-1"]?.value
 
             #expect(cancel.cancelled)
             #expect(read.core.lifecycle.status == .cancelled)

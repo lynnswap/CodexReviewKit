@@ -976,7 +976,8 @@ struct CodexReviewStoreHistoryTests {
         #expect(await completion.isComplete())
     }
 
-    @Test func boundedStartReturnsTerminalAfterHistoryReceiptWhileCleanupContinues() async throws {
+    @Test(arguments: [false, true])
+    func startReturnsTerminalAfterHistoryReceiptWhileCleanupContinues(hasWaitTimeout: Bool) async throws {
         let terminalWriteEntered = AsyncGate()
         let terminalWriteRelease = AsyncGate()
         let cleanupRelease = AsyncGate()
@@ -993,11 +994,15 @@ struct CodexReviewStoreHistoryTests {
             idGenerator: .init(next: { "job-1" })
         )
         let starting = Task { @MainActor in
-            let result = try await store.startReview(
-                sessionID: "session-1",
-                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
-                waitTimeout: .seconds(30)
-            )
+            let request = CodexReviewAPI.Start.Request(cwd: "/tmp/project", target: .uncommittedChanges)
+            let result: CodexReviewAPI.Read.Result
+            if hasWaitTimeout {
+                result = try await store.startReview(
+                    sessionID: "session-1", request: request, waitTimeout: .seconds(30)
+                )
+            } else {
+                result = try await store.startReview(sessionID: "session-1", request: request)
+            }
             await completion.complete()
             return result
         }
@@ -1006,16 +1011,22 @@ struct CodexReviewStoreHistoryTests {
         await backend.yield(.completed(summary: "Done", result: "No findings."))
         try await terminalWriteEntered.wait(
             timeout: .seconds(2),
-            operation: "bounded start terminal history write"
+            operation: "start terminal history write"
         )
         await backend.waitForCleanupReview()
         #expect(await completion.isComplete() == false)
         #expect(store.reviewWorkerTasks["job-1"] != nil)
 
         await terminalWriteRelease.open()
-        try #require(await waitForHistoryTestCondition {
-            await completion.isComplete()
-        })
+        do {
+            try #require(await waitForHistoryTestCondition {
+                await completion.isComplete()
+            })
+        } catch {
+            await cleanupRelease.open()
+            _ = try? await starting.value
+            throw error
+        }
         #expect(try await starting.value.core.lifecycle.status == .succeeded)
         #expect(store.historyResultLeaseIDs["job-1"] == nil)
         #expect(store.reviewWorkerTasks["job-1"] != nil)

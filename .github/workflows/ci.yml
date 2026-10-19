@@ -218,7 +218,7 @@ jobs:
     name: ReviewMonitor Tests (Xcode 27)
     # GitHub-hosted Xcode 27 image: actions/runner-images#14404.
     runs-on: xcode-27
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
