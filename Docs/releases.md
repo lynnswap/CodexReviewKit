@@ -15,10 +15,11 @@ python3 scripts/prepare_release.py start \
   --notes-file /path/to/release-notes.md
 ```
 
-Add `--prerelease` for a prerelease. The command creates a draft targeting the
-current remote `main` commit, starts CI, and returns. It leaves tag creation to
-publication. If workflow dispatch is uncertain, check Actions before retrying;
-the draft remains available.
+Add `--prerelease` for a prerelease. The command creates the approved version tag
+and a draft targeting the current remote `main` commit, starts CI, and returns.
+The tag is immediately available. A matching tag and draft are reused on retry;
+conflicting tags are never moved. If workflow dispatch is uncertain, check
+Actions before retrying; the tag and draft remain available.
 
 CI checks and builds the app, then waits for approval of the `release-signing`
 Environment in GitHub. After approval, it signs with Developer ID, notarizes,
@@ -38,7 +39,8 @@ workflow commit SHA; the workflow rejects a different commit.
 
 ### Assets and retries
 
-The workflow pins the draft to its full source SHA before building. Checks pass
+The workflow pins the draft to its full source SHA and creates its tag before
+building, including when started from a draft created in GitHub. Checks pass
 before signing, which runs separately with native Apple tools and a temporary
 keychain. The signing job does not run the app. The publication job verifies
 these three assets:
@@ -48,9 +50,10 @@ these three assets:
 - `SHA256SUMS`
 
 Only those assets may be attached when the draft is published. Remove unintended
-attachments before retrying. GitHub creates the tag at publication time.
+attachments before retrying. Publication requires the tag to still match the
+tested commit.
 
-A failure before publication leaves the draft unpublished. Rerun failed jobs to
+A failure before publication leaves the tag in place and the draft unpublished. Rerun failed jobs to
 reuse completed build and signing artifacts. An uploaded asset with matching
 bytes is kept; different bytes under the same name stop publication. If
 publication succeeded but confirmation failed, rerunning the publication job
