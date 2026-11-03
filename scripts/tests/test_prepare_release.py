@@ -19,6 +19,7 @@ class PrepareReleaseTests(unittest.TestCase):
         self.directory = Path(self.temporary.name)
         self.version = "v1.2.3-beta.1"
         self.sha = "a" * 40
+        self.tag = {"ref": f"refs/tags/{self.version}", "object": {"type": "commit", "sha": self.sha}}
         self.repository = "lynnswap/CodexReviewKit"
         self.dmg_name = "CodexReviewMonitor_1.2.3-beta.1.dmg"
         (self.directory / self.dmg_name).write_bytes(b"signed-dmg-fixture")
@@ -86,7 +87,7 @@ class PrepareReleaseTests(unittest.TestCase):
         draft = self.created_draft(assets=[])
         uploaded = self.created_draft(body="Notes edited while CI ran")
         published = {**uploaded, "draft": False}
-        with mock.patch.object(release, "api", side_effect=[draft, [], uploaded, [], {
+        with mock.patch.object(release, "api", side_effect=[draft, [self.tag], uploaded, [self.tag], {
             "object": {"type": "commit", "sha": self.sha}
         }]), mock.patch.object(release, "patch_release", return_value=published) as patch:
             self.assertEqual(self.create(), "https://example.invalid/draft")
@@ -106,7 +107,7 @@ class PrepareReleaseTests(unittest.TestCase):
             with self.subTest(initially_present=initially_present):
                 with_extra = self.created_draft(assets=[*complete["assets"], extra])
                 initial = with_extra if initially_present else self.created_draft(assets=[])
-                with mock.patch.object(release, "api", side_effect=[initial, [], with_extra]), \
+                with mock.patch.object(release, "api", side_effect=[initial, [self.tag], with_extra]), \
                         mock.patch.object(release, "patch_release") as patch:
                     with self.assertRaisesRegex(release.ReleaseError, "asset set"):
                         self.create()
@@ -126,7 +127,7 @@ class PrepareReleaseTests(unittest.TestCase):
             self.assertEqual(remote["target_commitish"], self.sha)
             return {"object": {"type": "commit", "sha": remote["target_commitish"]}}
 
-        responses = iter([complete, [], complete, [], read_tag])
+        responses = iter([complete, [self.tag], complete, [self.tag], read_tag])
 
         def api(*args, **kwargs):
             response = next(responses)
@@ -144,7 +145,7 @@ class PrepareReleaseTests(unittest.TestCase):
     def test_partial_upload_retry_only_uploads_missing_files(self):
         complete = self.created_draft()
         partial = self.created_draft(assets=complete["assets"][:1])
-        with mock.patch.object(release, "api", side_effect=[partial, [], complete, [], {
+        with mock.patch.object(release, "api", side_effect=[partial, [self.tag], complete, [self.tag], {
             "object": {"type": "commit", "sha": self.sha}
         }]), mock.patch.object(release, "patch_release", return_value={**complete, "draft": False}):
             self.create()
@@ -157,7 +158,7 @@ class PrepareReleaseTests(unittest.TestCase):
             if arguments[0] == "git":
                 return self.sha
             raise release.ReleaseError("Upload failed")
-        with mock.patch.object(release, "api", side_effect=[self.created_draft(assets=[]), []]), \
+        with mock.patch.object(release, "api", side_effect=[self.created_draft(assets=[]), [self.tag]]), \
                 mock.patch.object(release, "run", side_effect=fail_upload), \
                 mock.patch.object(release, "patch_release") as patch:
             with self.assertRaisesRegex(release.ReleaseError, "Upload failed"):
@@ -218,21 +219,53 @@ class PrepareReleaseTests(unittest.TestCase):
 
     def test_prepare_finds_draft_on_later_page_without_replacing_notes(self):
         draft = self.created_draft()
-        with mock.patch.object(release, "api", side_effect=[[ [{"tag_name": "v0.1.0"}], [draft] ], []]):
+        with mock.patch.object(release, "api", side_effect=[[ [{"tag_name": "v0.1.0"}], [draft] ], [self.tag]]):
             self.assertEqual(release.prepare_draft(self.version, self.sha), draft)
         self.assertFalse(any(args[0] == "gh" for args in self.calls))
 
     def test_prepare_pins_main_without_editing_user_notes(self):
         draft = self.created_draft(target_commitish="main")
-        with mock.patch.object(release, "api", side_effect=[[[draft]], []]), \
+        with mock.patch.object(release, "api", side_effect=[[[draft]], [self.tag]]), \
                 mock.patch.object(release, "patch_release", return_value=self.created_draft()) as patch:
             release.prepare_draft(self.version, self.sha)
         patch.assert_called_once_with(self.repository, 42, {"target_commitish": self.sha})
 
-    def test_existing_tag_is_not_reused(self):
-        with mock.patch.object(release, "api", side_effect=[[[self.created_draft()]], [{"ref": f"refs/tags/{self.version}"}]]):
-            with self.assertRaisesRegex(release.ReleaseError, "Tag .* already exists"):
-                release.prepare_draft(self.version, self.sha)
+    def test_prepare_creates_tag_before_checks(self):
+        draft = self.created_draft()
+        with mock.patch.object(release, "api", side_effect=[[[draft]], [], [self.tag]]):
+            release.prepare_draft(self.version, self.sha)
+        command = self.calls[-1]
+        self.assertEqual(command[:4], ["gh", "api", "--method", "POST"])
+        self.assertEqual(command[4], f"repos/{self.repository}/git/refs")
+
+    def test_prepare_reuses_annotated_tag_and_rejects_conflict(self):
+        annotated = {**self.tag, "object": {"type": "tag", "sha": "c" * 40}}
+        for tag, target in ((annotated, self.sha), (self.tag, "b" * 40)):
+            with self.subTest(target=target):
+                responses = [[[self.created_draft(target_commitish="main" if target != self.sha else self.sha)]], [tag]]
+                if tag is annotated:
+                    responses.append({"object": {"type": "commit", "sha": target}})
+                    with mock.patch.object(release, "api", side_effect=responses):
+                        release.prepare_draft(self.version, self.sha)
+                else:
+                    responses[1] = [{**tag, "object": {"type": "commit", "sha": target}}]
+                    with mock.patch.object(release, "api", side_effect=responses), mock.patch.object(release, "patch_release") as update:
+                        with self.assertRaisesRegex(release.ReleaseError, "differs"):
+                            release.prepare_draft(self.version, self.sha)
+                        update.assert_not_called()
+        self.assertFalse(any(args[0] == "gh" for args in self.calls))
+
+    def test_missing_or_moved_tag_prevents_upload_and_publication(self):
+        draft = self.created_draft()
+        for tag in ([], [{**self.tag, "object": {"type": "commit", "sha": "b" * 40}}]):
+            with self.subTest(tag=tag), mock.patch.object(release, "patch_release") as patch:
+                with mock.patch.object(release, "api", side_effect=[draft, tag]):
+                    with self.assertRaisesRegex(release.ReleaseError, "missing or differs"):
+                        self.create()
+                with mock.patch.object(release, "api", side_effect=[draft, [self.tag], draft, tag]):
+                    with self.assertRaisesRegex(release.ReleaseError, "missing or differs"):
+                        self.create()
+                patch.assert_not_called()
         self.assertFalse(any(args[0] == "gh" for args in self.calls))
 
     def test_prepare_rejects_missing_notes_published_release_and_different_commit(self):
@@ -256,7 +289,7 @@ class PrepareReleaseTests(unittest.TestCase):
         initial = self.created_draft(assets=[])
         for changes in ({"target_commitish": "b" * 40}, {"prerelease": False}, {"body": ""}, {"assets": []}):
             with self.subTest(changes=changes):
-                with mock.patch.object(release, "api", side_effect=[initial, [], self.created_draft(**changes)]), \
+                with mock.patch.object(release, "api", side_effect=[initial, [self.tag], self.created_draft(**changes)]), \
                         mock.patch.object(release, "patch_release") as patch:
                     with self.assertRaises(release.ReleaseError):
                         self.create()
@@ -265,7 +298,7 @@ class PrepareReleaseTests(unittest.TestCase):
     def test_uploaded_asset_digest_is_verified(self):
         draft = self.created_draft()
         draft["assets"][0]["digest"] = "sha256:" + "0" * 64
-        with mock.patch.object(release, "api", side_effect=[draft, []]), \
+        with mock.patch.object(release, "api", side_effect=[draft, [self.tag]]), \
                 mock.patch.object(release, "patch_release") as patch:
             with self.assertRaisesRegex(release.ReleaseError, "upload/digest mismatch"):
                 self.create()
@@ -273,7 +306,7 @@ class PrepareReleaseTests(unittest.TestCase):
 
     def test_published_tag_is_verified(self):
         draft = self.created_draft()
-        with mock.patch.object(release, "api", side_effect=[draft, [], draft, [], {
+        with mock.patch.object(release, "api", side_effect=[draft, [self.tag], draft, [self.tag], {
             "object": {"type": "commit", "sha": "b" * 40}
         }]), mock.patch.object(release, "patch_release", return_value={**draft, "draft": False}):
             with self.assertRaisesRegex(release.ReleaseError, "published tag"):
@@ -290,27 +323,47 @@ class PrepareReleaseTests(unittest.TestCase):
                 patch.assert_not_called()
         self.assertFalse(any(args[0] == "gh" for args in self.calls))
 
-    def test_start_saves_notes_and_dispatches_without_waiting(self):
+    def test_start_creates_tag_before_dispatch_and_reuses_matching_draft(self):
         notes = self.directory / "notes.md"
         notes.write_text("Approved release notes\n")
-        with mock.patch.object(release, "api", side_effect=[[[]], [], {"object": {"sha": self.sha}}]):
-            result = release.start_release(self.repository, self.version, notes, True)
-        self.assertIn("No local wait", result)
-        create, dispatch = self.calls
-        self.assertEqual(create[:4], ["gh", "release", "create", self.version])
-        self.assertIn("--draft", create)
-        self.assertEqual(create[create.index("--notes-file") + 1], str(notes))
-        self.assertEqual(create[create.index("--target") + 1], self.sha)
-        self.assertEqual(dispatch, ["gh", "workflow", "run", "release.yml", "--repo", self.repository,
-                                    "--ref", "main", "-f", f"version={self.version}"])
+        for existing in (False, True):
+            self.calls.clear()
+            responses = [{"object": {"sha": self.sha}}, [[self.created_draft(assets=[])]] if existing else [[]]]
+            responses += [[self.tag]] if existing else [[], [], [self.tag]]
+            with mock.patch.object(release, "api", side_effect=responses):
+                result = release.start_release(self.repository, self.version, notes, True)
+            self.assertIn("No local wait", result)
+            dispatch = self.calls[-1]
+            self.assertEqual(dispatch, ["gh", "workflow", "run", "release.yml", "--repo", self.repository,
+                                       "--ref", "main", "-f", f"version={self.version}"])
+            if existing:
+                self.assertEqual(len(self.calls), 1)
+            else:
+                create, tag, _ = self.calls
+                self.assertEqual(create[:4], ["gh", "release", "create", self.version])
+                self.assertIn("--draft", create)
+                self.assertEqual(create[create.index("--notes-file") + 1], str(notes))
+                self.assertEqual(create[create.index("--target") + 1], self.sha)
+                self.assertEqual(tag[:4], ["gh", "api", "--method", "POST"])
 
-    def test_dispatch_failure_reports_retained_draft(self):
+    def test_dispatch_failure_reports_retained_draft_and_tag(self):
         notes = self.directory / "notes.md"
         notes.write_text("Approved release notes")
-        with mock.patch.object(release, "api", side_effect=[[[]], [], {"object": {"sha": self.sha}}]), \
-                mock.patch.object(release, "run", side_effect=["https://example.invalid/draft", release.ReleaseError("Offline")]):
-            with self.assertRaisesRegex(release.ReleaseError, "Draft saved.*dispatch was not confirmed"):
-                release.start_release(self.repository, self.version, notes, False)
+        with mock.patch.object(release, "api", side_effect=[{"object": {"sha": self.sha}}, [[self.created_draft(assets=[])]], [self.tag]]), \
+                mock.patch.object(release, "run", side_effect=release.ReleaseError("Offline")):
+            with self.assertRaisesRegex(release.ReleaseError, "Tag .* and draft saved.*dispatch was not confirmed"):
+                release.start_release(self.repository, self.version, notes, True)
+
+    def test_start_rejects_changed_approval_without_mutation(self):
+        notes = self.directory / "notes.md"
+        notes.write_text("Approved release notes")
+        for changes in ({"body": "Other notes"}, {"prerelease": False}, {"draft": False}, {"target_commitish": "b" * 40}, {"assets": [{"name": "previous.dmg"}]}):
+            with self.subTest(changes=changes), mock.patch.object(release, "api", side_effect=[
+                {"object": {"sha": self.sha}}, [[self.created_draft(**changes)]]
+            ]):
+                with self.assertRaises(release.ReleaseError):
+                    release.start_release(self.repository, self.version, notes, True)
+        self.assertFalse(self.calls)
 
     def test_github_failure_does_not_trigger_recovery_mutations(self):
         with mock.patch.object(release, "api", side_effect=release.ReleaseError("GitHub unavailable")):
