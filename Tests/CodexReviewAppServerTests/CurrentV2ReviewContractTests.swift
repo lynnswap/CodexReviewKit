@@ -1063,11 +1063,11 @@ private struct BoundaryDiagnosticFixture: Sendable, CustomTestStringConvertible 
     static let all: [Self] = [
         .init(testDescription: "global params", route: .global, method: "configWarning", params: .scalar("scalar params"), threadID: nil, turnID: nil, itemType: nil, stage: .paramsDecoding, error: .malformedKnownEvent(method: "configWarning", message: "params must be a JSON object"), disposition: .ignored),
         .init(testDescription: "global schema", route: .global, method: "configWarning", params: .warning(.init(message: "wrong field")), threadID: nil, turnID: nil, itemType: nil, stage: .schemaValidation, error: .malformedKnownEvent(method: "configWarning", message: "summary must be a string"), disposition: .ignored),
-        .init(testDescription: "global payload", route: .global, method: "configWarning", params: .globalPayload(.init(summary: "valid", plan: "invalid")), threadID: nil, turnID: nil, itemType: nil, stage: .payloadDecoding, error: .malformedKnownEvent(method: "configWarning", message: "The data couldn’t be read because it isn’t in the correct format."), disposition: .ignored),
+        .init(testDescription: "global payload", route: .global, method: "configWarning", params: .globalPayload(.init(summary: "valid", plan: "invalid")), threadID: nil, turnID: nil, itemType: nil, stage: .payloadDecoding, error: .malformedKnownEvent(method: "configWarning", message: CocoaError(.coderReadCorrupt).localizedDescription), disposition: .ignored),
         .init(testDescription: "pre-routing identity", route: .connection, method: "guardianWarning", params: .warning(.init(message: "missing thread")), threadID: nil, turnID: nil, itemType: nil, stage: .schemaValidation, error: .missingRoutingIdentity(method: "guardianWarning"), disposition: .connectionFailed),
         .init(testDescription: "non-global params", route: .connection, method: "item/completed", params: .scalar("scalar params"), threadID: nil, turnID: nil, itemType: nil, stage: .paramsDecoding, error: .malformedKnownEvent(method: "item/completed", message: "params must be a JSON object"), disposition: .connectionFailed),
         .init(testDescription: "no-session unsupported item", route: .ignoredSingle, method: "item/completed", params: .item(.init(threadID: "thread-target", turnID: "turn-target", item: .init(type: "futureItem", id: "item-1"))), threadID: "thread-target", turnID: "turn-target", itemType: "futureItem", stage: .schemaValidation, error: .unsupportedItemType(method: "item/completed", type: "futureItem"), disposition: .ignored),
-        .init(testDescription: "no-session payload", route: .connection, method: "item/agentMessage/delta", params: .reviewPayload(.init(threadID: "thread-target", turnID: "turn-target", itemID: "item-1", delta: "delta", plan: "invalid")), threadID: "thread-target", turnID: "turn-target", itemType: nil, stage: .payloadDecoding, error: .malformedKnownEvent(method: "item/agentMessage/delta", message: "The data couldn’t be read because it isn’t in the correct format."), disposition: .connectionFailed),
+        .init(testDescription: "no-session payload", route: .connection, method: "item/agentMessage/delta", params: .reviewPayload(.init(threadID: "thread-target", turnID: "turn-target", itemID: "item-1", delta: "delta", plan: "invalid")), threadID: "thread-target", turnID: "turn-target", itemType: nil, stage: .payloadDecoding, error: .malformedKnownEvent(method: "item/agentMessage/delta", message: CocoaError(.coderReadCorrupt).localizedDescription), disposition: .connectionFailed),
         .init(testDescription: "ambiguous valid", route: .ambiguous, method: "item/agentMessage/delta", params: .delta(.init(threadID: "shared-thread", turnID: "turn-1", itemID: "item-1", delta: "delta")), threadID: "shared-thread", turnID: "turn-1", itemType: nil, stage: .routing, error: .conflictingActiveRouting(threadID: "shared-thread"), disposition: .connectionFailed),
         .init(testDescription: "ambiguous unsupported item", route: .ignoredAmbiguous, method: "item/completed", params: .item(.init(threadID: "shared-thread", turnID: "turn-1", item: .init(type: "futureItem", id: "item-1"))), threadID: "shared-thread", turnID: "turn-1", itemType: "futureItem", stage: .schemaValidation, error: .unsupportedItemType(method: "item/completed", type: "futureItem"), disposition: .ignored),
         .init(testDescription: "ambiguous malformed item", route: .ambiguous, method: "item/completed", params: .item(.init(threadID: "shared-thread", turnID: "turn-1", item: .init(type: "exitedReviewMode", id: "item-1"))), threadID: "shared-thread", turnID: "turn-1", itemType: "exitedReviewMode", stage: .routing, error: .conflictingActiveRouting(threadID: "shared-thread"), disposition: .connectionFailed),
@@ -1661,9 +1661,10 @@ struct CurrentV2ReviewRoutingIntegrationTests {
             params: params
         )
 
-        #expect(try await attempt.events.next() == .failed(
-            "Malformed app-server notification item/agentMessage/delta: The data couldn’t be read because it isn’t in the correct format."
-        ))
+        let expectedError = ReviewIngestionError.malformedKnownEvent(
+            method: "item/agentMessage/delta", message: CocoaError(.coderReadCorrupt).localizedDescription
+        )
+        #expect(try await attempt.events.next() == .failed(expectedError.localizedDescription))
         await backend.waitForReviewNotificationCompletionForTesting(1)
         let captured = diagnostics.snapshot()
         #expect(captured.count == 1)
@@ -1673,10 +1674,7 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         #expect(diagnostic.turnID == "turn-selected")
         #expect(diagnostic.itemType == nil)
         #expect(diagnostic.stage == .payloadDecoding)
-        #expect(diagnostic.error == .malformedKnownEvent(
-            method: "item/agentMessage/delta",
-            message: "The data couldn’t be read because it isn’t in the correct format."
-        ))
+        #expect(diagnostic.error == expectedError)
         #expect(diagnostic.disposition == .attemptFailed)
         #expect(try canonicalJSON(diagnostic.rawParams) == canonicalJSON(
             JSONEncoder().encode(params)
