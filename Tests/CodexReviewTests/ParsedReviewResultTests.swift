@@ -421,6 +421,14 @@ struct ParsedReviewResultTests {
         #expect(result.findings.first?.location?.path == path)
     }
 
+    @Test(arguments: ["  ", "\\"])
+    func hardBreakSeparatesBoldFindingLines(_ marker: String) {
+        let result = ParsedReviewResult.parse(finalReviewText:
+            "**[P1] One** — A.swift:1" + marker + "\n**[P2] Two** — B.swift:2"
+        )
+        #expect(result.findingCount == 2)
+    }
+
     @Test func malformedCurrentFindingReportsUnknown() {
         let result = ParsedReviewResult.parse(finalReviewText: """
         [P1] Valid first finding — Sources/Store.swift:10

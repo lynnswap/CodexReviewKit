@@ -543,7 +543,8 @@ private func requiredString(
 
 private extension CodexReviewAPI.Read.Result {
     func textContent() -> String {
-        core.reviewText.nilIfEmpty ?? core.lifecycle.status.rawValue
+        let review = core.reviewText
+        return review.allSatisfy(\.isWhitespace) ? core.lifecycle.status.rawValue : review
     }
 
     func textContentForStartOrAwait() -> String {

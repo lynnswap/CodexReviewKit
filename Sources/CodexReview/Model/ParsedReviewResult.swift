@@ -269,32 +269,47 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
     /// Use Markdown block and emphasis boundaries to distinguish finding titles from examples.
     /// Keep the original link syntax for the same destination checks used by plain findings.
     private static func markdownFindingLines(_ lines: [String]) -> ([Int: String], IndexSet) {
-        guard lines.contains(where: { $0.contains("[P") }),
-              let document = try? AttributedString(markdown: lines.joined(separator: "\n"), options: .init(
-                interpretedSyntax: .full, appliesSourcePositionAttributes: true
-              )) else { return ([:], []) }
+        guard lines.contains(where: { $0.contains("[P") }) else { return ([:], []) }
+        // Foundation's inline source positions can stay on the preceding line after a
+        // backslash hard break. Its equivalent two-space spelling keeps line numbers aligned.
+        let markdown = lines.map { line in
+            hasBackslashBreak(line) ? String(line.dropLast()) + "  " : line
+        }.joined(separator: "\n")
+        guard let document = try? AttributedString(markdown: markdown, options: .init(
+            interpretedSyntax: .full, appliesSourcePositionAttributes: true
+        )) else { return ([:], []) }
         var findings: [Int: String] = [:]
         var codeLines = IndexSet()
         var previousBlock: Int?
+        var followsBreak = false
         for run in document.runs {
+            if run.inlinePresentationIntent?.contains(.lineBreak) == true {
+                followsBreak = true
+                continue
+            }
             guard let components = run.presentationIntent?.components, let block = components.first,
                   let position = run.markdownSourcePosition else { continue }
             if case .codeBlock = block.kind {
                 codeLines.insert(integersIn: (position.startLine - 1)..<position.endLine)
                 continue
             }
-            defer { previousBlock = block.identity }
+            defer {
+                previousBlock = block.identity
+                followsBreak = false
+            }
             guard components.count == 1, lines.indices.contains(position.startLine - 1),
                   parsePriority(String(document[run.range].characters.prefix(4))) != nil else { continue }
             let index = position.startLine - 1
-            let raw = lines[index].trimmingCharacters(in: .whitespaces)
+            var raw = lines[index].trimmingCharacters(in: .whitespaces)
             switch block.kind {
             case .header:
                 guard raw.first == "#" else { continue }
             case .paragraph:
                 guard raw.hasPrefix("**[P"), run.inlinePresentationIntent?.contains(.stronglyEmphasized) == true,
-                      previousBlock != block.identity || (index > 0 &&
-                        (lines[index - 1].hasSuffix("  ") || lines[index - 1].hasSuffix("\\"))) else { continue }
+                      previousBlock != block.identity || followsBreak else { continue }
+                if hasBackslashBreak(lines[index]), index + 1 < lines.count, !lines[index + 1].isEmpty {
+                    raw.removeLast()
+                }
             default:
                 continue
             }
@@ -307,6 +322,10 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
             findings[index] = content
         }
         return (findings, codeLines)
+    }
+
+    private static func hasBackslashBreak(_ line: String) -> Bool {
+        !line.reversed().prefix(while: { $0 == "\\" }).count.isMultiple(of: 2)
     }
 
     private static func renderedFindingLine(_ raw: String) -> String? {
@@ -337,7 +356,6 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
                 }
             }
         }
-        guard source.contains(":") || hasCompleteMarkdownLinkShape(source) else { return nil }
         return title + " — " + source
     }
 
