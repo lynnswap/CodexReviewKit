@@ -1956,7 +1956,7 @@ struct CurrentV2ReviewRoutingIntegrationTests {
     }
 
 
-    @Test func subAgentActivityAndSleepAreValidCurrentV2LifecycleItems() async throws {
+    @Test func currentLifecycleItemsReachTheReviewLog() async throws {
         let transport = FakeJSONRPCTransport()
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
         let attempt = await backend.reviewAttemptForTesting(.init(
@@ -2010,9 +2010,19 @@ struct CurrentV2ReviewRoutingIntegrationTests {
                 item: .init(type: "sleep", id: "sleep-1", durationMs: 250)
             )
         )
+        var image = V2Item(type: "imageGeneration", id: "image-job", status: "completed")
+        image.fileID = "file-1"
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: V2ItemNotification(threadID: "thread-review", turnID: "turn-review", item: image)
+        )
         try await emitCompletedReview(transport: transport, review: "No findings.")
 
         let events = try await collectEvents(from: attempt.events)
+        #expect(events.contains { event in
+            guard case .logEntry(_, _, "image-job", _, let metadata, _) = event else { return false }
+            return metadata?.resultText == "file-1"
+        })
         #expect(events.contains(.logEntry(
             kind: .event,
             text: "Subagent workers/reviewer: started.",
@@ -2807,6 +2817,7 @@ private struct V2Item: Encodable, Sendable {
     var type: String
     var id: String
     var text: String?
+    var fileID: String?
     var review: String?
     var command: String?
     var cwd: String?
@@ -2863,6 +2874,7 @@ private struct V2Item: Encodable, Sendable {
         case id
         case text
         case review
+        case fileID = "fileId"
         case command
         case cwd
         case source
