@@ -379,6 +379,8 @@ struct ParsedReviewResultTests {
 
         ### [P2] vs. [P3]
 
+        ### Severity **[P2]** — see guide
+
         Overall assessment: two actionable findings.
         """, source: .backendProvided)
         let result = ParsedReviewResult.parse(finalReviewText: final.text)

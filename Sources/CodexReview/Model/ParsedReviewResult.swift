@@ -287,6 +287,16 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
             interpretedSyntax: .full, appliesSourcePositionAttributes: true
         )) else { return ([:], []) }
         var findings: [Int: String] = [:]
+        var hardBreakLines = IndexSet()
+        var lastTextLine: Int?
+        for run in document.runs {
+            if run.inlinePresentationIntent?.contains(.lineBreak) == true, let lastTextLine {
+                hardBreakLines.insert(lastTextLine)
+            } else if let position = run.markdownSourcePosition,
+                      let range = Range<String.Index>(position, in: markdown), !range.isEmpty {
+                lastTextLine = lineIndex(containing: markdown.index(before: range.upperBound))
+            }
+        }
         var codeLines = IndexSet()
         var previousBlock: Int?
         var followsBreak = false
@@ -310,21 +320,18 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
             guard components.count == 1,
                   parsePriority(String(document[run.range].characters.prefix(4))) != nil else { continue }
             var raw = lines[index].trimmingCharacters(in: .whitespaces)
+            if hardBreakLines.contains(index), hasBackslashBreak(lines[index]) { raw.removeLast() }
             switch block.kind {
             case .header:
                 guard raw.first == "#" else { continue }
             case .paragraph:
                 guard previousBlock != block.identity || followsBreak else { continue }
                 if lines[index].hasPrefix("[P") {
-                    if hasBackslashBreak(lines[index]), index + 1 < lines.count { raw.removeLast() }
                     findings[index] = raw
                     continue
                 }
                 guard raw.hasPrefix("**[P"), run.inlinePresentationIntent?.contains(.stronglyEmphasized) == true
                 else { continue }
-                if hasBackslashBreak(lines[index]), index + 1 < lines.count, !lines[index + 1].isEmpty {
-                    raw.removeLast()
-                }
             default:
                 continue
             }
@@ -348,7 +355,8 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         let text = String(rendered.characters)
         guard let separator = text.range(of: " — ", options: .backwards) else { return nil }
         let title = text[..<separator.lowerBound].trimmingCharacters(in: .whitespaces)
-        guard let dash = raw.range(of: " — ", options: .backwards) else { return nil }
+        guard parsePriority(String(title)) != nil,
+              let dash = raw.range(of: " — ", options: .backwards) else { return nil }
         var source = raw[dash.upperBound...].trimmingCharacters(in: .whitespaces)
         if raw.hasPrefix("#") {
             let hashes = source.reversed().prefix(while: { $0 == "#" })
