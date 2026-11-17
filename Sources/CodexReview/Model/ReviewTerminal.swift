@@ -61,8 +61,7 @@ package struct ReviewFinalResult: Equatable, Sendable {
         source: Source,
         suppressedAgentMessageItemIDs: Set<String> = []
     ) throws {
-        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard normalized.isEmpty == false else {
+        guard let normalized = Self.normalizedText(text) else {
             throw ReviewIngestionError.missingFinalReview
         }
         let byteCount = normalized.utf8.count
@@ -76,6 +75,15 @@ package struct ReviewFinalResult: Equatable, Sendable {
         self.source = source
         self.suppressedAgentMessageItemIDs = suppressedAgentMessageItemIDs
     }
+
+    static func normalizedText(_ text: String) -> String? {
+        guard let first = text.firstIndex(where: { !$0.isWhitespace }),
+              let last = text.lastIndex(where: { !$0.isWhitespace }) else { return nil }
+        // Indentation on the first content line can introduce a Markdown code block.
+        let start = text[..<first].lastIndex(where: \.isNewline).map(text.index(after:)) ?? text.startIndex
+        return String(text[start...last])
+    }
+
 }
 
 package enum ReviewAttemptTerminal: Equatable, Sendable {

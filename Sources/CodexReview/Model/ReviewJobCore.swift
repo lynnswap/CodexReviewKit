@@ -208,7 +208,7 @@ public struct ReviewJobCore: Codable, Sendable, Hashable {
         switch lifecycle.status {
         case .cancelled:
             if output.hasFinalReview,
-               let lastAgentMessage = output.lastAgentMessage?.nilIfEmpty
+               let lastAgentMessage = output.lastAgentMessage.flatMap(ReviewFinalResult.normalizedText)
             {
                 return lastAgentMessage
             }
@@ -220,12 +220,12 @@ public struct ReviewJobCore: Codable, Sendable, Hashable {
             return lifecycle.errorMessage?.nilIfEmpty ?? output.summary
         case .succeeded:
             if output.hasFinalReview,
-               let lastAgentMessage = output.lastAgentMessage?.nilIfEmpty {
+               let lastAgentMessage = output.lastAgentMessage.flatMap(ReviewFinalResult.normalizedText) {
                 return lastAgentMessage
             }
             return output.summary
         case .queued, .running:
-            return output.lastAgentMessage?.nilIfEmpty
+            return output.lastAgentMessage.flatMap(ReviewFinalResult.normalizedText)
                 ?? lifecycle.errorMessage?.nilIfEmpty
                 ?? output.summary
         }

@@ -47,7 +47,7 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         }
     }
 
-    public static let currentParserVersion = 4
+    public static let currentParserVersion = 5
 
     public var state: State
     public var findingCount: Int?
@@ -79,18 +79,22 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
     }
 
     public static func parse(finalReviewText text: String?) -> ParsedReviewResult {
-        guard let text = text?.trimmingCharacters(in: .whitespacesAndNewlines),
-              text.isEmpty == false
-        else {
+        guard let text = text.flatMap(ReviewFinalResult.normalizedText) else {
             return notAvailable()
         }
 
-        let lines = text.components(separatedBy: .newlines)
+        let lines = text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).map(String.init)
+        let (formatted, codeLines, headings) = markdownFindingLines(lines)
         let legacyHeaderIndex = lines.indices.first {
-            isLegacyFindingHeader(in: lines, at: $0)
+            !codeLines.contains($0) && isLegacyFindingHeader(in: lines, at: $0)
         }
-        let currentFindingLines = lines.indices.filter {
-            isCurrentFindingCandidate(in: lines, at: $0)
+        var currentFindingLines: [Int] = []
+        for index in lines.indices where !codeLines.contains(index) {
+            if formatted[index] != nil || isCurrentFindingCandidate(
+                in: lines, at: index, acceptsCompleteTitle: currentFindingLines.isEmpty || currentFindingLines.last == index - 1
+            ) {
+                currentFindingLines.append(index)
+            }
         }
         if let headerIndex = legacyHeaderIndex,
            currentFindingLines.first.map({ headerIndex < $0 }) != false
@@ -99,7 +103,7 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         }
 
         if currentFindingLines.isEmpty == false {
-            return parseCurrentFindings(in: lines, at: currentFindingLines)
+            return parseCurrentFindings(in: lines, at: currentFindingLines, formatted: formatted, headings: headings)
         }
 
         if isExplicitNoFindings(lines) {
@@ -163,14 +167,16 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
 
     private static func parseCurrentFindings(
         in lines: [String],
-        at findingLineIndices: [Int]
+        at findingLineIndices: [Int],
+        formatted: [Int: String],
+        headings: IndexSet
     ) -> ParsedReviewResult {
         let parsedLines = findingLineIndices.map { index in
             (
                 index: index,
                 line: lines[index],
                 finding: parseFindingLine(
-                    lines[index],
+                    formatted[index] ?? lines[index],
                     requiresBullet: false,
                     requiresPriority: true
                 )
@@ -185,7 +191,8 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
             guard let finding = parsedLine.finding else {
                 return unrecognizedResult()
             }
-            let endIndex = parsedLines.dropFirst(offset + 1).first?.index ?? lines.endIndex
+            let nextFinding = parsedLines.dropFirst(offset + 1).first?.index ?? lines.endIndex
+            let endIndex = min(nextFinding, headings.integerGreaterThan(parsedLine.index) ?? lines.endIndex)
             var builder = FindingBuilder(
                 findingLine: parsedLine.line.trimmingCharacters(in: .whitespaces),
                 finding: finding,
@@ -266,19 +273,144 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         ].contains(firstLine)
     }
 
+    /// Use Markdown block and emphasis boundaries to distinguish finding titles from examples.
+    /// Keep the original link syntax for the same destination checks used by plain findings.
+    private static func markdownFindingLines(_ lines: [String]) -> ([Int: String], IndexSet, IndexSet) {
+        guard lines.contains(where: { $0.contains("[P") }) else { return ([:], [], []) }
+        let markdown = lines.joined(separator: "\n")
+        let starts = markdown.split(separator: "\n", omittingEmptySubsequences: false).map(\.startIndex)
+        // Inline source line numbers can lag after escaped hard breaks. The source range
+        // still points to the original characters, including inside nested code blocks.
+        func lineIndex(containing index: String.Index) -> Int {
+            var lower = 0
+            var upper = starts.count
+            while lower + 1 < upper {
+                let middle = lower + (upper - lower) / 2
+                if starts[middle] <= index { lower = middle } else { upper = middle }
+            }
+            return lower
+        }
+        guard let document = try? AttributedString(markdown: markdown, options: .init(
+            interpretedSyntax: .full, appliesSourcePositionAttributes: true
+        )) else { return ([:], [], []) }
+        var findings: [Int: String] = [:]
+        var hardBreakLines = IndexSet()
+        var lastTextLine: Int?
+        for run in document.runs {
+            if run.inlinePresentationIntent?.contains(.lineBreak) == true, let lastTextLine {
+                hardBreakLines.insert(lastTextLine)
+            } else if let position = run.markdownSourcePosition,
+                      let range = Range<String.Index>(position, in: markdown), !range.isEmpty {
+                lastTextLine = lineIndex(containing: markdown.index(before: range.upperBound))
+            }
+        }
+        var codeLines = IndexSet()
+        var previousBlock: Int?
+        var headings = IndexSet()
+        for run in document.runs {
+            guard let components = run.presentationIntent?.components, let block = components.first,
+                  let position = run.markdownSourcePosition,
+                  let range = Range<String.Index>(position, in: markdown), !range.isEmpty else { continue }
+            let index = lineIndex(containing: range.lowerBound)
+            let end = lineIndex(containing: markdown.index(before: range.upperBound))
+            if components.count == 1, case .header = block.kind { headings.insert(index) }
+            if run.inlinePresentationIntent?.contains(.code) == true, index < end {
+                codeLines.insert(integersIn: (index + 1)...end)
+            }
+            if case .codeBlock = block.kind {
+                codeLines.insert(integersIn: index...end)
+                continue
+            }
+            defer { previousBlock = block.identity }
+            guard parsePriority(String(document[run.range].characters.prefix(4))) != nil else { continue }
+            var raw = lines[index].trimmingCharacters(in: .whitespaces)
+            if hardBreakLines.contains(index), hasBackslashBreak(lines[index]) { raw.removeLast() }
+            if components.count != 1 {
+                guard components.count == 3, case .listItem = components[1].kind,
+                      case .paragraph = block.kind, let space = raw.firstIndex(where: \.isWhitespace)
+                else { continue }
+                raw = raw[space...].trimmingCharacters(in: .whitespaces)
+                guard raw.hasPrefix("**[P") || raw.hasPrefix("__[P") else { continue }
+            }
+            switch block.kind {
+            case .header:
+                guard raw.first == "#" else { continue }
+            case .paragraph:
+                guard previousBlock != block.identity || findings[index - 1] != nil else { continue }
+                if lines[index].hasPrefix("[P") {
+                    if previousBlock == block.identity,
+                       parseFindingLine(raw, requiresBullet: false, requiresPriority: true) == nil { continue }
+                    findings[index] = raw
+                    continue
+                }
+                guard (raw.hasPrefix("**[P") || raw.hasPrefix("__[P")), run.inlinePresentationIntent?.contains(.stronglyEmphasized) == true
+                else { continue }
+            default:
+                continue
+            }
+            // Formatted priority labels also appear in explanations. A validated location
+            // is what distinguishes a formatted finding from that prose.
+            guard let content = renderedFindingLine(raw),
+                  parseFindingLine(content, requiresBullet: false, requiresPriority: true) != nil
+            else { continue }
+            findings[index] = content
+        }
+        return (findings, codeLines, headings)
+    }
+
+    private static func hasBackslashBreak(_ line: String) -> Bool {
+        !line.reversed().prefix(while: { $0 == "\\" }).count.isMultiple(of: 2)
+    }
+
+    private static func renderedFindingLine(_ raw: String) -> String? {
+        guard let rendered = try? AttributedString(markdown: raw) else { return nil }
+        let text = String(rendered.characters)
+        guard let separator = text.range(of: " — ", options: .backwards) else { return nil }
+        let title = text[..<separator.lowerBound].trimmingCharacters(in: .whitespaces)
+        guard parsePriority(String(title)) != nil,
+              let dash = raw.range(of: " — ", options: .backwards) else { return nil }
+        var source = raw[dash.upperBound...].trimmingCharacters(in: .whitespaces)
+        if raw.hasPrefix("#") {
+            let hashes = source.reversed().prefix(while: { $0 == "#" })
+            if !hashes.isEmpty, source.dropLast(hashes.count).last?.isWhitespace == true {
+                source = source.dropLast(hashes.count).trimmingCharacters(in: .whitespaces)
+            }
+        }
+        // The location is a literal protocol token. Only unwrap the emphasis at its
+        // boundaries, as filenames may themselves contain Markdown punctuation.
+        let titleOpensStrong = rendered.range(of: " — ", options: .backwards).map {
+            rendered[$0].runs.contains { $0.inlinePresentationIntent?.contains(.stronglyEmphasized) == true }
+        } ?? false
+        let headingContent = raw.drop(while: { $0 == "#" }).drop(while: \.isWhitespace)
+        let delimiter = ["**", "__"].first { delimiter in
+            titleOpensStrong ? headingContent.hasPrefix(delimiter) : source.hasPrefix(delimiter)
+        }
+        if let delimiter {
+            let token = !titleOpensStrong && source.hasPrefix(delimiter) ? source.dropFirst(2) : source[...]
+            if let close = token.range(of: delimiter, options: .backwards) {
+                let suffix = token[close.upperBound...]
+                if suffix.isEmpty || suffix.first == ":" {
+                    source = String(token[..<close.lowerBound] + suffix)
+                }
+            }
+        }
+        return title + " — " + source
+    }
+
     private static func isCurrentFindingCandidate(
         in lines: [String],
-        at index: Int
+        at index: Int,
+        acceptsCompleteTitle: Bool
     ) -> Bool {
-        guard lines[index].first?.isWhitespace != true else {
+        let line = index == lines.startIndex ? lines[index].trimmingCharacters(in: .whitespaces) : lines[index]
+        guard line.first?.isWhitespace != true else {
             return false
         }
         if index > lines.startIndex,
            lines[index - 1].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         {
-            return false
+            return acceptsCompleteTitle && parseFindingLine(line, requiresBullet: false, requiresPriority: true) != nil
         }
-        let line = lines[index]
         let content = line.hasPrefix("- ") ? String(line.dropFirst(2)) : line
         return parsePriority(content) != nil
     }
