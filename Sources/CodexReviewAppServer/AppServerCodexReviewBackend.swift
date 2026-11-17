@@ -4108,6 +4108,7 @@ private struct AppServerThreadItem: Decodable, Sendable {
         case summary
         case content
         case result
+        case fileID = "fileId"
         case error
         case success
         case prompt
@@ -4138,13 +4139,17 @@ private struct AppServerThreadItem: Decodable, Sendable {
         self.path = try container.decodeStringIfPresent(forKey: .path)
         self.review = try container.decodeStringIfPresent(forKey: .review)
         if self.type == "reasoning" {
-            self.summary = try container.decode([String].self, forKey: .summary)
-            self.content = try container.decode([String].self, forKey: .content)
+            self.summary = try container.decodeIfPresent([String].self, forKey: .summary)
+            self.content = try container.decodeIfPresent([String].self, forKey: .content)
         } else {
             self.summary = nil
             self.content = nil
         }
-        self.result = try container.decodeIfPresent(AppServerNotificationValue.self, forKey: .result)
+        if type == "imageGeneration", let fileID = try? container.decode(String.self, forKey: .fileID) {
+            self.result = .string(fileID)
+        } else {
+            self.result = try container.decodeIfPresent(AppServerNotificationValue.self, forKey: .result)
+        }
         self.error = try container.decodeIfPresent(AppServerNotificationValue.self, forKey: .error)
         self.success = try container.decodeIfPresent(Bool.self, forKey: .success)
         self.prompt = try container.decodeStringIfPresent(forKey: .prompt)

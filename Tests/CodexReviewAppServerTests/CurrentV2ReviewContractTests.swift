@@ -609,21 +609,21 @@ struct CurrentV2ReviewDecoderReducerTests {
 
     @Test func currentV2ThreadItemClosedUnionMatchesPinnedSchemas() throws {
         let items = [
-            #"{"type":"userMessage","id":"item-1","content":[]}"#,
+            #"{"type":"userMessage","id":"item-1","content":[{"type":"text","text":"review"},{"type":"image","fileId":"image-1"},{"type":"audio","fileId":"audio-1"}]}"#,
             #"{"type":"hookPrompt","id":"item-1","fragments":[]}"#,
             #"{"type":"agentMessage","id":"item-1","text":"","delivery":null,"phase":"commentary"}"#,
             #"{"type":"plan","id":"item-1","text":""}"#,
-            #"{"type":"reasoning","id":"item-1","summary":[],"content":[]}"#,
-            #"{"type":"commandExecution","id":"item-1","command":"","commandActions":[],"cwd":"","source":"agent","status":"completed"}"#,
+            #"{"type":"reasoning","id":"item-1"}"#,
+            #"{"type":"commandExecution","id":"item-1","command":"","commandActions":[],"cwd":"","status":"completed"}"#,
             #"{"type":"fileChange","id":"item-1","changes":[],"status":"completed"}"#,
             #"{"type":"mcpToolCall","id":"item-1","arguments":null,"server":"","status":"completed","tool":""}"#,
             #"{"type":"dynamicToolCall","id":"item-1","arguments":{},"status":"completed","tool":""}"#,
-            #"{"type":"collabAgentToolCall","id":"item-1","agentsStates":{},"receiverThreadIds":[],"senderThreadId":"","status":"completed","tool":"wait"}"#,
+            #"{"type":"collabAgentToolCall","id":"item-1","agentsStates":{},"receiverThreadIds":[],"senderThreadId":"","status":"interrupted","tool":"sendMessage"}"#,
             #"{"type":"subAgentActivity","id":"item-1","agentPath":"worker","agentThreadId":"thread-worker","kind":"interacted"}"#,
             #"{"type":"webSearch","id":"item-1","query":""}"#,
             #"{"type":"imageView","id":"item-1","path":""}"#,
             #"{"type":"sleep","id":"item-1","durationMs":0}"#,
-            #"{"type":"imageGeneration","id":"item-1","result":"","status":"completed"}"#,
+            #"{"type":"imageGeneration","id":"item-1","fileId":"image-1","status":"completed"}"#,
             #"{"type":"enteredReviewMode","id":"item-1","review":""}"#,
             #"{"type":"exitedReviewMode","id":"item-1","review":""}"#,
             #"{"type":"contextCompaction","id":"item-1"}"#,
@@ -1956,7 +1956,7 @@ struct CurrentV2ReviewRoutingIntegrationTests {
     }
 
 
-    @Test func subAgentActivityAndSleepAreValidCurrentV2LifecycleItems() async throws {
+    @Test func currentLifecycleItemsReachTheReviewLog() async throws {
         let transport = FakeJSONRPCTransport()
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
         let attempt = await backend.reviewAttemptForTesting(.init(
@@ -1988,7 +1988,7 @@ struct CurrentV2ReviewRoutingIntegrationTests {
                 item: .init(
                     type: "subAgentActivity",
                     id: "subagent-1",
-                    activityKind: "interacted",
+                    activityKind: "completed",
                     agentThreadID: "thread-worker",
                     agentPath: "workers/reviewer"
                 )
@@ -2010,9 +2010,19 @@ struct CurrentV2ReviewRoutingIntegrationTests {
                 item: .init(type: "sleep", id: "sleep-1", durationMs: 250)
             )
         )
+        var image = V2Item(type: "imageGeneration", id: "image-job", status: "completed")
+        image.fileID = "file-1"
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: V2ItemNotification(threadID: "thread-review", turnID: "turn-review", item: image)
+        )
         try await emitCompletedReview(transport: transport, review: "No findings.")
 
         let events = try await collectEvents(from: attempt.events)
+        #expect(events.contains { event in
+            guard case .logEntry(_, _, "image-job", _, let metadata, _) = event else { return false }
+            return metadata?.resultText == "file-1"
+        })
         #expect(events.contains(.logEntry(
             kind: .event,
             text: "Subagent workers/reviewer: started.",
@@ -2026,12 +2036,12 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         )))
         #expect(events.contains(.logEntry(
             kind: .event,
-            text: "Subagent workers/reviewer: interacted.",
+            text: "Subagent workers/reviewer: completed.",
             groupID: "subagent-1",
             replacesGroup: true,
             metadata: .init(
                 sourceType: "subAgentActivity",
-                status: "interacted",
+                status: "completed",
                 detail: "thread-worker"
             )
         )))
@@ -2807,6 +2817,7 @@ private struct V2Item: Encodable, Sendable {
     var type: String
     var id: String
     var text: String?
+    var fileID: String?
     var review: String?
     var command: String?
     var cwd: String?
@@ -2863,6 +2874,7 @@ private struct V2Item: Encodable, Sendable {
         case id
         case text
         case review
+        case fileID = "fileId"
         case command
         case cwd
         case source
