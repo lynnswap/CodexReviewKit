@@ -353,12 +353,16 @@ struct ParsedReviewResultTests {
     }
 
     @Test func currentReviewAgentFormatParsesMultipleFindingsAndRanges() throws {
-        let result = ParsedReviewResult.parse(finalReviewText: """
-        Review summary before findings.
+        let final = try ReviewFinalResult(validating: """
+            ```indented-example
+
+        - ```example
+          ### [P3] Ignore this example
+          ```
 
         **[P1] Preserve the terminal owner** — Sources/Store.swift:10-12
         Keep the canonical terminal bound to the selected run.
-        ### [P3] Retain exact file identity — Tests/StoreTests.swift:44 ###
+          ### [P3] Retain exact file identity — Tests/StoreTests.swift:44 ###
         Assert the single-line location without inventing a range.
 
         ```markdown
@@ -367,7 +371,8 @@ struct ParsedReviewResultTests {
         ```
 
         Overall assessment: two actionable findings.
-        """)
+        """, source: .backendProvided)
+        let result = ParsedReviewResult.parse(finalReviewText: final.text)
 
         #expect(result.state == .hasFindings)
         try #require(result.findingCount == 2)
@@ -387,13 +392,14 @@ struct ParsedReviewResultTests {
 
     @Test(arguments: [
         "**[P2]** Fix fallback — B.swift:2",
-        "**[P2] Fix fallback — B.swift:2**",
+        "**[P2] Fix fallback — B.swift:2**  ",
+        "**[P2] Fix fallback** — **B.swift:2**",
     ])
     func boldFindingTitlePreservesItsPriorityAndLocation(_ line: String) throws {
         let result = ParsedReviewResult.parse(finalReviewText: line)
         let finding = try #require(result.findings.first)
         #expect(finding.title == "[P2] Fix fallback")
-        #expect(finding.location?.startLine == 2)
+        #expect(finding.location == .init(path: "B.swift", startLine: 2, endLine: 2))
     }
 
     @Test func malformedCurrentFindingReportsUnknown() {

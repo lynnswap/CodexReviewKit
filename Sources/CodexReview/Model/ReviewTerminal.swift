@@ -61,10 +61,13 @@ package struct ReviewFinalResult: Equatable, Sendable {
         source: Source,
         suppressedAgentMessageItemIDs: Set<String> = []
     ) throws {
-        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard normalized.isEmpty == false else {
+        guard let first = text.firstIndex(where: { !$0.isWhitespace }),
+              let last = text.lastIndex(where: { !$0.isWhitespace }) else {
             throw ReviewIngestionError.missingFinalReview
         }
+        // Indentation on the first content line can introduce a Markdown code block.
+        let start = text[..<first].lastIndex(where: \.isNewline).map(text.index(after:)) ?? text.startIndex
+        let normalized = String(text[start...last])
         let byteCount = normalized.utf8.count
         guard byteCount <= Self.maximumUTF8Bytes else {
             throw ReviewIngestionError.outputTooLarge(
