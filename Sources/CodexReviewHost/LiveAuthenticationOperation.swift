@@ -443,3 +443,14 @@ final class LiveAuthenticationOperation {
         allowsSharedStateCommits && isCurrent(scope)
     }
 }
+
+extension CodexReviewBackendModel.Login.Challenge {
+    func signInDetail(nativeAuthentication: Bool) -> String {
+        if let userCode = userCode?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty {
+            return "Enter code \(userCode) in your browser, then return to ReviewMonitor."
+        }
+        return nativeAuthentication
+            ? "Complete sign in in the authentication window."
+            : "Complete sign in in your browser, then return to ReviewMonitor."
+    }
+}
