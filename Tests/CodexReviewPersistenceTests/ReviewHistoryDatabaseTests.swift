@@ -251,129 +251,23 @@ struct ReviewHistoryDatabaseTests {
         ))
     }
 
-    @Test("upgrades a stale parsed projection from its canonical review")
-    func staleParsedResultUpgrade() async throws {
-        let (database, writer) = try ReviewHistoryTestSupport.database()
-        let finalReview = """
-        [P0] Restore token validation — AccessGate.swift:3
-
-        Reject a supplied token that does not equal the expected token.
-        """
-        let staleResult = ParsedReviewResult(
-            state: .noFindings,
-            findingCount: 0,
-            findings: [],
-            source: .parsedFinalReviewText,
-            parserVersion: 1
-        )
-        _ = try await ReviewHistoryTestSupport.record(
-            started: ReviewHistoryTestSupport.started(id: "stale-parser"),
-            terminal: ReviewHistoryTestSupport.completed(
-                id: "stale-parser",
-                finalReview: finalReview,
-                parsedResult: staleResult
-            ),
-            in: database
-        )
-
-        let restored = try #require(
-            try await database.load(retentionPolicy: .default).first
-        )
-        #expect(restored.terminal.parsedResult?.state == .hasFindings)
-        #expect(restored.terminal.parsedResult?.parserVersion == ParsedReviewResult.currentParserVersion)
-        #expect(restored.terminal.parsedResult?.findings.first?.location == .init(
-            path: "AccessGate.swift",
-            startLine: 3,
-            endLine: 3
-        ))
-
-        let persisted = try await writer.read { db in
-            (
-                parserVersion: try ReviewRecordRow.find("stale-parser")
-                    .fetchOne(db)?.parserVersion,
-                findings: try ReviewFindingRow
-                    .where { $0.reviewID.eq("stale-parser") }
-                    .fetchAll(db)
-            )
-        }
-        #expect(persisted.parserVersion == ParsedReviewResult.currentParserVersion)
-        #expect(persisted.findings.count == 1)
-        #expect(persisted.findings.first?.startLine == 3)
-        #expect(persisted.findings.first?.endLine == 3)
-    }
-
-    @Test("upgrades a parser-v2 inline-code location from its canonical review")
-    func staleInlineCodeLocationUpgrade() async throws {
+    @Test func restoresTheStoredProjectionWithoutReparsing() async throws {
         let (database, _) = try ReviewHistoryTestSupport.database()
-        let finalReview = """
-        [P0] Restore token validation — `AccessGate.swift:3`
-
-        Reject a supplied token that does not equal the expected token.
-        """
-        let staleResult = ParsedReviewResult(
-            state: .unknown,
-            findingCount: nil,
-            findings: [],
-            source: .unrecognizedFindingBlock,
-            parserVersion: 2
+        let finalReview = "### [P2] Fix fallback — B.swift:2"
+        let previous = ParsedReviewResult(
+            state: .unknown, findingCount: nil, findings: [], source: .unrecognizedFindingBlock, parserVersion: 4
         )
         _ = try await ReviewHistoryTestSupport.record(
-            started: ReviewHistoryTestSupport.started(id: "stale-inline-location"),
+            started: ReviewHistoryTestSupport.started(id: "old-review"),
             terminal: ReviewHistoryTestSupport.completed(
-                id: "stale-inline-location",
-                finalReview: finalReview,
-                parsedResult: staleResult
+                id: "old-review", finalReview: finalReview, parsedResult: previous
             ),
             in: database
         )
 
-        let restored = try #require(
-            try await database.load(retentionPolicy: .default).first
-        )
-        #expect(restored.terminal.parsedResult?.state == .hasFindings)
-        #expect(restored.terminal.parsedResult?.parserVersion == ParsedReviewResult.currentParserVersion)
-        #expect(restored.terminal.parsedResult?.findings.first?.location == .init(
-            path: "AccessGate.swift",
-            startLine: 3,
-            endLine: 3
-        ))
-    }
-
-    @Test("upgrades a parser-v3 Markdown-link location from its canonical review")
-    func staleMarkdownLinkLocationUpgrade() async throws {
-        let (database, _) = try ReviewHistoryTestSupport.database()
-        let finalReview = """
-        [P0] Restore token validation — [AccessGate.swift](/tmp/review/AccessGate.swift:3)
-
-        Reject a supplied token that does not equal the expected token.
-        """
-        let staleResult = ParsedReviewResult(
-            state: .unknown,
-            findingCount: nil,
-            findings: [],
-            source: .unrecognizedFindingBlock,
-            parserVersion: 3
-        )
-        _ = try await ReviewHistoryTestSupport.record(
-            started: ReviewHistoryTestSupport.started(id: "stale-markdown-link-location"),
-            terminal: ReviewHistoryTestSupport.completed(
-                id: "stale-markdown-link-location",
-                finalReview: finalReview,
-                parsedResult: staleResult
-            ),
-            in: database
-        )
-
-        let restored = try #require(
-            try await database.load(retentionPolicy: .default).first
-        )
-        #expect(restored.terminal.parsedResult?.state == .hasFindings)
-        #expect(restored.terminal.parsedResult?.parserVersion == ParsedReviewResult.currentParserVersion)
-        #expect(restored.terminal.parsedResult?.findings.first?.location == .init(
-            path: "/tmp/review/AccessGate.swift",
-            startLine: 3,
-            endLine: 3
-        ))
+        let restored = try #require(try await database.load(retentionPolicy: .default).first)
+        #expect(restored.terminal.canonicalReview == finalReview)
+        #expect(restored.terminal.parsedResult == PersistedParsedReviewResult(previous))
     }
 
     @Test("converts abandoned active rows without inventing an end time")

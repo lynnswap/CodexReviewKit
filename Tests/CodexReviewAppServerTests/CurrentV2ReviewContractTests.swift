@@ -609,21 +609,21 @@ struct CurrentV2ReviewDecoderReducerTests {
 
     @Test func currentV2ThreadItemClosedUnionMatchesPinnedSchemas() throws {
         let items = [
-            #"{"type":"userMessage","id":"item-1","content":[]}"#,
+            #"{"type":"userMessage","id":"item-1","content":[{"type":"text","text":"review"},{"type":"image","fileId":"image-1"},{"type":"audio","fileId":"audio-1"}]}"#,
             #"{"type":"hookPrompt","id":"item-1","fragments":[]}"#,
             #"{"type":"agentMessage","id":"item-1","text":"","delivery":null,"phase":"commentary"}"#,
             #"{"type":"plan","id":"item-1","text":""}"#,
-            #"{"type":"reasoning","id":"item-1","summary":[],"content":[]}"#,
-            #"{"type":"commandExecution","id":"item-1","command":"","commandActions":[],"cwd":"","source":"agent","status":"completed"}"#,
+            #"{"type":"reasoning","id":"item-1"}"#,
+            #"{"type":"commandExecution","id":"item-1","command":"","commandActions":[],"cwd":"","status":"completed"}"#,
             #"{"type":"fileChange","id":"item-1","changes":[],"status":"completed"}"#,
             #"{"type":"mcpToolCall","id":"item-1","arguments":null,"server":"","status":"completed","tool":""}"#,
             #"{"type":"dynamicToolCall","id":"item-1","arguments":{},"status":"completed","tool":""}"#,
-            #"{"type":"collabAgentToolCall","id":"item-1","agentsStates":{},"receiverThreadIds":[],"senderThreadId":"","status":"completed","tool":"wait"}"#,
+            #"{"type":"collabAgentToolCall","id":"item-1","agentsStates":{},"receiverThreadIds":[],"senderThreadId":"","status":"interrupted","tool":"sendMessage"}"#,
             #"{"type":"subAgentActivity","id":"item-1","agentPath":"worker","agentThreadId":"thread-worker","kind":"interacted"}"#,
             #"{"type":"webSearch","id":"item-1","query":""}"#,
             #"{"type":"imageView","id":"item-1","path":""}"#,
             #"{"type":"sleep","id":"item-1","durationMs":0}"#,
-            #"{"type":"imageGeneration","id":"item-1","result":"","status":"completed"}"#,
+            #"{"type":"imageGeneration","id":"item-1","fileId":"image-1","status":"completed"}"#,
             #"{"type":"enteredReviewMode","id":"item-1","review":""}"#,
             #"{"type":"exitedReviewMode","id":"item-1","review":""}"#,
             #"{"type":"contextCompaction","id":"item-1"}"#,
@@ -1063,11 +1063,11 @@ private struct BoundaryDiagnosticFixture: Sendable, CustomTestStringConvertible 
     static let all: [Self] = [
         .init(testDescription: "global params", route: .global, method: "configWarning", params: .scalar("scalar params"), threadID: nil, turnID: nil, itemType: nil, stage: .paramsDecoding, error: .malformedKnownEvent(method: "configWarning", message: "params must be a JSON object"), disposition: .ignored),
         .init(testDescription: "global schema", route: .global, method: "configWarning", params: .warning(.init(message: "wrong field")), threadID: nil, turnID: nil, itemType: nil, stage: .schemaValidation, error: .malformedKnownEvent(method: "configWarning", message: "summary must be a string"), disposition: .ignored),
-        .init(testDescription: "global payload", route: .global, method: "configWarning", params: .globalPayload(.init(summary: "valid", plan: "invalid")), threadID: nil, turnID: nil, itemType: nil, stage: .payloadDecoding, error: .malformedKnownEvent(method: "configWarning", message: "The data couldn’t be read because it isn’t in the correct format."), disposition: .ignored),
+        .init(testDescription: "global payload", route: .global, method: "configWarning", params: .globalPayload(.init(summary: "valid", plan: "invalid")), threadID: nil, turnID: nil, itemType: nil, stage: .payloadDecoding, error: .malformedKnownEvent(method: "configWarning", message: CocoaError(.coderReadCorrupt).localizedDescription), disposition: .ignored),
         .init(testDescription: "pre-routing identity", route: .connection, method: "guardianWarning", params: .warning(.init(message: "missing thread")), threadID: nil, turnID: nil, itemType: nil, stage: .schemaValidation, error: .missingRoutingIdentity(method: "guardianWarning"), disposition: .connectionFailed),
         .init(testDescription: "non-global params", route: .connection, method: "item/completed", params: .scalar("scalar params"), threadID: nil, turnID: nil, itemType: nil, stage: .paramsDecoding, error: .malformedKnownEvent(method: "item/completed", message: "params must be a JSON object"), disposition: .connectionFailed),
         .init(testDescription: "no-session unsupported item", route: .ignoredSingle, method: "item/completed", params: .item(.init(threadID: "thread-target", turnID: "turn-target", item: .init(type: "futureItem", id: "item-1"))), threadID: "thread-target", turnID: "turn-target", itemType: "futureItem", stage: .schemaValidation, error: .unsupportedItemType(method: "item/completed", type: "futureItem"), disposition: .ignored),
-        .init(testDescription: "no-session payload", route: .connection, method: "item/agentMessage/delta", params: .reviewPayload(.init(threadID: "thread-target", turnID: "turn-target", itemID: "item-1", delta: "delta", plan: "invalid")), threadID: "thread-target", turnID: "turn-target", itemType: nil, stage: .payloadDecoding, error: .malformedKnownEvent(method: "item/agentMessage/delta", message: "The data couldn’t be read because it isn’t in the correct format."), disposition: .connectionFailed),
+        .init(testDescription: "no-session payload", route: .connection, method: "item/agentMessage/delta", params: .reviewPayload(.init(threadID: "thread-target", turnID: "turn-target", itemID: "item-1", delta: "delta", plan: "invalid")), threadID: "thread-target", turnID: "turn-target", itemType: nil, stage: .payloadDecoding, error: .malformedKnownEvent(method: "item/agentMessage/delta", message: CocoaError(.coderReadCorrupt).localizedDescription), disposition: .connectionFailed),
         .init(testDescription: "ambiguous valid", route: .ambiguous, method: "item/agentMessage/delta", params: .delta(.init(threadID: "shared-thread", turnID: "turn-1", itemID: "item-1", delta: "delta")), threadID: "shared-thread", turnID: "turn-1", itemType: nil, stage: .routing, error: .conflictingActiveRouting(threadID: "shared-thread"), disposition: .connectionFailed),
         .init(testDescription: "ambiguous unsupported item", route: .ignoredAmbiguous, method: "item/completed", params: .item(.init(threadID: "shared-thread", turnID: "turn-1", item: .init(type: "futureItem", id: "item-1"))), threadID: "shared-thread", turnID: "turn-1", itemType: "futureItem", stage: .schemaValidation, error: .unsupportedItemType(method: "item/completed", type: "futureItem"), disposition: .ignored),
         .init(testDescription: "ambiguous malformed item", route: .ambiguous, method: "item/completed", params: .item(.init(threadID: "shared-thread", turnID: "turn-1", item: .init(type: "exitedReviewMode", id: "item-1"))), threadID: "shared-thread", turnID: "turn-1", itemType: "exitedReviewMode", stage: .routing, error: .conflictingActiveRouting(threadID: "shared-thread"), disposition: .connectionFailed),
@@ -1661,9 +1661,10 @@ struct CurrentV2ReviewRoutingIntegrationTests {
             params: params
         )
 
-        #expect(try await attempt.events.next() == .failed(
-            "Malformed app-server notification item/agentMessage/delta: The data couldn’t be read because it isn’t in the correct format."
-        ))
+        let expectedError = ReviewIngestionError.malformedKnownEvent(
+            method: "item/agentMessage/delta", message: CocoaError(.coderReadCorrupt).localizedDescription
+        )
+        #expect(try await attempt.events.next() == .failed(expectedError.localizedDescription))
         await backend.waitForReviewNotificationCompletionForTesting(1)
         let captured = diagnostics.snapshot()
         #expect(captured.count == 1)
@@ -1673,10 +1674,7 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         #expect(diagnostic.turnID == "turn-selected")
         #expect(diagnostic.itemType == nil)
         #expect(diagnostic.stage == .payloadDecoding)
-        #expect(diagnostic.error == .malformedKnownEvent(
-            method: "item/agentMessage/delta",
-            message: "The data couldn’t be read because it isn’t in the correct format."
-        ))
+        #expect(diagnostic.error == expectedError)
         #expect(diagnostic.disposition == .attemptFailed)
         #expect(try canonicalJSON(diagnostic.rawParams) == canonicalJSON(
             JSONEncoder().encode(params)
@@ -1956,7 +1954,7 @@ struct CurrentV2ReviewRoutingIntegrationTests {
     }
 
 
-    @Test func subAgentActivityAndSleepAreValidCurrentV2LifecycleItems() async throws {
+    @Test func currentLifecycleItemsReachTheReviewLog() async throws {
         let transport = FakeJSONRPCTransport()
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
         let attempt = await backend.reviewAttemptForTesting(.init(
@@ -1988,7 +1986,7 @@ struct CurrentV2ReviewRoutingIntegrationTests {
                 item: .init(
                     type: "subAgentActivity",
                     id: "subagent-1",
-                    activityKind: "interacted",
+                    activityKind: "completed",
                     agentThreadID: "thread-worker",
                     agentPath: "workers/reviewer"
                 )
@@ -2010,9 +2008,19 @@ struct CurrentV2ReviewRoutingIntegrationTests {
                 item: .init(type: "sleep", id: "sleep-1", durationMs: 250)
             )
         )
+        var image = V2Item(type: "imageGeneration", id: "image-job", status: "completed")
+        image.fileID = "file-1"
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: V2ItemNotification(threadID: "thread-review", turnID: "turn-review", item: image)
+        )
         try await emitCompletedReview(transport: transport, review: "No findings.")
 
         let events = try await collectEvents(from: attempt.events)
+        #expect(events.contains { event in
+            guard case .logEntry(_, _, "image-job", _, let metadata, _) = event else { return false }
+            return metadata?.resultText == "file-1"
+        })
         #expect(events.contains(.logEntry(
             kind: .event,
             text: "Subagent workers/reviewer: started.",
@@ -2026,12 +2034,12 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         )))
         #expect(events.contains(.logEntry(
             kind: .event,
-            text: "Subagent workers/reviewer: interacted.",
+            text: "Subagent workers/reviewer: completed.",
             groupID: "subagent-1",
             replacesGroup: true,
             metadata: .init(
                 sourceType: "subAgentActivity",
-                status: "interacted",
+                status: "completed",
                 detail: "thread-worker"
             )
         )))
@@ -2807,6 +2815,7 @@ private struct V2Item: Encodable, Sendable {
     var type: String
     var id: String
     var text: String?
+    var fileID: String?
     var review: String?
     var command: String?
     var cwd: String?
@@ -2863,6 +2872,7 @@ private struct V2Item: Encodable, Sendable {
         case id
         case text
         case review
+        case fileID = "fileId"
         case command
         case cwd
         case source

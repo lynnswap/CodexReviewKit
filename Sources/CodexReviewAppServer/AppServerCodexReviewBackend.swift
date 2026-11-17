@@ -360,7 +360,26 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     package func readSettings() async throws -> CodexReviewBackendModel.Settings.Snapshot {
         _ = try await client.initialize()
         let response = try await client.send(AppServerAPI.Config.Read.Request())
-        let models = try await readModelCatalog()
+        var models = try await readModelCatalog()
+        if models.contains(where: { !$0.serviceTiers.isEmpty }) {
+            let limits: AppServerAPI.Config.RequirementsRequest.Response?
+            do {
+                limits = try await client.send(AppServerAPI.Config.RequirementsRequest())
+            } catch JSONRPC.Error.responseError(-32601, _) {
+                limits = nil
+            }
+            let independent = limits?.supportsIndependentSpeedModes == true
+            func allows(_ tier: String) -> Bool {
+                response.config.features?.allows(tier, independent: independent) != false
+                    && limits?.requirements?.featureRequirements?.allows(tier, independent: independent) != false
+            }
+            for index in models.indices {
+                for option in models[index].serviceTiers.indices {
+                    let id = models[index].serviceTiers[option].id
+                    models[index].serviceTiers[option].isAvailable = allows(id.rawValue)
+                }
+            }
+        }
         return .init(
             model: response.config.reviewModel?.nilIfEmpty,
             fallbackModel: response.config.model?.nilIfEmpty ?? models.first(where: \.isDefault)?.model,
@@ -3306,7 +3325,7 @@ private extension AppServerCodexReviewBackend {
         if change.updatesServiceTier {
             edits.append(.init(
                 keyPath: "service_tier",
-                value: change.serviceTier.map(AppServerAPI.Config.Value.string) ?? .null
+                value: change.serviceTier.map { .string($0 == "priority" ? "fast" : $0) } ?? .null
             ))
         }
         return edits
@@ -4108,6 +4127,7 @@ private struct AppServerThreadItem: Decodable, Sendable {
         case summary
         case content
         case result
+        case fileID = "fileId"
         case error
         case success
         case prompt
@@ -4138,13 +4158,17 @@ private struct AppServerThreadItem: Decodable, Sendable {
         self.path = try container.decodeStringIfPresent(forKey: .path)
         self.review = try container.decodeStringIfPresent(forKey: .review)
         if self.type == "reasoning" {
-            self.summary = try container.decode([String].self, forKey: .summary)
-            self.content = try container.decode([String].self, forKey: .content)
+            self.summary = try container.decodeIfPresent([String].self, forKey: .summary)
+            self.content = try container.decodeIfPresent([String].self, forKey: .content)
         } else {
             self.summary = nil
             self.content = nil
         }
-        self.result = try container.decodeIfPresent(AppServerNotificationValue.self, forKey: .result)
+        if type == "imageGeneration", let fileID = try? container.decode(String.self, forKey: .fileID) {
+            self.result = .string(fileID)
+        } else {
+            self.result = try container.decodeIfPresent(AppServerNotificationValue.self, forKey: .result)
+        }
         self.error = try container.decodeIfPresent(AppServerNotificationValue.self, forKey: .error)
         self.success = try container.decodeIfPresent(Bool.self, forKey: .success)
         self.prompt = try container.decodeStringIfPresent(forKey: .prompt)

@@ -171,7 +171,7 @@ package struct TerminalReviewRecord: Sendable, Hashable {
         guard id.nilIfEmpty != nil else {
             throw ReviewHistoryRecordError("A terminal review requires a stable ID.")
         }
-        let canonicalReview = canonicalReview?.nilIfEmpty
+        let canonicalReview = canonicalReview.flatMap(ReviewFinalResult.normalizedText)
         switch terminal {
         case .completed:
             guard endedAt != nil else {

@@ -353,31 +353,95 @@ struct ParsedReviewResultTests {
     }
 
     @Test func currentReviewAgentFormatParsesMultipleFindingsAndRanges() throws {
-        let result = ParsedReviewResult.parse(finalReviewText: """
-        Review summary before findings.
+        let final = try ReviewFinalResult(validating: """
+            ```indented-example
 
-        [P1] Preserve the terminal owner — Sources/Store.swift:10-12
+        - ```example
+          ### [P3] Ignore this example
+          ```
+
+        **[P1] Preserve the terminal owner** — [Store.swift:10-12](/project/Sources/Store.swift:10-12)
         Keep the canonical terminal bound to the selected run.
+        **[P2]** only describes priority here.
 
-        [P3] Retain exact file identity — Tests/StoreTests.swift:44
+        **[P2]** means an ordinary defect — see the guide: use priority labels.
+          ### [P3] Retain exact file identity — [StoreTests.swift:44](/project/Tests/StoreTests.swift:44) ###
         Assert the single-line location without inventing a range.
+        ## Overall assessment
+
+        ```markdown
+
+        [P2] Example inside a code block
+
+        ### [P2] Example inside a code block
+        ```
+
+        **[P2] means an ordinary defect.**
+
+        ### [P2] vs. [P3]
+
+        **[P2] means an ordinary defect** — see the guide for examples.
+
+        ### Severity **[P2]** — see guide
+
+        ### **[P2]** only describes severity — more details below
 
         Overall assessment: two actionable findings.
-        """)
+        """, source: .backendProvided)
+        let result = ParsedReviewResult.parse(finalReviewText: final.text)
 
         #expect(result.state == .hasFindings)
-        #expect(result.findingCount == 2)
+        try #require(result.findingCount == 2)
+        #expect(result.findings[1].title == "[P3] Retain exact file identity")
         #expect(result.findings[0].location == .init(
-            path: "Sources/Store.swift",
+            path: "/project/Sources/Store.swift",
             startLine: 10,
             endLine: 12
         ))
         #expect(result.findings[1].location == .init(
-            path: "Tests/StoreTests.swift",
+            path: "/project/Tests/StoreTests.swift",
             startLine: 44,
             endLine: 44
         ))
         #expect(result.findings[1].body == "Assert the single-line location without inventing a range.")
+    }
+
+    @Test(arguments: [
+        "**[P2]** Fix fallback — B.swift:2",
+        "__[P2] Fix fallback__ — B.swift:2",
+        "- **[P2] Fix fallback** — B.swift:2",
+        "**[P2] Fix fallback — B.swift:2**  ",
+        "**[P2] Fix fallback** —  **B.swift:2**",
+        "**[P2] Fix fallback** — **B.swift**:2",
+        "**[P2] Fix fallback — B.swift**:2",
+        "### **[P2] Fix fallback — B.swift:2**",
+        "  [P2] Fix fallback — B.swift:2",
+    ])
+    func boldFindingTitlePreservesItsPriorityAndLocation(_ line: String) throws {
+        let result = ParsedReviewResult.parse(finalReviewText: line)
+        let finding = try #require(result.findings.first)
+        #expect(finding.title == "[P2] Fix fallback")
+        #expect(finding.location == .init(path: "B.swift", startLine: 2, endLine: 2))
+    }
+
+    @Test(arguments: ["Sources/_Factory_.swift", "Sources/**Factory**.swift", "[generated](debug)/Page.swift"])
+    func headingKeepsTheLiteralFilename(_ path: String) throws {
+        let result = ParsedReviewResult.parse(finalReviewText: "### [P2] Fix fallback — \(path):3 ###")
+        #expect(result.findings.first?.location?.path == path)
+    }
+
+    @Test(arguments: ["", "  ", "\\"])
+    func adjacentBoldFindingLinesRemainDistinct(_ marker: String) {
+        let result = ParsedReviewResult.parse(finalReviewText:
+            "**[P1] One** — A.swift:1" + marker + "\n**[P2] Two** — B.swift:2"
+        )
+        #expect(result.findingCount == 2)
+    }
+
+    @Test(arguments: ["\n", "\r\n"])
+    func adjacentPlainFindingTitlesUseTheSameLineBoundaries(_ newline: String) {
+        let text = ["Review summary.", "[P1] One — A.swift:1", "[P2] Two — B.swift:2"].joined(separator: newline)
+        #expect(ParsedReviewResult.parse(finalReviewText: text).findingCount == 2)
     }
 
     @Test func malformedCurrentFindingReportsUnknown() {

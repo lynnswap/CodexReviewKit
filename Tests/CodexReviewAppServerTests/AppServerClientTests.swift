@@ -1794,7 +1794,8 @@ struct AppServerClientTests {
         }
     }
 
-    @Test func settingsReadLoadsConfigAndModelCatalog() async throws {
+    @Test(arguments: [true, false])
+    func settingsReadLoadsConfigAndModelCatalog(ultrafastEnabled: Bool) async throws {
         let modelList = Data("""
         {
           "data": [
@@ -1813,7 +1814,9 @@ struct AppServerClientTests {
                 {"reasoningEffort": "future-effort", "description": "Model-defined"}
               ],
               "defaultReasoningEffort": "future-effort",
-              "serviceTiers": [{"id": "fast"}, {"id": "flex"}],
+              "defaultServiceTier": "ultrafast",
+              "serviceTiers": [{"id": "priority", "name": "Fast"}, {"id": "ultrafast", "name": "Ultrafast"}],
+              "additionalSpeedTiers": ["fast", "ultrafast", "flex"],
               "isDefault": true
             }
           ]
@@ -1821,6 +1824,7 @@ struct AppServerClientTests {
         """.utf8)
         let transport = FakeJSONRPCTransport(responses: [
             "model/list": [modelList],
+            "configRequirements/read": [Data(#"{"requirements":{"featureRequirements":{"ultrafast_mode":\#(ultrafastEnabled)}},"supportsIndependentSpeedModes":true}"#.utf8)],
         ])
         try await enqueueInitialize(transport)
         try await transport.enqueue(
@@ -1828,7 +1832,8 @@ struct AppServerClientTests {
                 model: "gpt-5",
                 reviewModel: "gpt-5.6-sol",
                 modelReasoningEffort: "ultra",
-                serviceTier: "flex"
+                serviceTier: "ultrafast",
+                features: .init(ultrafastMode: true)
             )),
             for: "config/read"
         )
@@ -1839,7 +1844,7 @@ struct AppServerClientTests {
         #expect(settings.model == "gpt-5.6-sol")
         #expect(settings.fallbackModel == "gpt-5")
         #expect(settings.reasoningEffort == "ultra")
-        #expect(settings.serviceTier == "flex")
+        #expect(settings.serviceTier == "ultrafast")
         #expect(settings.models.map(\.model) == ["gpt-5.6-sol"])
         #expect(settings.models.first?.supportedReasoningEfforts.map(\.reasoningEffort.rawValue) == [
             "low", "medium", "high", "xhigh", "max", "ultra", "future-effort",
@@ -1848,7 +1853,9 @@ struct AppServerClientTests {
             "Light", "Balanced", "High", "Extra high", "Maximum", "Automatic delegation", "Model-defined",
         ])
         #expect(settings.models.first?.defaultReasoningEffort.rawValue == "future-effort")
-        #expect(settings.models.first?.supportedServiceTiers == [.fast, .flex])
+        #expect(settings.models.first?.supportedServiceTiers.map(\.rawValue) == ["priority", "ultrafast", "flex"])
+        #expect(settings.models.first?.availableServiceTiers.map(\.displayName) == (ultrafastEnabled ? ["Fast", "Ultrafast", "Flex"] : ["Fast", "Flex"]))
+        #expect(settings.models.first?.defaultServiceTier?.rawValue == "ultrafast")
         #expect(settings.models.first?.isDefault == true)
     }
 

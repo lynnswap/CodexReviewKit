@@ -680,7 +680,28 @@ struct Snapshot: Codable, Equatable, Sendable {
     package var modelReasoningEffort: String?
     package var serviceTier: String?
 
+    package var features: SpeedFeatures?
+
+    package struct SpeedFeatures: Codable, Equatable, Sendable {
+        package var fastMode: Bool?
+        package var ultrafastMode: Bool?
+
+        enum CodingKeys: String, CodingKey {
+            case fastMode = "fast_mode"
+            case ultrafastMode = "ultrafast_mode"
+        }
+
+        func allows(_ tier: String, independent: Bool) -> Bool {
+            switch tier {
+            case "default", "flex": true
+            case "ultrafast": ultrafastMode != false && (independent || fastMode != false)
+            default: fastMode != false
+            }
+        }
+    }
+
     enum CodingKeys: String, CodingKey {
+        case features
         case model
         case reviewModel = "review_model"
         case modelReasoningEffort = "model_reasoning_effort"
@@ -691,17 +712,34 @@ struct Snapshot: Codable, Equatable, Sendable {
         model: String? = nil,
         reviewModel: String? = nil,
         modelReasoningEffort: String? = nil,
-        serviceTier: String? = nil
+        serviceTier: String? = nil,
+        features: SpeedFeatures? = nil
     ) {
         self.model = model
         self.reviewModel = reviewModel
         self.modelReasoningEffort = modelReasoningEffort
         self.serviceTier = serviceTier
+        self.features = features
     }
 }
 }
 
 
+extension AppServerAPI.Config {
+    struct RequirementsRequest: AppServerAPI.Request {
+        static let method = "configRequirements/read"
+        let params = EmptyResponse()
+
+        struct Response: Decodable {
+            struct Requirements: Decodable {
+                let featureRequirements: Snapshot.SpeedFeatures?
+            }
+
+            let requirements: Requirements?
+            let supportsIndependentSpeedModes: Bool?
+        }
+    }
+}
 package extension AppServerAPI.Config.Read {
 struct Request: AppServerAPI.Request {
     package typealias Response = AppServerAPI.Config.Read.Response
