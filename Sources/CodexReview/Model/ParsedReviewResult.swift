@@ -84,7 +84,7 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         }
 
         let lines = text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).map(String.init)
-        let (formatted, codeLines) = markdownFindingLines(lines)
+        let (formatted, codeLines, headings) = markdownFindingLines(lines)
         let legacyHeaderIndex = lines.indices.first {
             !codeLines.contains($0) && isLegacyFindingHeader(in: lines, at: $0)
         }
@@ -103,7 +103,7 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         }
 
         if currentFindingLines.isEmpty == false {
-            return parseCurrentFindings(in: lines, at: currentFindingLines, formatted: formatted)
+            return parseCurrentFindings(in: lines, at: currentFindingLines, formatted: formatted, headings: headings)
         }
 
         if isExplicitNoFindings(lines) {
@@ -168,7 +168,8 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
     private static func parseCurrentFindings(
         in lines: [String],
         at findingLineIndices: [Int],
-        formatted: [Int: String]
+        formatted: [Int: String],
+        headings: IndexSet
     ) -> ParsedReviewResult {
         let parsedLines = findingLineIndices.map { index in
             (
@@ -190,7 +191,8 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
             guard let finding = parsedLine.finding else {
                 return unrecognizedResult()
             }
-            let endIndex = parsedLines.dropFirst(offset + 1).first?.index ?? lines.endIndex
+            let nextFinding = parsedLines.dropFirst(offset + 1).first?.index ?? lines.endIndex
+            let endIndex = min(nextFinding, headings.integerGreaterThan(parsedLine.index) ?? lines.endIndex)
             var builder = FindingBuilder(
                 findingLine: parsedLine.line.trimmingCharacters(in: .whitespaces),
                 finding: finding,
@@ -273,8 +275,8 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
 
     /// Use Markdown block and emphasis boundaries to distinguish finding titles from examples.
     /// Keep the original link syntax for the same destination checks used by plain findings.
-    private static func markdownFindingLines(_ lines: [String]) -> ([Int: String], IndexSet) {
-        guard lines.contains(where: { $0.contains("[P") }) else { return ([:], []) }
+    private static func markdownFindingLines(_ lines: [String]) -> ([Int: String], IndexSet, IndexSet) {
+        guard lines.contains(where: { $0.contains("[P") }) else { return ([:], [], []) }
         let markdown = lines.joined(separator: "\n")
         let starts = markdown.split(separator: "\n", omittingEmptySubsequences: false).map(\.startIndex)
         // Inline source line numbers can lag after escaped hard breaks. The source range
@@ -290,7 +292,7 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         }
         guard let document = try? AttributedString(markdown: markdown, options: .init(
             interpretedSyntax: .full, appliesSourcePositionAttributes: true
-        )) else { return ([:], []) }
+        )) else { return ([:], [], []) }
         var findings: [Int: String] = [:]
         var hardBreakLines = IndexSet()
         var lastTextLine: Int?
@@ -304,24 +306,22 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         }
         var codeLines = IndexSet()
         var previousBlock: Int?
-        var followsBreak = false
+        var headings = IndexSet()
         for run in document.runs {
-            if run.inlinePresentationIntent?.contains(.lineBreak) == true {
-                followsBreak = true
-                continue
-            }
             guard let components = run.presentationIntent?.components, let block = components.first,
                   let position = run.markdownSourcePosition,
                   let range = Range<String.Index>(position, in: markdown), !range.isEmpty else { continue }
             let index = lineIndex(containing: range.lowerBound)
+            let end = lineIndex(containing: markdown.index(before: range.upperBound))
+            if components.count == 1, case .header = block.kind { headings.insert(index) }
+            if run.inlinePresentationIntent?.contains(.code) == true, index < end {
+                codeLines.insert(integersIn: (index + 1)...end)
+            }
             if case .codeBlock = block.kind {
-                codeLines.insert(integersIn: index...lineIndex(containing: markdown.index(before: range.upperBound)))
+                codeLines.insert(integersIn: index...end)
                 continue
             }
-            defer {
-                previousBlock = block.identity
-                followsBreak = false
-            }
+            defer { previousBlock = block.identity }
             guard parsePriority(String(document[run.range].characters.prefix(4))) != nil else { continue }
             var raw = lines[index].trimmingCharacters(in: .whitespaces)
             if hardBreakLines.contains(index), hasBackslashBreak(lines[index]) { raw.removeLast() }
@@ -336,8 +336,10 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
             case .header:
                 guard raw.first == "#" else { continue }
             case .paragraph:
-                guard previousBlock != block.identity || (followsBreak && findings[index - 1] != nil) else { continue }
+                guard previousBlock != block.identity || findings[index - 1] != nil else { continue }
                 if lines[index].hasPrefix("[P") {
+                    if previousBlock == block.identity,
+                       parseFindingLine(raw, requiresBullet: false, requiresPriority: true) == nil { continue }
                     findings[index] = raw
                     continue
                 }
@@ -353,7 +355,7 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
             else { continue }
             findings[index] = content
         }
-        return (findings, codeLines)
+        return (findings, codeLines, headings)
     }
 
     private static func hasBackslashBreak(_ line: String) -> Bool {

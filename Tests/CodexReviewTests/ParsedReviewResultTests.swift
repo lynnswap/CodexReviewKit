@@ -367,6 +367,7 @@ struct ParsedReviewResultTests {
         **[P2]** means an ordinary defect — see the guide: use priority labels.
           ### [P3] Retain exact file identity — [StoreTests.swift:44](/project/Tests/StoreTests.swift:44) ###
         Assert the single-line location without inventing a range.
+        ## Overall assessment
 
         ```markdown
 
@@ -429,8 +430,8 @@ struct ParsedReviewResultTests {
         #expect(result.findings.first?.location?.path == path)
     }
 
-    @Test(arguments: ["  ", "\\"])
-    func hardBreakSeparatesBoldFindingLines(_ marker: String) {
+    @Test(arguments: ["", "  ", "\\"])
+    func adjacentBoldFindingLinesRemainDistinct(_ marker: String) {
         let result = ParsedReviewResult.parse(finalReviewText:
             "**[P1] One** — A.swift:1" + marker + "\n**[P2] Two** — B.swift:2"
         )

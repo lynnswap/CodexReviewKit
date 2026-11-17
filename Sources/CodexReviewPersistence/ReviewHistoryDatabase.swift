@@ -37,7 +37,6 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
         let timestamp = now()
         return try write(database) { db in
             _ = try Self.decodeAll(in: db)
-            try Self.upgradeParsedResults(in: db)
             try Self.backfillWorkspaceMetadata(in: db)
             try Self.finalizeOrphanedReviews(in: db, committedAt: timestamp)
             _ = try ReviewHistoryRetention.prune(
@@ -298,67 +297,6 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
                 updatedAt: committedAt
             )
             try updateTerminal(encoded.review, in: db)
-        }
-    }
-
-    private static func upgradeParsedResults(in db: Database) throws {
-        for row in try ReviewRecordRow.fetchAll(db) {
-            guard row.phase == "terminal",
-                  row.terminalKind == ReviewTerminalKind.completed.rawValue,
-                  let parserVersion = row.parserVersion,
-                  parserVersion < ParsedReviewResult.currentParserVersion,
-                  let canonicalReview = row.canonicalReview,
-                  let endedAt = row.endedAt,
-                  let summary = row.summary,
-                  let terminalCommittedAt = row.terminalCommittedAt
-            else {
-                continue
-            }
-
-            let parsed = ParsedReviewResult.parse(finalReviewText: canonicalReview)
-            // Older writers stripped leading indentation. A stored finding can be the only
-            // surviving evidence when that changes how a Markdown code fence is interpreted.
-            if parserVersion <= 4, parsed.state == .unknown,
-               row.parsedState == ParsedReviewResult.State.hasFindings.rawValue,
-               canonicalReview.hasPrefix("```") || canonicalReview.hasPrefix("~~~") {
-                continue
-            }
-            let terminal = try TerminalReviewRecord(
-                id: row.id,
-                model: row.terminalModel,
-                reviewThreadID: row.reviewThreadID,
-                threadID: row.threadID,
-                terminal: .completed,
-                endedAt: ReviewHistoryTimestamp.decode(endedAt),
-                summary: summary,
-                canonicalReview: canonicalReview,
-                parsedResult: PersistedParsedReviewResult(parsed)
-            )
-            let encoded = try ReviewHistoryRecordCodec.encodeTerminal(
-                terminal,
-                replacing: row,
-                terminalCommittedAt: ReviewHistoryTimestamp.decode(terminalCommittedAt),
-                updatedAt: ReviewHistoryTimestamp.decode(row.updatedAt)
-            )
-            try ReviewRecordRow.find(row.id)
-                .where { $0.phase.eq("terminal") }
-                .update {
-                    $0.parsedState = #bind(encoded.review.parsedState)
-                    $0.parsedFindingCount = #bind(encoded.review.parsedFindingCount)
-                    $0.parsedSource = #bind(encoded.review.parsedSource)
-                    $0.parserVersion = #bind(encoded.review.parserVersion)
-                }
-                .execute(db)
-            guard db.changesCount == 1 else {
-                throw ReviewHistoryDatabaseError.invalidRecord(
-                    id: row.id,
-                    reason: "parsed-result upgrade lost its terminal row"
-                )
-            }
-            try ReviewFindingRow.where { $0.reviewID.eq(row.id) }.delete().execute(db)
-            if encoded.findings.isEmpty == false {
-                try ReviewFindingRow.insert { encoded.findings }.execute(db)
-            }
         }
     }
 
