@@ -298,9 +298,13 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
             default:
                 continue
             }
-            if let content = renderedFindingLine(raw) {
-                findings[index] = content
+            guard let content = renderedFindingLine(raw) else { continue }
+            // Emphasizing the priority alone also occurs in prose explaining a severity.
+            if raw.hasPrefix("**[P"), raw.dropFirst(6).hasPrefix("**"),
+               parseFindingLine(content, requiresBullet: false, requiresPriority: true) == nil {
+                continue
             }
+            findings[index] = content
         }
         return (findings, codeLines)
     }
@@ -311,7 +315,6 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         guard let separator = text.range(of: " — ", options: .backwards) else { return nil }
         let title = text[..<separator.lowerBound].trimmingCharacters(in: .whitespaces)
         guard let dash = raw.range(of: " — ", options: .backwards) else { return nil }
-        let rawTitle = raw[..<dash.lowerBound]
         var source = raw[dash.upperBound...].trimmingCharacters(in: .whitespaces)
         if raw.hasPrefix("#") {
             let hashes = source.reversed().prefix(while: { $0 == "#" })
@@ -321,7 +324,9 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         }
         // The location is a literal protocol token. Only unwrap the emphasis at its
         // boundaries, as filenames may themselves contain Markdown punctuation.
-        let titleOpensStrong = rawTitle.hasPrefix("**") && !rawTitle.dropFirst(2).contains("**")
+        let titleOpensStrong = rendered.range(of: " — ", options: .backwards).map {
+            rendered[$0].runs.contains { $0.inlinePresentationIntent?.contains(.stronglyEmphasized) == true }
+        } ?? false
         let locationOpensStrong = source.hasPrefix("**")
         if titleOpensStrong || locationOpensStrong {
             let token = locationOpensStrong ? source.dropFirst(2) : source[...]
