@@ -408,6 +408,7 @@ struct ParsedReviewResultTests {
     @Test(arguments: [
         "**[P2]** Fix fallback — B.swift:2",
         "__[P2] Fix fallback__ — B.swift:2",
+        "- **[P2] Fix fallback** — B.swift:2",
         "**[P2] Fix fallback — B.swift:2**  ",
         "**[P2] Fix fallback** —  **B.swift:2**",
         "**[P2] Fix fallback** — **B.swift**:2",
@@ -438,7 +439,7 @@ struct ParsedReviewResultTests {
 
     @Test(arguments: ["\n", "\r\n"])
     func adjacentPlainFindingTitlesUseTheSameLineBoundaries(_ newline: String) {
-        let text = "[P1] One — A.swift:1" + newline + "[P2] Two — B.swift:2"
+        let text = ["Review summary.", "[P1] One — A.swift:1", "[P2] Two — B.swift:2"].joined(separator: newline)
         #expect(ParsedReviewResult.parse(finalReviewText: text).findingCount == 2)
     }
 

@@ -91,7 +91,7 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         var currentFindingLines: [Int] = []
         for index in lines.indices where !codeLines.contains(index) {
             if formatted[index] != nil || isCurrentFindingCandidate(
-                in: lines, at: index, followsFinding: currentFindingLines.last == index - 1
+                in: lines, at: index, acceptsCompleteTitle: currentFindingLines.isEmpty || currentFindingLines.last == index - 1
             ) {
                 currentFindingLines.append(index)
             }
@@ -322,18 +322,22 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
                 previousBlock = block.identity
                 followsBreak = false
             }
-            guard components.count == 1,
-                  parsePriority(String(document[run.range].characters.prefix(4))) != nil else { continue }
+            guard parsePriority(String(document[run.range].characters.prefix(4))) != nil else { continue }
             var raw = lines[index].trimmingCharacters(in: .whitespaces)
             if hardBreakLines.contains(index), hasBackslashBreak(lines[index]) { raw.removeLast() }
+            if components.count != 1 {
+                guard components.count == 3, case .listItem = components[1].kind,
+                      case .paragraph = block.kind, let space = raw.firstIndex(where: \.isWhitespace)
+                else { continue }
+                raw = raw[space...].trimmingCharacters(in: .whitespaces)
+                guard raw.hasPrefix("**[P") || raw.hasPrefix("__[P") else { continue }
+            }
             switch block.kind {
             case .header:
                 guard raw.first == "#" else { continue }
             case .paragraph:
-                guard previousBlock != block.identity || followsBreak else { continue }
+                guard previousBlock != block.identity || (followsBreak && findings[index - 1] != nil) else { continue }
                 if lines[index].hasPrefix("[P") {
-                    // A hard break inside an explanation continues the same paragraph.
-                    guard previousBlock != block.identity || findings[index - 1] != nil else { continue }
                     findings[index] = raw
                     continue
                 }
@@ -394,7 +398,7 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
     private static func isCurrentFindingCandidate(
         in lines: [String],
         at index: Int,
-        followsFinding: Bool
+        acceptsCompleteTitle: Bool
     ) -> Bool {
         let line = index == lines.startIndex ? lines[index].trimmingCharacters(in: .whitespaces) : lines[index]
         guard line.first?.isWhitespace != true else {
@@ -403,7 +407,7 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         if index > lines.startIndex,
            lines[index - 1].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         {
-            return followsFinding && parseFindingLine(line, requiresBullet: false, requiresPriority: true) != nil
+            return acceptsCompleteTitle && parseFindingLine(line, requiresBullet: false, requiresPriority: true) != nil
         }
         let content = line.hasPrefix("- ") ? String(line.dropFirst(2)) : line
         return parsePriority(content) != nil
