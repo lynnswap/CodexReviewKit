@@ -4138,8 +4138,8 @@ private struct AppServerThreadItem: Decodable, Sendable {
         self.path = try container.decodeStringIfPresent(forKey: .path)
         self.review = try container.decodeStringIfPresent(forKey: .review)
         if self.type == "reasoning" {
-            self.summary = try container.decode([String].self, forKey: .summary)
-            self.content = try container.decode([String].self, forKey: .content)
+            self.summary = try container.decodeIfPresent([String].self, forKey: .summary)
+            self.content = try container.decodeIfPresent([String].self, forKey: .content)
         } else {
             self.summary = nil
             self.content = nil

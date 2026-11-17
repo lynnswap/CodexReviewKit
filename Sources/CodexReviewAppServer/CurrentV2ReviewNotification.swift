@@ -427,14 +427,17 @@ enum CurrentV2ReviewNotificationDecoder {
         case "plan":
             _ = try requiredString("text", in: item)
         case "reasoning":
-            _ = try requiredStringArray("summary", in: item)
-            _ = try requiredStringArray("content", in: item)
+            for key in ["summary", "content"] where item[key] != nil {
+                _ = try requiredStringArray(key, in: item)
+            }
         case "commandExecution":
             _ = try requiredString("command", in: item)
             try validateCommandActions(try requiredObjectArray("commandActions", in: item))
             _ = try requiredString("cwd", in: item)
             _ = try requiredEnum("status", in: item, allowed: commandStatuses)
-            _ = try requiredEnum("source", in: item, allowed: commandSources)
+            if item["source"] != nil {
+                _ = try requiredEnum("source", in: item, allowed: commandSources)
+            }
         case "fileChange":
             try validateFileChanges(try requiredObjectArray("changes", in: item))
             _ = try requiredEnum("status", in: item, allowed: commandStatuses)
@@ -451,7 +454,7 @@ enum CurrentV2ReviewNotificationDecoder {
             try validateCollabAgentStates(try requiredObject("agentsStates", in: item))
             _ = try requiredStringArray("receiverThreadIds", in: item)
             _ = try requiredString("senderThreadId", in: item)
-            _ = try requiredEnum("status", in: item, allowed: toolStatuses)
+            _ = try requiredEnum("status", in: item, allowed: collabToolStatuses)
             _ = try requiredEnum("tool", in: item, allowed: collabAgentTools)
         case "subAgentActivity":
             _ = try requiredString("agentPath", in: item)
@@ -464,7 +467,7 @@ enum CurrentV2ReviewNotificationDecoder {
         case "sleep":
             _ = try requiredInteger("durationMs", in: item)
         case "imageGeneration":
-            _ = try requiredString("result", in: item)
+            try requireFileIDOrString("result", in: item)
             _ = try requiredString("status", in: item)
         case "enteredReviewMode", "exitedReviewMode":
             _ = try requiredString("review", in: item)
@@ -481,9 +484,11 @@ enum CurrentV2ReviewNotificationDecoder {
             switch type {
             case "text":
                 _ = try requiredString("text", in: input)
-                _ = try requiredArray("text_elements", in: input)
+                if input["text_elements"] != nil {
+                    _ = try requiredArray("text_elements", in: input)
+                }
             case "image", "audio":
-                _ = try requiredString("url", in: input)
+                try requireFileIDOrString("url", in: input)
             case "localImage", "localAudio":
                 _ = try requiredString("path", in: input)
             case "skill", "mention":
@@ -613,6 +618,12 @@ enum CurrentV2ReviewNotificationDecoder {
             throw PayloadError("\(key) must be a string")
         }
         return value
+    }
+
+    private static func requireFileIDOrString(_ key: String, in object: [String: Any]) throws {
+        guard object["fileId"] is String || object[key] is String else {
+            throw PayloadError("fileId or \(key) must be a string")
+        }
     }
 
     private static func requiredNonemptyString(
@@ -830,13 +841,15 @@ enum CurrentV2ReviewNotificationDecoder {
     ]
     private static let commandActionTypes: Set<String> = ["read", "listFiles", "search", "unknown"]
     private static let patchChangeKinds: Set<String> = ["add", "delete", "update"]
+    private static let collabToolStatuses = toolStatuses.union(["interrupted"])
     private static let collabAgentTools: Set<String> = [
         "spawnAgent", "sendInput", "resumeAgent", "wait", "closeAgent",
+        "sendMessage", "followupTask", "interruptAgent", "listAgents",
     ]
     private static let collabAgentStatuses: Set<String> = [
         "pendingInit", "running", "interrupted", "completed", "errored", "shutdown", "notFound",
     ]
-    private static let subAgentActivityKinds: Set<String> = ["started", "interacted", "interrupted"]
+    private static let subAgentActivityKinds: Set<String> = ["started", "interacted", "interrupted", "completed"]
     private static let userInputTypes: Set<String> = [
         "text", "image", "localImage", "audio", "localAudio", "skill", "mention",
     ]

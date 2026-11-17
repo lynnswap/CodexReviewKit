@@ -609,21 +609,21 @@ struct CurrentV2ReviewDecoderReducerTests {
 
     @Test func currentV2ThreadItemClosedUnionMatchesPinnedSchemas() throws {
         let items = [
-            #"{"type":"userMessage","id":"item-1","content":[]}"#,
+            #"{"type":"userMessage","id":"item-1","content":[{"type":"text","text":"review"},{"type":"image","fileId":"image-1"},{"type":"audio","fileId":"audio-1"}]}"#,
             #"{"type":"hookPrompt","id":"item-1","fragments":[]}"#,
             #"{"type":"agentMessage","id":"item-1","text":"","delivery":null,"phase":"commentary"}"#,
             #"{"type":"plan","id":"item-1","text":""}"#,
-            #"{"type":"reasoning","id":"item-1","summary":[],"content":[]}"#,
-            #"{"type":"commandExecution","id":"item-1","command":"","commandActions":[],"cwd":"","source":"agent","status":"completed"}"#,
+            #"{"type":"reasoning","id":"item-1"}"#,
+            #"{"type":"commandExecution","id":"item-1","command":"","commandActions":[],"cwd":"","status":"completed"}"#,
             #"{"type":"fileChange","id":"item-1","changes":[],"status":"completed"}"#,
             #"{"type":"mcpToolCall","id":"item-1","arguments":null,"server":"","status":"completed","tool":""}"#,
             #"{"type":"dynamicToolCall","id":"item-1","arguments":{},"status":"completed","tool":""}"#,
-            #"{"type":"collabAgentToolCall","id":"item-1","agentsStates":{},"receiverThreadIds":[],"senderThreadId":"","status":"completed","tool":"wait"}"#,
+            #"{"type":"collabAgentToolCall","id":"item-1","agentsStates":{},"receiverThreadIds":[],"senderThreadId":"","status":"interrupted","tool":"sendMessage"}"#,
             #"{"type":"subAgentActivity","id":"item-1","agentPath":"worker","agentThreadId":"thread-worker","kind":"interacted"}"#,
             #"{"type":"webSearch","id":"item-1","query":""}"#,
             #"{"type":"imageView","id":"item-1","path":""}"#,
             #"{"type":"sleep","id":"item-1","durationMs":0}"#,
-            #"{"type":"imageGeneration","id":"item-1","result":"","status":"completed"}"#,
+            #"{"type":"imageGeneration","id":"item-1","fileId":"image-1","status":"completed"}"#,
             #"{"type":"enteredReviewMode","id":"item-1","review":""}"#,
             #"{"type":"exitedReviewMode","id":"item-1","review":""}"#,
             #"{"type":"contextCompaction","id":"item-1"}"#,
@@ -1988,7 +1988,7 @@ struct CurrentV2ReviewRoutingIntegrationTests {
                 item: .init(
                     type: "subAgentActivity",
                     id: "subagent-1",
-                    activityKind: "interacted",
+                    activityKind: "completed",
                     agentThreadID: "thread-worker",
                     agentPath: "workers/reviewer"
                 )
@@ -2026,12 +2026,12 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         )))
         #expect(events.contains(.logEntry(
             kind: .event,
-            text: "Subagent workers/reviewer: interacted.",
+            text: "Subagent workers/reviewer: completed.",
             groupID: "subagent-1",
             replacesGroup: true,
             metadata: .init(
                 sourceType: "subAgentActivity",
-                status: "interacted",
+                status: "completed",
                 detail: "thread-worker"
             )
         )))
