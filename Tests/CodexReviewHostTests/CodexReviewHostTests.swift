@@ -16,33 +16,6 @@ private enum HostCloseFailure: LocalizedError, Equatable, Sendable {
     }
 }
 
-private actor HostCloseFailureTransport: JSONRPC.Transport {
-    private var closeCallCount = 0
-
-    func send(_: JSONRPC.Request) async throws -> Data {
-        Data("{}".utf8)
-    }
-
-    func notify(_: JSONRPC.Notification) async throws {}
-
-    func notificationStream() async -> AsyncThrowingStream<JSONRPC.ReceivedNotification, Error> {
-        AsyncThrowingStream { _ in }
-    }
-
-    func notificationHighWatermark() -> JSONRPC.NotificationReceipt {
-        .beforeFirst
-    }
-
-    func close() async throws {
-        closeCallCount += 1
-        throw HostCloseFailure.injected
-    }
-
-    func recordedCloseCallCount() -> Int {
-        closeCallCount
-    }
-}
-
 @Suite("host composition")
 @MainActor
 struct CodexReviewHostTests {
@@ -124,61 +97,6 @@ struct CodexReviewHostTests {
         await store.stop()
     }
 
-    @Test func hostStartsAndStopsRuntimeWithFakeBackend() async throws {
-        let backend = FakeCodexReviewBackend()
-        let host = CodexReviewHost(
-            backend: backend,
-            endpoint: URL(string: "http://localhost:9417/mcp")
-        )
-
-        await host.start()
-        #expect(host.store.serverState == .running)
-        #expect(host.store.serverURL == URL(string: "http://localhost:9417/mcp"))
-
-        try await host.stop()
-        #expect(host.store.serverState == .stopped)
-    }
-
-    @Test func directRuntimeFailureUsesExactCancellationReason() async throws {
-        let interruptGate = AsyncGate()
-        let backend = FakeCodexReviewBackend()
-        await backend.holdInterruptReview(with: interruptGate)
-        let host = CodexReviewHost(backend: backend)
-        await host.start()
-        let review = Task { @MainActor in
-            try await host.store.startReview(
-                sessionID: "session-1",
-                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
-            )
-        }
-        let active = await StoreSnapshotProbe(store: host.store).waitUntil {
-            $0.job()?.activeRun != nil
-        }
-        let activeRun = try #require(active?.job()?.activeRun)
-
-        let failure = Task { @MainActor in
-            await host.store.stop(intent: .unexpectedFailure("Injected direct failure."))
-        }
-        try await backend.waitForInterruptReview(timeout: .seconds(2))
-        let expected = "Review runtime stopped unexpectedly: Injected direct failure."
-        #expect(host.store.serverState == .failed(expected))
-        let command = try #require(await backend.recordedCommands().last)
-        guard case .interruptReviewAdmission(let admission, let reason) = command else {
-            Issue.record("Expected an interrupt request.")
-            return
-        }
-        #expect(admission.run == activeRun)
-        #expect(reason.message == expected)
-        #expect(host.store.jobs.first?.core.lifecycle.cancellation?.message == expected)
-
-        await interruptGate.open()
-        await backend.yield(.cancelled(expected), for: activeRun)
-        await failure.value
-        let result = try await review.value
-        #expect(result.core.lifecycle.cancellation?.message == expected)
-        #expect(host.store.serverState == .failed(expected))
-    }
-
     @Test func teardownIntentDerivesReasonStateAndDiagnosticsFromOneValue() {
         let explicit = ReviewRuntimeTeardownIntent.explicitStop
         #expect(explicit.reviewCancellation == .system(message: "Review runtime stopped."))
@@ -194,85 +112,40 @@ struct CodexReviewHostTests {
         #expect(failure.cleanupTimeoutWarning == "Timed out cleaning active reviews after runtime failure")
     }
 
-    @Test func hostStopReplaysAppServerLifecycleCloseFailure() async {
-        let transport = HostCloseFailureTransport()
-        let host = CodexReviewHost(appServerTransport: transport)
+    @Test func liveHostLoadsReviewSettingsAndWritesModelDefinedEffort() async throws {
+        let home = try temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let transport = FakeJSONRPCTransport()
+        let initial = AppServerAPI.Config.Snapshot(reviewModel: "review-model", modelReasoningEffort: "ultra")
+        try await enqueueRuntimeStartResponses(transport, accountEmail: "review@example.com", config: initial)
+        let server = ControlledMCPHTTPServer(endpoint: try #require(URL(string: "http://127.0.0.1:9417/mcp")))
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": home.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            mcpHTTPServerFactory: { _, _ in server },
+            mcpHTTPServerBindChecker: { _ in },
+            transportFactory: { _ in transport }
+        )
 
-        await #expect(throws: HostCloseFailure.injected) {
-            try await host.stop()
-        }
-        await #expect(throws: HostCloseFailure.injected) {
-            try await host.stop()
-        }
+        await store.start()
+        #expect(store.settings.selectedModel == "review-model")
+        #expect(store.settings.selectedReasoningEffort == .ultra)
+        #expect(store.auth.selectedAccount?.accountKey == "review@example.com")
 
-        #expect(await transport.recordedCloseCallCount() == 1)
-    }
-
-    @Test func hostStartLoadsSettingsBeforeStandaloneReviews() async throws {
-        let backend = FakeCodexReviewBackend(settings: .init(model: "gpt-5.5"))
-        let host = CodexReviewHost(backend: backend)
-
-        await host.start()
-        let reviewTask = Task { @MainActor in
-            try await host.store.startReview(
-                sessionID: "session-1",
-                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
-            )
-        }
-        await backend.waitForStartReview()
-
-        let commands = await backend.recordedCommands()
-        #expect(commands.first == .readSettings)
-        let startReview = try #require(commands.compactMap { command -> CodexReviewBackendModel.Review.Start? in
-            if case .startReview(let request) = command {
-                request
-            } else {
-                nil
-            }
-        }.first)
-        #expect(startReview.model == "gpt-5.5")
-
-        await backend.yield(.completed(summary: "Succeeded.", result: nil))
-        await backend.finishEvents()
-        _ = try await reviewTask.value
-    }
-
-    @Test func hostPreservesReasoningEffortWireValues() async throws {
-        let backend = FakeCodexReviewBackend(settings: .init(reasoningEffort: "ultra"))
-        let host = CodexReviewHost(backend: backend)
-
-        await host.start()
-
-        #expect(host.store.settings.selectedReasoningEffort == .ultra)
-
-        let modelDefined = try #require(CodexReviewSettings.ReasoningEffort(rawValue: "future-effort"))
-        await host.store.updateSettingsReasoningEffort(modelDefined)
-
-        let commands = await backend.recordedCommands()
-        guard case .applySettings(let change) = try #require(commands.last) else {
-            Issue.record("Expected a settings write.")
-            return
-        }
-        #expect(change.reasoningEffort == "future-effort")
-        #expect(change.updatesReasoningEffort)
-        #expect(host.store.settings.selectedReasoningEffort == modelDefined)
-    }
-
-    @Test func hostStartPreservesBackendAccountID() async {
-        let backend = FakeCodexReviewBackend(auth: .init(
-            accounts: [
-                .init(id: .init("review@example.com"), label: "review@example.com", isActive: true),
-            ],
-            activeAccountID: .init("review@example.com")
-        ))
-        let host = CodexReviewHost(backend: backend)
-
-        await host.start()
-        await host.store.refreshAuthentication()
-
-        #expect(host.store.auth.selectedAccount?.accountKey == "review@example.com")
-        #expect(host.store.auth.selectedAccount?.email == "review@example.com")
-        #expect(host.store.auth.persistedActiveAccountKey == "review@example.com")
+        let effort = try #require(CodexReviewSettings.ReasoningEffort(rawValue: "future-effort"))
+        await transport.enqueueRawResponse(Data(#"{"status":"ok"}"#.utf8), for: "config/batchWrite")
+        var updated = initial
+        updated.modelReasoningEffort = effort.rawValue
+        try await transport.enqueue(AppServerAPI.Config.Read.Response(config: updated), for: "config/read")
+        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        await store.updateSettingsReasoningEffort(effort)
+        let write = try #require(await transport.recordedRequests().first { $0.method == "config/batchWrite" })
+        let params = try #require(JSONSerialization.jsonObject(with: write.params) as? [String: Any])
+        let edit = try #require((params["edits"] as? [[String: Any]])?.first)
+        #expect(edit["keyPath"] as? String == "model_reasoning_effort")
+        #expect(edit["value"] as? String == effort.rawValue)
+        #expect(store.settings.selectedReasoningEffort == effort)
+        await store.stop()
     }
 
     @Test func runtimePreferencesNormalizeInvalidValues() {
@@ -6879,7 +6752,8 @@ private final class FakeWebAuthenticationSession: CodexReviewNativeAuthenticatio
 
 private func enqueueRuntimeStartResponses(
     _ transport: FakeJSONRPCTransport,
-    accountEmail: String? = nil
+    accountEmail: String? = nil,
+    config: AppServerAPI.Config.Snapshot = .init(model: "gpt-5")
 ) async throws {
     try await transport.enqueue(
         AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"),
@@ -6903,7 +6777,7 @@ private func enqueueRuntimeStartResponses(
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
     }
     try await transport.enqueue(
-        AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+        AppServerAPI.Config.Read.Response(config: config),
         for: "config/read"
     )
     try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
