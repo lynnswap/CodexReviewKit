@@ -76,18 +76,31 @@ struct ReasoningEffort: RawRepresentable, Codable, Hashable, Sendable {
 
 
 package extension CodexReviewSettings {
-enum ServiceTier: String, CaseIterable, Codable, Sendable {
-    case fast
-    case flex
+struct ServiceTier: RawRepresentable, Hashable, Codable, Sendable {
+    package let rawValue: String
 
-    package var displayText: String {
-        switch self {
-        case .fast:
-            "Fast"
-        case .flex:
-            "Flex"
-        }
+    package init(rawValue: String) {
+        self.rawValue = rawValue
     }
+
+    package static let fast = Self(rawValue: "fast")
+    package static let priority = Self(rawValue: "priority")
+    package static let flex = Self(rawValue: "flex")
+
+    package var isFast: Bool { self == .fast || self == .priority }
+
+    var fallbackName: String {
+        if isFast { return "Fast" }
+        if self == .flex { return "Flex" }
+        return rawValue
+    }
+}
+
+struct ServiceTierOption: Codable, Equatable, Identifiable, Sendable {
+    package let id: ServiceTier
+    let name: String?
+
+    package var displayName: String { name ?? id.fallbackName }
 }
 }
 
@@ -120,8 +133,11 @@ struct ModelCatalogItem: Codable, Identifiable, Equatable, Sendable {
     package let hidden: Bool
     package let supportedReasoningEfforts: [CodexReviewSettings.ReasoningOption]
     package let defaultReasoningEffort: CodexReviewSettings.ReasoningEffort
-    package let supportedServiceTiers: [CodexReviewSettings.ServiceTier]
+    package let serviceTiers: [CodexReviewSettings.ServiceTierOption]
+
     package let isDefault: Bool
+
+    package var supportedServiceTiers: [CodexReviewSettings.ServiceTier] { serviceTiers.map(\.id) }
 
     private enum CodingKeys: String, CodingKey {
         case id
@@ -133,10 +149,6 @@ struct ModelCatalogItem: Codable, Identifiable, Equatable, Sendable {
         case supportedServiceTiers = "additionalSpeedTiers"
         case serviceTiers
         case isDefault
-    }
-
-    private struct RawServiceTier: Decodable {
-        let id: String
     }
 
     package var normalizedDisplayName: String {
@@ -214,7 +226,7 @@ struct ModelCatalogItem: Codable, Identifiable, Equatable, Sendable {
         self.hidden = hidden
         self.supportedReasoningEfforts = supportedReasoningEfforts
         self.defaultReasoningEffort = defaultReasoningEffort
-        self.supportedServiceTiers = supportedServiceTiers
+        self.serviceTiers = supportedServiceTiers.map { .init(id: $0, name: nil) }
         self.isDefault = isDefault
     }
 
@@ -235,17 +247,17 @@ struct ModelCatalogItem: Codable, Identifiable, Equatable, Sendable {
         defaultReasoningEffort = decodedDefaultReasoningEffort
             ?? supportedReasoningEfforts.first?.reasoningEffort
             ?? .medium
-        let additionalSpeedTiers = try container.decodeIfPresent(
-            [String].self,
-            forKey: .supportedServiceTiers
+        let options = try container.decodeIfPresent(
+            [CodexReviewSettings.ServiceTierOption].self, forKey: .serviceTiers
         ) ?? []
-        let serviceTierIDs = try container.decodeIfPresent(
-            [RawServiceTier].self,
-            forKey: .serviceTiers
-        )?.map(\.id) ?? []
-        supportedServiceTiers = Array(Set(additionalSpeedTiers + serviceTierIDs))
-            .sorted()
-            .compactMap(CodexReviewSettings.ServiceTier.init(rawValue:))
+        let legacyIDs = try container.decodeIfPresent(
+            [CodexReviewSettings.ServiceTier].self, forKey: .supportedServiceTiers
+        ) ?? []
+        var seen = Set<CodexReviewSettings.ServiceTier>()
+        let candidates = options + legacyIDs.map { .init(id: $0, name: nil) }
+        serviceTiers = candidates.filter { option in
+            seen.insert(option.id.isFast ? .fast : option.id).inserted
+        }
         isDefault = try container.decodeIfPresent(Bool.self, forKey: .isDefault) ?? false
     }
 
@@ -257,10 +269,7 @@ struct ModelCatalogItem: Codable, Identifiable, Equatable, Sendable {
         try container.encode(hidden, forKey: .hidden)
         try container.encode(supportedReasoningEfforts, forKey: .supportedReasoningEfforts)
         try container.encode(defaultReasoningEffort, forKey: .defaultReasoningEffort)
-        try container.encode(
-            supportedServiceTiers.map(\.rawValue),
-            forKey: .supportedServiceTiers
-        )
+        try container.encode(serviceTiers, forKey: .serviceTiers)
         try container.encode(isDefault, forKey: .isDefault)
     }
 

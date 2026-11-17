@@ -241,7 +241,7 @@ struct StatusView: View {
                     Picker("Model", selection: modelSelection) {
                         ForEach(settings.displayedModels) { item in
                             LabeledContent{
-                                if item.supportedServiceTiers.contains(.fast) {
+                                if item.supportedServiceTiers.contains(where: \.isFast) {
                                     Image(systemName: "bolt.fill")
                                 }
                             }label:{
@@ -254,14 +254,14 @@ struct StatusView: View {
                     
                     Picker("Tier", selection: serviceTierSelection) {
                         Text("Normal").tag(Optional<CodexReviewSettings.ServiceTier>.none)
-                        ForEach(settings.availableServiceTiers, id: \.self) { item in
-                            Text(item.displayText).tag(Optional(item))
+                        ForEach(settings.availableServiceTiers) { item in
+                            Text(item.displayName).tag(Optional(item.id))
                         }
                     }
                     .pickerStyle(.inline)
                 }label:{
                     LabeledContent{
-                        if settings.selectedServiceTier == .fast{
+                        if settings.selectedServiceTier?.isFast == true {
                             Image(systemName:"bolt.fill")
                         }
                     }label:{

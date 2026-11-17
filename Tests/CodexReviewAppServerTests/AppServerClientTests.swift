@@ -1813,7 +1813,8 @@ struct AppServerClientTests {
                 {"reasoningEffort": "future-effort", "description": "Model-defined"}
               ],
               "defaultReasoningEffort": "future-effort",
-              "serviceTiers": [{"id": "fast"}, {"id": "flex"}],
+              "serviceTiers": [{"id": "priority", "name": "Fast"}, {"id": "ultrafast", "name": "Ultrafast"}],
+              "additionalSpeedTiers": ["fast", "ultrafast", "flex"],
               "isDefault": true
             }
           ]
@@ -1848,7 +1849,8 @@ struct AppServerClientTests {
             "Light", "Balanced", "High", "Extra high", "Maximum", "Automatic delegation", "Model-defined",
         ])
         #expect(settings.models.first?.defaultReasoningEffort.rawValue == "future-effort")
-        #expect(settings.models.first?.supportedServiceTiers == [.fast, .flex])
+        #expect(settings.models.first?.supportedServiceTiers.map(\.rawValue) == ["priority", "ultrafast", "flex"])
+        #expect(settings.models.first?.serviceTiers.map(\.displayName) == ["Fast", "Ultrafast", "Flex"])
         #expect(settings.models.first?.isDefault == true)
     }
 
