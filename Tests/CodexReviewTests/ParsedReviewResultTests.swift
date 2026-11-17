@@ -363,6 +363,8 @@ struct ParsedReviewResultTests {
         **[P1] Preserve the terminal owner** — Sources/Store.swift:10-12
         Keep the canonical terminal bound to the selected run.
         **[P2]** only describes priority here.
+
+        **[P2]** means an ordinary defect — see the guide.
           ### [P3] Retain exact file identity — Tests/StoreTests.swift:44 ###
         Assert the single-line location without inventing a range.
 
@@ -397,6 +399,7 @@ struct ParsedReviewResultTests {
         "**[P2]** Fix fallback — B.swift:2",
         "**[P2] Fix fallback — B.swift:2**  ",
         "**[P2] Fix fallback** —  **B.swift:2**",
+        "**[P2] Fix fallback** — **B.swift**:2",
         "  [P2] Fix fallback — B.swift:2",
     ])
     func boldFindingTitlePreservesItsPriorityAndLocation(_ line: String) throws {

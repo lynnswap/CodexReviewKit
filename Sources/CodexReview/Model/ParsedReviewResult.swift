@@ -84,7 +84,7 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         }
 
         let lines = text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).map(String.init)
-        let (formatted, codeLines) = markdownFindingLines(text, lines: lines)
+        let (formatted, codeLines) = markdownFindingLines(lines)
         let legacyHeaderIndex = lines.indices.first {
             !codeLines.contains($0) && isLegacyFindingHeader(in: lines, at: $0)
         }
@@ -268,9 +268,9 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
 
     /// Use Markdown block and emphasis boundaries to distinguish finding titles from examples.
     /// Keep the original link syntax for the same destination checks used by plain findings.
-    private static func markdownFindingLines(_ text: String, lines: [String]) -> ([Int: String], IndexSet) {
-        guard text.contains("[P"),
-              let document = try? AttributedString(markdown: text, options: .init(
+    private static func markdownFindingLines(_ lines: [String]) -> ([Int: String], IndexSet) {
+        guard lines.contains(where: { $0.contains("[P") }),
+              let document = try? AttributedString(markdown: lines.joined(separator: "\n"), options: .init(
                 interpretedSyntax: .full, appliesSourcePositionAttributes: true
               )) else { return ([:], []) }
         var findings: [Int: String] = [:]
@@ -284,50 +284,50 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
                 continue
             }
             defer { previousBlock = block.identity }
-            guard components.count == 1, previousBlock != block.identity,
-                  let priority = parsePriority(String(document[run.range].characters.prefix(4))),
-                  lines.indices.contains(position.startLine - 1) else { continue }
+            guard components.count == 1, lines.indices.contains(position.startLine - 1),
+                  parsePriority(String(document[run.range].characters.prefix(4))) != nil else { continue }
             let index = position.startLine - 1
-            var line = lines[index].trimmingCharacters(in: .whitespaces)
+            let raw = lines[index].trimmingCharacters(in: .whitespaces)
+            let explicitTitle: Bool
             switch block.kind {
             case .header:
-                let hashes = line.prefix(while: { $0 == "#" })
-                guard !hashes.isEmpty else { continue }
-                line = String(line.dropFirst(hashes.count)).trimmingCharacters(in: .whitespaces)
-                let closing = line.reversed().prefix(while: { $0 == "#" })
-                if !closing.isEmpty, line.dropLast(closing.count).last?.isWhitespace == true {
-                    line = String(line.dropLast(closing.count)).trimmingCharacters(in: .whitespaces)
-                }
+                guard raw.first == "#" else { continue }
+                explicitTitle = true
             case .paragraph:
-                guard run.inlinePresentationIntent?.contains(.stronglyEmphasized) == true,
-                      lines[index].hasPrefix("**[P") else { continue }
+                guard raw.hasPrefix("**[P"), run.inlinePresentationIntent?.contains(.stronglyEmphasized) == true,
+                      previousBlock != block.identity || (index > 0 &&
+                        (lines[index - 1].hasSuffix("  ") || lines[index - 1].hasSuffix("\\"))) else { continue }
+                explicitTitle = !raw.dropFirst(6).hasPrefix("**")
             default:
                 continue
             }
-            let marker = "[P\(priority)]"
-            guard line.hasPrefix(marker) || line.hasPrefix("**" + marker) else { continue }
-            guard let dash = line.range(of: " — ", options: .backwards) else {
-                if case .header = block.kind { findings[index] = marker }
-                continue
+            if let content = renderedFindingLine(raw),
+               parseFindingLine(content, requiresBullet: false, requiresPriority: true) != nil {
+                findings[index] = content
+            } else if explicitTitle {
+                findings[index] = raw
             }
-            var title = line[..<dash.lowerBound].trimmingCharacters(in: .whitespaces)
-            var location = line[dash.upperBound...].trimmingCharacters(in: .whitespaces)
-            if title.hasPrefix("**") {
-                title.removeFirst(2)
-                if title.hasPrefix(marker + "**") {
-                    title = marker + title.dropFirst(marker.count + 2)
-                } else if title.hasSuffix("**") {
-                    title.removeLast(2)
-                } else if location.hasSuffix("**") {
-                    location.removeLast(2)
-                }
-            }
-            if location.hasPrefix("**"), location.hasSuffix("**"), location.count >= 4 {
-                location = String(location.dropFirst(2).dropLast(2))
-            }
-            findings[index] = title + " — " + location
         }
         return (findings, codeLines)
+    }
+
+    private static func renderedFindingLine(_ raw: String) -> String? {
+        guard let rendered = try? AttributedString(markdown: raw) else { return nil }
+        let text = String(rendered.characters)
+        guard let separator = text.range(of: " — ", options: .backwards) else { return nil }
+        let title = text[..<separator.lowerBound].trimmingCharacters(in: .whitespaces)
+        let label = text[separator.upperBound...].trimmingCharacters(in: .whitespaces)
+        guard !label.isEmpty, let range = rendered.range(of: label, options: .backwards) else { return nil }
+        let location = rendered[range]
+        if location.runs.contains(where: { $0.link != nil }) {
+            guard let link = location.runs.first?.link, location.runs.allSatisfy({ $0.link == link }),
+                  let dash = raw.range(of: " — ", options: .backwards),
+                  let start = raw[dash.upperBound...].firstIndex(of: "["),
+                  let end = raw[start...].lastIndex(of: ")"),
+                  parseMarkdownLinkLocation(String(raw[start...end])) != nil else { return nil }
+            return title + " — " + raw[start...end]
+        }
+        return title + " — " + label
     }
 
     private static func isCurrentFindingCandidate(
