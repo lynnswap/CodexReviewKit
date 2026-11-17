@@ -379,6 +379,8 @@ struct ParsedReviewResultTests {
 
         ### [P2] vs. [P3]
 
+        **[P2] means an ordinary defect** — see the guide for examples.
+
         ### Severity **[P2]** — see guide
 
         ### **[P2]** only describes severity — more details below

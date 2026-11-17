@@ -342,13 +342,11 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
             default:
                 continue
             }
-            guard let content = renderedFindingLine(raw) else { continue }
-            // Emphasizing the priority alone also occurs in prose explaining a severity.
-            if run.inlinePresentationIntent?.contains(.stronglyEmphasized) == true,
-               document[run.range].characters.count == 4,
-               parseFindingLine(content, requiresBullet: false, requiresPriority: true) == nil {
-                continue
-            }
+            // Formatted priority labels also appear in explanations. A validated location
+            // is what distinguishes a formatted finding from that prose.
+            guard let content = renderedFindingLine(raw),
+                  parseFindingLine(content, requiresBullet: false, requiresPriority: true) != nil
+            else { continue }
             findings[index] = content
         }
         return (findings, codeLines)
@@ -382,7 +380,7 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
             titleOpensStrong ? headingContent.hasPrefix(delimiter) : source.hasPrefix(delimiter)
         }
         if let delimiter {
-            let token = source.hasPrefix(delimiter) ? source.dropFirst(2) : source[...]
+            let token = !titleOpensStrong && source.hasPrefix(delimiter) ? source.dropFirst(2) : source[...]
             if let close = token.range(of: delimiter, options: .backwards) {
                 let suffix = token[close.upperBound...]
                 if suffix.isEmpty || suffix.first == ":" {
