@@ -414,9 +414,10 @@ struct ParsedReviewResultTests {
         #expect(finding.location == .init(path: "B.swift", startLine: 2, endLine: 2))
     }
 
-    @Test func headingKeepsTheLiteralFilename() throws {
-        let result = ParsedReviewResult.parse(finalReviewText: "### [P2] Fix fallback — Sources/_Factory_.swift:3 ###")
-        #expect(result.findings.first?.location?.path == "Sources/_Factory_.swift")
+    @Test(arguments: ["Sources/_Factory_.swift", "Sources/**Factory**.swift", "[generated](debug)/Page.swift"])
+    func headingKeepsTheLiteralFilename(_ path: String) throws {
+        let result = ParsedReviewResult.parse(finalReviewText: "### [P2] Fix fallback — \(path):3 ###")
+        #expect(result.findings.first?.location?.path == path)
     }
 
     @Test func malformedCurrentFindingReportsUnknown() {

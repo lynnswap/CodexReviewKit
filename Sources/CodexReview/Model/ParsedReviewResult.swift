@@ -298,8 +298,7 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
             default:
                 continue
             }
-            if let content = renderedFindingLine(raw),
-               parseFindingLine(content, requiresBullet: false, requiresPriority: true) != nil {
+            if let content = renderedFindingLine(raw) {
                 findings[index] = content
             }
         }
@@ -311,18 +310,8 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         let text = String(rendered.characters)
         guard let separator = text.range(of: " — ", options: .backwards) else { return nil }
         let title = text[..<separator.lowerBound].trimmingCharacters(in: .whitespaces)
-        let label = text[separator.upperBound...].trimmingCharacters(in: .whitespaces)
-        guard !label.isEmpty, let range = rendered.range(of: label, options: .backwards) else { return nil }
-        let location = rendered[range]
-        if location.runs.contains(where: { $0.link != nil }) {
-            guard let link = location.runs.first?.link, location.runs.allSatisfy({ $0.link == link }),
-                  let dash = raw.range(of: " — ", options: .backwards),
-                  let start = raw[dash.upperBound...].firstIndex(of: "["),
-                  let end = raw[start...].lastIndex(of: ")"),
-                  parseMarkdownLinkLocation(String(raw[start...end])) != nil else { return nil }
-            return title + " — " + raw[start...end]
-        }
         guard let dash = raw.range(of: " — ", options: .backwards) else { return nil }
+        let rawTitle = raw[..<dash.lowerBound]
         var source = raw[dash.upperBound...].trimmingCharacters(in: .whitespaces)
         if raw.hasPrefix("#") {
             let hashes = source.reversed().prefix(while: { $0 == "#" })
@@ -330,11 +319,20 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
                 source = source.dropLast(hashes.count).trimmingCharacters(in: .whitespaces)
             }
         }
-        // Preserve literal filename characters such as underscores. Remove strong markers
-        // only when Markdown interpreted them as formatting around the title or location.
-        if source.contains("**"), !label.contains("**") {
-            source = source.replacingOccurrences(of: "**", with: "")
+        // The location is a literal protocol token. Only unwrap the emphasis at its
+        // boundaries, as filenames may themselves contain Markdown punctuation.
+        let titleOpensStrong = rawTitle.hasPrefix("**") && !rawTitle.dropFirst(2).contains("**")
+        let locationOpensStrong = source.hasPrefix("**")
+        if titleOpensStrong || locationOpensStrong {
+            let token = locationOpensStrong ? source.dropFirst(2) : source[...]
+            if let close = token.range(of: "**", options: .backwards) {
+                let suffix = token[close.upperBound...]
+                if suffix.isEmpty || suffix.first == ":" {
+                    source = String(token[..<close.lowerBound] + suffix)
+                }
+            }
         }
+        guard source.contains(":") || hasCompleteMarkdownLinkShape(source) else { return nil }
         return title + " — " + source
     }
 
