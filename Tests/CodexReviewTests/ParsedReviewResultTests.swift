@@ -358,9 +358,13 @@ struct ParsedReviewResultTests {
 
         **[P1] Preserve the terminal owner** — Sources/Store.swift:10-12
         Keep the canonical terminal bound to the selected run.
-
-        ### [P3] Retain exact file identity — Tests/StoreTests.swift:44
+        ### [P3] Retain exact file identity — Tests/StoreTests.swift:44 ###
         Assert the single-line location without inventing a range.
+
+        ```markdown
+
+        ### [P2] Example inside a code block
+        ```
 
         Overall assessment: two actionable findings.
         """)
@@ -379,6 +383,17 @@ struct ParsedReviewResultTests {
             endLine: 44
         ))
         #expect(result.findings[1].body == "Assert the single-line location without inventing a range.")
+    }
+
+    @Test(arguments: [
+        "**[P2]** Fix fallback — B.swift:2",
+        "**[P2] Fix fallback — B.swift:2**",
+    ])
+    func boldFindingTitlePreservesItsPriorityAndLocation(_ line: String) throws {
+        let result = ParsedReviewResult.parse(finalReviewText: line)
+        let finding = try #require(result.findings.first)
+        #expect(finding.title == "[P2] Fix fallback")
+        #expect(finding.location?.startLine == 2)
     }
 
     @Test func malformedCurrentFindingReportsUnknown() {
