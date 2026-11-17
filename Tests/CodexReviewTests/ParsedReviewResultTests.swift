@@ -362,10 +362,13 @@ struct ParsedReviewResultTests {
 
         **[P1] Preserve the terminal owner** — Sources/Store.swift:10-12
         Keep the canonical terminal bound to the selected run.
+        **[P2]** only describes priority here.
           ### [P3] Retain exact file identity — Tests/StoreTests.swift:44 ###
         Assert the single-line location without inventing a range.
 
         ```markdown
+
+        [P2] Example inside a code block
 
         ### [P2] Example inside a code block
         ```
@@ -393,7 +396,8 @@ struct ParsedReviewResultTests {
     @Test(arguments: [
         "**[P2]** Fix fallback — B.swift:2",
         "**[P2] Fix fallback — B.swift:2**  ",
-        "**[P2] Fix fallback** — **B.swift:2**",
+        "**[P2] Fix fallback** —  **B.swift:2**",
+        "  [P2] Fix fallback — B.swift:2",
     ])
     func boldFindingTitlePreservesItsPriorityAndLocation(_ line: String) throws {
         let result = ParsedReviewResult.parse(finalReviewText: line)

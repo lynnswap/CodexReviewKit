@@ -79,18 +79,17 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
     }
 
     public static func parse(finalReviewText text: String?) -> ParsedReviewResult {
-        guard let text, !text.allSatisfy(\.isWhitespace)
-        else {
+        guard let text = text.flatMap(ReviewFinalResult.normalizedText) else {
             return notAvailable()
         }
 
         let lines = text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).map(String.init)
-        let formatted = formattedFindingLines(text, lines: lines)
+        let (formatted, codeLines) = markdownFindingLines(text, lines: lines)
         let legacyHeaderIndex = lines.indices.first {
-            isLegacyFindingHeader(in: lines, at: $0)
+            !codeLines.contains($0) && isLegacyFindingHeader(in: lines, at: $0)
         }
         let currentFindingLines = lines.indices.filter {
-            formatted[$0] != nil || isCurrentFindingCandidate(in: lines, at: $0)
+            !codeLines.contains($0) && (formatted[$0] != nil || isCurrentFindingCandidate(in: lines, at: $0))
         }
         if let headerIndex = legacyHeaderIndex,
            currentFindingLines.first.map({ headerIndex < $0 }) != false
@@ -269,15 +268,23 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
 
     /// Use Markdown block and emphasis boundaries to distinguish finding titles from examples.
     /// Keep the original link syntax for the same destination checks used by plain findings.
-    private static func formattedFindingLines(_ text: String, lines: [String]) -> [Int: String] {
-        guard text.contains("#") || text.contains("**"),
+    private static func markdownFindingLines(_ text: String, lines: [String]) -> ([Int: String], IndexSet) {
+        guard text.contains("[P"),
               let document = try? AttributedString(markdown: text, options: .init(
                 interpretedSyntax: .full, appliesSourcePositionAttributes: true
-              )) else { return [:] }
+              )) else { return ([:], []) }
         var findings: [Int: String] = [:]
+        var codeLines = IndexSet()
+        var previousBlock: Int?
         for run in document.runs {
-            guard let components = run.presentationIntent?.components, components.count == 1,
-                  let block = components.first, let position = run.markdownSourcePosition,
+            guard let components = run.presentationIntent?.components, let block = components.first,
+                  let position = run.markdownSourcePosition else { continue }
+            if case .codeBlock = block.kind {
+                codeLines.insert(integersIn: (position.startLine - 1)..<position.endLine)
+                continue
+            }
+            defer { previousBlock = block.identity }
+            guard components.count == 1, previousBlock != block.identity,
                   let priority = parsePriority(String(document[run.range].characters.prefix(4))),
                   lines.indices.contains(position.startLine - 1) else { continue }
             let index = position.startLine - 1
@@ -300,11 +307,11 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
             let marker = "[P\(priority)]"
             guard line.hasPrefix(marker) || line.hasPrefix("**" + marker) else { continue }
             guard let dash = line.range(of: " — ", options: .backwards) else {
-                findings[index] = marker
+                if case .header = block.kind { findings[index] = marker }
                 continue
             }
-            var title = String(line[..<dash.lowerBound])
-            var location = String(line[dash.upperBound...])
+            var title = line[..<dash.lowerBound].trimmingCharacters(in: .whitespaces)
+            var location = line[dash.upperBound...].trimmingCharacters(in: .whitespaces)
             if title.hasPrefix("**") {
                 title.removeFirst(2)
                 if title.hasPrefix(marker + "**") {
@@ -320,14 +327,15 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
             }
             findings[index] = title + " — " + location
         }
-        return findings
+        return (findings, codeLines)
     }
 
     private static func isCurrentFindingCandidate(
         in lines: [String],
         at index: Int
     ) -> Bool {
-        guard lines[index].first?.isWhitespace != true else {
+        let line = index == lines.startIndex ? lines[index].trimmingCharacters(in: .whitespaces) : lines[index]
+        guard line.first?.isWhitespace != true else {
             return false
         }
         if index > lines.startIndex,
@@ -335,7 +343,6 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         {
             return false
         }
-        let line = lines[index]
         let content = line.hasPrefix("- ") ? String(line.dropFirst(2)) : line
         return parsePriority(content) != nil
     }

@@ -255,6 +255,8 @@ struct ReviewHistoryDatabaseTests {
     func staleParsedResultUpgrade() async throws {
         let (database, writer) = try ReviewHistoryTestSupport.database()
         let finalReview = """
+            ```indented-example
+
         ### [P0] Restore token validation — AccessGate.swift:3
 
         Reject a supplied token that does not equal the expected token.
