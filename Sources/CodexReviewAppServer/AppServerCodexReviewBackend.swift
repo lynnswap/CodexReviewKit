@@ -361,21 +361,30 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         _ = try await client.initialize()
         let response = try await client.send(AppServerAPI.Config.Read.Request())
         var models = try await readModelCatalog()
-        var serviceTier = response.config.serviceTier
-        if let features = response.config.features {
+        if models.contains(where: { !$0.serviceTiers.isEmpty }) {
+            let limits: AppServerAPI.Config.RequirementsRequest.Response?
+            do {
+                limits = try await client.send(AppServerAPI.Config.RequirementsRequest())
+            } catch JSONRPC.Error.responseError(-32601, _) {
+                limits = nil
+            }
+            let independent = limits?.supportsIndependentSpeedModes == true
+            func allows(_ tier: String) -> Bool {
+                response.config.features?.allows(tier, independent: independent) != false
+                    && limits?.requirements?.featureRequirements?.allows(tier, independent: independent) != false
+            }
             for index in models.indices {
-                models[index].serviceTiers.removeAll { !features.allows($0.id.rawValue) }
-                if let tier = models[index].defaultServiceTier, !features.allows(tier.rawValue) {
+                models[index].serviceTiers.removeAll { !allows($0.id.rawValue) }
+                if let tier = models[index].defaultServiceTier, !allows(tier.rawValue) {
                     models[index].defaultServiceTier = nil
                 }
             }
-            if let tier = serviceTier, !features.allows(tier) { serviceTier = nil }
         }
         return .init(
             model: response.config.reviewModel?.nilIfEmpty,
             fallbackModel: response.config.model?.nilIfEmpty ?? models.first(where: \.isDefault)?.model,
             reasoningEffort: response.config.modelReasoningEffort,
-            serviceTier: serviceTier,
+            serviceTier: response.config.serviceTier,
             models: models
         )
     }

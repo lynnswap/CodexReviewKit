@@ -1824,6 +1824,7 @@ struct AppServerClientTests {
         """.utf8)
         let transport = FakeJSONRPCTransport(responses: [
             "model/list": [modelList],
+            "configRequirements/read": [Data(#"{"requirements":{"featureRequirements":{"ultrafast_mode":\#(ultrafastEnabled)}},"supportsIndependentSpeedModes":true}"#.utf8)],
         ])
         try await enqueueInitialize(transport)
         try await transport.enqueue(
@@ -1832,7 +1833,7 @@ struct AppServerClientTests {
                 reviewModel: "gpt-5.6-sol",
                 modelReasoningEffort: "ultra",
                 serviceTier: "ultrafast",
-                features: .init(ultrafastMode: ultrafastEnabled)
+                features: .init(ultrafastMode: true)
             )),
             for: "config/read"
         )
@@ -1843,7 +1844,7 @@ struct AppServerClientTests {
         #expect(settings.model == "gpt-5.6-sol")
         #expect(settings.fallbackModel == "gpt-5")
         #expect(settings.reasoningEffort == "ultra")
-        #expect(settings.serviceTier == (ultrafastEnabled ? "ultrafast" : nil))
+        #expect(settings.serviceTier == "ultrafast")
         #expect(settings.models.map(\.model) == ["gpt-5.6-sol"])
         #expect(settings.models.first?.supportedReasoningEfforts.map(\.reasoningEffort.rawValue) == [
             "low", "medium", "high", "xhigh", "max", "ultra", "future-effort",

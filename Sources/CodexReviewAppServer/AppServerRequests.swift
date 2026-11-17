@@ -691,10 +691,10 @@ struct Snapshot: Codable, Equatable, Sendable {
             case ultrafastMode = "ultrafast_mode"
         }
 
-        func allows(_ tier: String) -> Bool {
+        func allows(_ tier: String, independent: Bool) -> Bool {
             switch tier {
             case "default", "flex": true
-            case "ultrafast": ultrafastMode != false
+            case "ultrafast": ultrafastMode != false && (independent || fastMode != false)
             default: fastMode != false
             }
         }
@@ -725,6 +725,21 @@ struct Snapshot: Codable, Equatable, Sendable {
 }
 
 
+extension AppServerAPI.Config {
+    struct RequirementsRequest: AppServerAPI.Request {
+        static let method = "configRequirements/read"
+        let params = EmptyResponse()
+
+        struct Response: Decodable {
+            struct Requirements: Decodable {
+                let featureRequirements: Snapshot.SpeedFeatures?
+            }
+
+            let requirements: Requirements?
+            let supportsIndependentSpeedModes: Bool?
+        }
+    }
+}
 package extension AppServerAPI.Config.Read {
 struct Request: AppServerAPI.Request {
     package typealias Response = AppServerAPI.Config.Read.Response

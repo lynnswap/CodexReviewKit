@@ -254,10 +254,14 @@ struct StatusView: View {
                     
                     Picker("Tier", selection: serviceTierSelection) {
                         if settings.effectiveModelItem?.defaultServiceTier != nil {
-                            Text("Model Default").tag(Optional<CodexReviewSettings.ServiceTier>.none)
+                            Text("No Override").tag(Optional<CodexReviewSettings.ServiceTier>.none)
                             Text("Normal").tag(Optional(CodexReviewSettings.ServiceTier.normal))
                         } else {
                             Text("Normal").tag(settings.selectedServiceTier == .normal ? CodexReviewSettings.ServiceTier.normal : nil)
+                        }
+                        if let configured = settings.selectedServiceTier, configured != .normal,
+                           !settings.availableServiceTiers.contains(where: { $0.id == configured }) {
+                            Text("Unavailable (\(configured.rawValue))").tag(Optional(configured)).disabled(true)
                         }
                         ForEach(settings.availableServiceTiers) { item in
                             Text(item.displayName).tag(Optional(item.id))
