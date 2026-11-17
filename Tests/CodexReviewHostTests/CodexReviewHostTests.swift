@@ -128,7 +128,20 @@ struct CodexReviewHostTests {
         )
 
         await store.start()
-        #expect(store.settings.selectedModel == "review-model")
+        try await enqueueLiveRouteReviewStartResponses(transport, threadID: "first-thread", turnID: "first-turn")
+        try await enqueueReviewCleanupResponses(transport)
+        let review = try await store.startReview(
+            sessionID: "client", request: .init(cwd: home.path, target: .uncommittedChanges), waitTimeout: .zero
+        )
+        try #require(await StoreSnapshotProbe(store: store).waitUntil {
+            $0.job()?.activeRun?.turnID == "first-turn"
+        } != nil)
+        let start = try #require(await transport.recordedRequests().first { $0.method == "thread/start" })
+        let threadParams = try #require(JSONSerialization.jsonObject(with: start.params) as? [String: Any])
+        #expect(threadParams["model"] as? String == "review-model")
+        try await emitInterruptedTurn(transport, threadID: "first-thread", turnID: "first-turn", message: "Finished test")
+        _ = try await store.awaitReview(sessionID: "client", jobID: review.jobID, timeout: .seconds(2))
+
         #expect(store.settings.selectedReasoningEffort == .ultra)
         #expect(store.auth.selectedAccount?.accountKey == "review@example.com")
 
