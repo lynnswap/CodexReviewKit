@@ -360,12 +360,12 @@ struct ParsedReviewResultTests {
           ### [P3] Ignore this example
           ```
 
-        **[P1] Preserve the terminal owner** — Sources/Store.swift:10-12
+        **[P1] Preserve the terminal owner** — [Store.swift:10-12](/project/Sources/Store.swift:10-12)
         Keep the canonical terminal bound to the selected run.
         **[P2]** only describes priority here.
 
         **[P2]** means an ordinary defect — see the guide: use priority labels.
-          ### [P3] Retain exact file identity — Tests/StoreTests.swift:44 ###
+          ### [P3] Retain exact file identity — [StoreTests.swift:44](/project/Tests/StoreTests.swift:44) ###
         Assert the single-line location without inventing a range.
 
         ```markdown
@@ -387,12 +387,12 @@ struct ParsedReviewResultTests {
         try #require(result.findingCount == 2)
         #expect(result.findings[1].title == "[P3] Retain exact file identity")
         #expect(result.findings[0].location == .init(
-            path: "Sources/Store.swift",
+            path: "/project/Sources/Store.swift",
             startLine: 10,
             endLine: 12
         ))
         #expect(result.findings[1].location == .init(
-            path: "Tests/StoreTests.swift",
+            path: "/project/Tests/StoreTests.swift",
             startLine: 44,
             endLine: 44
         ))

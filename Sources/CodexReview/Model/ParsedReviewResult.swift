@@ -270,11 +270,19 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
     /// Keep the original link syntax for the same destination checks used by plain findings.
     private static func markdownFindingLines(_ lines: [String]) -> ([Int: String], IndexSet) {
         guard lines.contains(where: { $0.contains("[P") }) else { return ([:], []) }
-        // Foundation's inline source positions can stay on the preceding line after a
-        // backslash hard break. Its equivalent two-space spelling keeps line numbers aligned.
-        let markdown = lines.map { line in
-            hasBackslashBreak(line) ? String(line.dropLast()) + "  " : line
-        }.joined(separator: "\n")
+        let markdown = lines.joined(separator: "\n")
+        let starts = markdown.split(separator: "\n", omittingEmptySubsequences: false).map(\.startIndex)
+        // Inline source line numbers can lag after escaped hard breaks. The source range
+        // still points to the original characters, including inside nested code blocks.
+        func lineIndex(containing index: String.Index) -> Int {
+            var lower = 0
+            var upper = starts.count
+            while lower + 1 < upper {
+                let middle = lower + (upper - lower) / 2
+                if starts[middle] <= index { lower = middle } else { upper = middle }
+            }
+            return lower
+        }
         guard let document = try? AttributedString(markdown: markdown, options: .init(
             interpretedSyntax: .full, appliesSourcePositionAttributes: true
         )) else { return ([:], []) }
@@ -288,25 +296,32 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
                 continue
             }
             guard let components = run.presentationIntent?.components, let block = components.first,
-                  let position = run.markdownSourcePosition else { continue }
+                  let position = run.markdownSourcePosition,
+                  let range = Range<String.Index>(position, in: markdown), !range.isEmpty else { continue }
+            let index = lineIndex(containing: range.lowerBound)
             if case .codeBlock = block.kind {
-                codeLines.insert(integersIn: (position.startLine - 1)..<position.endLine)
+                codeLines.insert(integersIn: index...lineIndex(containing: markdown.index(before: range.upperBound)))
                 continue
             }
             defer {
                 previousBlock = block.identity
                 followsBreak = false
             }
-            guard components.count == 1, lines.indices.contains(position.startLine - 1),
+            guard components.count == 1,
                   parsePriority(String(document[run.range].characters.prefix(4))) != nil else { continue }
-            let index = position.startLine - 1
             var raw = lines[index].trimmingCharacters(in: .whitespaces)
             switch block.kind {
             case .header:
                 guard raw.first == "#" else { continue }
             case .paragraph:
-                guard raw.hasPrefix("**[P"), run.inlinePresentationIntent?.contains(.stronglyEmphasized) == true,
-                      previousBlock != block.identity || followsBreak else { continue }
+                guard previousBlock != block.identity || followsBreak else { continue }
+                if lines[index].hasPrefix("[P") {
+                    if hasBackslashBreak(lines[index]), index + 1 < lines.count { raw.removeLast() }
+                    findings[index] = raw
+                    continue
+                }
+                guard raw.hasPrefix("**[P"), run.inlinePresentationIntent?.contains(.stronglyEmphasized) == true
+                else { continue }
                 if hasBackslashBreak(lines[index]), index + 1 < lines.count, !lines[index + 1].isEmpty {
                     raw.removeLast()
                 }
