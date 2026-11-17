@@ -375,6 +375,8 @@ struct ParsedReviewResultTests {
         ### [P2] Example inside a code block
         ```
 
+        **[P2] means an ordinary defect.**
+
         ### [P2] vs. [P3]
 
         Overall assessment: two actionable findings.
@@ -402,6 +404,7 @@ struct ParsedReviewResultTests {
         "**[P2] Fix fallback — B.swift:2**  ",
         "**[P2] Fix fallback** —  **B.swift:2**",
         "**[P2] Fix fallback** — **B.swift**:2",
+        "**[P2] Fix fallback — B.swift**:2",
         "  [P2] Fix fallback — B.swift:2",
     ])
     func boldFindingTitlePreservesItsPriorityAndLocation(_ line: String) throws {
@@ -412,7 +415,7 @@ struct ParsedReviewResultTests {
     }
 
     @Test func headingKeepsTheLiteralFilename() throws {
-        let result = ParsedReviewResult.parse(finalReviewText: "### [P2] Fix fallback — Sources/_Factory_.swift:3")
+        let result = ParsedReviewResult.parse(finalReviewText: "### [P2] Fix fallback — Sources/_Factory_.swift:3 ###")
         #expect(result.findings.first?.location?.path == "Sources/_Factory_.swift")
     }
 

@@ -288,24 +288,19 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
                   parsePriority(String(document[run.range].characters.prefix(4))) != nil else { continue }
             let index = position.startLine - 1
             let raw = lines[index].trimmingCharacters(in: .whitespaces)
-            let explicitTitle: Bool
             switch block.kind {
             case .header:
                 guard raw.first == "#" else { continue }
-                explicitTitle = raw.contains(" — ")
             case .paragraph:
                 guard raw.hasPrefix("**[P"), run.inlinePresentationIntent?.contains(.stronglyEmphasized) == true,
                       previousBlock != block.identity || (index > 0 &&
                         (lines[index - 1].hasSuffix("  ") || lines[index - 1].hasSuffix("\\"))) else { continue }
-                explicitTitle = !raw.dropFirst(6).hasPrefix("**")
             default:
                 continue
             }
             if let content = renderedFindingLine(raw),
                parseFindingLine(content, requiresBullet: false, requiresPriority: true) != nil {
                 findings[index] = content
-            } else if explicitTitle {
-                findings[index] = raw
             }
         }
         return (findings, codeLines)
@@ -327,13 +322,20 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
                   parseMarkdownLinkLocation(String(raw[start...end])) != nil else { return nil }
             return title + " — " + raw[start...end]
         }
-        if let dash = raw.range(of: " — ", options: .backwards) {
-            let source = raw[dash.upperBound...].trimmingCharacters(in: .whitespaces)
-            if !source.hasPrefix("**"), parseLocation(source) != nil {
-                return title + " — " + source
+        guard let dash = raw.range(of: " — ", options: .backwards) else { return nil }
+        var source = raw[dash.upperBound...].trimmingCharacters(in: .whitespaces)
+        if raw.hasPrefix("#") {
+            let hashes = source.reversed().prefix(while: { $0 == "#" })
+            if !hashes.isEmpty, source.dropLast(hashes.count).last?.isWhitespace == true {
+                source = source.dropLast(hashes.count).trimmingCharacters(in: .whitespaces)
             }
         }
-        return title + " — " + label
+        // Preserve literal filename characters such as underscores. Remove strong markers
+        // only when Markdown interpreted them as formatting around the title or location.
+        if source.contains("**"), !label.contains("**") {
+            source = source.replacingOccurrences(of: "**", with: "")
+        }
+        return title + " — " + source
     }
 
     private static func isCurrentFindingCandidate(

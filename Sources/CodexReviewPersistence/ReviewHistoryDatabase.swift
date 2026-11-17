@@ -318,7 +318,9 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
             let parsed = ParsedReviewResult.parse(finalReviewText: canonicalReview)
             // Older writers stripped leading indentation. A stored finding can be the only
             // surviving evidence when that changes how a Markdown code fence is interpreted.
-            if parsed.state == .unknown, row.parsedState == ParsedReviewResult.State.hasFindings.rawValue {
+            if parserVersion <= 4, parsed.state == .unknown,
+               row.parsedState == ParsedReviewResult.State.hasFindings.rawValue,
+               canonicalReview.hasPrefix("```") || canonicalReview.hasPrefix("~~~") {
                 continue
             }
             let terminal = try TerminalReviewRecord(
