@@ -100,6 +100,9 @@ struct ServiceTier: RawRepresentable, Hashable, Codable, Sendable {
 struct ServiceTierOption: Codable, Equatable, Identifiable, Sendable {
     package let id: ServiceTier
     let name: String?
+    package var isAvailable = true
+
+    private enum CodingKeys: String, CodingKey { case id, name }
 
     package var displayName: String { name ?? id.fallbackName }
 }
@@ -138,6 +141,8 @@ struct ModelCatalogItem: Codable, Identifiable, Equatable, Sendable {
     package var defaultServiceTier: CodexReviewSettings.ServiceTier?
 
     package let isDefault: Bool
+
+    package var availableServiceTiers: [CodexReviewSettings.ServiceTierOption] { serviceTiers.filter(\.isAvailable) }
 
     package var supportedServiceTiers: [CodexReviewSettings.ServiceTier] { serviceTiers.map(\.id) }
 

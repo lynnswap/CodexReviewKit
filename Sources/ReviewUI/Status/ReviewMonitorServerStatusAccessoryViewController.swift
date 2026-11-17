@@ -241,7 +241,7 @@ struct StatusView: View {
                     Picker("Model", selection: modelSelection) {
                         ForEach(settings.displayedModels) { item in
                             LabeledContent{
-                                if item.supportedServiceTiers.contains(where: \.isFast) {
+                                if item.availableServiceTiers.contains(where: \.id.isFast) {
                                     Image(systemName: "bolt.fill")
                                 }
                             }label:{
@@ -253,11 +253,11 @@ struct StatusView: View {
                     .pickerStyle(.inline)
                     
                     Picker("Tier", selection: serviceTierSelection) {
-                        if settings.effectiveModelItem?.defaultServiceTier != nil {
+                        if settings.effectiveModelItem?.defaultServiceTier != nil || settings.selectedServiceTier == .normal {
                             Text("No Override").tag(Optional<CodexReviewSettings.ServiceTier>.none)
                             Text("Normal").tag(Optional(CodexReviewSettings.ServiceTier.normal))
                         } else {
-                            Text("Normal").tag(settings.selectedServiceTier == .normal ? CodexReviewSettings.ServiceTier.normal : nil)
+                            Text("Normal").tag(Optional<CodexReviewSettings.ServiceTier>.none)
                         }
                         if let configured = settings.selectedServiceTier, configured != .normal,
                            !settings.availableServiceTiers.contains(where: { $0.id == configured }) {
@@ -270,7 +270,7 @@ struct StatusView: View {
                     .pickerStyle(.inline)
                 }label:{
                     LabeledContent{
-                        if settings.selectedServiceTier?.isFast == true {
+                        if settings.selectedServiceTier?.isFast == true, settings.availableServiceTiers.contains(where: \.id.isFast) {
                             Image(systemName:"bolt.fill")
                         }
                     }label:{

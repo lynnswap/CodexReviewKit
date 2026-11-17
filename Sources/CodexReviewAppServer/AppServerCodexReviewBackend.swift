@@ -374,9 +374,9 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                     && limits?.requirements?.featureRequirements?.allows(tier, independent: independent) != false
             }
             for index in models.indices {
-                models[index].serviceTiers.removeAll { !allows($0.id.rawValue) }
-                if let tier = models[index].defaultServiceTier, !allows(tier.rawValue) {
-                    models[index].defaultServiceTier = nil
+                for option in models[index].serviceTiers.indices {
+                    let id = models[index].serviceTiers[option].id
+                    models[index].serviceTiers[option].isAvailable = allows(id.rawValue)
                 }
             }
         }

@@ -77,7 +77,7 @@ package final class SettingsStore {
     }
 
     package var availableServiceTiers: [CodexReviewSettings.ServiceTierOption] {
-        effectiveModelItem?.serviceTiers ?? []
+        effectiveModelItem?.availableServiceTiers ?? []
     }
 
     package var effectiveReasoningEffort: CodexReviewSettings.ReasoningEffort? {

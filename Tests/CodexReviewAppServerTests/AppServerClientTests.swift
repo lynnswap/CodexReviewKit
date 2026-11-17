@@ -1853,9 +1853,9 @@ struct AppServerClientTests {
             "Light", "Balanced", "High", "Extra high", "Maximum", "Automatic delegation", "Model-defined",
         ])
         #expect(settings.models.first?.defaultReasoningEffort.rawValue == "future-effort")
-        #expect(settings.models.first?.supportedServiceTiers.map(\.rawValue) == (ultrafastEnabled ? ["priority", "ultrafast", "flex"] : ["priority", "flex"]))
-        #expect(settings.models.first?.serviceTiers.map(\.displayName) == (ultrafastEnabled ? ["Fast", "Ultrafast", "Flex"] : ["Fast", "Flex"]))
-        #expect(settings.models.first?.defaultServiceTier?.rawValue == (ultrafastEnabled ? "ultrafast" : nil))
+        #expect(settings.models.first?.supportedServiceTiers.map(\.rawValue) == ["priority", "ultrafast", "flex"])
+        #expect(settings.models.first?.availableServiceTiers.map(\.displayName) == (ultrafastEnabled ? ["Fast", "Ultrafast", "Flex"] : ["Fast", "Flex"]))
+        #expect(settings.models.first?.defaultServiceTier?.rawValue == "ultrafast")
         #expect(settings.models.first?.isDefault == true)
     }
 
