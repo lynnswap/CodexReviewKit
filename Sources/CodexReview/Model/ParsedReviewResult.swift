@@ -327,17 +327,19 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
             case .paragraph:
                 guard previousBlock != block.identity || followsBreak else { continue }
                 if lines[index].hasPrefix("[P") {
+                    // A hard break inside an explanation continues the same paragraph.
+                    guard previousBlock != block.identity || findings[index - 1] != nil else { continue }
                     findings[index] = raw
                     continue
                 }
-                guard raw.hasPrefix("**[P"), run.inlinePresentationIntent?.contains(.stronglyEmphasized) == true
+                guard (raw.hasPrefix("**[P") || raw.hasPrefix("__[P")), run.inlinePresentationIntent?.contains(.stronglyEmphasized) == true
                 else { continue }
             default:
                 continue
             }
             guard let content = renderedFindingLine(raw) else { continue }
             // Emphasizing the priority alone also occurs in prose explaining a severity.
-            if raw.hasPrefix("**[P"), raw.dropFirst(6).hasPrefix("**"),
+            if (raw.hasPrefix("**[P") || raw.hasPrefix("__[P")), raw.dropFirst(6).starts(with: raw.prefix(2)),
                parseFindingLine(content, requiresBullet: false, requiresPriority: true) == nil {
                 continue
             }
@@ -369,13 +371,15 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         let titleOpensStrong = rendered.range(of: " — ", options: .backwards).map {
             rendered[$0].runs.contains { $0.inlinePresentationIntent?.contains(.stronglyEmphasized) == true }
         } ?? false
-        let locationOpensStrong = source.hasPrefix("**")
-        if titleOpensStrong || locationOpensStrong {
+        for delimiter in ["**", "__"] {
+            let locationOpensStrong = source.hasPrefix(delimiter)
+            guard titleOpensStrong || locationOpensStrong else { continue }
             let token = locationOpensStrong ? source.dropFirst(2) : source[...]
-            if let close = token.range(of: "**", options: .backwards) {
+            if let close = token.range(of: delimiter, options: .backwards) {
                 let suffix = token[close.upperBound...]
                 if suffix.isEmpty || suffix.first == ":" {
                     source = String(token[..<close.lowerBound] + suffix)
+                    break
                 }
             }
         }

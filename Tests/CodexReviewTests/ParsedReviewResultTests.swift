@@ -403,6 +403,7 @@ struct ParsedReviewResultTests {
 
     @Test(arguments: [
         "**[P2]** Fix fallback — B.swift:2",
+        "__[P2] Fix fallback__ — B.swift:2",
         "**[P2] Fix fallback — B.swift:2**  ",
         "**[P2] Fix fallback** —  **B.swift:2**",
         "**[P2] Fix fallback** — **B.swift**:2",
