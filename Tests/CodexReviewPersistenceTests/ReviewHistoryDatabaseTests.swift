@@ -255,16 +255,16 @@ struct ReviewHistoryDatabaseTests {
     func staleParsedResultUpgrade() async throws {
         let (database, writer) = try ReviewHistoryTestSupport.database()
         let finalReview = """
-        [P0] Restore token validation — AccessGate.swift:3
+        ### [P0] Restore token validation — AccessGate.swift:3
 
         Reject a supplied token that does not equal the expected token.
         """
         let staleResult = ParsedReviewResult(
-            state: .noFindings,
-            findingCount: 0,
+            state: .unknown,
+            findingCount: nil,
             findings: [],
-            source: .parsedFinalReviewText,
-            parserVersion: 1
+            source: .unrecognizedFindingBlock,
+            parserVersion: 4
         )
         _ = try await ReviewHistoryTestSupport.record(
             started: ReviewHistoryTestSupport.started(id: "stale-parser"),

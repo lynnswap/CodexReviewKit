@@ -356,17 +356,18 @@ struct ParsedReviewResultTests {
         let result = ParsedReviewResult.parse(finalReviewText: """
         Review summary before findings.
 
-        [P1] Preserve the terminal owner — Sources/Store.swift:10-12
+        **[P1] Preserve the terminal owner** — Sources/Store.swift:10-12
         Keep the canonical terminal bound to the selected run.
 
-        [P3] Retain exact file identity — Tests/StoreTests.swift:44
+        ### [P3] Retain exact file identity — Tests/StoreTests.swift:44
         Assert the single-line location without inventing a range.
 
         Overall assessment: two actionable findings.
         """)
 
         #expect(result.state == .hasFindings)
-        #expect(result.findingCount == 2)
+        try #require(result.findingCount == 2)
+        #expect(result.findings[1].title == "[P3] Retain exact file identity")
         #expect(result.findings[0].location == .init(
             path: "Sources/Store.swift",
             startLine: 10,

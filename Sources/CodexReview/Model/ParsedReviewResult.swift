@@ -47,7 +47,7 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         }
     }
 
-    public static let currentParserVersion = 4
+    public static let currentParserVersion = 5
 
     public var state: State
     public var findingCount: Int?
@@ -278,9 +278,19 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         {
             return false
         }
-        let line = lines[index]
-        let content = line.hasPrefix("- ") ? String(line.dropFirst(2)) : line
-        return parsePriority(content) != nil
+        let content = currentFindingContent(lines[index])
+        let title = content.hasPrefix("**") ? String(content.dropFirst(2)) : content
+        return parsePriority(title) != nil
+    }
+
+    private static func currentFindingContent(_ line: String) -> String {
+        if line.hasPrefix("- ") { return String(line.dropFirst(2)) }
+        let hashes = line.prefix(while: { $0 == "#" })
+        let remainder = line.dropFirst(hashes.count)
+        if (1...6).contains(hashes.count), remainder.first == " " {
+            return String(remainder.drop(while: { $0 == " " }))
+        }
+        return line
     }
 
     private static func parseFindingLine(
@@ -295,16 +305,18 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
             }
             content = String(line.dropFirst(2))
         } else {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            content = trimmed.hasPrefix("- ") ? String(trimmed.dropFirst(2)) : trimmed
+            content = currentFindingContent(line)
         }
         let delimiter = " \u{2014} "
         guard let delimiterRange = content.range(of: delimiter, options: .backwards) else {
             return nil
         }
 
-        let title = String(content[..<delimiterRange.lowerBound])
+        var title = String(content[..<delimiterRange.lowerBound])
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        if requiresPriority, title.hasPrefix("**"), title.hasSuffix("**"), title.count > 4 {
+            title = String(title.dropFirst(2).dropLast(2))
+        }
         let locationText = String(content[delimiterRange.upperBound...])
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let priority = parsePriority(title)
