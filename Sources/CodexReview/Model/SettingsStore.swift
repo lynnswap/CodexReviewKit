@@ -76,8 +76,8 @@ package final class SettingsStore {
         effectiveModelItem?.supportedReasoningEfforts ?? []
     }
 
-    package var availableServiceTiers: [CodexReviewSettings.ServiceTier] {
-        effectiveModelItem?.supportedServiceTiers ?? []
+    package var availableServiceTiers: [CodexReviewSettings.ServiceTierOption] {
+        effectiveModelItem?.availableServiceTiers ?? []
     }
 
     package var effectiveReasoningEffort: CodexReviewSettings.ReasoningEffort? {
@@ -165,10 +165,14 @@ package final class SettingsStore {
             reasoningEffort
         }
 
-        let resolvedServiceTier: CodexReviewSettings.ServiceTier? = if let serviceTier,
-            selectedModel.supportedServiceTiers.contains(serviceTier)
+        let resolvedServiceTier: CodexReviewSettings.ServiceTier? = if serviceTier == .normal {
+            .normal
+        } else if let serviceTier,
+            let supported = selectedModel.supportedServiceTiers.first(where: {
+                $0 == serviceTier || ($0.isFast && serviceTier.isFast)
+            })
         {
-            serviceTier
+            supported
         } else if clearIncompatibleOverrides {
             nil
         } else {

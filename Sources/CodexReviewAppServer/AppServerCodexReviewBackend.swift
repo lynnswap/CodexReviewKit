@@ -360,7 +360,26 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     package func readSettings() async throws -> CodexReviewBackendModel.Settings.Snapshot {
         _ = try await client.initialize()
         let response = try await client.send(AppServerAPI.Config.Read.Request())
-        let models = try await readModelCatalog()
+        var models = try await readModelCatalog()
+        if models.contains(where: { !$0.serviceTiers.isEmpty }) {
+            let limits: AppServerAPI.Config.RequirementsRequest.Response?
+            do {
+                limits = try await client.send(AppServerAPI.Config.RequirementsRequest())
+            } catch JSONRPC.Error.responseError(-32601, _) {
+                limits = nil
+            }
+            let independent = limits?.supportsIndependentSpeedModes == true
+            func allows(_ tier: String) -> Bool {
+                response.config.features?.allows(tier, independent: independent) != false
+                    && limits?.requirements?.featureRequirements?.allows(tier, independent: independent) != false
+            }
+            for index in models.indices {
+                for option in models[index].serviceTiers.indices {
+                    let id = models[index].serviceTiers[option].id
+                    models[index].serviceTiers[option].isAvailable = allows(id.rawValue)
+                }
+            }
+        }
         return .init(
             model: response.config.reviewModel?.nilIfEmpty,
             fallbackModel: response.config.model?.nilIfEmpty ?? models.first(where: \.isDefault)?.model,
@@ -3306,7 +3325,7 @@ private extension AppServerCodexReviewBackend {
         if change.updatesServiceTier {
             edits.append(.init(
                 keyPath: "service_tier",
-                value: change.serviceTier.map(AppServerAPI.Config.Value.string) ?? .null
+                value: change.serviceTier.map { .string($0 == "priority" ? "fast" : $0) } ?? .null
             ))
         }
         return edits
