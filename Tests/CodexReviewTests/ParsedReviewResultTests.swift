@@ -375,6 +375,8 @@ struct ParsedReviewResultTests {
         ### [P2] Example inside a code block
         ```
 
+        ### [P2] vs. [P3]
+
         Overall assessment: two actionable findings.
         """, source: .backendProvided)
         let result = ParsedReviewResult.parse(finalReviewText: final.text)
@@ -407,6 +409,11 @@ struct ParsedReviewResultTests {
         let finding = try #require(result.findings.first)
         #expect(finding.title == "[P2] Fix fallback")
         #expect(finding.location == .init(path: "B.swift", startLine: 2, endLine: 2))
+    }
+
+    @Test func headingKeepsTheLiteralFilename() throws {
+        let result = ParsedReviewResult.parse(finalReviewText: "### [P2] Fix fallback — Sources/_Factory_.swift:3")
+        #expect(result.findings.first?.location?.path == "Sources/_Factory_.swift")
     }
 
     @Test func malformedCurrentFindingReportsUnknown() {

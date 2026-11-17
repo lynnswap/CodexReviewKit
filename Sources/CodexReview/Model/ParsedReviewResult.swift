@@ -292,7 +292,7 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
             switch block.kind {
             case .header:
                 guard raw.first == "#" else { continue }
-                explicitTitle = true
+                explicitTitle = raw.contains(" — ")
             case .paragraph:
                 guard raw.hasPrefix("**[P"), run.inlinePresentationIntent?.contains(.stronglyEmphasized) == true,
                       previousBlock != block.identity || (index > 0 &&
@@ -326,6 +326,12 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
                   let end = raw[start...].lastIndex(of: ")"),
                   parseMarkdownLinkLocation(String(raw[start...end])) != nil else { return nil }
             return title + " — " + raw[start...end]
+        }
+        if let dash = raw.range(of: " — ", options: .backwards) {
+            let source = raw[dash.upperBound...].trimmingCharacters(in: .whitespaces)
+            if !source.hasPrefix("**"), parseLocation(source) != nil {
+                return title + " — " + source
+            }
         }
         return title + " — " + label
     }

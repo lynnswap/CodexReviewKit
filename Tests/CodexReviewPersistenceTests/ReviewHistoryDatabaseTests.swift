@@ -304,6 +304,24 @@ struct ReviewHistoryDatabaseTests {
         #expect(persisted.findings.first?.endLine == 3)
     }
 
+    @Test func staleFindingsSurviveLossOfIndentationInStoredText() async throws {
+        let (database, _) = try ReviewHistoryTestSupport.database()
+        let findingLine = "[P2] Fix fallback — B.swift:2"
+        var previous = ParsedReviewResult.parse(finalReviewText: findingLine)
+        previous.parserVersion = 4
+        _ = try await ReviewHistoryTestSupport.record(
+            started: ReviewHistoryTestSupport.started(id: "old-indentation"),
+            terminal: ReviewHistoryTestSupport.completed(
+                id: "old-indentation", finalReview: "```sample\n\n" + findingLine, parsedResult: previous
+            ),
+            in: database
+        )
+
+        let restored = try #require(try await database.load(retentionPolicy: .default).first)
+        #expect(restored.terminal.parsedResult?.findings.first?.location == previous.findings.first?.location)
+        #expect(restored.terminal.parsedResult?.parserVersion == 4)
+    }
+
     @Test("upgrades a parser-v2 inline-code location from its canonical review")
     func staleInlineCodeLocationUpgrade() async throws {
         let (database, _) = try ReviewHistoryTestSupport.database()

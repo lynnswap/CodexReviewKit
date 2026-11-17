@@ -315,8 +315,12 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
                 continue
             }
 
-            // The canonical review is the durable source of truth. Parser versioning exists so
-            // a newer parser can replace a stale projection instead of preserving a false result.
+            let parsed = ParsedReviewResult.parse(finalReviewText: canonicalReview)
+            // Older writers stripped leading indentation. A stored finding can be the only
+            // surviving evidence when that changes how a Markdown code fence is interpreted.
+            if parsed.state == .unknown, row.parsedState == ParsedReviewResult.State.hasFindings.rawValue {
+                continue
+            }
             let terminal = try TerminalReviewRecord(
                 id: row.id,
                 model: row.terminalModel,
@@ -326,9 +330,7 @@ package actor ReviewHistoryDatabase: ReviewHistoryPersistence {
                 endedAt: ReviewHistoryTimestamp.decode(endedAt),
                 summary: summary,
                 canonicalReview: canonicalReview,
-                parsedResult: PersistedParsedReviewResult(
-                    ParsedReviewResult.parse(finalReviewText: canonicalReview)
-                )
+                parsedResult: PersistedParsedReviewResult(parsed)
             )
             let encoded = try ReviewHistoryRecordCodec.encodeTerminal(
                 terminal,
