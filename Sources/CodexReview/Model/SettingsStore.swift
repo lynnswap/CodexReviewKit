@@ -165,7 +165,9 @@ package final class SettingsStore {
             reasoningEffort
         }
 
-        let resolvedServiceTier: CodexReviewSettings.ServiceTier? = if let serviceTier,
+        let resolvedServiceTier: CodexReviewSettings.ServiceTier? = if serviceTier == .normal {
+            .normal
+        } else if let serviceTier,
             let supported = selectedModel.supportedServiceTiers.first(where: {
                 $0 == serviceTier || ($0.isFast && serviceTier.isFast)
             })

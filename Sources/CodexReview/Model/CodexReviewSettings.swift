@@ -85,6 +85,7 @@ struct ServiceTier: RawRepresentable, Hashable, Codable, Sendable {
 
     package static let fast = Self(rawValue: "fast")
     package static let priority = Self(rawValue: "priority")
+    package static let normal = Self(rawValue: "default")
     package static let flex = Self(rawValue: "flex")
 
     package var isFast: Bool { self == .fast || self == .priority }
@@ -133,7 +134,8 @@ struct ModelCatalogItem: Codable, Identifiable, Equatable, Sendable {
     package let hidden: Bool
     package let supportedReasoningEfforts: [CodexReviewSettings.ReasoningOption]
     package let defaultReasoningEffort: CodexReviewSettings.ReasoningEffort
-    package let serviceTiers: [CodexReviewSettings.ServiceTierOption]
+    package var serviceTiers: [CodexReviewSettings.ServiceTierOption]
+    package var defaultServiceTier: CodexReviewSettings.ServiceTier?
 
     package let isDefault: Bool
 
@@ -148,6 +150,7 @@ struct ModelCatalogItem: Codable, Identifiable, Equatable, Sendable {
         case defaultReasoningEffort
         case supportedServiceTiers = "additionalSpeedTiers"
         case serviceTiers
+        case defaultServiceTier
         case isDefault
     }
 
@@ -247,6 +250,7 @@ struct ModelCatalogItem: Codable, Identifiable, Equatable, Sendable {
         defaultReasoningEffort = decodedDefaultReasoningEffort
             ?? supportedReasoningEfforts.first?.reasoningEffort
             ?? .medium
+        defaultServiceTier = try container.decodeIfPresent(CodexReviewSettings.ServiceTier.self, forKey: .defaultServiceTier)
         let options = try container.decodeIfPresent(
             [CodexReviewSettings.ServiceTierOption].self, forKey: .serviceTiers
         ) ?? []
@@ -270,6 +274,7 @@ struct ModelCatalogItem: Codable, Identifiable, Equatable, Sendable {
         try container.encode(supportedReasoningEfforts, forKey: .supportedReasoningEfforts)
         try container.encode(defaultReasoningEffort, forKey: .defaultReasoningEffort)
         try container.encode(serviceTiers, forKey: .serviceTiers)
+        try container.encodeIfPresent(defaultServiceTier, forKey: .defaultServiceTier)
         try container.encode(isDefault, forKey: .isDefault)
     }
 

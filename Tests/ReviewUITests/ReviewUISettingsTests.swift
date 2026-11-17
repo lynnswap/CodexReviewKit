@@ -152,14 +152,17 @@ struct ReviewUISettingsTests {
         #expect(store.settings.effectiveModelItem == nil)
     }
 
-    @Test func settingsStoreMatchesConfiguredFastAliasToCatalogTier() {
+    @Test(arguments: [("fast", "priority"), ("default", "default")])
+    func settingsStoreRestoresConfiguredTier(configured: String, expected: String) {
         let model = CodexReviewSettings.ModelCatalogItem(
             id: "model", model: "model", displayName: "Model", hidden: false,
             supportedReasoningEfforts: [], defaultReasoningEffort: .medium,
             supportedServiceTiers: [.priority]
         )
-        let settings = SettingsStore(snapshot: .init(model: model.model, serviceTier: .fast, models: [model]))
-        #expect(settings.selectedServiceTier?.rawValue == "priority")
+        let settings = SettingsStore(snapshot: .init(
+            model: model.model, serviceTier: .init(rawValue: configured), models: [model]
+        ))
+        #expect(settings.selectedServiceTier?.rawValue == expected)
     }
 
     @Test func settingsStorePreservesIncompatiblePersistedOverridesUntilEdited() {

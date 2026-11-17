@@ -360,12 +360,22 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     package func readSettings() async throws -> CodexReviewBackendModel.Settings.Snapshot {
         _ = try await client.initialize()
         let response = try await client.send(AppServerAPI.Config.Read.Request())
-        let models = try await readModelCatalog()
+        var models = try await readModelCatalog()
+        var serviceTier = response.config.serviceTier
+        if let features = response.config.features {
+            for index in models.indices {
+                models[index].serviceTiers.removeAll { !features.allows($0.id.rawValue) }
+                if let tier = models[index].defaultServiceTier, !features.allows(tier.rawValue) {
+                    models[index].defaultServiceTier = nil
+                }
+            }
+            if let tier = serviceTier, !features.allows(tier) { serviceTier = nil }
+        }
         return .init(
             model: response.config.reviewModel?.nilIfEmpty,
             fallbackModel: response.config.model?.nilIfEmpty ?? models.first(where: \.isDefault)?.model,
             reasoningEffort: response.config.modelReasoningEffort,
-            serviceTier: response.config.serviceTier,
+            serviceTier: serviceTier,
             models: models
         )
     }
@@ -3306,7 +3316,7 @@ private extension AppServerCodexReviewBackend {
         if change.updatesServiceTier {
             edits.append(.init(
                 keyPath: "service_tier",
-                value: change.serviceTier.map(AppServerAPI.Config.Value.string) ?? .null
+                value: change.serviceTier.map { .string($0 == "priority" ? "fast" : $0) } ?? .null
             ))
         }
         return edits

@@ -253,7 +253,12 @@ struct StatusView: View {
                     .pickerStyle(.inline)
                     
                     Picker("Tier", selection: serviceTierSelection) {
-                        Text("Normal").tag(Optional<CodexReviewSettings.ServiceTier>.none)
+                        if settings.effectiveModelItem?.defaultServiceTier != nil {
+                            Text("Model Default").tag(Optional<CodexReviewSettings.ServiceTier>.none)
+                            Text("Normal").tag(Optional(CodexReviewSettings.ServiceTier.normal))
+                        } else {
+                            Text("Normal").tag(settings.selectedServiceTier == .normal ? CodexReviewSettings.ServiceTier.normal : nil)
+                        }
                         ForEach(settings.availableServiceTiers) { item in
                             Text(item.displayName).tag(Optional(item.id))
                         }

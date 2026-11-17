@@ -1794,7 +1794,8 @@ struct AppServerClientTests {
         }
     }
 
-    @Test func settingsReadLoadsConfigAndModelCatalog() async throws {
+    @Test(arguments: [true, false])
+    func settingsReadLoadsConfigAndModelCatalog(ultrafastEnabled: Bool) async throws {
         let modelList = Data("""
         {
           "data": [
@@ -1813,6 +1814,7 @@ struct AppServerClientTests {
                 {"reasoningEffort": "future-effort", "description": "Model-defined"}
               ],
               "defaultReasoningEffort": "future-effort",
+              "defaultServiceTier": "ultrafast",
               "serviceTiers": [{"id": "priority", "name": "Fast"}, {"id": "ultrafast", "name": "Ultrafast"}],
               "additionalSpeedTiers": ["fast", "ultrafast", "flex"],
               "isDefault": true
@@ -1829,7 +1831,8 @@ struct AppServerClientTests {
                 model: "gpt-5",
                 reviewModel: "gpt-5.6-sol",
                 modelReasoningEffort: "ultra",
-                serviceTier: "flex"
+                serviceTier: "ultrafast",
+                features: .init(ultrafastMode: ultrafastEnabled)
             )),
             for: "config/read"
         )
@@ -1840,7 +1843,7 @@ struct AppServerClientTests {
         #expect(settings.model == "gpt-5.6-sol")
         #expect(settings.fallbackModel == "gpt-5")
         #expect(settings.reasoningEffort == "ultra")
-        #expect(settings.serviceTier == "flex")
+        #expect(settings.serviceTier == (ultrafastEnabled ? "ultrafast" : nil))
         #expect(settings.models.map(\.model) == ["gpt-5.6-sol"])
         #expect(settings.models.first?.supportedReasoningEfforts.map(\.reasoningEffort.rawValue) == [
             "low", "medium", "high", "xhigh", "max", "ultra", "future-effort",
@@ -1849,8 +1852,9 @@ struct AppServerClientTests {
             "Light", "Balanced", "High", "Extra high", "Maximum", "Automatic delegation", "Model-defined",
         ])
         #expect(settings.models.first?.defaultReasoningEffort.rawValue == "future-effort")
-        #expect(settings.models.first?.supportedServiceTiers.map(\.rawValue) == ["priority", "ultrafast", "flex"])
-        #expect(settings.models.first?.serviceTiers.map(\.displayName) == ["Fast", "Ultrafast", "Flex"])
+        #expect(settings.models.first?.supportedServiceTiers.map(\.rawValue) == (ultrafastEnabled ? ["priority", "ultrafast", "flex"] : ["priority", "flex"]))
+        #expect(settings.models.first?.serviceTiers.map(\.displayName) == (ultrafastEnabled ? ["Fast", "Ultrafast", "Flex"] : ["Fast", "Flex"]))
+        #expect(settings.models.first?.defaultServiceTier?.rawValue == (ultrafastEnabled ? "ultrafast" : nil))
         #expect(settings.models.first?.isDefault == true)
     }
 
