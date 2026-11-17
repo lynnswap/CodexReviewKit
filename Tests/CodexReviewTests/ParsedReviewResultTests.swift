@@ -381,6 +381,8 @@ struct ParsedReviewResultTests {
 
         ### Severity **[P2]** — see guide
 
+        ### **[P2]** only describes severity — more details below
+
         Overall assessment: two actionable findings.
         """, source: .backendProvided)
         let result = ParsedReviewResult.parse(finalReviewText: final.text)
@@ -430,6 +432,12 @@ struct ParsedReviewResultTests {
             "**[P1] One** — A.swift:1" + marker + "\n**[P2] Two** — B.swift:2"
         )
         #expect(result.findingCount == 2)
+    }
+
+    @Test(arguments: ["\n", "\r\n"])
+    func adjacentPlainFindingTitlesUseTheSameLineBoundaries(_ newline: String) {
+        let text = "[P1] One — A.swift:1" + newline + "[P2] Two — B.swift:2"
+        #expect(ParsedReviewResult.parse(finalReviewText: text).findingCount == 2)
     }
 
     @Test func malformedCurrentFindingReportsUnknown() {

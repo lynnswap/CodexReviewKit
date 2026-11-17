@@ -88,8 +88,13 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         let legacyHeaderIndex = lines.indices.first {
             !codeLines.contains($0) && isLegacyFindingHeader(in: lines, at: $0)
         }
-        let currentFindingLines = lines.indices.filter {
-            !codeLines.contains($0) && (formatted[$0] != nil || isCurrentFindingCandidate(in: lines, at: $0))
+        var currentFindingLines: [Int] = []
+        for index in lines.indices where !codeLines.contains(index) {
+            if formatted[index] != nil || isCurrentFindingCandidate(
+                in: lines, at: index, followsFinding: currentFindingLines.last == index - 1
+            ) {
+                currentFindingLines.append(index)
+            }
         }
         if let headerIndex = legacyHeaderIndex,
            currentFindingLines.first.map({ headerIndex < $0 }) != false
@@ -339,7 +344,8 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
             }
             guard let content = renderedFindingLine(raw) else { continue }
             // Emphasizing the priority alone also occurs in prose explaining a severity.
-            if (raw.hasPrefix("**[P") || raw.hasPrefix("__[P")), raw.dropFirst(6).starts(with: raw.prefix(2)),
+            if run.inlinePresentationIntent?.contains(.stronglyEmphasized) == true,
+               document[run.range].characters.count == 4,
                parseFindingLine(content, requiresBullet: false, requiresPriority: true) == nil {
                 continue
             }
@@ -371,15 +377,16 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         let titleOpensStrong = rendered.range(of: " — ", options: .backwards).map {
             rendered[$0].runs.contains { $0.inlinePresentationIntent?.contains(.stronglyEmphasized) == true }
         } ?? false
-        for delimiter in ["**", "__"] {
-            let locationOpensStrong = source.hasPrefix(delimiter)
-            guard titleOpensStrong || locationOpensStrong else { continue }
-            let token = locationOpensStrong ? source.dropFirst(2) : source[...]
+        let headingContent = raw.drop(while: { $0 == "#" }).drop(while: \.isWhitespace)
+        let delimiter = ["**", "__"].first { delimiter in
+            titleOpensStrong ? headingContent.hasPrefix(delimiter) : source.hasPrefix(delimiter)
+        }
+        if let delimiter {
+            let token = source.hasPrefix(delimiter) ? source.dropFirst(2) : source[...]
             if let close = token.range(of: delimiter, options: .backwards) {
                 let suffix = token[close.upperBound...]
                 if suffix.isEmpty || suffix.first == ":" {
                     source = String(token[..<close.lowerBound] + suffix)
-                    break
                 }
             }
         }
@@ -388,7 +395,8 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
 
     private static func isCurrentFindingCandidate(
         in lines: [String],
-        at index: Int
+        at index: Int,
+        followsFinding: Bool
     ) -> Bool {
         let line = index == lines.startIndex ? lines[index].trimmingCharacters(in: .whitespaces) : lines[index]
         guard line.first?.isWhitespace != true else {
@@ -397,7 +405,7 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         if index > lines.startIndex,
            lines[index - 1].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         {
-            return false
+            return followsFinding && parseFindingLine(line, requiresBullet: false, requiresPriority: true) != nil
         }
         let content = line.hasPrefix("- ") ? String(line.dropFirst(2)) : line
         return parsePriority(content) != nil
