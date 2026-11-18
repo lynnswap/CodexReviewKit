@@ -3,27 +3,29 @@ import Foundation
 import SQLiteData
 
 enum ReviewHistoryRetention {
+    private typealias TerminalRow = (id: String, cwd: String, committedAt: Double)
+
     static func prune(
         in db: Database,
         policy: ReviewHistoryRetentionPolicy,
         protecting protectedReviewID: String?
     ) throws -> Set<String> {
-        let terminalRows = try ReviewRecordRow.fetchAll(db).filter {
-            $0.phase == "terminal"
-        }
-        for row in terminalRows where row.terminalCommittedAt == nil {
-            throw ReviewHistoryDatabaseError.invalidRecord(
-                id: row.id,
-                reason: "terminal row is missing its retention timestamp"
-            )
-        }
+        let terminalRows: [TerminalRow] = try ReviewRecordRow
+            .where { $0.phase.eq("terminal") }
+            .select { ($0.id, $0.cwd, $0.terminalCommittedAt) }
+            .fetchAll(db)
+            .map { id, cwd, committedAt in
+                guard let committedAt else {
+                    throw ReviewHistoryDatabaseError.invalidRecord(
+                        id: id, reason: "terminal row is missing its retention timestamp"
+                    )
+                }
+                return (id, cwd, committedAt)
+            }
+            .sorted { ($0.committedAt, $0.id) < ($1.committedAt, $1.id) }
 
         var removedIDs = Set<String>()
-        let rowsByWorkspace = Dictionary(grouping: terminalRows, by: \.cwd)
-        for cwd in rowsByWorkspace.keys.sorted() {
-            guard let rows = rowsByWorkspace[cwd] else {
-                continue
-            }
+        for rows in Dictionary(grouping: terminalRows, by: \.cwd).values {
             removedIDs.formUnion(removals(
                 from: rows,
                 maximumCount: policy.maximumReviewsPerWorkspace,
@@ -48,15 +50,16 @@ enum ReviewHistoryRetention {
     }
 
     static func deleteEmptyWorkspaces(in db: Database) throws {
-        let referencedCWDs = Set(try ReviewRecordRow.fetchAll(db).map(\.cwd))
-        for workspace in try ReviewWorkspaceRow.fetchAll(db)
-        where referencedCWDs.contains(workspace.cwd) == false {
-            try ReviewWorkspaceRow.find(workspace.cwd).delete().execute(db)
-        }
+        try #sql(
+            """
+            DELETE FROM "review_workspaces"
+            WHERE "cwd" NOT IN (SELECT "cwd" FROM "review_records")
+            """
+        ).execute(db)
     }
 
     private static func removals(
-        from rows: [ReviewRecordRow],
+        from rows: [TerminalRow],
         maximumCount: Int,
         protecting protectedReviewID: String?
     ) -> Set<String> {
@@ -65,27 +68,10 @@ enum ReviewHistoryRetention {
             return []
         }
         return Set(
-            rows.sortedByOldest
-                .lazy
+            rows.lazy
                 .filter { $0.id != protectedReviewID }
                 .prefix(excess)
                 .map(\.id)
         )
-    }
-}
-
-private extension Array where Element == ReviewRecordRow {
-    var sortedByOldest: [ReviewRecordRow] {
-        sorted { lhs, rhs in
-            guard let lhsCommittedAt = lhs.terminalCommittedAt,
-                  let rhsCommittedAt = rhs.terminalCommittedAt
-            else {
-                return lhs.id < rhs.id
-            }
-            if lhsCommittedAt != rhsCommittedAt {
-                return lhsCommittedAt < rhsCommittedAt
-            }
-            return lhs.id < rhs.id
-        }
     }
 }
