@@ -17,6 +17,7 @@ on:
   push:
     branches: [main]
     paths: *build-inputs
+  workflow_dispatch:
 
 permissions:
   contents: read
