@@ -30,7 +30,7 @@ struct CodexExecutableResolverTests {
             _ = try resolver.resolve(configuredPath: "/missing", environment: ["PATH": "/auto"])
             Issue.record("Invalid configured path unexpectedly fell back.")
         } catch {
-            #expect(error.kind == .invalidExplicit)
+            #expect(error.kind == .invalidConfiguredPath)
             #expect(error.trace.first?.source == .configuredPath)
         }
         do {
@@ -41,7 +41,7 @@ struct CodexExecutableResolverTests {
             ])
             Issue.record("Invalid environment command unexpectedly fell back.")
         } catch {
-            #expect(error.kind == .invalidExplicit)
+            #expect(error.kind == .invalidEnvironment("CODEX_APP_SERVER_CODEX_EXECUTABLE"))
             #expect(error.trace.allSatisfy { $0.source == .environment("CODEX_APP_SERVER_CODEX_EXECUTABLE") })
         }
     }

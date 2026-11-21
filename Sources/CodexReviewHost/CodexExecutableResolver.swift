@@ -1,7 +1,7 @@
 import Foundation
+import CodexReview
 
-package struct CodexExecutableResolutionError: LocalizedError, Equatable, Sendable {
-    package enum Kind: Equatable, Sendable { case invalidExplicit, notFound }
+package struct CodexExecutableResolutionError: LocalizedError, CodexExecutableFailure, Equatable {
     package enum Source: Equatable, Sendable {
         case configuredPath, environment(String), path(String), homeLocalBin
         case fallbackBin(String)
@@ -10,12 +10,15 @@ package struct CodexExecutableResolutionError: LocalizedError, Equatable, Sendab
         package var source: Source
         package var candidate, reason: String
     }
-    package var kind: Kind
+    package var kind: CodexExecutableFailureKind
     package var trace: [Trace]
     package var errorDescription: String? {
-        let headline = kind == .invalidExplicit
-            ? "The explicitly selected Codex executable is invalid."
-            : "No usable Codex executable was found. Install the Codex CLI or select its executable in Settings."
+        let headline = switch kind {
+        case .notFound:
+            "No usable Codex executable was found. Install the Codex CLI or select its executable in Settings."
+        case .invalidConfiguredPath, .invalidEnvironment:
+            "The explicitly selected Codex executable is invalid."
+        }
         return ([headline] + trace.map { "\($0.source): \($0.candidate) — \($0.reason)" })
             .joined(separator: "\n")
     }
@@ -121,9 +124,12 @@ package struct CodexExecutableResolver: Sendable {
         var trace: [CodexExecutableResolutionError.Trace] = []
         mutating func explicitPath(_ value: String) throws(CodexExecutableResolutionError) -> (launcherURL: URL, executableURL: URL) {
             let path = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard path.hasPrefix("/") else { try failExplicit(.configuredPath, value, "not absolute") }
-            if let url = candidate(URL(fileURLWithPath: path), .configuredPath) { return url }
-            throw .init(kind: .invalidExplicit, trace: trace)
+            if path.hasPrefix("/") {
+                if let url = candidate(URL(fileURLWithPath: path), .configuredPath) { return url }
+            } else {
+                reject(.configuredPath, value, "not absolute")
+            }
+            throw .init(kind: .invalidConfiguredPath, trace: trace)
         }
         mutating func environmentCommand(
             _ value: String, key: String, path: [URL]
@@ -131,8 +137,11 @@ package struct CodexExecutableResolver: Sendable {
             let command = value.trimmingCharacters(in: .whitespacesAndNewlines)
             let source = CodexExecutableResolutionError.Source.environment(key)
             if command.contains("/") {
-                guard command.hasPrefix("/") else { try failExplicit(source, value, "not absolute") }
-                if let url = candidate(URL(fileURLWithPath: command), source) { return url }
+                if command.hasPrefix("/") {
+                    if let url = candidate(URL(fileURLWithPath: command), source) { return url }
+                } else {
+                    reject(source, value, "not absolute")
+                }
             } else if command.isEmpty == false {
                 for directory in path {
                     if let url = candidate(directory.appendingPathComponent(command), source) { return url }
@@ -141,7 +150,7 @@ package struct CodexExecutableResolver: Sendable {
             } else {
                 trace.append(.init(source: source, candidate: value, reason: "command is empty"))
             }
-            throw .init(kind: .invalidExplicit, trace: trace)
+            throw .init(kind: .invalidEnvironment(key), trace: trace)
         }
         mutating func candidate(_ rawURL: URL, _ source: CodexExecutableResolutionError.Source) -> (launcherURL: URL, executableURL: URL)? {
             let fs = configuration.fileSystem
@@ -160,12 +169,6 @@ package struct CodexExecutableResolver: Sendable {
             _ source: CodexExecutableResolutionError.Source, _ candidate: String, _ reason: String
         ) {
             trace.append(.init(source: source, candidate: candidate, reason: reason))
-        }
-        mutating func failExplicit(
-            _ source: CodexExecutableResolutionError.Source, _ candidate: String, _ reason: String
-        ) throws(CodexExecutableResolutionError) -> Never {
-            trace.append(.init(source: source, candidate: candidate, reason: reason))
-            throw .init(kind: .invalidExplicit, trace: trace)
         }
     }
 }
