@@ -242,16 +242,7 @@ public final class CodexReviewStore {
         }
     }
 
-    /// Optionally warms up continuous observation for the current application process.
-    ///
-    /// ReviewUI controllers can be created before this method is called or completes.
-    /// Synchronous observation startup resolves the runtime on demand and may block
-    /// the caller. Use this method during asynchronous setup to warm up that work.
-    /// Concurrent calls share preparation, and successful calls reuse the runtime.
-    /// ``start(forceRestartIfNeeded:)`` also prepares observation before starting
-    /// the store's automatic rate limit refresh.
-    ///
-    /// - Throws: The error encountered while preparing the Observation runtime.
+    /// Call during asynchronous setup to avoid blocking on the first synchronous observation.
     public static func prepareObservationTracking() async throws {
         try await PortableObservationTracking.prepare()
     }
