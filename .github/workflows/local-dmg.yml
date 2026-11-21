@@ -1,0 +1,46 @@
+name: Local DMG
+
+on:
+  pull_request:
+    paths: &build-inputs
+      - .github/workflows/local-dmg.yml
+      - Package.swift
+      - Package.resolved
+      - Tools/ReviewMonitor/CodexReviewMonitor.xcodeproj/**
+      - Tools/ReviewMonitor/AppIcon.icon/**
+      - Tools/ReviewMonitor/CodexReviewMonitor/**
+      - '!Tools/ReviewMonitor/CodexReviewMonitor/**/*.swift'
+      - scripts/build_review_monitor.py
+      - scripts/build_dmg.py
+      - scripts/release-requirements.txt
+      - scripts/tests/test_build_review_monitor.py
+  push:
+    branches: [main]
+    paths: *build-inputs
+
+permissions:
+  contents: read
+
+concurrency:
+  group: local-dmg-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  integration:
+    name: Local DMG integration (Xcode 27)
+    runs-on: xcode-27
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Show Xcode environment
+        run: xcodebuild -version
+
+      - name: Run local build integration tests
+        working-directory: scripts/tests
+        env:
+          RUN_LOCAL_BUILD_INTEGRATION: '1'
+        run: python3 -m unittest -v test_build_review_monitor.LocalBuildIntegrationTests
