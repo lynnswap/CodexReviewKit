@@ -97,7 +97,13 @@ public final class CodexReviewStore {
     @ObservationIgnored package var runtimeAccountOperations: [UUID: Task<Void, any Error>] = [:]
     @ObservationIgnored package var unclosedCodexUpdateRuntime: PreparedRuntime?
 
-    public package(set) var serverState: CodexReviewServerState = .stopped
+    package private(set) var serverStatus: (
+        state: CodexReviewServerState, executableFailure: CodexExecutableFailureKind?
+    ) = (.stopped, nil)
+    public package(set) var serverState: CodexReviewServerState {
+        get { serverStatus.state }
+        set { serverStatus = (newValue, nil) }
+    }
     public let auth: CodexReviewAuthModel
     package let settings: SettingsStore
     public package(set) var serverURL: URL?
@@ -1153,7 +1159,7 @@ public final class CodexReviewStore {
                 retainedMCP: nil,
                 failureIncident: context.failureIncident
             )
-            transitionToFailed(error.localizedDescription)
+            transitionToFailed(error.localizedDescription, executableFailure: (error as? any CodexExecutableFailure)?.kind)
         }
     }
 
@@ -1311,7 +1317,7 @@ public final class CodexReviewStore {
                 failureIncident: nil
             )
             serverURL = replacement.retainedMCP.serverURL
-            serverState = .failed(failureMessage)
+            serverStatus = (.failed(failureMessage), (error as? any CodexExecutableFailure)?.kind)
             writeDiagnosticsIfNeeded()
             replacement.finish(.failed(failureMessage))
         }
@@ -1819,12 +1825,14 @@ public final class CodexReviewStore {
         writeDiagnosticsIfNeeded()
     }
 
-    package func transitionToFailed(_ message: String, resetJobs: Bool = false) {
+    package func transitionToFailed(
+        _ message: String, executableFailure: CodexExecutableFailureKind? = nil, resetJobs: Bool = false
+    ) {
         serverURL = nil
         if resetJobs {
             resetReviews()
         }
-        serverState = .failed(message)
+        serverStatus = (.failed(message), executableFailure)
         writeDiagnosticsIfNeeded()
     }
 

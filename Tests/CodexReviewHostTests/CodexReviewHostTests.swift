@@ -5747,12 +5747,14 @@ struct CodexReviewHostTests {
             Issue.record("Missing Codex should fail setup.")
             return
         }
+        #expect(store.serverStatus.executableFailure == .notFound)
         try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executableURL)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executableURL.path)
 
         await store.restart()
 
         #expect(store.serverState == .running)
+        #expect(store.serverStatus.executableFailure == nil)
         #expect(store.canPerformPrimaryAuthenticationAction)
         #expect(store.auth.accounts.isEmpty)
         await store.stop()

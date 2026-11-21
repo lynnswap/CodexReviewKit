@@ -1,3 +1,13 @@
+package enum CodexExecutableFailureKind: Equatable, Sendable {
+    case notFound
+    case invalidConfiguredPath
+    case invalidEnvironment(String)
+}
+
+package protocol CodexExecutableFailure: Error {
+    var kind: CodexExecutableFailureKind { get }
+}
+
 public enum CodexReviewServerState: Sendable, Equatable {
     case stopped
     case starting

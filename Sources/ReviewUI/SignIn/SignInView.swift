@@ -14,6 +14,19 @@ struct SignInView: View {
     }
 
     var body: some View {
+        if store.serverStatus.executableFailure != nil {
+            ScrollView {
+                signInContent
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity)
+            }
+            .defaultScrollAnchor(.center, for: .alignment)
+        } else {
+            signInContent
+        }
+    }
+
+    private var signInContent: some View {
         ContentUnavailableView {
             Text("Welcome to CodexReviewMonitor")
                 .font(.largeTitle)
@@ -61,11 +74,13 @@ struct SignInView: View {
             
         } description: {
             VStack(spacing: 12) {
-                Text("Reviews run using the Codex CLI installed on your Mac.")
-                Link("Install Codex CLI", destination: URL(string: "https://github.com/openai/codex")!)
-                    .accessibilityIdentifier("review-monitor.install-codex-link")
-                if let descriptionText {
-                    Text(descriptionText)
+                if let kind = store.serverStatus.executableFailure, let message = serverFailureMessage {
+                    CodexCLISetupHelp(kind: kind, diagnostic: message)
+                }
+                if let message = store.auth.progress?.detail ?? store.auth.errorMessage {
+                    Text(message)
+                } else if store.serverStatus.executableFailure == nil, let message = serverFailureMessage {
+                    Text(message)
                 }
                 if case .failed = store.serverState {
                     Button("Retry Setup", systemImage: "arrow.clockwise") {
@@ -79,16 +94,48 @@ struct SignInView: View {
         .scenePadding()
     }
 
-    private var descriptionText: String? {
-        store.auth.progress?.detail ?? store.auth.errorMessage ?? serverFailureMessage
-    }
-
     private var serverFailureMessage: String? {
         guard case .failed(let message) = store.serverState else {
             return nil
         }
         let trimmedMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmedMessage.isEmpty ? nil : trimmedMessage
+    }
+}
+
+private struct CodexCLISetupHelp: View {
+    let kind: CodexExecutableFailureKind
+    let diagnostic: String
+    @State private var showsDetails = false
+
+    var body: some View {
+        switch kind {
+        case .notFound:
+            Text("Install the Codex CLI, then retry. If it’s already installed, set its path in Settings, then quit and reopen ReviewMonitor.")
+        case .invalidConfiguredPath:
+            Text("Check the Codex executable path in Settings, then quit and reopen ReviewMonitor.")
+        case .invalidEnvironment(let variable):
+            Text("Update or remove the \(variable) environment variable, then quit and reopen ReviewMonitor.")
+        }
+        HStack(spacing: 16) {
+            if kind == .notFound {
+                Link("Install Codex CLI", destination: URL(string: "https://github.com/openai/codex#quickstart")!)
+                    .accessibilityIdentifier("review-monitor.install-codex-link")
+            }
+            Button("Diagnostic Details") { showsDetails = true }
+                .buttonStyle(.link)
+                .popover(isPresented: $showsDetails) {
+                    ScrollView {
+                        Text(verbatim: diagnostic)
+                            .font(.callout.monospaced())
+                            .textSelection(.enabled)
+                            .multilineTextAlignment(.leading)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding()
+                    }
+                    .frame(width: 360, height: 180)
+                }
+        }
     }
 }
 
@@ -102,17 +149,17 @@ struct SignInView: View {
 }
 
 #Preview("Codex CLI Not Installed") {
-    SignInView(store: makeSetupFailurePreviewStore("No usable Codex executable was found. Install the Codex CLI, then retry setup."))
+    SignInView(store: makeSetupFailurePreviewStore(.notFound, message: "No usable Codex executable was found.\n/usr/local/bin/codex — not an executable regular file"))
 }
 
 #Preview("Codex Startup Failed") {
-    SignInView(store: makeSetupFailurePreviewStore("The explicitly selected Codex executable is invalid. Check its path in Settings."))
+    SignInView(store: makeSetupFailurePreviewStore(.invalidConfiguredPath, message: "The explicitly selected Codex executable is invalid."))
 }
 
 @MainActor
-private func makeSetupFailurePreviewStore(_ message: String) -> CodexReviewStore {
+private func makeSetupFailurePreviewStore(_ kind: CodexExecutableFailureKind, message: String) -> CodexReviewStore {
     let store = makeSignInPreviewStore()
-    store.transitionToFailed(message)
+    store.transitionToFailed(message, executableFailure: kind)
     return store
 }
 
