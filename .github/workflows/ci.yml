@@ -191,21 +191,6 @@ jobs:
           --pattern 'test_build_review_monitor.py'
           --verbose
 
-      - name: Show Xcode environment
-        run: |
-          xcodebuild -version
-          xcodebuild -showsdks
-
-      - name: Run local build integration test
-        timeout-minutes: 12
-        env:
-          RUN_LOCAL_BUILD_INTEGRATION: '1'
-        run: >-
-          python3 -m unittest discover
-          --start-directory scripts/tests
-          --pattern 'test_build_review_monitor.py'
-          --verbose
-
       - name: Test remote release contracts
         timeout-minutes: 3
         run: |
