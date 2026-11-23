@@ -102,14 +102,8 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
         self.stdin = stdin
         self.stdout = stdout
         self.stderr = stderr
-        let stdoutEvents = AppServerPipeReadEventSource(
-            fileHandle: stdout.fileHandleForReading,
-            label: "com.lynnpd.CodexReviewKit.app-server.stdout"
-        )
-        let stderrEvents = AppServerPipeReadEventSource(
-            fileHandle: stderr.fileHandleForReading,
-            label: "com.lynnpd.CodexReviewKit.app-server.stderr"
-        )
+        let stdoutEvents = AppServerPipeReadEventSource(fileHandle: stdout.fileHandleForReading)
+        let stderrEvents = AppServerPipeReadEventSource(fileHandle: stderr.fileHandleForReading)
         self.stdoutEvents = stdoutEvents
         self.stderrEvents = stderrEvents
         self.closeAdmissionForTesting = closeAdmissionForTesting
@@ -672,61 +666,34 @@ package struct AppServerStderrLogFilter: Sendable {
     }
 }
 
-private final class AppServerPipeReadEventSource: @unchecked Sendable {
+private final class AppServerPipeReadEventSource: Sendable {
     let events: AsyncStream<AppServerPipeReadEvent>
 
     private let fileHandle: FileHandle
-    private let queue: DispatchQueue
-    private let continuationLock = NSLock()
-    private var continuation: AsyncStream<AppServerPipeReadEvent>.Continuation?
+    private let continuation: AsyncStream<AppServerPipeReadEvent>.Continuation
 
-    init(fileHandle: FileHandle, label: String) {
+    init(fileHandle: FileHandle) {
         self.fileHandle = fileHandle
-        self.queue = DispatchQueue(label: label)
-        var continuation: AsyncStream<AppServerPipeReadEvent>.Continuation?
-        self.events = AsyncStream(bufferingPolicy: .unbounded) { streamContinuation in
-            continuation = streamContinuation
-        }
-        self.continuation = continuation
+        (events, continuation) = AsyncStream.makeStream()
     }
 
     func start() {
-        fileHandle.readabilityHandler = { [weak self] handle in
-            self?.queue.async { [weak self] in
-                guard let self else {
-                    return
-                }
-                let data = handle.availableData
-                if data.isEmpty {
-                    finish(with: .end)
-                    return
-                }
-                yield(.data(data))
+        fileHandle.readabilityHandler = { [continuation] handle in
+            // Read before returning so the same unread bytes cannot schedule more reads.
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                continuation.yield(.end)
+                continuation.finish()
+            } else {
+                continuation.yield(.data(data))
             }
         }
     }
 
     func cancel() {
         fileHandle.readabilityHandler = nil
-        finish()
-    }
-
-    private func yield(_ event: AppServerPipeReadEvent) {
-        continuationLock.lock()
-        let continuation = continuation
-        continuationLock.unlock()
-        continuation?.yield(event)
-    }
-
-    private func finish(with finalEvent: AppServerPipeReadEvent? = nil) {
-        continuationLock.lock()
-        let continuation = continuation
-        self.continuation = nil
-        continuationLock.unlock()
-        if let finalEvent {
-            continuation?.yield(finalEvent)
-        }
-        continuation?.finish()
+        continuation.finish()
     }
 }
 
