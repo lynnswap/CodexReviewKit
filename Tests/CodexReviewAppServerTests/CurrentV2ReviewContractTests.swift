@@ -616,6 +616,7 @@ struct CurrentV2ReviewDecoderReducerTests {
             #"{"type":"reasoning","id":"item-1"}"#,
             #"{"type":"commandExecution","id":"item-1","command":"","commandActions":[],"cwd":"","status":"completed"}"#,
             #"{"type":"fileChange","id":"item-1","changes":[],"status":"completed"}"#,
+            #"{"type":"functionCallOutput","id":"item-1","name":"get_state","output":"ready"}"#,
             #"{"type":"mcpToolCall","id":"item-1","arguments":null,"server":"","status":"completed","tool":""}"#,
             #"{"type":"dynamicToolCall","id":"item-1","arguments":{},"status":"completed","tool":""}"#,
             #"{"type":"collabAgentToolCall","id":"item-1","agentsStates":{},"receiverThreadIds":[],"senderThreadId":"","status":"interrupted","tool":"sendMessage"}"#,
@@ -2008,6 +2009,13 @@ struct CurrentV2ReviewRoutingIntegrationTests {
                 item: .init(type: "sleep", id: "sleep-1", durationMs: 250)
             )
         )
+        var functionOutput = V2Item(type: "functionCallOutput", id: "function-1")
+        functionOutput.name = "get_state"
+        functionOutput.output = [["type": "input_text", "text": "Ready"], ["type": "input_audio", "file_id": "audio-1"]]
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: V2ItemNotification(threadID: "thread-review", turnID: "turn-review", item: functionOutput)
+        )
         var image = V2Item(type: "imageGeneration", id: "image-job", status: "completed")
         image.fileID = "file-1"
         try await transport.emitServerNotification(
@@ -2017,6 +2025,10 @@ struct CurrentV2ReviewRoutingIntegrationTests {
         try await emitCompletedReview(transport: transport, review: "No findings.")
 
         let events = try await collectEvents(from: attempt.events)
+        #expect(events.contains { event in
+            guard case .logEntry(.toolCall, _, "function-1", true, let metadata, _) = event else { return false }
+            return metadata?.title == "get_state" && metadata?.resultText == "Ready\n<audio content>"
+        })
         #expect(events.contains { event in
             guard case .logEntry(_, _, "image-job", _, let metadata, _) = event else { return false }
             return metadata?.resultText == "file-1"
@@ -2815,6 +2827,8 @@ private struct V2Item: Encodable, Sendable {
     var type: String
     var id: String
     var text: String?
+    var name: String?
+    var output: [[String: String]]?
     var fileID: String?
     var review: String?
     var command: String?
@@ -2872,6 +2886,8 @@ private struct V2Item: Encodable, Sendable {
         case id
         case text
         case review
+        case name
+        case output
         case fileID = "fileId"
         case command
         case cwd

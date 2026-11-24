@@ -424,6 +424,11 @@ enum CurrentV2ReviewNotificationDecoder {
             _ = try requiredString("text", in: item)
             try validateOptionalNullableEnum("delivery", in: item, allowed: agentMessageDeliveries)
             try validateOptionalNullableEnum("phase", in: item, allowed: agentMessagePhases)
+        case "functionCallOutput":
+            _ = try requiredString("name", in: item)
+            if item["output"] is String == false {
+                _ = try requiredObjectArray("output", in: item)
+            }
         case "plan":
             _ = try requiredString("text", in: item)
         case "reasoning":
@@ -787,6 +792,7 @@ enum CurrentV2ReviewNotificationDecoder {
         "userMessage",
         "hookPrompt",
         "agentMessage",
+        "functionCallOutput",
         "plan",
         "reasoning",
         "commandExecution",

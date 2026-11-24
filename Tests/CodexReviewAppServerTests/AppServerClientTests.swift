@@ -7301,10 +7301,13 @@ struct AppServerClientTests {
                 item: .init(
                     type: "dynamicToolCall",
                     id: "tool-success-false",
-                    status: "failed",
+                    status: "completed",
                     namespace: "web",
                     tool: "search",
-                    result: "no matches",
+                    contentItems: [
+                        ["type": "inputText", "text": "no matches"],
+                        ["type": "inputImage", "imageUrl": "data:image/png;base64,AA=="],
+                    ],
                     success: false
                 )
             )
@@ -7328,7 +7331,7 @@ struct AppServerClientTests {
         ))
         #expect(try await iterator.next() == .logEntry(
             kind: .toolCall,
-            text: "Dynamic tool web.search failed. Result: no matches",
+            text: "Dynamic tool web.search failed. Result: no matches\n<image content>",
             groupID: "tool-success-false",
             replacesGroup: true,
             metadata: .init(
@@ -7337,7 +7340,7 @@ struct AppServerClientTests {
                 status: "failed",
                 namespace: "web",
                 tool: "search",
-                resultText: "no matches"
+                resultText: "no matches\n<image content>"
             )
         ))
     }
@@ -8617,6 +8620,7 @@ private struct TestItem: Encodable, Sendable {
     var tool: String?
     var query: String?
     var path: String?
+    var contentItems: [[String: String]]?
     var result: String?
     var error: String?
     var success: Bool?
@@ -8647,6 +8651,7 @@ private struct TestItem: Encodable, Sendable {
         tool: String? = nil,
         query: String? = nil,
         path: String? = nil,
+        contentItems: [[String: String]]? = nil,
         result: String? = nil,
         error: String? = nil,
         success: Bool? = nil,
@@ -8673,6 +8678,7 @@ private struct TestItem: Encodable, Sendable {
         self.tool = tool ?? (["mcpToolCall", "dynamicToolCall"].contains(type) ? "" : nil)
         self.query = query ?? (type == "webSearch" ? "" : nil)
         self.path = path ?? (type == "imageView" ? "" : nil)
+        self.contentItems = contentItems
         self.result = result ?? (type == "imageGeneration" ? "" : nil)
         self.error = error
         self.success = success

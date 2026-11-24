@@ -632,8 +632,8 @@ final class ReviewMonitorCommandOutputToggleButton: NSButton {
         state = isExpanded ? .on : .off
 
         let accessibilityLabel = isExpanded
-            ? "Collapse command output"
-            : "Expand command output"
+            ? "Collapse output"
+            : "Expand output"
         toolTip = accessibilityLabel
         setAccessibilityLabel(accessibilityLabel)
     }
@@ -867,7 +867,7 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
     private nonisolated static let commandTrailingInset: CGFloat = 2
 
     private let blockID: ReviewMonitorLog.BlockID
-    private let shellLabel = NSTextField(labelWithString: "Shell")
+    private let sourceLabel = NSTextField(labelWithString: "Shell")
     private let commandTextView = NSTextView(usingTextLayoutManager: true)
     private let outputScrollView = ReviewMonitorCommandOutputScrollView()
     private let outputTextView = NSTextView(usingTextLayoutManager: true)
@@ -894,9 +894,9 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         wantsLayer = true
         layer?.masksToBounds = true
 
-        configureLabel(shellLabel)
-        shellLabel.font = Self.labelFont(weight: .medium)
-        addSubview(shellLabel)
+        configureLabel(sourceLabel)
+        sourceLabel.font = Self.labelFont(weight: .medium)
+        addSubview(sourceLabel)
 
         configureTerminalTextView(commandTextView, textColor: .labelColor, textContainerInset: .zero)
         commandTextView.isHidden = true
@@ -939,7 +939,8 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         let wasExpanded = previousPanel?.isExpanded == true
         self.panel = panel
         let isExpanded = panel.isExpanded
-        shellLabel.isHidden = isExpanded == false
+        sourceLabel.stringValue = panel.isToolOutput ? "Tool output" : "Shell"
+        sourceLabel.isHidden = isExpanded == false
         let nextCommandLineText = Self.commandLineText(for: panel.commandText)
         commandTextView.isHidden = isExpanded == false || nextCommandLineText.isEmpty
         outputScrollView.isHidden = isExpanded == false
@@ -947,7 +948,7 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         let outputChanged = previousPanel?.outputText != panel.outputText ||
             outputText != panel.outputText
         let shouldFollowOutput = wasExpanded == false || outputScrollIsPinnedToBottom()
-        if isExpanded, wasExpanded == false || (outputChanged && shouldFollowOutput) {
+        if !panel.isToolOutput, isExpanded, wasExpanded == false || (outputChanged && shouldFollowOutput) {
             shouldScrollOutputToBottomOnNextLayout = true
         }
 
@@ -990,19 +991,19 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
     override func layout() {
         super.layout()
         guard panel?.isExpanded == true else {
-            shellLabel.frame = .zero
+            sourceLabel.frame = .zero
             commandTextView.frame = .zero
             outputScrollView.frame = .zero
             resultLabel.frame = .zero
             return
         }
 
-        let shellHeight = Self.labelLineHeight(for: shellLabel.font ?? Self.labelFont(weight: .medium))
+        let shellHeight = Self.labelLineHeight(for: sourceLabel.font ?? Self.labelFont(weight: .medium))
         let footerHeight = Self.labelLineHeight(for: resultLabel.font ?? Self.labelFont())
         let contentWidth = max(0, bounds.width - Self.horizontalInset * 2)
         let commandWidth = max(0, bounds.width - Self.commandLeadingInset - Self.commandTrailingInset)
 
-        shellLabel.frame = NSRect(
+        sourceLabel.frame = NSRect(
             x: Self.horizontalInset,
             y: Self.topInset,
             width: contentWidth,

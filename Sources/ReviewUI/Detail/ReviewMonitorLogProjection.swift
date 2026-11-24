@@ -139,6 +139,7 @@ struct CommandOutputPanel: Equatable, Sendable {
 
     var blockID: ReviewMonitorLog.BlockID
     var range: NSRange
+    var isToolOutput = false
     var commandText: String
     var outputText: String
     var outputSourceRange: NSRange? = nil

@@ -40,7 +40,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         previousDisplay: ReviewMonitorLog.Document? = nil,
         currentDate: Date = Date()
     ) -> ReviewMonitorLog.Document {
-        guard source.blocks.contains(where: { $0.kind == .command || $0.kind == .commandOutput }) else {
+        guard source.blocks.contains(where: \.usesOutputPanel) else {
             return source
         }
 
@@ -101,7 +101,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                     sourceString: sourceString,
                     commandTextByGroupID: commandTextByGroupID
                 )
-                let hasOutput = panelSource.output != nil
+                let hasOutput = panelSource.output != nil || panelSource.anchor.toolOutput != nil
                 let status = commandOutputStatus(metadata, hasOutput: hasOutput)
                 let isActive = status == .running
                 let actions = commandActionRows(
@@ -111,7 +111,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                         ?? blockID.rawValue,
                     isActive: isActive
                 )
-                let title = commandOutputTitle(
+                let title = panelSource.anchor.toolOutputTitle ?? commandOutputTitle(
                     metadata: metadata,
                     commandText: commandText,
                     isActive: isActive,
@@ -157,19 +157,16 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                 panels.append(.init(
                     blockID: blockID,
                     range: displayRange,
+                    isToolOutput: panelSource.anchor.kind == .toolCall,
                     commandText: commandText,
                     outputText: outputText,
                     outputSourceRange: panelSource.output?.sourceRange,
-                    lineCount: commandOutputLineCount(
-                        for: panelSource,
-                        rawSourceString: rawSourceString,
-                        isExpanded: isExpanded
-                    ),
+                    lineCount: ReviewMonitorLog.LineCounter.lineCount(outputText),
                     isExpanded: isExpanded,
                     status: status,
                     startedAt: metadata?.startedAt,
                     title: title,
-                    exitText: commandOutputResultText(for: metadata, status: status),
+                    exitText: panelSource.anchor.kind == .toolCall ? nil : commandOutputResultText(for: metadata, status: status),
                     actions: actions
                 ))
             } else {
@@ -326,6 +323,8 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                 return nil
             }
             return .init(anchor: anchor, command: command, output: block)
+        case .toolCall where block.toolOutput != nil:
+            return .init(anchor: block)
         case .agentMessage, .plan, .todoList, .reasoning, .reasoningSummary, .rawReasoning,
              .toolCall, .diagnostic, .error, .progress, .event, .contextCompaction:
             return nil
@@ -349,7 +348,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
     }
 
     private static func commandPanelBlockID(for block: ReviewMonitorLog.Block) -> ReviewMonitorLog.BlockID {
-        if let groupID = block.groupID {
+        if block.kind != .toolCall, let groupID = block.groupID {
             return ReviewMonitorLog.BlockID("commandOutput:\(groupID)")
         }
         return block.id
@@ -482,20 +481,6 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         )
     }
 
-    private static func commandOutputLineCount(
-        for panelSource: CommandPanelSource,
-        rawSourceString: NSString,
-        isExpanded: Bool
-    ) -> Int {
-        guard isExpanded else {
-            return 0
-        }
-        guard let output = panelSource.output else {
-            return 0
-        }
-        return ReviewMonitorLog.LineCounter.lineCount(in: rawSourceString, range: output.sourceRange)
-    }
-
     private static func commandOutputText(
         for panelSource: CommandPanelSource,
         rawSourceString: NSString,
@@ -504,10 +489,43 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         guard isExpanded else {
             return ""
         }
+        if let toolOutput = panelSource.anchor.toolOutput {
+            return panelSource.anchor.metadata?.sourceType == "mcpToolCall"
+                ? mcpOutputText(toolOutput)
+                : toolOutput
+        }
         guard let output = panelSource.output else {
             return ""
         }
         return rawSourceString.substring(with: output.sourceRange)
+    }
+
+    private static func mcpOutputText(_ text: String) -> String {
+        guard let object = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] else {
+            return text
+        }
+        if let message = object["message"] as? String, object.count == 1 {
+            return message
+        }
+        guard let content = object["content"] as? [[String: Any]] else { return text }
+        func formattedJSON(_ value: Any) -> String {
+            guard let data = try? JSONSerialization.data(
+                withJSONObject: value,
+                options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes, .fragmentsAllowed]
+            ) else { return text }
+            return String(decoding: data, as: UTF8.self)
+        }
+        var sections = content.map { block in
+            if block["type"] as? String == "text", let body = block["text"] as? String, block.count == 2 {
+                return body
+            }
+            return formattedJSON(block)
+        }
+        let fields = object.filter { $0.key != "content" && !($0.value is NSNull) }
+        if !fields.isEmpty {
+            sections.append(formattedJSON(fields))
+        }
+        return sections.isEmpty ? text : sections.joined(separator: "\n\n")
     }
 
     private static func commandOutputTitle(
@@ -720,6 +738,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         sourceString: NSString,
         commandTextByGroupID: [String: String]
     ) -> String {
+        if panelSource.anchor.kind == .toolCall { return "" }
         if let groupID = panelSource.anchor.groupID,
            let commandText = commandTextByGroupID[groupID] {
             return commandText
@@ -946,7 +965,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         displayText: String
     ) -> ReviewMonitorLog.Change? {
         guard let sourceBlock = sourceBlocks.first(where: { $0.id == blockID }),
-              sourceBlock.kind == .command || sourceBlock.kind == .commandOutput,
+              sourceBlock.usesOutputPanel,
               NSMaxRange(sourceRange) <= NSMaxRange(sourceBlock.range),
               let displayBlock = commandPanelDisplayBlock(
                 for: sourceBlock,
@@ -1025,6 +1044,9 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         for sourceBlock: ReviewMonitorLog.Block,
         displayBlocks: [ReviewMonitorLog.Block]
     ) -> ReviewMonitorLog.Block? {
+        if sourceBlock.kind == .toolCall {
+            return displayBlocks.first { $0.kind == .commandOutput && $0.id == sourceBlock.id }
+        }
         if let groupID = sourceBlock.groupID {
             return displayBlocks.first {
                 $0.kind == .commandOutput && $0.groupID == groupID
@@ -1042,8 +1064,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         displayBlocks: [ReviewMonitorLog.Block]
     ) -> NSRange? {
         guard let sourceBlock = sourceBlocks.first(where: { $0.id == blockID }),
-              sourceBlock.kind != .command,
-              sourceBlock.kind != .commandOutput,
+              !sourceBlock.usesOutputPanel,
               let displayBlock = displayBlocks.first(where: { $0.id == blockID }),
               NSMaxRange(range) <= NSMaxRange(sourceBlock.range)
         else {
@@ -1054,5 +1075,27 @@ enum ReviewMonitorCommandOutputDisplayDocument {
             return nil
         }
         return mappedRange
+    }
+}
+
+private extension ReviewMonitorLog.Block {
+    var toolOutput: String? {
+        guard kind == .toolCall, let metadata else { return nil }
+        switch metadata.sourceType {
+        case "mcpToolCall", "dynamicToolCall", "functionCallOutput":
+            return metadata.errorText ?? metadata.resultText
+        default:
+            return nil
+        }
+    }
+
+    var toolOutputTitle: String? {
+        guard kind == .toolCall, let metadata, let title = metadata.title else { return nil }
+        if metadata.sourceType == "functionCallOutput" { return "\(title) returned output." }
+        return "\(title) \(metadata.status ?? "completed")."
+    }
+
+    var usesOutputPanel: Bool {
+        kind == .command || kind == .commandOutput || toolOutput != nil
     }
 }

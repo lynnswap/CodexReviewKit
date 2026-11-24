@@ -418,7 +418,10 @@ extension ReviewUITests {
                         arguments: [:],
                         server: "codex_review",
                         tool: "review_read",
-                        result: "Review state loaded."
+                        result: .init(
+                            content: [["type": "text", "text": "Review state loaded."]],
+                            structuredContent: ["workflow": "Native Xcode CI"]
+                        )
                     )
                 )
             )
@@ -551,7 +554,15 @@ extension ReviewUITests {
                 ),
             ])
 
-            #expect(contentPane.logCommandOutputPanelCountForTesting == 2)
+            #expect(rendered.log.contains("Native Xcode CI") == false)
+            #expect(rendered.log.contains("Review state loaded.") == false)
+            #expect(contentPane.logCommandOutputPanelCountForTesting == 3)
+            let toolID = ReviewMonitorLog.BlockID("toolCall:tool-1")
+            #expect(contentPane.clickLogCommandOutputPanelHeaderForTesting(blockID: toolID))
+            await awaitNativeLayoutTurn()
+            let toolOutput = try #require(contentPane.logCommandOutputPanelTerminalTextForTesting(blockID: toolID))
+            #expect(toolOutput.contains("Review state loaded."))
+            #expect(toolOutput.contains("Native Xcode CI"))
             let firstCommandID = ReviewMonitorLog.BlockID("commandOutput:command-1")
             let secondCommandID = ReviewMonitorLog.BlockID("commandOutput:command-2")
             #expect(contentPane.clickLogCommandOutputPanelHeaderForTesting(blockID: firstCommandID))
@@ -1080,7 +1091,12 @@ private struct ReviewUIV2ItemNotification: Encodable, Sendable {
         var server: String?
         var namespace: String?
         var tool: String?
-        var result: String?
+        struct MCPResult: Encodable, Sendable {
+            var content: [[String: String]]
+            var structuredContent: [String: String]
+        }
+
+        var result: MCPResult?
         var error: String?
         var phase: String?
         var summary: [String]?
@@ -1102,7 +1118,7 @@ private struct ReviewUIV2ItemNotification: Encodable, Sendable {
             server: String? = nil,
             namespace: String? = nil,
             tool: String? = nil,
-            result: String? = nil,
+            result: MCPResult? = nil,
             error: String? = nil,
             phase: String? = nil,
             summary: [String]? = nil,
