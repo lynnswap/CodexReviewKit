@@ -1593,19 +1593,23 @@ struct ReviewMonitorLogProjectionTests {
     }
 
     @Test func expandingToolOutputUsesOnlyTheRetainedTranscript() throws {
-        var projection = ReviewMonitorLog.Projection()
-        let entry = ReviewLogEntry(
-            kind: .toolCall,
-            groupID: "tool-1",
-            text: "retained tail",
-            metadata: .init(
-                sourceType: "mcpToolCall",
-                title: "logs.read",
-                status: "completed",
-                resultText: "discarded beginning\nretained tail"
-            )
+        let output = "discarded beginning" + String(repeating: "x", count: 256 * 1024) + "\nretained tail"
+        let job = CodexReviewJob.makeForTesting(
+            id: "tool-retention",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .succeeded,
+            summary: "Done",
+            logEntries: [.init(
+                kind: .toolCall,
+                groupID: "tool-1",
+                text: "logs.read completed. Result: \(output)",
+                metadata: .init(sourceType: "mcpToolCall", title: "logs.read", status: "completed", resultText: output)
+            )]
         )
-        let source = projection.render(entries: [entry])
+        let retained = try #require(job.logEntries.first)
+        #expect(retained.metadata?.resultText == retained.text)
+        let source = document(for: job)
         let blockID = try #require(source.blocks.first?.id)
         let expanded = ReviewMonitorCommandOutputDisplayDocument.make(from: source, expandedBlockIDs: [blockID])
         #expect(expanded.text.hasSuffix("\nretained tail"))

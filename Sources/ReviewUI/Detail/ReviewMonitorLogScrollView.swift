@@ -319,7 +319,6 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     }
 
     private func toggleCommandOutputPanel(_ blockID: ReviewMonitorLog.BlockID) {
-        let restorationTarget = currentScrollRestorationTarget
         guard let sourceDocument
         else {
             return
@@ -334,6 +333,9 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             return
         }
 
+        let restorationTarget: ScrollRestorationTarget = previousPanel.isToolOutput && !previousPanel.isExpanded
+            ? .offset(contentView.bounds.origin.y)
+            : currentScrollRestorationTarget
         let display = displayDocument(for: sourceDocument)
         guard let nextPanel = display.commandOutputPanels.first(where: { $0.blockID == blockID }) else {
             assertionFailure("Toggled command output panel disappeared from the display document.")

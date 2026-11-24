@@ -280,6 +280,8 @@ extension ReviewUITests {
             ))
             #expect(job.core.output.lastAgentMessage ==
                 "Inspecting repository instructions and diff.")
+            let completedCommentary = "Inspecting repository instructions and diff."
+                + String(repeating: "\nChecking changes.", count: 64)
             try await transport.emitServerNotification(
                 method: "item/completed",
                 params: ReviewUIV2ItemNotification(
@@ -288,7 +290,7 @@ extension ReviewUITests {
                     item: .init(
                         type: "agentMessage",
                         id: "commentary",
-                        text: "Inspecting repository instructions and diff.",
+                        text: completedCommentary,
                         phase: "commentary"
                     )
                 )
@@ -419,7 +421,10 @@ extension ReviewUITests {
                         server: "codex_review",
                         tool: "review_read",
                         result: .init(
-                            content: [["type": "text", "text": "Review state loaded."]],
+                            content: [
+                                ["type": "text", "text": "Review state loaded."],
+                                ["type": "text", "text": String(repeating: "Run completed.\n", count: 96)],
+                            ],
                             structuredContent: ["workflow": "Native Xcode CI"]
                         )
                     )
@@ -523,7 +528,7 @@ extension ReviewUITests {
                 $0.kind == .commandOutput && $0.text.contains("All tests passed.")
             })
             #expect(job.logEntries.contains {
-                $0.text == "Inspecting repository instructions and diff."
+                $0.text == completedCommentary
                     && $0.metadata?.agentMessagePhase == .commentary
             })
             #expect(job.logEntries.contains {
@@ -558,8 +563,11 @@ extension ReviewUITests {
             #expect(rendered.log.contains("Review state loaded.") == false)
             #expect(contentPane.logCommandOutputPanelCountForTesting == 3)
             let toolID = ReviewMonitorLog.BlockID("toolCall:tool-1")
+            contentPane.scrollLogToBottomForTesting()
+            let previousOffset = contentPane.logVerticalScrollOffsetForTesting
             #expect(contentPane.clickLogCommandOutputPanelHeaderForTesting(blockID: toolID))
             await awaitNativeLayoutTurn()
+            #expect(abs(contentPane.logVerticalScrollOffsetForTesting - previousOffset) <= 1)
             #expect(contentPane.displayedLogForTesting.contains("Review state loaded.\n\n"))
             let toolResultMatch = (contentPane.logFindStringForTesting as NSString).range(of: "Native Xcode CI")
             try #require(toolResultMatch.location != NSNotFound)

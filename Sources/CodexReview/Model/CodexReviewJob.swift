@@ -631,16 +631,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
         if truncatedText.isEmpty {
             entries.remove(at: index)
         } else {
-            entries[index] = .init(
-                id: entry.id,
-                kind: entry.kind,
-                groupID: entry.groupID,
-                replacesGroup: entry.replacesGroup,
-                text: truncatedText,
-                metadata: entry.metadata,
-                audience: entry.audience,
-                timestamp: entry.timestamp
-            )
+            entries[index] = entry.retainingText(truncatedText, keeping: direction)
         }
         replaceLogEntries(entries)
     }
@@ -768,16 +759,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
             return trimmedEntries
         }
 
-        trimmedEntries[index] = .init(
-            id: entry.id,
-            kind: entry.kind,
-            groupID: entry.groupID,
-            replacesGroup: entry.replacesGroup,
-            text: truncatedText,
-            metadata: entry.metadata,
-            audience: entry.audience,
-            timestamp: entry.timestamp
-        )
+        trimmedEntries[index] = entry.retainingText(truncatedText, keeping: direction)
         return trimmedEntries
     }
 

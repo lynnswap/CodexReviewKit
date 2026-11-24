@@ -1090,13 +1090,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
 
 private extension ReviewMonitorLog.Block {
     var toolOutput: String? {
-        guard kind == .toolCall, let metadata else { return nil }
-        switch metadata.sourceType {
-        case "mcpToolCall", "dynamicToolCall", "functionCallOutput":
-            return metadata.errorText ?? metadata.resultText
-        default:
-            return nil
-        }
+        kind == .toolCall ? metadata?.toolOutput : nil
     }
 
     var toolOutputTitle: String? {
