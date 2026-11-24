@@ -355,19 +355,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             return
         }
 
-        let selection = logDocumentView.selectedRangeForFinding
-        let oldEnd = NSMaxRange(previousPanel.range)
-        let newEnd = NSMaxRange(nextPanel.range)
-        let headerEnd = min(oldEnd, newEnd)
-        let adjustedSelection: NSRange?
-        if selection.location >= oldEnd {
-            adjustedSelection = NSRange(location: selection.location + newEnd - oldEnd, length: selection.length)
-        } else if NSMaxRange(selection) > headerEnd {
-            adjustedSelection = NSRange(location: headerEnd, length: 0)
-        } else {
-            adjustedSelection = nil
-        }
-        applyReplacement(replacement, document: display, adjustedSelection: adjustedSelection)
+        applyReplacement(replacement, document: display, togglingPanel: true)
         currentDisplayDocument = display
         displayedRevision = display.revision
         invalidateDocumentLayout()
@@ -496,7 +484,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     private func applyReplacement(
         _ replacement: ReviewMonitorLog.Replacement,
         document: ReviewMonitorLog.Document,
-        adjustedSelection: NSRange? = nil
+        togglingPanel: Bool = false
     ) -> Bool {
         let shouldAutoFollow = isPinnedToBottom()
         let resultingTextUTF16Length = displayedUTF16Length - replacement.range.length + replacement.textUTF16Length
@@ -508,10 +496,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             .structural,
             resultingTextIsEmpty: resultingTextUTF16Length == 0
         )
-        logDocumentView.replaceText(in: replacement.range, with: replacement.text)
-        if let adjustedSelection {
-            logDocumentView.setSelectedRange(adjustedSelection)
-        }
+        logDocumentView.replaceText(in: replacement.range, with: replacement.text, togglingPanel: togglingPanel)
         replaceDisplayedText(in: replacement.range, with: replacement.text)
         displayedUTF16Length = resultingTextUTF16Length
         logDocumentView.applyPresentation(document, replacement: replacement)
