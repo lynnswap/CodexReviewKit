@@ -70,7 +70,16 @@ enum ReviewMonitorCommandOutputDisplayDocument {
             sourceString: sourceString
         )
 
+        // Projection emits runs in block order, preserving overlapping Markdown styles within each block.
+        var remainingStyles = source.styleRuns[...]
+        var remainingDecorations = source.decorations[...]
         for block in sourceBlocks {
+            let end = NSMaxRange(block.range)
+            let blockStyles = remainingStyles.prefix { $0.range.location < end }
+            let blockDecorations = remainingDecorations.prefix { $0.range.location < end }
+            remainingStyles = remainingStyles[blockStyles.endIndex...]
+            remainingDecorations = remainingDecorations[blockDecorations.endIndex...]
+
             if shouldSkipBlockAndLeadingGap(
                 block,
                 commandBlocksByGroupID: commandBlocksByGroupID,
@@ -187,7 +196,8 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                     metadata: block.metadata
                 ))
                 appendPresentationRuns(
-                    from: source,
+                    blockStyles: blockStyles,
+                    blockDecorations: blockDecorations,
                     sourceRange: block.range,
                     displayRange: displayRange,
                     styleRuns: &styleRuns,
@@ -398,13 +408,14 @@ enum ReviewMonitorCommandOutputDisplayDocument {
     }
 
     private static func appendPresentationRuns(
-        from source: ReviewMonitorLog.Document,
+        blockStyles: ArraySlice<ReviewMonitorLog.TextRun>,
+        blockDecorations: ArraySlice<ReviewMonitorLog.Decoration>,
         sourceRange: NSRange,
         displayRange: NSRange,
         styleRuns: inout [ReviewMonitorLog.TextRun],
         decorations: inout [ReviewMonitorLog.Decoration]
     ) {
-        for styleRun in source.styleRuns {
+        for styleRun in blockStyles {
             let intersection = NSIntersectionRange(styleRun.range, sourceRange)
             guard intersection.length > 0 else {
                 continue
@@ -415,7 +426,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
             ))
         }
 
-        for decoration in source.decorations {
+        for decoration in blockDecorations {
             let intersection = NSIntersectionRange(decoration.range, sourceRange)
             guard intersection.length > 0 else {
                 continue
@@ -521,7 +532,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         func formattedJSON(_ value: Any) -> String {
             guard let data = try? JSONSerialization.data(
                 withJSONObject: value,
-                options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes, .fragmentsAllowed]
+                options: [.sortedKeys, .withoutEscapingSlashes, .fragmentsAllowed]
             ) else { return text }
             return String(decoding: data, as: UTF8.self)
         }

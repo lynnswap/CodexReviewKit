@@ -1859,6 +1859,7 @@ struct ReviewMonitorLogProjectionTests {
                     text: "Tests passed",
                     metadata: .init(sourceType: "command", title: "Ran command for 3s")
                 ),
+                .init(kind: .agentMessage, text: "**Summary**\n\n```\nlog entry\n```"),
             ]
         )
         let sourceDocument = document(for: job)
@@ -1870,6 +1871,13 @@ struct ReviewMonitorLogProjectionTests {
         let displayText = ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: displayDocument.text)
         #expect(displayText.hasPrefix("Ran command for 3s\nMCP codex_review.review_read started."))
         #expect(displayDocument.text.contains("$ swift test") == false)
+        let displayed = displayDocument.text as NSString
+        #expect(displayDocument.styleRuns.contains {
+            $0.style == .strong && displayed.substring(with: $0.range) == "Summary"
+        })
+        #expect(displayDocument.decorations.contains {
+            $0.style == .codeBlock && displayed.substring(with: $0.range).contains("log entry")
+        })
     }
 
     @Test func commandOutputDisplayLetsExitCodeOverrideCompletedStatus() {
