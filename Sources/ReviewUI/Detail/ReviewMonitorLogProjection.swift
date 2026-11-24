@@ -139,6 +139,7 @@ struct CommandOutputPanel: Equatable, Sendable {
 
     var blockID: ReviewMonitorLog.BlockID
     var range: NSRange
+    var isToolOutput = false
     var commandText: String
     var outputText: String
     var outputSourceRange: NSRange? = nil
@@ -312,7 +313,7 @@ struct Document: Equatable, Sendable {
     }
 
     mutating func rebuildPresentation(forBlockAt blockIndex: Int) {
-        guard blocks.indices.contains(blockIndex) else {
+        guard blockIndex == blocks.indices.last else {
             rebuildPresentation()
             return
         }

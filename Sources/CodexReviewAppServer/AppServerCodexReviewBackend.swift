@@ -4096,8 +4096,8 @@ private struct AppServerThreadItem: Decodable, Sendable {
     var review: String?
     var summary: [String]?
     var content: [String]?
-    var result: AppServerNotificationValue?
-    var error: AppServerNotificationValue?
+    var resultText: String?
+    var errorText: String?
     var success: Bool?
     var prompt: String?
     var activityKind: String?
@@ -4127,6 +4127,9 @@ private struct AppServerThreadItem: Decodable, Sendable {
         case summary
         case content
         case result
+        case name
+        case output
+        case contentItems
         case fileID = "fileId"
         case error
         case success
@@ -4152,7 +4155,7 @@ private struct AppServerThreadItem: Decodable, Sendable {
         self.commandActions = try container.decodeIfPresent([AppServerCommandAction].self, forKey: .commandActions) ?? []
         self.status = try container.decodeStringIfPresent(forKey: .status)
         self.server = try container.decodeStringIfPresent(forKey: .server)
-        self.tool = try container.decodeStringIfPresent(forKey: .tool)
+        self.tool = try container.decodeStringIfPresent(forKey: type == "functionCallOutput" ? .name : .tool)
         self.namespace = try container.decodeStringIfPresent(forKey: .namespace)
         self.query = try container.decodeStringIfPresent(forKey: .query)
         self.path = try container.decodeStringIfPresent(forKey: .path)
@@ -4164,12 +4167,17 @@ private struct AppServerThreadItem: Decodable, Sendable {
             self.summary = nil
             self.content = nil
         }
-        if type == "imageGeneration", let fileID = try? container.decode(String.self, forKey: .fileID) {
-            self.result = .string(fileID)
+        if type == "functionCallOutput" {
+            resultText = try container.decode(AppServerNotificationValue.self, forKey: .output).toolOutputText
+        } else if type == "dynamicToolCall",
+                  let items = try container.decodeIfPresent(AppServerNotificationValue.self, forKey: .contentItems) {
+            resultText = items.toolOutputText
+        } else if type == "imageGeneration", let fileID = try? container.decode(String.self, forKey: .fileID) {
+            resultText = fileID
         } else {
-            self.result = try container.decodeIfPresent(AppServerNotificationValue.self, forKey: .result)
+            resultText = try container.decodeIfPresent(AppServerNotificationValue.self, forKey: .result)?.nonNullDebugText
         }
-        self.error = try container.decodeIfPresent(AppServerNotificationValue.self, forKey: .error)
+        errorText = try container.decodeIfPresent(AppServerNotificationValue.self, forKey: .error)?.nonNullDebugText
         self.success = try container.decodeIfPresent(Bool.self, forKey: .success)
         self.prompt = try container.decodeStringIfPresent(forKey: .prompt)
         self.activityKind = try container.decodeStringIfPresent(forKey: .activityKind)
@@ -4187,7 +4195,7 @@ private struct AppServerThreadItem: Decodable, Sendable {
         agentMessagePhase: ReviewAgentMessagePhase? = nil
     ) throws -> [CodexReviewBackendModel.Review.Event] {
         switch type {
-        case "userMessage":
+        case "userMessage", "functionCallOutput":
             return []
         case "enteredReviewMode":
             return review.map { [.logEntry(kind: .progress, text: "Reviewing \($0)", groupID: id, replacesGroup: true)] } ?? []
@@ -4305,10 +4313,12 @@ private struct AppServerThreadItem: Decodable, Sendable {
             return text.map { [.logEntry(kind: .plan, text: $0, groupID: id, replacesGroup: true)] } ?? []
         case "reasoning":
             return reasoningCompletionEvents(replacesGroup: true)
+        case "functionCallOutput":
+            return [logEntry(kind: .toolCall, text: "\(toolLabel) returned output.\(resultSuffix)", replacesGroup: true, title: toolLabel, status: "completed")]
         case "mcpToolCall":
             return [logEntry(kind: .toolCall, text: "\(toolLabel) \(status ?? "completed").\(resultSuffix)", replacesGroup: true, title: toolLabel, status: completedStatus)]
         case "dynamicToolCall":
-            return [logEntry(kind: .toolCall, text: "Dynamic tool \(toolLabel) \(status ?? "completed").\(resultSuffix)", replacesGroup: true, title: toolLabel, status: completedStatus)]
+            return [logEntry(kind: .toolCall, text: "Dynamic tool \(toolLabel) \(completedStatus ?? "completed").\(resultSuffix)", replacesGroup: true, title: toolLabel, status: completedStatus)]
         case "collabAgentToolCall":
             return [logEntry(kind: .toolCall, text: "Collab tool \(toolLabel) \(status ?? "completed").\(promptSuffix)", replacesGroup: true, title: toolLabel, status: completedStatus, detail: prompt)]
         case "subAgentActivity":
@@ -4499,8 +4509,8 @@ private struct AppServerThreadItem: Decodable, Sendable {
             tool: tool,
             query: query,
             path: path,
-            resultText: result?.nonNullDebugText?.nilIfEmpty,
-            errorText: error?.nonNullDebugText?.nilIfEmpty
+            resultText: resultText?.isEmpty == false ? resultText : nil,
+            errorText: errorText?.nilIfEmpty
         )
     }
 
@@ -4536,13 +4546,16 @@ private struct AppServerThreadItem: Decodable, Sendable {
     }
 
     private var completedStatus: String? {
+        if type == "dynamicToolCall", success == false {
+            return "failed"
+        }
         if let status = status?.nilIfEmpty {
             return status
         }
         if let exitCode {
             return exitCode == 0 ? "succeeded" : "failed"
         }
-        if error?.nonNullDebugText?.nilIfEmpty != nil {
+        if errorText?.nilIfEmpty != nil {
             return "failed"
         }
         if let success {
@@ -4574,10 +4587,10 @@ private struct AppServerThreadItem: Decodable, Sendable {
     }
 
     private var resultSuffix: String {
-        if let error = error?.nonNullDebugText?.nilIfEmpty {
+        if let error = errorText?.nilIfEmpty {
             return " Error: \(error)"
         }
-        if let result = result?.nonNullDebugText?.nilIfEmpty {
+        if let result = resultText, !result.isEmpty {
             return " Result: \(result)"
         }
         return ""
@@ -4645,6 +4658,28 @@ private enum AppServerNotificationValue: Decodable, Sendable {
         } else {
             self = .array(try container.decode([AppServerNotificationValue].self))
         }
+    }
+
+    var toolOutputText: String {
+        guard case .array(let items) = self else { return debugText }
+        return items.map { item -> String in
+            guard case .object(let block) = item, case .string(let type) = block["type"] else {
+                return item.debugText
+            }
+            switch type {
+            case "inputText", "input_text":
+                if case .string(let text) = block["text"] { return text }
+                return item.debugText
+            case "inputImage", "input_image":
+                return "<image content>"
+            case "inputAudio", "input_audio":
+                return "<audio content>"
+            case "encrypted_content":
+                return "<encrypted content>"
+            default:
+                return item.debugText
+            }
+        }.joined(separator: "\n")
     }
 
     var nonNullDebugText: String? {

@@ -71,8 +71,8 @@ public struct ReviewLogEntry: Codable, Identifiable, Sendable, Hashable {
         public let tool: String?
         public let query: String?
         public let path: String?
-        public let resultText: String?
-        public let errorText: String?
+        public fileprivate(set) var resultText: String?
+        public fileprivate(set) var errorText: String?
 
         public init(
             sourceType: String,
@@ -194,11 +194,52 @@ package enum ReviewAgentMessagePhase: String, Codable, Sendable, Hashable {
 }
 
 package extension ReviewLogEntry.Metadata {
+    var toolOutput: String? {
+        switch sourceType {
+        case "mcpToolCall", "dynamicToolCall", "functionCallOutput":
+            errorText ?? resultText
+        default:
+            nil
+        }
+    }
+
     var agentMessagePhase: ReviewAgentMessagePhase? {
         guard sourceType == "agentMessage" || sourceType == "canonicalReviewResult" else {
             return nil
         }
         return detail.flatMap(ReviewAgentMessagePhase.init(rawValue:))
+    }
+}
+
+extension ReviewLogEntry {
+    func retainingText(_ retained: String, keeping direction: CodexReviewJob.TruncationDirection) -> Self {
+        var metadata = metadata
+        if kind == .toolCall, metadata?.toolOutput != nil {
+            let original = text as NSString
+            let length = retained.utf16.count
+            let start = direction == .prefix ? 0 : original.length - length
+            let retainedRange = NSRange(location: start, length: length)
+            func retainedOutput(_ value: String?) -> String? {
+                guard let value else { return nil }
+                let range = original.range(of: value, options: [.anchored, .backwards, .literal])
+                guard range.location != NSNotFound else { return nil }
+                let overlap = NSIntersectionRange(range, retainedRange)
+                if overlap == retainedRange { return retained }
+                return overlap.length > 0 ? original.substring(with: overlap) : nil
+            }
+            metadata?.resultText = retainedOutput(self.metadata?.resultText)
+            metadata?.errorText = retainedOutput(self.metadata?.errorText)
+        }
+        return .init(
+            id: id,
+            kind: kind,
+            groupID: groupID,
+            replacesGroup: replacesGroup,
+            text: retained,
+            metadata: metadata,
+            audience: audience,
+            timestamp: timestamp
+        )
     }
 }
 

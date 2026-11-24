@@ -348,7 +348,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         invalidateTextLayout(measureEstimatedHeightImmediately: true)
     }
 
-    func replaceText(in range: NSRange, with text: String) {
+    func replaceText(in range: NSRange, with text: String, togglingPanel: Bool = false) {
         cancelGlowAnimations()
         let replacementRange = clamp(range)
         guard replacementRange.length == range.length else {
@@ -365,7 +365,14 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
             )
         }
         invalidateFinderStringMapping()
-        clampSelectedRange()
+        if togglingPanel {
+            adjustSelectionForPanelToggle(
+                oldEnd: NSMaxRange(replacementRange),
+                newEnd: replacementRange.location + text.utf16.count
+            )
+        } else {
+            clampSelectedRange()
+        }
         adjustEstimatedDocumentHeight(replacing: replacedText, with: text)
         invalidateTextLayout(
             in: NSRange(location: invalidationStart, length: textStorage.length - invalidationStart),
@@ -724,7 +731,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     private func commandOutputPanelAttachmentRange(
         for panel: ReviewMonitorLog.CommandOutputPanel
     ) -> NSRange? {
-        guard panel.isExpanded else {
+        guard panel.isExpanded && !panel.isToolOutput else {
             return nil
         }
         let labelLength = commandOutputHeaderUTF16Length(for: panel)
@@ -2259,6 +2266,23 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
             return range.location
         }
         return rounding == .backward ? range.location : NSMaxRange(range)
+    }
+
+    private func adjustSelectionForPanelToggle(oldEnd: Int, newEnd: Int) {
+        // Toggling inserts or removes the detail immediately after the unchanged header.
+        let previous = selectedRange
+        func mappedOffset(_ offset: Int) -> Int {
+            if offset > oldEnd || (offset == oldEnd && offset == previous.location) {
+                return offset + (newEnd - oldEnd)
+            }
+            return min(offset, newEnd)
+        }
+        let lower = mappedOffset(previous.location)
+        let upper = mappedOffset(NSMaxRange(previous))
+        keyboardSelectionAnchorUTF16Offset = keyboardSelectionAnchorUTF16Offset.map(mappedOffset)
+        keyboardSelectionFocusUTF16Offset = keyboardSelectionFocusUTF16Offset.map(mappedOffset)
+        dragAnchorUTF16Offset = dragAnchorUTF16Offset.map(mappedOffset)
+        setSelectedRange(NSRange(location: lower, length: upper - lower), preserveKeyboardSelection: true)
     }
 
     private func clampSelectedRange() {

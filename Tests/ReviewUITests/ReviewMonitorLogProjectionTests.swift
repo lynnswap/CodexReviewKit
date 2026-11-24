@@ -1592,6 +1592,30 @@ struct ReviewMonitorLogProjectionTests {
         }
     }
 
+    @Test func expandingToolOutputUsesOnlyTheRetainedTranscript() throws {
+        let output = "discarded beginning" + String(repeating: "x", count: 256 * 1024) + "\nretained tail"
+        let job = CodexReviewJob.makeForTesting(
+            id: "tool-retention",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .succeeded,
+            summary: "Done",
+            logEntries: [.init(
+                kind: .toolCall,
+                groupID: "tool-1",
+                text: "logs.read completed. Result: \(output)",
+                metadata: .init(sourceType: "mcpToolCall", title: "logs.read", status: "completed", resultText: output)
+            )]
+        )
+        let retained = try #require(job.logEntries.first)
+        #expect(retained.metadata?.resultText == retained.text)
+        let source = document(for: job)
+        let blockID = try #require(source.blocks.first?.id)
+        let expanded = ReviewMonitorCommandOutputDisplayDocument.make(from: source, expandedBlockIDs: [blockID])
+        #expect(expanded.text.hasSuffix("\nretained tail"))
+        #expect(!expanded.text.contains("discarded beginning"))
+    }
+
     @Test func toolLifecycleUsesOneStableItemGroup() {
         var projection = ReviewMonitorLog.Projection()
         let entries: [ReviewLogEntry] = [
@@ -1835,6 +1859,7 @@ struct ReviewMonitorLogProjectionTests {
                     text: "Tests passed",
                     metadata: .init(sourceType: "command", title: "Ran command for 3s")
                 ),
+                .init(kind: .agentMessage, text: "**Summary**\n\n```\nlog entry\n```"),
             ]
         )
         let sourceDocument = document(for: job)
@@ -1846,6 +1871,13 @@ struct ReviewMonitorLogProjectionTests {
         let displayText = ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: displayDocument.text)
         #expect(displayText.hasPrefix("Ran command for 3s\nMCP codex_review.review_read started."))
         #expect(displayDocument.text.contains("$ swift test") == false)
+        let displayed = displayDocument.text as NSString
+        #expect(displayDocument.styleRuns.contains {
+            $0.style == .strong && displayed.substring(with: $0.range) == "Summary"
+        })
+        #expect(displayDocument.decorations.contains {
+            $0.style == .codeBlock && displayed.substring(with: $0.range).contains("log entry")
+        })
     }
 
     @Test func commandOutputDisplayLetsExitCodeOverrideCompletedStatus() {

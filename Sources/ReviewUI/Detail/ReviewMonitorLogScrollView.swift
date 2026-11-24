@@ -319,7 +319,6 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     }
 
     private func toggleCommandOutputPanel(_ blockID: ReviewMonitorLog.BlockID) {
-        let restorationTarget = currentScrollRestorationTarget
         guard let sourceDocument
         else {
             return
@@ -334,6 +333,9 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             return
         }
 
+        let restorationTarget: ScrollRestorationTarget = previousPanel.isToolOutput && !previousPanel.isExpanded
+            ? .offset(contentView.bounds.origin.y)
+            : currentScrollRestorationTarget
         let display = displayDocument(for: sourceDocument)
         guard let nextPanel = display.commandOutputPanels.first(where: { $0.blockID == blockID }) else {
             assertionFailure("Toggled command output panel disappeared from the display document.")
@@ -353,7 +355,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             return
         }
 
-        applyReplacement(replacement, document: display)
+        applyReplacement(replacement, document: display, togglingPanel: true)
         currentDisplayDocument = display
         displayedRevision = display.revision
         invalidateDocumentLayout()
@@ -481,7 +483,8 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     @discardableResult
     private func applyReplacement(
         _ replacement: ReviewMonitorLog.Replacement,
-        document: ReviewMonitorLog.Document
+        document: ReviewMonitorLog.Document,
+        togglingPanel: Bool = false
     ) -> Bool {
         let shouldAutoFollow = isPinnedToBottom()
         let resultingTextUTF16Length = displayedUTF16Length - replacement.range.length + replacement.textUTF16Length
@@ -493,7 +496,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             .structural,
             resultingTextIsEmpty: resultingTextUTF16Length == 0
         )
-        logDocumentView.replaceText(in: replacement.range, with: replacement.text)
+        logDocumentView.replaceText(in: replacement.range, with: replacement.text, togglingPanel: togglingPanel)
         replaceDisplayedText(in: replacement.range, with: replacement.text)
         displayedUTF16Length = resultingTextUTF16Length
         logDocumentView.applyPresentation(document, replacement: replacement)

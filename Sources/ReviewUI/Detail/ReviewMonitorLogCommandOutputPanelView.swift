@@ -632,8 +632,8 @@ final class ReviewMonitorCommandOutputToggleButton: NSButton {
         state = isExpanded ? .on : .off
 
         let accessibilityLabel = isExpanded
-            ? "Collapse command output"
-            : "Expand command output"
+            ? "Collapse output"
+            : "Expand output"
         toolTip = accessibilityLabel
         setAccessibilityLabel(accessibilityLabel)
     }
