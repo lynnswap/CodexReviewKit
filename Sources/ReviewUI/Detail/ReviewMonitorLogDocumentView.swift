@@ -724,7 +724,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     private func commandOutputPanelAttachmentRange(
         for panel: ReviewMonitorLog.CommandOutputPanel
     ) -> NSRange? {
-        guard panel.isExpanded else {
+        guard panel.isExpanded && !panel.isToolOutput else {
             return nil
         }
         let labelLength = commandOutputHeaderUTF16Length(for: panel)

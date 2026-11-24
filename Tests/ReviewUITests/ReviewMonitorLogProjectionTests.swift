@@ -1592,6 +1592,26 @@ struct ReviewMonitorLogProjectionTests {
         }
     }
 
+    @Test func expandingToolOutputUsesOnlyTheRetainedTranscript() throws {
+        var projection = ReviewMonitorLog.Projection()
+        let entry = ReviewLogEntry(
+            kind: .toolCall,
+            groupID: "tool-1",
+            text: "retained tail",
+            metadata: .init(
+                sourceType: "mcpToolCall",
+                title: "logs.read",
+                status: "completed",
+                resultText: "discarded beginning\nretained tail"
+            )
+        )
+        let source = projection.render(entries: [entry])
+        let blockID = try #require(source.blocks.first?.id)
+        let expanded = ReviewMonitorCommandOutputDisplayDocument.make(from: source, expandedBlockIDs: [blockID])
+        #expect(expanded.text.hasSuffix("\nretained tail"))
+        #expect(!expanded.text.contains("discarded beginning"))
+    }
+
     @Test func toolLifecycleUsesOneStableItemGroup() {
         var projection = ReviewMonitorLog.Projection()
         let entries: [ReviewLogEntry] = [

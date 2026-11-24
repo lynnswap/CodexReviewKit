@@ -95,6 +95,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                     usedBlockIDs: &usedPanelBlockIDs
                 )
                 let isExpanded = expandedBlockIDs.contains(blockID)
+                let isToolOutput = panelSource.anchor.kind == .toolCall
                 let metadata = commandPanelMetadata(for: panelSource)
                 let commandText = commandOutputCommandText(
                     for: panelSource,
@@ -125,10 +126,16 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                 let placeholder = commandOutputPlaceholder(
                     title: title,
                     includesActiveTimer: isActive && metadata?.startedAt != nil,
-                    includesPanelAttachment: isExpanded,
+                    includesPanelAttachment: isExpanded && !isToolOutput,
                     actions: isExpanded ? actions : []
                 )
-                let displayRange = appendText(placeholder)
+                var displayRange = appendText(placeholder)
+                if isToolOutput && isExpanded {
+                    _ = appendText("\n")
+                    let outputRange = appendText(outputText)
+                    styleRuns.append(.init(range: outputRange, style: .terminalOutput))
+                    displayRange.length = textUTF16Length - displayRange.location
+                }
                 let controlRange = commandOutputControlRange(
                     in: displayRange,
                     title: title,
@@ -157,16 +164,16 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                 panels.append(.init(
                     blockID: blockID,
                     range: displayRange,
-                    isToolOutput: panelSource.anchor.kind == .toolCall,
+                    isToolOutput: isToolOutput,
                     commandText: commandText,
-                    outputText: outputText,
+                    outputText: isToolOutput ? "" : outputText,
                     outputSourceRange: panelSource.output?.sourceRange,
-                    lineCount: ReviewMonitorLog.LineCounter.lineCount(outputText),
+                    lineCount: isToolOutput ? 0 : ReviewMonitorLog.LineCounter.lineCount(outputText),
                     isExpanded: isExpanded,
                     status: status,
                     startedAt: metadata?.startedAt,
                     title: title,
-                    exitText: panelSource.anchor.kind == .toolCall ? nil : commandOutputResultText(for: metadata, status: status),
+                    exitText: isToolOutput ? nil : commandOutputResultText(for: metadata, status: status),
                     actions: actions
                 ))
             } else {
@@ -490,6 +497,9 @@ enum ReviewMonitorCommandOutputDisplayDocument {
             return ""
         }
         if let toolOutput = panelSource.anchor.toolOutput {
+            let retained = rawSourceString.substring(with: panelSource.anchor.sourceRange)
+            // Retention can trim the entry while its metadata still holds the complete result.
+            guard retained.hasSuffix(toolOutput) else { return retained }
             return panelSource.anchor.metadata?.sourceType == "mcpToolCall"
                 ? mcpOutputText(toolOutput)
                 : toolOutput

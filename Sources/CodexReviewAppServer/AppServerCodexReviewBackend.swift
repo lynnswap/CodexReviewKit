@@ -4590,7 +4590,7 @@ private struct AppServerThreadItem: Decodable, Sendable {
         if let error = errorText?.nilIfEmpty {
             return " Error: \(error)"
         }
-        if let result = resultText?.nilIfEmpty {
+        if let result = resultText, !result.isEmpty {
             return " Result: \(result)"
         }
         return ""
